@@ -9,7 +9,7 @@ from utils import FileUtils
 from loguru import logger
 
 
-RESULT_ROOT = "result"
+RESULT_ROOT = config.get('storage.result_root', 'result')
 
 
 def get_latest_workdir() -> str:
@@ -32,12 +32,16 @@ def create_new_workdir() -> str:
 
 def process_docs(args):
     work_dir = create_new_workdir() if args.new else get_latest_workdir()
+    # 更新配置中的工作目录
+    cfg = config.load_config()
+    cfg.setdefault('storage', {})['work_dir'] = work_dir
     logger.info(f"Using work dir: {work_dir}")
 
     processor = DocumentProcessor(output_dir=work_dir)
 
     extensions = [".json", ".jsonl", ".docx"]
-    files = FileUtils.list_files("data", extensions)
+    src_dir = cfg.get('storage', {}).get('source_docs_dir', 'data')
+    files = FileUtils.list_files(src_dir, extensions)
 
     result = processor.process_documents(files, force_reprocess=args.force, output_dir=work_dir)
     FileUtils.write_json(result.get('atomic_notes', []), os.path.join(work_dir, 'atomic_notes.json'))
@@ -45,7 +49,10 @@ def process_docs(args):
 
 
 def query_mode(args):
-    work_dir = args.work_dir or get_latest_workdir()
+    work_dir = args.work_dir or config.get('storage.work_dir') or get_latest_workdir()
+    # 确保配置中的工作目录一致
+    cfg = config.load_config()
+    cfg.setdefault('storage', {})['work_dir'] = work_dir
     notes_file = os.path.join(work_dir, 'atomic_notes.json')
     if not os.path.exists(notes_file):
         logger.error(f'Notes file not found: {notes_file}')
