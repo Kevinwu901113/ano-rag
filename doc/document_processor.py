@@ -1,4 +1,5 @@
 import os
+import numpy as np
 from typing import List, Dict, Any, Optional
 from loguru import logger
 from .chunker import DocumentChunker
@@ -11,7 +12,7 @@ from config import config
 class DocumentProcessor:
     """文档处理器主类，整合所有文档处理功能"""
     
-    def __init__(self):
+    def __init__(self, output_dir: Optional[str] = None):
         # 初始化组件
         self.chunker = DocumentChunker()
         self.clustering = TopicClustering()
@@ -24,12 +25,16 @@ class DocumentProcessor:
         )
         
         # 存储路径
-        self.processed_docs_path = config.get('storage.processed_docs_path', './data/processed')
+        self.processed_docs_path = output_dir or config.get('storage.processed_docs_path', './data/processed')
         FileUtils.ensure_dir(self.processed_docs_path)
         
-    def process_documents(self, file_paths: List[str], force_reprocess: bool = False) -> Dict[str, Any]:
+    def process_documents(self, file_paths: List[str], force_reprocess: bool = False, output_dir: Optional[str] = None) -> Dict[str, Any]:
         """处理文档的主要入口点"""
         logger.info(f"Starting document processing for {len(file_paths)} files")
+
+        if output_dir:
+            self.processed_docs_path = output_dir
+            FileUtils.ensure_dir(self.processed_docs_path)
         
         # 获取处理计划
         processing_plan = self.incremental_processor.get_processing_plan(file_paths)
@@ -45,33 +50,58 @@ class DocumentProcessor:
         
         logger.info(f"Processing {len(files_to_process)} files")
         
-        # 步骤1: 文档分块
-        logger.info("Step 1: Document chunking")
-        all_chunks = self._chunk_documents(files_to_process)
+        chunk_file = os.path.join(self.processed_docs_path, "chunks.jsonl")
+        if not force_reprocess and os.path.exists(chunk_file):
+            logger.info(f"Loading chunks from {chunk_file}")
+            all_chunks = FileUtils.read_jsonl(chunk_file)
+        else:
+            logger.info("Step 1: Document chunking")
+            all_chunks = self._chunk_documents(files_to_process)
+            FileUtils.write_jsonl(all_chunks, chunk_file)
         
         if not all_chunks:
             logger.warning("No chunks created from documents")
             return {'atomic_notes': [], 'topic_pools': [], 'processing_stats': {}}
         
-        # 步骤2: 生成原子笔记
-        logger.info("Step 2: Generating atomic notes")
-        atomic_notes = self._generate_atomic_notes(all_chunks)
+        atomic_file = os.path.join(self.processed_docs_path, "atomic_notes.json")
+        if not force_reprocess and os.path.exists(atomic_file):
+            logger.info(f"Loading atomic notes from {atomic_file}")
+            atomic_notes = FileUtils.read_json(atomic_file)
+        else:
+            logger.info("Step 2: Generating atomic notes")
+            atomic_notes = self._generate_atomic_notes(all_chunks)
+            FileUtils.write_json(atomic_notes, atomic_file)
         
         if not atomic_notes:
             logger.warning("No atomic notes generated")
             return {'atomic_notes': [], 'topic_pools': [], 'processing_stats': {}}
         
-        # 步骤3: 创建向量嵌入（这里先占位，后续在vector_store模块实现）
-        logger.info("Step 3: Creating embeddings (placeholder)")
-        embeddings = self._create_embeddings_placeholder(atomic_notes)
+        embed_file = os.path.join(self.processed_docs_path, "embeddings.npy")
+        if not force_reprocess and os.path.exists(embed_file):
+            logger.info(f"Loading embeddings from {embed_file}")
+            embeddings = np.load(embed_file)
+        else:
+            logger.info("Step 3: Creating embeddings (placeholder)")
+            embeddings = self._create_embeddings_placeholder(atomic_notes)
+            np.save(embed_file, embeddings)
         
-        # 步骤4: 主题聚类
-        logger.info("Step 4: Topic clustering")
-        clustering_result = self.clustering.cluster_notes(atomic_notes, embeddings)
+        cluster_file = os.path.join(self.processed_docs_path, "clustering.json")
+        if not force_reprocess and os.path.exists(cluster_file):
+            logger.info(f"Loading clustering from {cluster_file}")
+            clustering_result = FileUtils.read_json(cluster_file)
+        else:
+            logger.info("Step 4: Topic clustering")
+            clustering_result = self.clustering.cluster_notes(atomic_notes, embeddings)
+            FileUtils.write_json(clustering_result, cluster_file)
         
-        # 步骤5: 构建图谱关系（这里先占位，后续在graph模块实现）
-        logger.info("Step 5: Building graph relationships (placeholder)")
-        graph_data = self._build_graph_placeholder(clustering_result['clustered_notes'])
+        graph_file = os.path.join(self.processed_docs_path, "graph.json")
+        if not force_reprocess and os.path.exists(graph_file):
+            logger.info(f"Loading graph from {graph_file}")
+            graph_data = FileUtils.read_json(graph_file)
+        else:
+            logger.info("Step 5: Building graph relationships (placeholder)")
+            graph_data = self._build_graph_placeholder(clustering_result['clustered_notes'])
+            FileUtils.write_json(graph_data, graph_file)
         
         # 保存处理结果
         result = {
@@ -84,7 +114,10 @@ class DocumentProcessor:
         
         # 更新缓存
         self._update_processing_cache(files_to_process, result)
-        
+
+        result_file = os.path.join(self.processed_docs_path, "result.json")
+        FileUtils.write_json(result, result_file)
+
         logger.info("Document processing completed successfully")
         return result
     

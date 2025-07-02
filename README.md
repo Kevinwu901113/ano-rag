@@ -112,14 +112,14 @@ vim config.yaml
 ### 1. 处理文档
 
 ```bash
-# 处理单个文档
-python main.py process document.json
+# 使用最近的结果目录处理 data/ 下的文档
+python main.py process
 
-# 处理多个文档
-python main.py process doc1.json doc2.docx doc3.jsonl
+# 创建新的工作目录并重新处理
+python main.py process --new
 
-# 强制重新处理
-python main.py process --force document.json
+# 强制重新处理所有文档
+python main.py process --force
 ```
 
 ### 2. 查询问答
@@ -128,8 +128,8 @@ python main.py process --force document.json
 # 简单查询
 python main.py query "什么是机器学习？"
 
-# 复杂查询
-python main.py query "深度学习和传统机器学习的主要区别是什么？"
+# 从指定目录查询
+python main.py query "深度学习和传统机器学习的主要区别是什么？" --work-dir result/1
 ```
 
 ### 3. Python API使用
@@ -139,8 +139,8 @@ from doc import DocumentProcessor
 from query import QueryProcessor
 
 # 处理文档
-processor = DocumentProcessor()
-result = processor.process_documents(['document.json'])
+processor = DocumentProcessor(output_dir="result/1")
+result = processor.process_documents(["data/document.json"]) 
 
 # 查询处理
 query_processor = QueryProcessor(result['atomic_notes'])
