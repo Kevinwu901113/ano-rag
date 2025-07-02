@@ -1,0 +1,93 @@
+# RAG System Configuration
+
+# Document Processing
+document:
+  chunk_size: 512
+  overlap: 50
+  batch_size: 32
+  supported_formats: ["json", "jsonl", "docx"]
+  
+# Embedding Model
+embedding:
+  model_name: "BAAI/bge-m3"  # or "nomic-ai/nomic-embed-text-v1"
+  batch_size: 64
+  max_length: 512
+  device: "cuda"
+  
+# Clustering
+clustering:
+  algorithm: "hdbscan"  # or "kmeans", "dbscan"
+  min_cluster_size: 5
+  min_samples: 3
+  metric: "euclidean"
+  use_gpu: true
+  
+# Graph Construction
+graph:
+  k_hop: 2
+  edge_types:
+    - "reference"
+    - "entity_coexistence" 
+    - "context_relation"
+    - "topic_link"
+  centrality_weight: 0.3
+  path_value_weight: 0.2
+  
+# Query Processing
+query:
+  rewrite_enabled: true
+  split_multi_queries: true
+  add_prior_knowledge: false  # switch for LLM hallucination prevention
+  parallel_processing: true
+  
+# Context Scheduler Weights
+context_scheduler:
+  semantic_weight: 0.3      # t1
+  graph_weight: 0.25        # t2  
+  topic_weight: 0.2         # t3
+  feedback_weight: 0.15     # t4
+  redundancy_penalty: 0.1   # t5
+  top_n_notes: 10
+  
+# LLM Configuration
+llm:
+  # For atomic note generation and query rewriting
+  local_model:
+    base_url: "http://localhost:11434"
+    model: "llama3.1:8b"
+    temperature: 0.1
+    max_tokens: 2048
+    
+  # For final generation and feedback (Ollama required)
+  ollama:
+    base_url: "http://localhost:11434"
+    model: "llama3.1:8b"
+    temperature: 0.7
+    max_tokens: 4096
+    
+# Vector Store
+vector_store:
+  index_type: "faiss"  # or "chroma", "pinecone"
+  dimension: 1024
+  similarity_metric: "cosine"
+  top_k: 50
+  
+# Storage Paths
+storage:
+  vector_db_path: "./data/vector_store"
+  graph_db_path: "./data/graph_store"
+  processed_docs_path: "./data/processed"
+  cache_path: "./data/cache"
+  
+# Evaluation
+eval:
+  datasets_path: "./data/eval_datasets"
+  metrics: ["precision", "recall", "f1", "bleu", "rouge"]
+  batch_size: 16
+  
+# Performance
+performance:
+  use_gpu: true
+  use_cudf: true
+  num_workers: 4
+  cache_enabled: true

@@ -1,0 +1,248 @@
+from typing import List, Dict, Any, Optional, Union
+from loguru import logger
+from utils import FileUtils, TextUtils
+from config import config
+import os
+from pathlib import Path
+
+class DocumentChunker:
+    """文档分块器，用于将文档分割成合适的块"""
+    
+    def __init__(self):
+        self.chunk_size = config.get('document.chunk_size', 512)
+        self.overlap = config.get('document.overlap', 50)
+        self.supported_formats = config.get('document.supported_formats', ['json', 'jsonl', 'docx'])
+        
+    def chunk_document(self, file_path: str, source_info: Dict[str, Any] = None) -> List[Dict[str, Any]]:
+        """对单个文档进行分块"""
+        logger.info(f"Chunking document: {file_path}")
+        
+        try:
+            # 读取文档内容
+            content = self._read_document_content(file_path)
+            
+            # 提取文本内容
+            text_content = self._extract_text_content(content, file_path)
+            
+            # 分块处理
+            chunks = self._chunk_text_content(text_content, file_path, source_info)
+            
+            logger.info(f"Document chunked into {len(chunks)} chunks")
+            return chunks
+            
+        except Exception as e:
+            logger.error(f"Failed to chunk document {file_path}: {e}")
+            return []
+    
+    def chunk_documents(self, file_paths: List[str]) -> List[Dict[str, Any]]:
+        """批量处理多个文档"""
+        all_chunks = []
+        
+        for file_path in file_paths:
+            source_info = {
+                'file_path': file_path,
+                'file_name': os.path.basename(file_path),
+                'file_hash': FileUtils.get_file_hash(file_path)
+            }
+            
+            chunks = self.chunk_document(file_path, source_info)
+            all_chunks.extend(chunks)
+        
+        logger.info(f"Total chunks created: {len(all_chunks)}")
+        return all_chunks
+    
+    def _read_document_content(self, file_path: str) -> Union[str, Dict, List]:
+        """读取文档内容"""
+        try:
+            return FileUtils.read_document(file_path)
+        except Exception as e:
+            logger.error(f"Failed to read document {file_path}: {e}")
+            raise
+    
+    def _extract_text_content(self, content: Union[str, Dict, List], file_path: str) -> str:
+        """从不同格式的内容中提取文本"""
+        if isinstance(content, str):
+            return content
+        
+        elif isinstance(content, dict):
+            return self._extract_text_from_dict(content)
+        
+        elif isinstance(content, list):
+            return self._extract_text_from_list(content)
+        
+        else:
+            logger.warning(f"Unknown content type for {file_path}: {type(content)}")
+            return str(content)
+    
+    def _extract_text_from_dict(self, data: Dict[str, Any]) -> str:
+        """从字典中提取文本内容"""
+        text_parts = []
+        
+        # 常见的文本字段
+        text_fields = ['text', 'content', 'body', 'description', 'summary', 'title']
+        
+        for field in text_fields:
+            if field in data and isinstance(data[field], str):
+                text_parts.append(data[field])
+        
+        # 如果没有找到标准字段，尝试提取所有字符串值
+        if not text_parts:
+            for key, value in data.items():
+                if isinstance(value, str) and len(value.strip()) > 10:
+                    text_parts.append(f"{key}: {value}")
+        
+        return '\n'.join(text_parts)
+    
+    def _extract_text_from_list(self, data: List[Any]) -> str:
+        """从列表中提取文本内容"""
+        text_parts = []
+        
+        for item in data:
+            if isinstance(item, str):
+                text_parts.append(item)
+            elif isinstance(item, dict):
+                text_parts.append(self._extract_text_from_dict(item))
+            else:
+                text_parts.append(str(item))
+        
+        return '\n'.join(text_parts)
+    
+    def _chunk_text_content(self, text: str, file_path: str, source_info: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """对文本内容进行分块"""
+        # 清理文本
+        cleaned_text = TextUtils.clean_text(text)
+        
+        if not cleaned_text.strip():
+            logger.warning(f"No text content found in {file_path}")
+            return []
+        
+        # 使用TextUtils进行分块
+        text_chunks = TextUtils.chunk_text(
+            cleaned_text, 
+            chunk_size=self.chunk_size, 
+            overlap=self.overlap
+        )
+        
+        # 创建分块数据结构
+        chunks = []
+        for i, chunk_data in enumerate(text_chunks):
+            chunk = {
+                'text': chunk_data['text'],
+                'chunk_index': i,
+                'chunk_id': f"{source_info.get('file_name', 'unknown')}_{i:04d}",
+                'length': chunk_data['length'],
+                'source_info': source_info.copy(),
+                'created_at': self._get_timestamp()
+            }
+            
+            # 添加上下文信息
+            chunk['context'] = self._extract_context_info(chunk_data['text'], cleaned_text, i)
+            
+            chunks.append(chunk)
+        
+        return chunks
+    
+    def _extract_context_info(self, chunk_text: str, full_text: str, chunk_index: int) -> Dict[str, Any]:
+        """提取块的上下文信息"""
+        context = {
+            'position_ratio': self._calculate_position_ratio(chunk_text, full_text),
+            'chunk_index': chunk_index,
+            'is_beginning': chunk_index == 0,
+            'contains_title': self._contains_title_markers(chunk_text),
+            'paragraph_count': chunk_text.count('\n\n') + 1
+        }
+        
+        return context
+    
+    def _calculate_position_ratio(self, chunk_text: str, full_text: str) -> float:
+        """计算块在文档中的位置比例"""
+        try:
+            chunk_start = full_text.find(chunk_text)
+            if chunk_start == -1:
+                return 0.0
+            
+            return chunk_start / len(full_text)
+        except Exception:
+            return 0.0
+    
+    def _contains_title_markers(self, text: str) -> bool:
+        """检查文本是否包含标题标记"""
+        title_markers = ['#', '##', '###', '第', '章', '节', '一、', '二、', '三、', '1.', '2.', '3.']
+        
+        for marker in title_markers:
+            if marker in text:
+                return True
+        
+        return False
+    
+    def _get_timestamp(self) -> str:
+        """获取当前时间戳"""
+        from datetime import datetime
+        return datetime.now().isoformat()
+    
+    def adaptive_chunking(self, text: str, target_chunk_count: int = None) -> List[Dict[str, Any]]:
+        """自适应分块，根据文本长度调整块大小"""
+        text_length = len(text)
+        
+        if target_chunk_count:
+            # 根据目标块数量调整块大小
+            adaptive_chunk_size = max(100, text_length // target_chunk_count)
+        else:
+            # 根据文本长度自适应
+            if text_length < 1000:
+                adaptive_chunk_size = text_length
+            elif text_length < 5000:
+                adaptive_chunk_size = 500
+            elif text_length < 20000:
+                adaptive_chunk_size = 1000
+            else:
+                adaptive_chunk_size = 1500
+        
+        # 临时调整配置
+        original_chunk_size = self.chunk_size
+        self.chunk_size = adaptive_chunk_size
+        
+        try:
+            chunks = TextUtils.chunk_text(text, chunk_size=adaptive_chunk_size, overlap=self.overlap)
+            return chunks
+        finally:
+            # 恢复原始配置
+            self.chunk_size = original_chunk_size
+    
+    def validate_chunks(self, chunks: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """验证分块结果"""
+        valid_chunks = []
+        
+        for chunk in chunks:
+            # 检查基本字段
+            if not chunk.get('text') or len(chunk['text'].strip()) < 10:
+                logger.warning(f"Skipping chunk with insufficient content: {chunk.get('chunk_id')}")
+                continue
+            
+            # 检查文本质量
+            text = chunk['text']
+            if self._is_low_quality_text(text):
+                logger.warning(f"Skipping low quality chunk: {chunk.get('chunk_id')}")
+                continue
+            
+            valid_chunks.append(chunk)
+        
+        logger.info(f"Validated {len(valid_chunks)} out of {len(chunks)} chunks")
+        return valid_chunks
+    
+    def _is_low_quality_text(self, text: str) -> bool:
+        """检查文本质量"""
+        # 检查是否主要由特殊字符组成
+        import string
+        
+        # 计算字母数字字符的比例
+        alphanumeric_count = sum(1 for c in text if c.isalnum())
+        total_count = len(text)
+        
+        if total_count == 0:
+            return True
+        
+        alphanumeric_ratio = alphanumeric_count / total_count
+        
+        # 如果字母数字字符比例太低，认为是低质量文本
+        return alphanumeric_ratio < 0.3
