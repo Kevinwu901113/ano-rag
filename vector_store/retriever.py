@@ -404,7 +404,7 @@ class VectorRetriever:
             
             # 保存原子笔记
             notes_file = os.path.join(self.data_dir, 'atomic_notes.json')
-            FileUtils.write_json(notes_file, self.atomic_notes)
+            FileUtils.write_json(self.atomic_notes, notes_file)
             
             # 保存嵌入
             if self.note_embeddings is not None:
@@ -413,10 +413,10 @@ class VectorRetriever:
             
             # 保存ID映射
             mapping_file = os.path.join(self.data_dir, 'id_mappings.json')
-            FileUtils.write_json(mapping_file, {
+            FileUtils.write_json({
                 'note_id_to_index': self.note_id_to_index,
                 'index_to_note_id': self.index_to_note_id
-            })
+            }, mapping_file)
             
             logger.info("Index data saved successfully")
             
