@@ -1,5 +1,6 @@
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 from loguru import logger
+import os
 
 from llm import QueryRewriter, OllamaClient
 from vector_store import VectorRetriever
@@ -11,14 +12,48 @@ from config import config
 
 class QueryProcessor:
     """High level query processing pipeline."""
-    def __init__(self, atomic_notes: List[Dict[str, Any]], embeddings=None):
+
+    def __init__(
+        self,
+        atomic_notes: List[Dict[str, Any]],
+        embeddings=None,
+        graph_file: Optional[str] = None,
+        vector_index_file: Optional[str] = None,
+    ):
         self.rewriter = QueryRewriter()
         self.vector_retriever = VectorRetriever()
-        self.vector_retriever.build_index(atomic_notes)
+        if vector_index_file and os.path.exists(vector_index_file):
+            try:
+                # adjust storage directories
+                dir_path = os.path.dirname(vector_index_file)
+                self.vector_retriever.data_dir = dir_path
+                self.vector_retriever.vector_index.index_dir = dir_path
+                # load index directly
+                self.vector_retriever.vector_index.load_index(os.path.basename(vector_index_file))
+                self.vector_retriever.atomic_notes = atomic_notes
+                self.vector_retriever._build_id_mappings()
+                logger.info(f"Loaded vector index from {vector_index_file}")
+            except Exception as e:
+                logger.error(f"Failed to load vector index: {e}, rebuilding")
+                self.vector_retriever.build_index(atomic_notes)
+        else:
+            self.vector_retriever.build_index(atomic_notes)
+
         builder = GraphBuilder()
-        graph = builder.build_graph(atomic_notes, embeddings)
-        self.graph_index = GraphIndex()
-        self.graph_index.build_index(graph)
+        graph = None
+        if graph_file and os.path.exists(graph_file):
+            self.graph_index = GraphIndex()
+            try:
+                self.graph_index.load_index(graph_file)
+                logger.info(f"Loaded graph from {graph_file}")
+            except Exception as e:
+                logger.error(f"Failed to load graph index: {e}, rebuilding")
+                graph = builder.build_graph(atomic_notes, embeddings)
+                self.graph_index.build_index(graph)
+        else:
+            graph = builder.build_graph(atomic_notes, embeddings)
+            self.graph_index = GraphIndex()
+            self.graph_index.build_index(graph)
         self.graph_retriever = GraphRetriever(self.graph_index, k_hop=config.get('graph.k_hop',2))
         self.scheduler = ContextScheduler()
         self.ollama = OllamaClient()
