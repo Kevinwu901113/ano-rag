@@ -13,6 +13,7 @@ embedding:
   batch_size: 64
   max_length: 512
   device: "cuda"
+  normalize: true
   
 # Clustering
 clustering:

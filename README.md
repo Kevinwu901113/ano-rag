@@ -101,11 +101,20 @@ vim config.yaml
 主要配置项包括：
 
 - **文档处理**: 分块大小、重叠度、批处理大小
-- **嵌入模型**: 模型选择、批处理大小、设备配置
+- **嵌入模型**: 模型选择、批处理大小、设备配置、向量归一化开关 (`embedding.normalize`)
 - **聚类算法**: HDBSCAN、K-means、DBSCAN参数
 - **图谱构建**: 关系类型、权重配置、相似度阈值
 - **LLM配置**: 本地模型和Ollama服务配置
 - **性能优化**: GPU使用、并行度、缓存设置
+
+```yaml
+embedding:
+  model_name: "BAAI/bge-m3"
+  batch_size: 64
+  max_length: 512
+  device: "cuda"
+  normalize: true  # 是否对嵌入向量进行归一化
+```
 
 ## 🚀 快速开始
 
