@@ -3,6 +3,10 @@ from loguru import logger
 from .local_llm import LocalLLM
 from utils import BatchProcessor, TextUtils
 from config import config
+from .prompts import (
+    ATOMIC_NOTEGEN_SYSTEM_PROMPT,
+    ATOMIC_NOTEGEN_PROMPT,
+)
 
 class AtomicNoteGenerator:
     """原子笔记生成器，专门用于文档处理阶段的原子笔记构建"""
@@ -51,23 +55,7 @@ class AtomicNoteGenerator:
         """生成单个原子笔记"""
         text = chunk_data.get('text', '')
         
-        prompt = f"""
-请将以下文本转换为原子笔记。每个原子笔记应该包含一个独立的知识点。
-
-文本内容：
-{text}
-
-请按照以下JSON格式返回：
-{{
-    "content": "原子笔记的主要内容",
-    "summary": "简要总结",
-    "keywords": ["关键词1", "关键词2"],
-    "entities": ["实体1", "实体2"],
-    "concepts": ["概念1", "概念2"],
-    "importance_score": 0.8,
-    "note_type": "fact/concept/procedure/example"
-}}
-"""
+        prompt = ATOMIC_NOTEGEN_PROMPT.format(text=text)
         
         response = self.llm.generate(prompt, system_prompt)
         
@@ -120,26 +108,7 @@ class AtomicNoteGenerator:
     
     def _get_atomic_note_system_prompt(self) -> str:
         """获取原子笔记生成的系统提示词"""
-        return """
-你是一个专业的知识提取和整理专家。你的任务是将给定的文本转换为高质量的原子笔记。
-
-原子笔记的特点：
-1. 每个笔记包含一个独立、完整的知识点
-2. 内容简洁明了，避免冗余
-3. 保留关键信息和必要的上下文
-4. 便于后续的检索和组合
-
-提取要求：
-1. content: 提取核心知识点，保持完整性和准确性
-2. summary: 用一句话概括主要内容
-3. keywords: 提取3-5个关键词，有助于检索
-4. entities: 识别人名、地名、机构名、专业术语等
-5. concepts: 识别重要概念和理论
-6. importance_score: 评估内容重要性（0-1分）
-7. note_type: 分类为fact（事实）、concept（概念）、procedure（流程）、example（示例）
-
-请确保返回有效的JSON格式。
-"""
+        return ATOMIC_NOTEGEN_SYSTEM_PROMPT
     
     def _clean_list(self, items: List[str]) -> List[str]:
         """清理列表，去除空值和重复项"""

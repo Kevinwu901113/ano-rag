@@ -8,8 +8,9 @@ class ConfigLoader:
     
     def __init__(self, config_path: str = None):
         if config_path is None:
-            config_path = Path(__file__).parent / "config.yaml"
-        self.config_path = config_path
+            # config.yaml is stored at the repository root
+            config_path = Path(__file__).resolve().parent.parent / "config.yaml"
+        self.config_path = Path(config_path)
         self._config = None
         
     def load_config(self) -> Dict[str, Any]:
@@ -52,6 +53,6 @@ class ConfigLoader:
         for path_key, path_value in storage_paths.items():
             if path_value and isinstance(path_value, str):
                 Path(path_value).mkdir(parents=True, exist_ok=True)
-                
+
 # 全局配置实例
 config = ConfigLoader()

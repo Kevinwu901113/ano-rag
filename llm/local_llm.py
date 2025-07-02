@@ -4,6 +4,12 @@ from typing import List, Dict, Any, Optional
 from loguru import logger
 from config import config
 from utils import BatchProcessor
+from .prompts import (
+    ATOMIC_NOTE_SYSTEM_PROMPT,
+    ATOMIC_NOTE_PROMPT,
+    EXTRACT_ENTITIES_SYSTEM_PROMPT,
+    EXTRACT_ENTITIES_PROMPT,
+)
 
 class LocalLLM:
     """本地LLM类，用于原子笔记生成和查询重写等任务"""
@@ -110,30 +116,10 @@ class LocalLLM:
     
     def generate_atomic_notes(self, text_chunks: List[str]) -> List[Dict[str, Any]]:
         """生成原子笔记"""
-        system_prompt = """
-你是一个专业的知识提取专家。请将给定的文本块转换为原子笔记。
-
-原子笔记要求：
-1. 每个笔记包含一个独立的知识点
-2. 内容简洁明了，易于理解
-3. 保留关键信息和上下文
-4. 使用结构化的格式
-
-请以JSON格式返回，包含以下字段：
-- content: 笔记内容
-- keywords: 关键词列表
-- entities: 实体列表
-- summary: 简要总结
-"""
+        system_prompt = ATOMIC_NOTE_SYSTEM_PROMPT
         
         def process_chunk(chunk):
-            prompt = f"""
-请将以下文本转换为原子笔记：
-
-{chunk}
-
-请返回JSON格式的原子笔记：
-"""
+            prompt = ATOMIC_NOTE_PROMPT.format(chunk=chunk)
             
             response = self.generate(prompt, system_prompt)
             
@@ -167,21 +153,9 @@ class LocalLLM:
     
     def extract_entities_and_relations(self, text: str) -> Dict[str, Any]:
         """提取实体和关系"""
-        system_prompt = """
-你是一个专业的实体关系提取专家。请从给定文本中提取实体和它们之间的关系。
-
-请以JSON格式返回，包含：
-- entities: 实体列表，每个实体包含name和type
-- relations: 关系列表，每个关系包含source, target, relation_type
-"""
+        system_prompt = EXTRACT_ENTITIES_SYSTEM_PROMPT
         
-        prompt = f"""
-请从以下文本中提取实体和关系：
-
-{text}
-
-请返回JSON格式的结果：
-"""
+        prompt = EXTRACT_ENTITIES_PROMPT.format(text=text)
         
         response = self.generate(prompt, system_prompt)
         
