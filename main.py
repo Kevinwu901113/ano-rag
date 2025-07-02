@@ -5,7 +5,7 @@ from glob import glob
 from doc import DocumentProcessor
 from config import config
 from query import QueryProcessor
-from utils import FileUtils
+from utils import FileUtils, setup_logging
 from loguru import logger
 
 
@@ -35,6 +35,7 @@ def process_docs(args):
     # 更新配置中的工作目录
     cfg = config.load_config()
     cfg.setdefault('storage', {})['work_dir'] = work_dir
+    setup_logging(os.path.join(work_dir, 'ano-rag.log'))
     logger.info(f"Using work dir: {work_dir}")
 
     processor = DocumentProcessor(output_dir=work_dir)
@@ -53,6 +54,7 @@ def query_mode(args):
     # 确保配置中的工作目录一致
     cfg = config.load_config()
     cfg.setdefault('storage', {})['work_dir'] = work_dir
+    setup_logging(os.path.join(work_dir, 'ano-rag.log'))
     notes_file = os.path.join(work_dir, 'atomic_notes.json')
     if not os.path.exists(notes_file):
         logger.error(f'Notes file not found: {notes_file}')
