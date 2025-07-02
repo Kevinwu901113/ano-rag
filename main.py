@@ -1,7 +1,7 @@
 import argparse
-from doc_processor import DocumentProcessor
+from doc import DocumentProcessor
 from config import config
-from query_processor import QueryProcessor
+from query import QueryProcessor
 from utils import FileUtils
 from loguru import logger
 

@@ -6,7 +6,7 @@ from vector_store import VectorRetriever
 from graph.graph_builder import GraphBuilder
 from graph.graph_index import GraphIndex
 from graph.graph_retriever import GraphRetriever
-from context_scheduler import ContextScheduler
+from utils.context_scheduler import ContextScheduler
 from config import config
 
 class QueryProcessor:
