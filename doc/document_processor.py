@@ -218,17 +218,67 @@ class DocumentProcessor:
     
     def _load_cached_results(self, file_paths: List[str]) -> Dict[str, Any]:
         """加载缓存的处理结果"""
-        # 这里应该从存储中加载已处理的结果
-        # 目前返回空结果，实际实现需要从vector_store和graph模块加载
-        logger.info("Loading cached results (placeholder implementation)")
-        
-        return {
-            'atomic_notes': [],
-            'topic_pools': [],
-            'processing_stats': {
+        logger.info("Loading cached results from disk")
+
+        atomic_file = os.path.join(self.processed_docs_path, "atomic_notes.json")
+        cluster_file = os.path.join(self.processed_docs_path, "clustering.json")
+        embed_file = os.path.join(self.processed_docs_path, "embeddings.npy")
+        graph_file = os.path.join(self.processed_docs_path, "graph.json")
+        result_file = os.path.join(self.processed_docs_path, "result.json")
+
+        atomic_notes = []
+        topic_pools = []
+        cluster_info = {}
+        graph_data = {}
+        embeddings = None
+        processing_stats = None
+
+        if os.path.exists(atomic_file):
+            try:
+                atomic_notes = FileUtils.read_json(atomic_file)
+            except Exception as e:
+                logger.warning(f"Failed to load atomic notes: {e}")
+
+        if os.path.exists(cluster_file):
+            try:
+                cluster_data = FileUtils.read_json(cluster_file)
+                topic_pools = cluster_data.get('topic_pools', [])
+                cluster_info = cluster_data.get('cluster_info', {})
+                atomic_notes = cluster_data.get('clustered_notes', atomic_notes)
+            except Exception as e:
+                logger.warning(f"Failed to load clustering result: {e}")
+
+        if os.path.exists(embed_file):
+            try:
+                embeddings = np.load(embed_file)
+            except Exception as e:
+                logger.warning(f"Failed to load embeddings: {e}")
+
+        if os.path.exists(graph_file):
+            try:
+                graph_data = FileUtils.read_json(graph_file)
+            except Exception as e:
+                logger.warning(f"Failed to load graph data: {e}")
+
+        if os.path.exists(result_file):
+            try:
+                processing_stats = FileUtils.read_json(result_file).get('processing_stats')
+            except Exception as e:
+                logger.warning(f"Failed to load processing stats: {e}")
+
+        if not processing_stats:
+            processing_stats = {
                 'files_processed': len(file_paths),
                 'loaded_from_cache': True
             }
+
+        return {
+            'atomic_notes': atomic_notes,
+            'topic_pools': topic_pools,
+            'cluster_info': cluster_info,
+            'graph_data': graph_data,
+            'embeddings': embeddings,
+            'processing_stats': processing_stats
         }
     
     def process_single_document(self, file_path: str, force_reprocess: bool = False) -> Dict[str, Any]:
