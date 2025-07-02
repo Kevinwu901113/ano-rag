@@ -58,7 +58,16 @@ def query_mode(args):
         logger.error(f'Notes file not found: {notes_file}')
         return
     notes = FileUtils.read_json(notes_file)
-    processor = QueryProcessor(notes)
+
+    graph_file = os.path.join(work_dir, 'graph.json')
+    faiss_files = glob(os.path.join(work_dir, '*.faiss'))
+    vector_index_file = faiss_files[0] if faiss_files else None
+
+    processor = QueryProcessor(
+        notes,
+        graph_file=graph_file if os.path.exists(graph_file) else None,
+        vector_index_file=vector_index_file if vector_index_file and os.path.exists(vector_index_file) else None,
+    )
     output = processor.process(args.query)
     print(output['answer'])
 
