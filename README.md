@@ -78,6 +78,17 @@ pip install -r requirements.txt
 conda install -c rapidsai -c conda-forge cudf cuml cugraph
 ```
 
+如果安装后 `import cudf` 仍然失败，可能是由于系统中存在多个 `cupy` 版本导致冲突，可按
+以下步骤清理并重新安装 RAPIDS：
+
+```bash
+# 删除所有已安装的 cupy 包
+conda remove -y cupy cupy-cuda*
+
+# 重新安装 RAPIDS
+conda install -c rapidsai -c conda-forge cudf cuml cugraph
+```
+
 3. **配置Ollama**
 ```bash
 # 安装Ollama
