@@ -2,6 +2,7 @@ import os
 import numpy as np
 from typing import List, Dict, Any, Optional
 from loguru import logger
+from tqdm import tqdm
 import networkx as nx
 from networkx.readwrite import json_graph
 from .chunker import DocumentChunker
@@ -72,6 +73,7 @@ class DocumentProcessor:
             logger.info("Step 1: Document chunking")
             all_chunks = self._chunk_documents(files_to_process)
             FileUtils.write_jsonl(all_chunks, chunk_file)
+        chunk_count = len(all_chunks)
         
         if not all_chunks:
             logger.warning("No chunks created from documents")
@@ -85,6 +87,7 @@ class DocumentProcessor:
             logger.info("Step 2: Generating atomic notes")
             atomic_notes = self._generate_atomic_notes(all_chunks)
             FileUtils.write_json(atomic_notes, atomic_file)
+        note_count = len(atomic_notes)
         
         if not atomic_notes:
             logger.warning("No atomic notes generated")
@@ -126,7 +129,13 @@ class DocumentProcessor:
             'topic_pools': clustering_result['topic_pools'],
             'cluster_info': clustering_result['cluster_info'],
             'graph_data': graph_data,
-            'processing_stats': self._calculate_processing_stats(files_to_process, atomic_notes, clustering_result)
+            'processing_stats': self._calculate_processing_stats(
+                files_to_process,
+                atomic_notes,
+                clustering_result,
+                chunk_count,
+                note_count,
+            )
         }
         
         # 更新缓存
@@ -141,8 +150,7 @@ class DocumentProcessor:
     def _chunk_documents(self, file_paths: List[str]) -> List[Dict[str, Any]]:
         """文档分块处理"""
         all_chunks = []
-        
-        for file_path in file_paths:
+        for file_path in tqdm(file_paths, desc="Chunking documents"):
             try:
                 chunks = self.chunker.chunk_document(file_path)
                 all_chunks.extend(chunks)
@@ -176,13 +184,16 @@ class DocumentProcessor:
             return []
     
     
-    def _calculate_processing_stats(self, file_paths: List[str], 
-                                   atomic_notes: List[Dict[str, Any]], 
-                                   clustering_result: Dict[str, Any]) -> Dict[str, Any]:
+    def _calculate_processing_stats(self, file_paths: List[str],
+                                   atomic_notes: List[Dict[str, Any]],
+                                   clustering_result: Dict[str, Any],
+                                   chunk_count: int,
+                                   note_count: int) -> Dict[str, Any]:
         """计算处理统计信息"""
         stats = {
             'files_processed': len(file_paths),
-            'atomic_notes_created': len(atomic_notes),
+            'chunks_created': chunk_count,
+            'atomic_notes_created': note_count,
             'topic_pools_created': len(clustering_result.get('topic_pools', [])),
             'clusters_found': clustering_result.get('cluster_info', {}).get('n_clusters', 0),
             'noise_notes': clustering_result.get('cluster_info', {}).get('n_noise', 0),
@@ -209,9 +220,9 @@ class DocumentProcessor:
     
     def _update_processing_cache(self, file_paths: List[str], result: Dict[str, Any]):
         """更新处理缓存"""
-        for file_path in file_paths:
+        for file_path in tqdm(file_paths, desc="Updating cache"):
             self.incremental_processor.update_file_cache(file_path, {
-                'atomic_notes_count': len([n for n in result['atomic_notes'] 
+                'atomic_notes_count': len([n for n in result['atomic_notes']
                                          if n.get('source_info', {}).get('file_path') == file_path]),
                 'processing_stats': result['processing_stats']
             })
