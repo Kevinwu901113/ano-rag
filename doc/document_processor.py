@@ -2,12 +2,16 @@ import os
 import numpy as np
 from typing import List, Dict, Any, Optional
 from loguru import logger
+import networkx as nx
+from networkx.readwrite import json_graph
 from .chunker import DocumentChunker
 from .clustering import TopicClustering
 from .incremental_processor import IncrementalProcessor
 from llm import AtomicNoteGenerator, LocalLLM
 from utils import BatchProcessor, FileUtils
 from config import config
+from vector_store import EmbeddingManager
+from graph import GraphBuilder
 
 class DocumentProcessor:
     """文档处理器主类，整合所有文档处理功能"""
@@ -31,6 +35,8 @@ class DocumentProcessor:
             batch_size=config.get('document.batch_size', 32),
             use_gpu=config.get('performance.use_gpu', True)
         )
+        self.embedding_manager = EmbeddingManager()
+        self.graph_builder = GraphBuilder()
         
         # 存储路径，默认使用配置中的工作目录
         self.processed_docs_path = output_dir or config.get('storage.work_dir') or config.get('storage.processed_docs_path', './data/processed')
@@ -89,8 +95,8 @@ class DocumentProcessor:
             logger.info(f"Loading embeddings from {embed_file}")
             embeddings = np.load(embed_file)
         else:
-            logger.info("Step 3: Creating embeddings (placeholder)")
-            embeddings = self._create_embeddings_placeholder(atomic_notes)
+            logger.info("Step 3: Creating embeddings")
+            embeddings = self.embedding_manager.encode_atomic_notes(atomic_notes)
             np.save(embed_file, embeddings)
         
         cluster_file = os.path.join(self.processed_docs_path, "clustering.json")
@@ -107,8 +113,11 @@ class DocumentProcessor:
             logger.info(f"Loading graph from {graph_file}")
             graph_data = FileUtils.read_json(graph_file)
         else:
-            logger.info("Step 5: Building graph relationships (placeholder)")
-            graph_data = self._build_graph_placeholder(clustering_result['clustered_notes'])
+            logger.info("Step 5: Building graph relationships")
+            graph = self.graph_builder.build_graph(
+                clustering_result['clustered_notes'], embeddings
+            )
+            graph_data = nx.node_link_data(graph)
             FileUtils.write_json(graph_data, graph_file)
         
         # 保存处理结果
@@ -166,88 +175,6 @@ class DocumentProcessor:
             logger.error(f"Failed to generate atomic notes: {e}")
             return []
     
-    def _create_embeddings_placeholder(self, atomic_notes: List[Dict[str, Any]]) -> 'np.ndarray':
-        """创建向量嵌入的占位符实现"""
-        import numpy as np
-        
-        # 这里是占位符实现，实际的嵌入生成将在vector_store模块中实现
-        # 为了聚类能够工作，我们创建随机嵌入
-        n_notes = len(atomic_notes)
-        embedding_dim = 768  # 常见的嵌入维度
-        
-        # 基于文本内容创建简单的特征向量
-        embeddings = []
-        for note in atomic_notes:
-            # 简单的特征提取：基于关键词和实体
-            features = np.zeros(embedding_dim)
-            
-            # 基于文本长度
-            text_length = len(note.get('content', ''))
-            features[0] = min(text_length / 1000, 1.0)
-            
-            # 基于关键词数量
-            keywords_count = len(note.get('keywords', []))
-            features[1] = min(keywords_count / 10, 1.0)
-            
-            # 基于实体数量
-            entities_count = len(note.get('entities', []))
-            features[2] = min(entities_count / 10, 1.0)
-            
-            # 添加一些随机噪声以模拟真实嵌入
-            features[3:] = np.random.normal(0, 0.1, embedding_dim - 3)
-            
-            embeddings.append(features)
-        
-        return np.array(embeddings)
-    
-    def _build_graph_placeholder(self, atomic_notes: List[Dict[str, Any]]) -> Dict[str, Any]:
-        """构建图谱的占位符实现"""
-        # 这里是占位符实现，实际的图谱构建将在graph模块中实现
-        nodes = []
-        edges = []
-        
-        # 创建节点
-        for note in atomic_notes:
-            node = {
-                'id': note.get('note_id'),
-                'type': 'atomic_note',
-                'content': note.get('content', ''),
-                'cluster_id': note.get('cluster_id'),
-                'keywords': note.get('keywords', []),
-                'entities': note.get('entities', [])
-            }
-            nodes.append(node)
-        
-        # 创建边（基于现有的关系信息）
-        for note in atomic_notes:
-            note_id = note.get('note_id')
-            
-            # 相关笔记关系
-            for related in note.get('related_notes', []):
-                edge = {
-                    'source': note_id,
-                    'target': related.get('note_id'),
-                    'type': related.get('relation_type', 'related'),
-                    'weight': related.get('similarity', 0.5)
-                }
-                edges.append(edge)
-            
-            # 实体共现关系
-            for entity_rel in note.get('entity_relations', []):
-                edge = {
-                    'source': note_id,
-                    'target': entity_rel.get('target_note_id'),
-                    'type': 'entity_coexistence',
-                    'weight': len(entity_rel.get('common_entities', [])) * 0.1
-                }
-                edges.append(edge)
-        
-        return {
-            'nodes': nodes,
-            'edges': edges,
-            'node_count': len(nodes),
-            'edge_count': len(edges)
-        }
     
     def _calculate_processing_stats(self, file_paths: List[str], 
                                    atomic_notes: List[Dict[str, Any]], 
@@ -347,4 +274,6 @@ class DocumentProcessor:
         """清理资源"""
         if hasattr(self.llm, 'cleanup'):
             self.llm.cleanup()
+        if hasattr(self.embedding_manager, 'cleanup'):
+            self.embedding_manager.cleanup()
         logger.info("Document processor cleanup completed")
