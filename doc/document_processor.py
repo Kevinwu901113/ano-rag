@@ -16,7 +16,15 @@ class DocumentProcessor:
         # 初始化组件
         self.chunker = DocumentChunker()
         self.clustering = TopicClustering()
-        self.incremental_processor = IncrementalProcessor()
+        # 增量处理缓存目录放在工作目录下
+        cache_dir = None
+        if output_dir:
+            cache_dir = os.path.join(output_dir, 'cache')
+        else:
+            work_dir = config.get('storage.work_dir')
+            if work_dir:
+                cache_dir = os.path.join(work_dir, 'cache')
+        self.incremental_processor = IncrementalProcessor(cache_dir=cache_dir)
         self.llm = LocalLLM()
         self.atomic_note_generator = AtomicNoteGenerator(self.llm)
         self.batch_processor = BatchProcessor(
@@ -24,8 +32,8 @@ class DocumentProcessor:
             use_gpu=config.get('performance.use_gpu', True)
         )
         
-        # 存储路径
-        self.processed_docs_path = output_dir or config.get('storage.processed_docs_path', './data/processed')
+        # 存储路径，默认使用配置中的工作目录
+        self.processed_docs_path = output_dir or config.get('storage.work_dir') or config.get('storage.processed_docs_path', './data/processed')
         FileUtils.ensure_dir(self.processed_docs_path)
         
     def process_documents(self, file_paths: List[str], force_reprocess: bool = False, output_dir: Optional[str] = None) -> Dict[str, Any]:

@@ -89,6 +89,9 @@ storage:
   graph_db_path: "./data/graph_store"
   processed_docs_path: "./data/processed"
   cache_path: "./data/cache"
+  source_docs_dir: "./data"
+  result_root: "./result"
+  work_dir: null
   
 # Evaluation
 eval:
