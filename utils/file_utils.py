@@ -99,3 +99,12 @@ class FileUtils:
     def ensure_dir(directory: str):
         """确保目录存在"""
         Path(directory).mkdir(parents=True, exist_ok=True)
+
+    @staticmethod
+    def list_files(directory: str, extensions: List[str]) -> List[str]:
+        """列出目录中指定扩展名的文件"""
+        files = []
+        path = Path(directory)
+        for ext in extensions:
+            files.extend(str(p) for p in path.glob(f"*{ext}"))
+        return sorted(files)

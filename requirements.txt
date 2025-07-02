@@ -8,10 +8,10 @@ transformers>=4.20.0
 torch>=1.12.0
 sentence-transformers>=2.2.0
 
-# NVIDIA RAPIDS for GPU acceleration
-cudf>=22.0.0
-cuml>=22.0.0
-cugraph>=22.0.0
+# NVIDIA RAPIDS for GPU acceleration (pip distributions)
+cudf-cu11>=23.10.0
+cuml-cu11>=23.10.0
+cugraph-cu11>=23.10.0
 
 # Graph processing
 networkx>=2.8
