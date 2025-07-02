@@ -285,7 +285,7 @@ class VectorIndex:
             }
             
             metadata_file = filepath.replace('.faiss', '_metadata.json')
-            FileUtils.write_json(metadata_file, metadata)
+            FileUtils.write_json(metadata, metadata_file)
             
             logger.info(f"Index saved to {filepath}")
             return filepath
