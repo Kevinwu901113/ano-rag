@@ -27,11 +27,22 @@ graph:
   k_hop: 2
   edge_types:
     - "reference"
-    - "entity_coexistence" 
+    - "entity_coexistence"
     - "context_relation"
     - "topic_link"
   centrality_weight: 0.3
   path_value_weight: 0.2
+  similarity_threshold: 0.7
+  entity_cooccurrence_threshold: 2
+  context_window: 3
+  batch_size: 64
+  max_relations_per_note: 10
+  weights:
+    reference: 1.0
+    entity_coexistence: 0.8
+    context_relation: 0.6
+    topic_relation: 0.7
+    semantic_similarity: 0.5
   
 # Query Processing
 query:
@@ -85,6 +96,7 @@ eval:
   metrics: ["precision", "recall", "f1", "bleu", "rouge"]
   batch_size: 16
   
+
 # Performance
 performance:
   use_gpu: true

@@ -3,6 +3,12 @@ import json
 from typing import List, Dict, Any, Optional, Union
 from loguru import logger
 from config import config
+from .prompts import (
+    FINAL_ANSWER_SYSTEM_PROMPT,
+    FINAL_ANSWER_PROMPT,
+    EVALUATE_ANSWER_SYSTEM_PROMPT,
+    EVALUATE_ANSWER_PROMPT,
+)
 
 class OllamaClient:
     """Ollama客户端，用于与本地Ollama服务通信"""
@@ -68,50 +74,17 @@ class OllamaClient:
     
     def generate_final_answer(self, context: str, query: str) -> str:
         """生成最终答案"""
-        system_prompt = """
-你是一个专业的知识问答助手。请根据提供的上下文信息回答用户的问题。
+        system_prompt = FINAL_ANSWER_SYSTEM_PROMPT
 
-要求：
-1. 基于提供的上下文信息进行回答
-2. 如果上下文信息不足以回答问题，请明确说明
-3. 回答要准确、简洁、有条理
-4. 不要编造不存在于上下文中的信息
-"""
-        
-        prompt = f"""
-上下文信息：
-{context}
-
-用户问题：{query}
-
-请基于上述上下文信息回答用户问题：
-"""
+        prompt = FINAL_ANSWER_PROMPT.format(context=context, query=query)
         
         return self.generate(prompt, system_prompt)
     
     def evaluate_answer(self, query: str, context: str, answer: str) -> Dict[str, float]:
         """评估答案质量"""
-        system_prompt = """
-你是一个专业的答案质量评估专家。请从以下几个维度评估答案的质量：
+        system_prompt = EVALUATE_ANSWER_SYSTEM_PROMPT
 
-1. 相关性 (0-1)：答案与问题的相关程度
-2. 准确性 (0-1)：答案基于上下文的准确程度
-3. 完整性 (0-1)：答案的完整程度
-4. 清晰度 (0-1)：答案的表达清晰程度
-
-请以JSON格式返回评分，例如：
-{"relevance": 0.9, "accuracy": 0.8, "completeness": 0.7, "clarity": 0.9}
-"""
-        
-        prompt = f"""
-问题：{query}
-
-上下文：{context}
-
-答案：{answer}
-
-请评估上述答案的质量：
-"""
+        prompt = EVALUATE_ANSWER_PROMPT.format(query=query, context=context, answer=answer)
         
         try:
             response = self.generate(prompt, system_prompt)

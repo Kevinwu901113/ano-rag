@@ -3,6 +3,16 @@ from typing import List, Dict, Any, Optional
 from loguru import logger
 from .local_llm import LocalLLM
 from config import config
+from .prompts import (
+    QUERY_ANALYSIS_SYSTEM_PROMPT,
+    QUERY_ANALYSIS_PROMPT,
+    SPLIT_QUERY_SYSTEM_PROMPT,
+    SPLIT_QUERY_PROMPT,
+    OPTIMIZE_QUERY_SYSTEM_PROMPT,
+    OPTIMIZE_QUERY_PROMPT,
+    ENHANCE_QUERY_SYSTEM_PROMPT,
+    ENHANCE_QUERY_PROMPT,
+)
 
 class QueryRewriter:
     """查询重写器，用于优化和拆分用户查询"""
@@ -52,27 +62,9 @@ class QueryRewriter:
     
     def _analyze_query(self, query: str) -> Dict[str, Any]:
         """分析查询的类型和复杂度"""
-        system_prompt = """
-你是一个专业的查询分析专家。请分析用户查询的特点和类型。
-
-分析维度：
-1. query_type: factual/conceptual/procedural/comparative/analytical
-2. complexity: simple/medium/complex
-3. is_multi_question: 是否包含多个问题
-4. key_concepts: 关键概念列表
-5. intent: 用户意图
-6. domain: 领域分类
-
-请以JSON格式返回分析结果。
-"""
+        system_prompt = QUERY_ANALYSIS_SYSTEM_PROMPT
         
-        prompt = f"""
-请分析以下查询：
-
-查询：{query}
-
-请返回JSON格式的分析结果：
-"""
+        prompt = QUERY_ANALYSIS_PROMPT.format(query=query)
         
         try:
             response = self.llm.generate(prompt, system_prompt)
@@ -102,25 +94,9 @@ class QueryRewriter:
     
     def _split_multi_queries(self, query: str) -> List[str]:
         """拆分多个查询"""
-        system_prompt = """
-你是一个专业的查询拆分专家。请将包含多个问题的查询拆分为独立的子查询。
-
-要求：
-1. 每个子查询应该是独立完整的
-2. 保持原始查询的语义
-3. 确保子查询之间的逻辑关系
-4. 避免信息丢失
-
-请以JSON格式返回拆分结果：{"sub_queries": ["查询1", "查询2", ...]}
-"""
+        system_prompt = SPLIT_QUERY_SYSTEM_PROMPT
         
-        prompt = f"""
-请将以下查询拆分为独立的子查询：
-
-原始查询：{query}
-
-请返回JSON格式的拆分结果：
-"""
+        prompt = SPLIT_QUERY_PROMPT.format(query=query)
         
         try:
             response = self.llm.generate(prompt, system_prompt)
@@ -160,26 +136,9 @@ class QueryRewriter:
     
     def _optimize_single_query(self, query: str) -> List[str]:
         """优化单个查询"""
-        system_prompt = """
-你是一个专业的查询优化专家。请优化用户查询以提高检索效果。
-
-优化策略：
-1. 明确查询意图
-2. 补充关键信息
-3. 使用更精确的术语
-4. 保持查询的简洁性
-5. 考虑同义词和相关概念
-
-请以JSON格式返回优化结果：{"optimized_queries": ["优化查询1", "优化查询2", ...]}
-"""
+        system_prompt = OPTIMIZE_QUERY_SYSTEM_PROMPT
         
-        prompt = f"""
-请优化以下查询以提高检索效果：
-
-原始查询：{query}
-
-请返回JSON格式的优化结果：
-"""
+        prompt = OPTIMIZE_QUERY_PROMPT.format(query=query)
         
         try:
             response = self.llm.generate(prompt, system_prompt)
@@ -204,25 +163,9 @@ class QueryRewriter:
         enhanced_queries = []
         
         for query in queries:
-            system_prompt = """
-你是一个知识增强专家。请基于你的知识为查询添加相关的背景信息和上下文。
+            system_prompt = ENHANCE_QUERY_SYSTEM_PROMPT
 
-重要要求：
-1. 只添加确定性很高的知识
-2. 避免推测和假设
-3. 如果不确定，请保持原查询不变
-4. 标明添加的信息来源于常识
-
-请以JSON格式返回：{"enhanced_query": "增强后的查询", "confidence": 0.8, "added_context": "添加的上下文"}
-"""
-            
-            prompt = f"""
-请为以下查询添加相关的背景知识（仅在确定的情况下）：
-
-查询：{query}
-
-请返回JSON格式的结果：
-"""
+            prompt = ENHANCE_QUERY_PROMPT.format(query=query)
             
             try:
                 response = self.llm.generate(prompt, system_prompt)
