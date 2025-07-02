@@ -310,7 +310,7 @@ class RelationExtractor:
                         'weight': weight,
                         'metadata': {
                             'cosine_similarity': float(similarity),
-                            'similarity_rank': self._get_similarity_rank(i, similarity_matrix)
+                            'similarity_rank': self._get_similarity_rank(i, j, similarity_matrix)
                         }
                     }
                     relations.append(relation)
@@ -425,12 +425,13 @@ class RelationExtractor:
         
         return similarity_matrix
     
-    def _get_similarity_rank(self, note_index: int, similarity_matrix: np.ndarray) -> int:
-        """获取相似度排名"""
-        similarities = similarity_matrix[note_index]
+    def _get_similarity_rank(self, source_index: int, target_index: int,
+                             similarity_matrix: np.ndarray) -> int:
+        """获取目标笔记在源笔记相似度排序中的排名"""
+        similarities = similarity_matrix[source_index]
         # 排序并找到排名
         sorted_indices = np.argsort(similarities)[::-1]
-        rank = np.where(sorted_indices == note_index)[0][0] + 1
+        rank = np.where(sorted_indices == target_index)[0][0] + 1
         return int(rank)
     
     def _filter_and_deduplicate_relations(self, relations: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
