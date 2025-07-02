@@ -45,7 +45,12 @@ def process_docs(args):
 
     result = processor.process_documents(files, force_reprocess=args.force, output_dir=work_dir)
     FileUtils.write_json(result.get('atomic_notes', []), os.path.join(work_dir, 'atomic_notes.json'))
-    logger.info('Documents processed')
+    stats = result.get('processing_stats', {})
+    logger.info(
+        f"Processed {stats.get('files_processed')} files, "
+        f"created {stats.get('chunks_created', 0)} chunks and "
+        f"{stats.get('atomic_notes_created', 0)} atomic notes."
+    )
 
 
 def query_mode(args):

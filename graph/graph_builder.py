@@ -1,6 +1,7 @@
 import networkx as nx
 from typing import List, Dict, Any
 from loguru import logger
+from tqdm import tqdm
 from .relation_extractor import RelationExtractor
 
 class GraphBuilder:
@@ -12,14 +13,14 @@ class GraphBuilder:
         """Create a graph from notes and optional embeddings."""
         logger.info(f"Building graph with {len(atomic_notes)} notes")
         G = nx.Graph()
-        for note in atomic_notes:
+        for note in tqdm(atomic_notes, desc="Adding nodes"):
             node_id = note.get("note_id")
             if not node_id:
                 continue
             G.add_node(node_id, **note)
 
         relations = self.relation_extractor.extract_all_relations(atomic_notes, embeddings)
-        for rel in relations:
+        for rel in tqdm(relations, desc="Adding relations"):
             src = rel.get("source_id")
             tgt = rel.get("target_id")
             weight = rel.get("weight", 1.0)
