@@ -46,7 +46,7 @@ class OllamaClient:
         *,
         stream: bool = False,
         **kwargs: Any,
-    ) -> Union[str, Iterator[str]]:
+    ) -> str:
         """Generate text from a prompt with improved error handling."""
         # Merge default options with kwargs
         options = self.default_options.copy()
@@ -77,20 +77,31 @@ class OllamaClient:
             
             # Make the request with timeout handling
             response = self.client.generate(**request_params)
-            
+
+            text: str = ""
             if stream:
-                return (chunk.response for chunk in response)
-            
-            # Process and clean the response
-            result = response.response if hasattr(response, 'response') else str(response)
-            return self._clean_response(result)
+                for chunk in response:
+                    chunk_text = getattr(chunk, "response", None)
+                    if chunk_text is not None:
+                        text += chunk_text
+                    elif hasattr(chunk, "message") and hasattr(chunk.message, "content"):
+                        text += chunk.message.content
+            else:
+                if hasattr(response, "response"):
+                    text = response.response
+                elif hasattr(response, "message") and hasattr(response.message, "content"):
+                    text = response.message.content
+                else:
+                    text = str(response)
+
+            return self._clean_response(text)
             
         except ConnectionError as e:
             logger.error(f"Connection error: {e}")
-            return "" if not stream else iter(())
+            return ""
         except Exception as e:
             logger.error(f"Generation failed: {e}")
-            return "" if not stream else iter(())
+            return ""
 
     def chat(
         self,
@@ -129,23 +140,21 @@ class OllamaClient:
             
         except ConnectionError as e:
             logger.error(f"Connection error in chat: {e}")
-            return "" if not stream else iter(())
+            return ""
         except Exception as e:
             logger.error(f"Chat failed: {e}")
-            return "" if not stream else iter(())
+            return ""
 
     def generate_final_answer(self, context: str, query: str) -> str:
         system_prompt = FINAL_ANSWER_SYSTEM_PROMPT
         prompt = FINAL_ANSWER_PROMPT.format(context=context, query=query)
-        result = self.generate(prompt, system_prompt)
-        return result if isinstance(result, str) else "".join(result)
+        return self.generate(prompt, system_prompt)
 
     def evaluate_answer(self, query: str, context: str, answer: str) -> Dict[str, float]:
         system_prompt = EVALUATE_ANSWER_SYSTEM_PROMPT
         prompt = EVALUATE_ANSWER_PROMPT.format(query=query, context=context, answer=answer)
         try:
-            result = self.generate(prompt, system_prompt)
-            text = result if isinstance(result, str) else "".join(result)
+            text = self.generate(prompt, system_prompt)
             return json.loads(text)
         except Exception as e:  # pragma: no cover - runtime parsing or connection error
             logger.error(f"Answer evaluation failed: {e}")
@@ -158,14 +167,14 @@ class OllamaClient:
         *,
         stream: bool = False,
         **kwargs: Any,
-    ) -> List[Union[str, Iterator[str]]]:
-        results: List[Union[str, Iterator[str]]] = []
+    ) -> List[str]:
+        results: List[str] = []
         for prompt in prompts:
             try:
                 results.append(self.generate(prompt, system_prompt, stream=stream, **kwargs))
             except Exception as e:  # pragma: no cover
                 logger.error(f"Batch generation failed for prompt: {e}")
-                results.append("" if not stream else iter(()))
+                results.append("")
         return results
 
     def _quick_health_check(self) -> bool:
