@@ -61,7 +61,16 @@ class AtomicNoteGenerator:
         
         try:
             import json
-            note_data = json.loads(response)
+            import re
+            
+            # 清理响应，提取JSON部分
+            cleaned_response = self._extract_json_from_response(response)
+            
+            if not cleaned_response:
+                logger.warning(f"No valid JSON found in response: {response[:200]}...")
+                return self._create_fallback_note(chunk_data)
+            
+            note_data = json.loads(cleaned_response)
             
             # 验证和清理数据
             atomic_note = {
@@ -84,9 +93,63 @@ class AtomicNoteGenerator:
             
             return atomic_note
             
-        except json.JSONDecodeError as e:
-            logger.warning(f"Failed to parse JSON response: {e}")
+        except (json.JSONDecodeError, ValueError) as e:
+            logger.warning(f"Failed to parse JSON response: {e}. Response: {response[:200]}...")
             return self._create_fallback_note(chunk_data)
+    
+    def _extract_json_from_response(self, response: str) -> str:
+        """从LLM响应中提取JSON部分"""
+        import re
+        
+        if not response or not response.strip():
+            return ""
+        
+        # 尝试直接解析整个响应
+        try:
+            import json
+            json.loads(response.strip())
+            return response.strip()
+        except json.JSONDecodeError:
+            pass
+        
+        # 查找JSON代码块
+        json_pattern = r'```(?:json)?\s*({.*?})\s*```'
+        matches = re.findall(json_pattern, response, re.DOTALL | re.IGNORECASE)
+        if matches:
+            return matches[0].strip()
+        
+        # 查找花括号包围的内容
+        brace_pattern = r'{[^{}]*(?:{[^{}]*}[^{}]*)*}'
+        matches = re.findall(brace_pattern, response, re.DOTALL)
+        for match in matches:
+            try:
+                import json
+                json.loads(match)
+                return match
+            except json.JSONDecodeError:
+                continue
+        
+        # 尝试修复常见的JSON格式问题
+        cleaned = response.strip()
+        
+        # 移除markdown标记
+        cleaned = re.sub(r'```(?:json)?\s*', '', cleaned)
+        cleaned = re.sub(r'```\s*$', '', cleaned)
+        
+        # 查找第一个{到最后一个}的内容
+        start_idx = cleaned.find('{')
+        end_idx = cleaned.rfind('}')
+        
+        if start_idx != -1 and end_idx != -1 and end_idx > start_idx:
+            potential_json = cleaned[start_idx:end_idx+1]
+            try:
+                import json
+                json.loads(potential_json)
+                return potential_json
+            except json.JSONDecodeError:
+                pass
+        
+        return ""
     
     def _create_fallback_note(self, chunk_data: Dict[str, Any]) -> Dict[str, Any]:
         """创建备用的原子笔记（当LLM生成失败时）"""

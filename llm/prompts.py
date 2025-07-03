@@ -60,7 +60,7 @@ ATOMIC_NOTEGEN_SYSTEM_PROMPT = """
 6. importance_score: 评估内容重要性（0-1分）
 7. note_type: 分类为fact（事实）、concept（概念）、procedure（流程）、example（示例）
 
-请确保返回有效的JSON格式。
+重要：你必须严格按照JSON格式返回结果，不要添加任何解释文字或markdown标记。只返回纯JSON对象。
 """
 
 ATOMIC_NOTEGEN_PROMPT = """
@@ -69,7 +69,7 @@ ATOMIC_NOTEGEN_PROMPT = """
 文本内容：
 {text}
 
-请按照以下JSON格式返回：
+请严格按照以下JSON格式返回，不要添加任何其他文字或解释：
 {{
     "content": "原子笔记的主要内容",
     "summary": "简要总结",
@@ -77,8 +77,13 @@ ATOMIC_NOTEGEN_PROMPT = """
     "entities": ["实体1", "实体2"],
     "concepts": ["概念1", "概念2"],
     "importance_score": 0.8,
-    "note_type": "fact/concept/procedure/example"
+    "note_type": "fact"
 }}
+
+注意：
+- importance_score必须是0到1之间的数字
+- note_type必须是以下之一：fact, concept, procedure, example
+- 只返回JSON对象，不要包含markdown代码块标记
 """
 
 # Query rewriting

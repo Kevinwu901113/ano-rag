@@ -4,6 +4,7 @@ from typing import List, Dict, Any, Optional
 from loguru import logger
 from config import config
 from utils import BatchProcessor
+from .ollama_client import OllamaClient
 from .prompts import (
     ATOMIC_NOTE_SYSTEM_PROMPT,
     ATOMIC_NOTE_PROMPT,
@@ -23,24 +24,43 @@ class LocalLLM:
         self.tokenizer = None
         self.model = None
         self.pipeline = None
+        self.ollama_client = None
         self.batch_processor = BatchProcessor()
+        
+        # 检查是否是Ollama模型格式
+        self.is_ollama_model = ':' in self.model_name
         
     def load_model(self):
         """加载模型"""
         try:
             logger.info(f"Loading model: {self.model_name}")
             
-            # 对于Ollama模型，我们使用pipeline方式
-            if 'llama' in self.model_name.lower() or ':' in self.model_name:
-                # 使用text-generation pipeline
-                self.pipeline = pipeline(
-                    "text-generation",
-                    model=self.model_name,
-                    device=0 if self.device == 'cuda' and torch.cuda.is_available() else -1,
-                    torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32
-                )
+            if self.is_ollama_model:
+                # 使用Ollama客户端
+                base_url = config.get('llm.local_model.base_url', 'http://localhost:11434')
+                self.ollama_client = OllamaClient(base_url=base_url, model=self.model_name)
+                
+                # 直接测试连接和生成能力，避免递归调用
+                max_retries = 3
+                for attempt in range(max_retries):
+                    try:
+                        # 直接测试生成能力，这会自动检查服务可用性
+                        test_response = self.ollama_client.generate("Hello", timeout=10)
+                        if test_response:
+                            logger.info("Ollama model loaded and tested successfully")
+                            break
+                        else:
+                            raise Exception("Model test generation failed")
+                    except Exception as e:
+                        if attempt < max_retries - 1:
+                            logger.warning(f"Attempt {attempt + 1} failed: {e}, retrying...")
+                            import time
+                            time.sleep(2)  # 等待2秒后重试
+                        else:
+                            raise Exception(f"Failed to connect to Ollama after {max_retries} attempts: {e}")
             else:
                 # 使用transformers直接加载
+                import torch
                 self.tokenizer = AutoTokenizer.from_pretrained(self.model_name)
                 self.model = AutoModelForCausalLM.from_pretrained(
                     self.model_name,
@@ -59,27 +79,25 @@ class LocalLLM:
     
     def generate(self, prompt: str, system_prompt: str = None, **kwargs) -> str:
         """生成文本"""
-        if self.pipeline is None and self.model is None:
+        if self.ollama_client is None and self.model is None:
             self.load_model()
         
         try:
-            if system_prompt:
-                full_prompt = f"System: {system_prompt}\n\nUser: {prompt}\n\nAssistant:"
-            else:
-                full_prompt = prompt
-            
-            if self.pipeline:
-                # 使用pipeline生成
-                outputs = self.pipeline(
-                    full_prompt,
-                    max_new_tokens=kwargs.get('max_tokens', self.max_tokens),
+            if self.is_ollama_model and self.ollama_client:
+                # 使用Ollama客户端生成
+                return self.ollama_client.generate(
+                    prompt=prompt,
+                    system_prompt=system_prompt,
                     temperature=kwargs.get('temperature', self.temperature),
-                    do_sample=True,
-                    pad_token_id=self.pipeline.tokenizer.eos_token_id
+                    max_tokens=kwargs.get('max_tokens', self.max_tokens)
                 )
-                return outputs[0]['generated_text'][len(full_prompt):].strip()
             else:
-                # 使用transformers直接生成
+                # 使用transformers生成
+                if system_prompt:
+                    full_prompt = f"System: {system_prompt}\n\nUser: {prompt}\n\nAssistant:"
+                else:
+                    full_prompt = prompt
+                
                 inputs = self.tokenizer(full_prompt, return_tensors="pt", padding=True)
                 inputs = {k: v.to(self.model.device) for k, v in inputs.items()}
                 
@@ -168,9 +186,17 @@ class LocalLLM:
     def is_available(self) -> bool:
         """检查模型是否可用"""
         try:
-            if self.pipeline is None and self.model is None:
-                self.load_model()
-            return True
+            if self.is_ollama_model:
+                # 避免递归调用load_model，直接创建临时客户端检查
+                if self.ollama_client is None:
+                    base_url = config.get('llm.local_model.base_url', 'http://localhost:11434')
+                    temp_client = OllamaClient(base_url=base_url, model=self.model_name)
+                    return temp_client.is_available()
+                return self.ollama_client.is_available()
+            else:
+                if self.model is None:
+                    self.load_model()
+                return True
         except Exception:
             return False
     
@@ -187,6 +213,9 @@ class LocalLLM:
         if self.pipeline is not None:
             del self.pipeline
             self.pipeline = None
+            
+        if self.ollama_client is not None:
+            self.ollama_client = None
         
         if torch.cuda.is_available():
             torch.cuda.empty_cache()

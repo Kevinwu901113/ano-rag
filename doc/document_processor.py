@@ -185,7 +185,13 @@ class DocumentProcessor:
         all_chunks = []
         for file_path in tqdm(file_paths, desc="Chunking documents"):
             try:
-                chunks = self.chunker.chunk_document(file_path)
+                # 创建source_info
+                source_info = {
+                    'file_path': file_path,
+                    'file_name': os.path.basename(file_path),
+                    'file_hash': FileUtils.get_file_hash(file_path) if hasattr(FileUtils, 'get_file_hash') else 'unknown'
+                }
+                chunks = self.chunker.chunk_document(file_path, source_info)
                 all_chunks.extend(chunks)
                 logger.debug(f"Created {len(chunks)} chunks from {file_path}")
             except Exception as e:
