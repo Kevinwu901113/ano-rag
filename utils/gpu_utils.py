@@ -77,29 +77,35 @@ class GPUUtils:
             return df.values
     
     @staticmethod
-    def batch_process_gpu(data: List, batch_size: int, process_func, use_gpu: bool = True):
-        """GPU批处理函数"""
+    def batch_process_gpu(
+        data: Union[List, "cudf.DataFrame"],
+        batch_size: int,
+        process_func,
+        use_gpu: bool = True,
+    ):
+        """批处理函数，支持列表或cuDF DataFrame"""
+
         results = []
-        
-        for i in range(0, len(data), batch_size):
-            batch = data[i:i + batch_size]
-            
+
+        is_cudf_df = CUDF_AVAILABLE and hasattr(data, "iloc")
+        data_len = len(data)
+
+        for i in range(0, data_len, batch_size):
+            batch = data.iloc[i : i + batch_size] if is_cudf_df else data[i : i + batch_size]
+
             if use_gpu and CUDF_AVAILABLE:
                 try:
-                    # 对于GPU处理，直接传递原始batch数据
-                    # 因为大多数process_func期望原始数据格式
                     result = process_func(batch)
-                    results.extend(result)
                 except Exception as e:
                     logger.warning(f"GPU processing failed: {e}, falling back to CPU")
-                    # 回退到CPU处理
-                    result = process_func(batch)
-                    results.extend(result)
+                    cpu_batch = batch.to_pandas() if is_cudf_df and hasattr(batch, "to_pandas") else batch
+                    result = process_func(cpu_batch)
             else:
-                # CPU处理
-                result = process_func(batch)
-                results.extend(result)
-        
+                cpu_batch = batch.to_pandas() if is_cudf_df and hasattr(batch, "to_pandas") else batch
+                result = process_func(cpu_batch)
+
+            results.extend(result)
+
         return results
     
     @staticmethod
