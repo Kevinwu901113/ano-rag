@@ -53,34 +53,64 @@ class DocumentProcessor:
         
         # 获取处理计划
         processing_plan = self.incremental_processor.get_processing_plan(file_paths)
-        
+
         if not force_reprocess and processing_plan['can_skip_processing']:
             logger.info("No files need processing, loading cached results")
             return self._load_cached_results(file_paths)
-        
-        # 确定需要处理的文件
+
         files_to_process = processing_plan['files_to_process']
+        unchanged_files = processing_plan.get('unchanged_files', [])
+        files_to_clean = processing_plan.get('files_to_clean', [])
+
         if force_reprocess:
             files_to_process = file_paths
-        
+            unchanged_files = []
+            files_to_clean = []
+
         logger.info(f"Processing {len(files_to_process)} files")
-        
+
         chunk_file = os.path.join(self.processed_docs_path, "chunks.jsonl")
-        if not force_reprocess and os.path.exists(chunk_file):
-            logger.info(f"Loading chunks from {chunk_file}")
-            all_chunks = FileUtils.read_jsonl(chunk_file)
-        else:
+        existing_chunks = []
+        if os.path.exists(chunk_file):
+            try:
+                existing_chunks = FileUtils.read_jsonl(chunk_file)
+            except Exception as e:
+                logger.warning(f"Failed to load existing chunks: {e}")
+
+        # 过滤出未变更文件的旧分块
+        cached_chunks = [
+            c for c in existing_chunks
+            if c.get('source_info', {}).get('file_path') in unchanged_files
+        ]
+
+        # 移除需要清理的文件对应的分块
+        cached_chunks = [
+            c for c in cached_chunks
+            if c.get('source_info', {}).get('file_path') not in files_to_clean
+        ]
+
+        chunks_updated = False
+        new_chunks = []
+        if files_to_process:
             logger.info("Step 1: Document chunking")
-            all_chunks = self._chunk_documents(files_to_process)
-            FileUtils.write_jsonl(all_chunks, chunk_file)
+            new_chunks = self._chunk_documents(files_to_process)
+            chunks_updated = True
+        if files_to_clean:
+            chunks_updated = True
+
+        all_chunks = cached_chunks + new_chunks
         chunk_count = len(all_chunks)
+
+        if chunks_updated:
+            FileUtils.write_jsonl(all_chunks, chunk_file)
         
         if not all_chunks:
             logger.warning("No chunks created from documents")
             return {'atomic_notes': [], 'topic_pools': [], 'processing_stats': {}}
         
         atomic_file = os.path.join(self.processed_docs_path, "atomic_notes.json")
-        if not force_reprocess and os.path.exists(atomic_file):
+        if (not force_reprocess and not chunks_updated
+                and os.path.exists(atomic_file)):
             logger.info(f"Loading atomic notes from {atomic_file}")
             atomic_notes = FileUtils.read_json(atomic_file)
         else:
@@ -94,7 +124,8 @@ class DocumentProcessor:
             return {'atomic_notes': [], 'topic_pools': [], 'processing_stats': {}}
         
         embed_file = os.path.join(self.processed_docs_path, "embeddings.npy")
-        if not force_reprocess and os.path.exists(embed_file):
+        if (not force_reprocess and not chunks_updated
+                and os.path.exists(embed_file)):
             logger.info(f"Loading embeddings from {embed_file}")
             embeddings = np.load(embed_file)
         else:
@@ -103,7 +134,8 @@ class DocumentProcessor:
             np.save(embed_file, embeddings)
         
         cluster_file = os.path.join(self.processed_docs_path, "clustering.json")
-        if not force_reprocess and os.path.exists(cluster_file):
+        if (not force_reprocess and not chunks_updated
+                and os.path.exists(cluster_file)):
             logger.info(f"Loading clustering from {cluster_file}")
             clustering_result = FileUtils.read_json(cluster_file)
         else:
@@ -112,7 +144,8 @@ class DocumentProcessor:
             FileUtils.write_json(clustering_result, cluster_file)
         
         graph_file = os.path.join(self.processed_docs_path, "graph.json")
-        if not force_reprocess and os.path.exists(graph_file):
+        if (not force_reprocess and not chunks_updated
+                and os.path.exists(graph_file)):
             logger.info(f"Loading graph from {graph_file}")
             graph_data = FileUtils.read_json(graph_file)
         else:
