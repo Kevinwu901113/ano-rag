@@ -32,10 +32,14 @@ class OllamaClient:
         self.client = ollama.Client(host=self.base_url)
         
         # Default options for all requests
+        # Reduce num_ctx to avoid 503 errors with smaller models
+        safe_num_ctx = min(self.num_ctx, 8192)  # Use smaller context window
+        safe_max_tokens = min(self.max_tokens, 2048)  # Limit output tokens
+        
         self.default_options = {
-            "num_ctx": self.num_ctx,
+            "num_ctx": safe_num_ctx,
             "temperature": self.temperature,
-            "num_predict": self.max_tokens,
+            "num_predict": safe_max_tokens,
         }
 
     def generate(
@@ -49,20 +53,20 @@ class OllamaClient:
         """Generate text from a prompt with improved error handling."""
         # Merge default options with kwargs
         options = self.default_options.copy()
+        # Use safe limits to avoid 503 errors
+        safe_max_tokens = min(kwargs.get("max_tokens", self.max_tokens), 2048)
+        safe_num_ctx = min(kwargs.get("num_ctx", self.num_ctx), 8192)
+        
         options.update({
             "temperature": kwargs.get("temperature", self.temperature),
-            "num_predict": kwargs.get("max_tokens", self.max_tokens),
-            "num_ctx": kwargs.get("num_ctx", self.num_ctx),
+            "num_predict": safe_max_tokens,
+            "num_ctx": safe_num_ctx,
         })
         
         # Get timeout from kwargs or use default
         timeout = kwargs.get("timeout", self.timeout)
         
         try:
-            # Quick availability check with shorter timeout
-            if not self._quick_health_check():
-                raise ConnectionError("Ollama service is not responding")
-            
             # Prepare the request
             request_params = {
                 "model": self.model,
@@ -74,7 +78,7 @@ class OllamaClient:
             if system_prompt:
                 request_params["system"] = system_prompt
             
-            # Make the request with timeout handling
+            # Make the request directly - let ollama handle connection errors
             response = self.client.generate(**request_params)
 
             text: str = ""
@@ -95,11 +99,15 @@ class OllamaClient:
 
             return self._clean_response(text)
             
-        except ConnectionError as e:
-            logger.error(f"Connection error: {e}")
-            return ""
         except Exception as e:
-            logger.error(f"Generation failed: {e}")
+            # Log the specific error for debugging
+            error_msg = str(e)
+            if "connection" in error_msg.lower() or "refused" in error_msg.lower():
+                logger.error(f"Connection error: Ollama service is not responding - {e}")
+            elif "model" in error_msg.lower() and "not found" in error_msg.lower():
+                logger.error(f"Model error: Model '{self.model}' not found - {e}")
+            else:
+                logger.error(f"Generation failed: {e}")
             return ""
 
     def chat(
@@ -112,17 +120,18 @@ class OllamaClient:
         """Chat with the model using a list of messages with improved error handling."""
         # Merge default options with kwargs
         options = self.default_options.copy()
+        # Use safe limits to avoid 503 errors
+        safe_max_tokens = min(kwargs.get("max_tokens", self.max_tokens), 2048)
+        safe_num_ctx = min(kwargs.get("num_ctx", self.num_ctx), 8192)
+        
         options.update({
             "temperature": kwargs.get("temperature", self.temperature),
-            "num_predict": kwargs.get("max_tokens", self.max_tokens),
-            "num_ctx": kwargs.get("num_ctx", self.num_ctx),
+            "num_predict": safe_max_tokens,
+            "num_ctx": safe_num_ctx,
         })
         
         try:
-            # Quick availability check
-            if not self._quick_health_check():
-                raise ConnectionError("Ollama service is not responding")
-            
+            # Make the request directly - let ollama handle connection errors
             response = self.client.chat(
                 model=self.model,
                 messages=messages,
@@ -137,11 +146,15 @@ class OllamaClient:
             result = response.message.content if hasattr(response, 'message') else str(response)
             return self._clean_response(result)
             
-        except ConnectionError as e:
-            logger.error(f"Connection error in chat: {e}")
-            return ""
         except Exception as e:
-            logger.error(f"Chat failed: {e}")
+            # Log the specific error for debugging
+            error_msg = str(e)
+            if "connection" in error_msg.lower() or "refused" in error_msg.lower():
+                logger.error(f"Connection error in chat: Ollama service is not responding - {e}")
+            elif "model" in error_msg.lower() and "not found" in error_msg.lower():
+                logger.error(f"Model error in chat: Model '{self.model}' not found - {e}")
+            else:
+                logger.error(f"Chat failed: {e}")
             return ""
 
     def generate_final_answer(self, context: str, query: str) -> str:
@@ -179,9 +192,16 @@ class OllamaClient:
     def _quick_health_check(self) -> bool:
         """Quick health check with minimal timeout."""
         try:
+            # First check if the API endpoint is reachable
             response = requests.get(f"{self.base_url}/api/version", timeout=3)
-            return response.status_code == 200
-        except Exception:
+            if response.status_code != 200:
+                return False
+            
+            # Then check if we can list models (this tests the ollama client)
+            models_response = self.client.list()
+            return hasattr(models_response, 'models')
+        except Exception as e:
+            logger.debug(f"Health check failed: {e}")
             return False
     
     def _clean_response(self, response: str) -> str:
