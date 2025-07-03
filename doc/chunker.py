@@ -116,6 +116,14 @@ class DocumentChunker:
             logger.warning(f"No text content found in {file_path}")
             return []
         
+        # 如果source_info为None，创建默认的source_info
+        if source_info is None:
+            source_info = {
+                'file_path': file_path,
+                'file_name': os.path.basename(file_path),
+                'file_hash': FileUtils.get_file_hash(file_path) if hasattr(FileUtils, 'get_file_hash') else 'unknown'
+            }
+        
         # 使用TextUtils进行分块
         text_chunks = TextUtils.chunk_text(
             cleaned_text, 

@@ -86,20 +86,18 @@ class GPUUtils:
             
             if use_gpu and CUDF_AVAILABLE:
                 try:
-                    # 尝试使用GPU处理
-                    batch_df = GPUUtils.to_cudf(batch, use_gpu=True)
-                    result = process_func(batch_df)
+                    # 对于GPU处理，直接传递原始batch数据
+                    # 因为大多数process_func期望原始数据格式
+                    result = process_func(batch)
                     results.extend(result)
                 except Exception as e:
                     logger.warning(f"GPU processing failed: {e}, falling back to CPU")
                     # 回退到CPU处理
-                    batch_df = GPUUtils.to_cudf(batch, use_gpu=False)
-                    result = process_func(batch_df)
+                    result = process_func(batch)
                     results.extend(result)
             else:
                 # CPU处理
-                batch_df = GPUUtils.to_cudf(batch, use_gpu=False)
-                result = process_func(batch_df)
+                result = process_func(batch)
                 results.extend(result)
         
         return results

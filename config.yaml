@@ -76,6 +76,10 @@ llm:
     model: "gemma3:4b-it-fp16"
     temperature: 0.7
     max_tokens: 4096
+    # LightRAG-inspired configuration
+    num_ctx: 32768          # Context window size
+    max_async: 4            # Max concurrent requests
+    timeout: 60             # Request timeout in seconds
     
 # Vector Store
 vector_store:
