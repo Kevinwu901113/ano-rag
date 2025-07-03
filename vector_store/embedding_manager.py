@@ -39,8 +39,32 @@ class EmbeddingManager:
         """加载嵌入模型"""
         try:
             logger.info(f"Loading embedding model: {self.model_name}")
-            
-            # 支持多种模型
+
+            # 首先尝试从根目录的models文件夹加载本地模型
+            repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+            local_models_dir = os.path.join(repo_root, 'models')
+            candidate_paths = [
+                os.path.join(local_models_dir, self.model_name),
+                os.path.join(local_models_dir, self.model_name.replace('/', '_')),
+            ]
+            for path in candidate_paths:
+                if os.path.isdir(path):
+                    logger.info(f"Using local embedding model at {path}")
+                    self.model = SentenceTransformer(path, device=self.device)
+                    if hasattr(self.model, 'get_sentence_embedding_dimension'):
+                        self.embedding_dim = self.model.get_sentence_embedding_dimension()
+                    else:
+                        test_embedding = self.model.encode(["test"], convert_to_numpy=True)
+                        self.embedding_dim = test_embedding.shape[1]
+                    if hasattr(self.model, 'max_seq_length'):
+                        self.model.max_seq_length = self.max_length
+                    self.model_name = path
+                    logger.info(
+                        f"Model loaded successfully from local path {path}, embedding dimension: {self.embedding_dim}"
+                    )
+                    return
+
+            # 支持多种模型 (在线或默认路径)
             if 'bge-m3' in self.model_name.lower():
                 self.model = SentenceTransformer(self.model_name, device=self.device)
                 # BGE-M3 支持多语言和多粒度
