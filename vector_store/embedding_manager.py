@@ -8,7 +8,7 @@ from utils import BatchProcessor, GPUUtils, FileUtils
 from config import config
 
 class EmbeddingManager:
-    """嵌入管理器，负责生成和管理文本的向量嵌入"""
+    """嵌入管理器，专注于本地模型加载"""
     
     def __init__(self):
         # 配置参数
@@ -21,7 +21,7 @@ class EmbeddingManager:
         # 初始化模型
         self.model = None
         self.embedding_dim = None
-        self._load_model()
+        self._load_local_model()
         
         # 批处理器
         self.batch_processor = BatchProcessor(
@@ -35,47 +35,139 @@ class EmbeddingManager:
         
         logger.info(f"EmbeddingManager initialized with model: {self.model_name}, device: {self.device}")
     
-    def _load_model(self):
-        """加载嵌入模型"""
+    def _load_local_model(self):
+        """专门加载本地模型"""
         try:
-            logger.info(f"Loading embedding model: {self.model_name}")
-
-            # 首先尝试从根目录的models文件夹加载本地模型
+            # 设置离线模式，避免网络请求
+            os.environ['TRANSFORMERS_OFFLINE'] = '1'
+            os.environ['HF_HUB_OFFLINE'] = '1'
+            
+            # 获取本地模型目录
             repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
-            local_models_dir = os.path.join(repo_root, 'models')
-            candidate_paths = [
-                os.path.join(local_models_dir, self.model_name),
-                os.path.join(local_models_dir, self.model_name.replace('/', '_')),
-            ]
-            for path in candidate_paths:
-                if os.path.isdir(path):
-                    logger.info(f"Using local embedding model at {path}")
-                    self.model = SentenceTransformer(path, device=self.device)
-                    if hasattr(self.model, 'get_sentence_embedding_dimension'):
-                        self.embedding_dim = self.model.get_sentence_embedding_dimension()
-                    else:
-                        test_embedding = self.model.encode(["test"], convert_to_numpy=True)
-                        self.embedding_dim = test_embedding.shape[1]
-                    if hasattr(self.model, 'max_seq_length'):
-                        self.model.max_seq_length = self.max_length
-                    self.model_name = path
-                    logger.info(
-                        f"Model loaded successfully from local path {path}, embedding dimension: {self.embedding_dim}"
-                    )
+            local_models_dir = os.path.join(repo_root, 'models/embedding')
+            
+            # 定义本地模型路径映射
+            local_model_paths = self._get_local_model_paths(local_models_dir)
+            
+            # 尝试加载本地模型
+            for model_path in local_model_paths:
+                if self._try_load_model_from_path(model_path):
                     return
-
-            # 支持多种模型 (在线或默认路径)
-            if 'bge-m3' in self.model_name.lower():
-                self.model = SentenceTransformer(self.model_name, device=self.device)
-                # BGE-M3 支持多语言和多粒度
-                self.embedding_dim = 1024
-            elif 'nomic-embed' in self.model_name.lower():
-                self.model = SentenceTransformer(self.model_name, device=self.device)
-                self.embedding_dim = 768
+            
+            # 如果所有路径都失败，抛出异常
+            raise RuntimeError(f"无法从本地路径加载任何嵌入模型。检查的路径: {local_model_paths}")
+            
+        except Exception as e:
+            logger.error(f"加载本地嵌入模型失败: {e}")
+            raise RuntimeError(f"无法加载嵌入模型: {e}")
+    
+    def _get_local_model_paths(self, local_models_dir: str) -> List[str]:
+        """获取所有可能的本地模型路径"""
+        paths = []
+        
+        # 1. 直接模型名称路径
+        paths.append(os.path.join(local_models_dir, self.model_name))
+        
+        # 2. 替换斜杠的路径
+        safe_name = self.model_name.replace('/', '_')
+        paths.append(os.path.join(local_models_dir, safe_name))
+        
+        # 3. HuggingFace缓存格式路径
+        hf_cache_name = f"models--{self.model_name.replace('/', '--')}"
+        paths.append(os.path.join(local_models_dir, hf_cache_name))
+        
+        # 4. 特殊处理BAAI/bge-m3模型的snapshots路径
+        if self.model_name == 'BAAI/bge-m3':
+            bge_cache_path = os.path.join(local_models_dir, 'BAAI_bge-m3')
+            snapshots_dir = os.path.join(bge_cache_path, 'snapshots')
+            if os.path.isdir(snapshots_dir):
+                # 查找所有snapshot目录
+                try:
+                     snapshot_dirs = [d for d in os.listdir(snapshots_dir) 
+                                    if os.path.isdir(os.path.join(snapshots_dir, d))]
+                     if snapshot_dirs:
+                         # 查找有实际文件的snapshot目录
+                         for snapshot_dir in sorted(snapshot_dirs, reverse=True):  # 从最新开始
+                             snapshot_path = os.path.join(snapshots_dir, snapshot_dir)
+                             # 检查是否有模型文件
+                             if (os.path.exists(os.path.join(snapshot_path, 'modules.json')) or 
+                                 os.path.exists(os.path.join(snapshot_path, 'config.json'))):
+                                 paths.insert(0, snapshot_path)  # 优先使用
+                                 break
+                except Exception as e:
+                    logger.warning(f"检查snapshots目录失败: {e}")
+        
+        # 5. 添加sentence-transformers格式的路径
+        if 'sentence-transformers' in self.model_name:
+            model_short_name = self.model_name.split('/')[-1]
+            paths.append(os.path.join(local_models_dir, model_short_name))
+        
+        # 6. 添加all-MiniLM-L6-v2的HuggingFace缓存路径
+        if 'all-MiniLM-L6-v2' in self.model_name:
+            minilm_cache_path = os.path.join(local_models_dir, 'models--sentence-transformers--all-MiniLM-L6-v2')
+            snapshots_dir = os.path.join(minilm_cache_path, 'snapshots')
+            if os.path.isdir(snapshots_dir):
+                try:
+                     snapshot_dirs = [d for d in os.listdir(snapshots_dir) 
+                                    if os.path.isdir(os.path.join(snapshots_dir, d))]
+                     if snapshot_dirs:
+                         # 查找有实际文件的snapshot目录
+                         for snapshot_dir in sorted(snapshot_dirs, reverse=True):  # 从最新开始
+                             snapshot_path = os.path.join(snapshots_dir, snapshot_dir)
+                             # 检查是否有模型文件
+                             if (os.path.exists(os.path.join(snapshot_path, 'modules.json')) or 
+                                 os.path.exists(os.path.join(snapshot_path, 'config.json'))):
+                                 paths.insert(0, snapshot_path)  # 优先使用
+                                 break
+                except Exception as e:
+                    logger.warning(f"检查MiniLM snapshots目录失败: {e}")
+        
+        return paths
+    
+    def _try_load_model_from_path(self, model_path: str) -> bool:
+        """尝试从指定路径加载模型"""
+        logger.info(f"尝试从路径加载模型: {model_path}")
+        
+        if not os.path.isdir(model_path):
+            logger.debug(f"路径不存在或不是目录: {model_path}")
+            return False
+        
+        try:
+            # 检查必要的模型文件是否存在
+            # 对于sentence-transformers模型，检查特有的配置文件
+            required_files = ['modules.json', 'config_sentence_transformers.json']
+            has_required_files = False
+            
+            # 检查是否有sentence-transformers的配置文件
+            for file in required_files:
+                if os.path.exists(os.path.join(model_path, file)):
+                    has_required_files = True
+                    break
+            
+            # 如果没有sentence-transformers配置文件，检查通用的config.json
+            if not has_required_files and os.path.exists(os.path.join(model_path, 'config.json')):
+                has_required_files = True
+            
+            if not has_required_files:
+                logger.debug(f"缺少必要的模型配置文件在路径 {model_path}")
+                return False
+            
+            # 尝试加载模型
+            logger.info(f"正在从 {model_path} 加载SentenceTransformer模型")
+            
+            # 根据模型类型使用不同的加载参数
+            load_kwargs = {
+                'device': self.device,
+                'trust_remote_code': True  # 允许自定义代码
+            }
+            
+            self.model = SentenceTransformer(model_path, **load_kwargs)
+            
+            # 获取嵌入维度
+            if hasattr(self.model, 'get_sentence_embedding_dimension'):
+                self.embedding_dim = self.model.get_sentence_embedding_dimension()
             else:
-                # 通用的sentence-transformers模型
-                self.model = SentenceTransformer(self.model_name, device=self.device)
-                # 获取实际的嵌入维度
+                # 通过测试编码获取维度
                 test_embedding = self.model.encode(["test"], convert_to_numpy=True)
                 self.embedding_dim = test_embedding.shape[1]
             
@@ -83,19 +175,15 @@ class EmbeddingManager:
             if hasattr(self.model, 'max_seq_length'):
                 self.model.max_seq_length = self.max_length
             
-            logger.info(f"Model loaded successfully, embedding dimension: {self.embedding_dim}")
+            # 更新模型名称为实际路径
+            self.model_name = model_path
+            
+            logger.info(f"模型加载成功! 路径: {model_path}, 嵌入维度: {self.embedding_dim}")
+            return True
             
         except Exception as e:
-            logger.error(f"Failed to load embedding model {self.model_name}: {e}")
-            # 回退到默认模型
-            try:
-                logger.info("Falling back to default model: all-MiniLM-L6-v2")
-                self.model = SentenceTransformer('all-MiniLM-L6-v2', device=self.device)
-                self.embedding_dim = 384
-                self.model_name = 'all-MiniLM-L6-v2'
-            except Exception as fallback_error:
-                logger.error(f"Failed to load fallback model: {fallback_error}")
-                raise RuntimeError("Cannot load any embedding model")
+            logger.warning(f"从路径 {model_path} 加载模型失败: {e}")
+            return False
     
     def encode_texts(self, texts: List[str], 
                     batch_size: Optional[int] = None,
@@ -109,7 +197,7 @@ class EmbeddingManager:
         normalize = normalize if normalize is not None else self.normalize_embeddings
         
         try:
-            logger.info(f"Encoding {len(texts)} texts with batch size {batch_size}")
+            logger.info(f"编码 {len(texts)} 个文本，批次大小: {batch_size}")
             
             # 预处理文本
             processed_texts = self._preprocess_texts(texts)
@@ -124,11 +212,11 @@ class EmbeddingManager:
                 device=self.device
             )
             
-            logger.info(f"Generated embeddings shape: {embeddings.shape}")
+            logger.info(f"生成嵌入形状: {embeddings.shape}")
             return embeddings
             
         except Exception as e:
-            logger.error(f"Failed to encode texts: {e}")
+            logger.error(f"编码文本失败: {e}")
             # 返回零向量作为回退
             return np.zeros((len(texts), self.embedding_dim))
     
@@ -170,7 +258,7 @@ class EmbeddingManager:
             full_text = ' '.join(text_parts) if text_parts else 'Empty note'
             texts.append(full_text)
         
-        logger.info(f"Encoding {len(atomic_notes)} atomic notes")
+        logger.info(f"编码 {len(atomic_notes)} 个原子笔记")
         return self.encode_texts(texts)
     
     def encode_queries(self, queries: List[str], 
@@ -185,7 +273,7 @@ class EmbeddingManager:
         else:
             prefixed_queries = queries
         
-        logger.info(f"Encoding {len(queries)} queries")
+        logger.info(f"编码 {len(queries)} 个查询")
         return self.encode_texts(prefixed_queries)
     
     def _preprocess_texts(self, texts: List[str]) -> List[str]:
@@ -198,7 +286,7 @@ class EmbeddingManager:
             # 截断过长的文本
             if len(cleaned) > self.max_length * 4:  # 粗略估计token数
                 cleaned = cleaned[:self.max_length * 4]
-                logger.debug(f"Truncated text from {len(text)} to {len(cleaned)} characters")
+                logger.debug(f"文本从 {len(text)} 字符截断到 {len(cleaned)} 字符")
             
             # 处理空文本
             if not cleaned:
@@ -245,12 +333,12 @@ class EmbeddingManager:
                 similarity = np.dot(embeddings1, embeddings2.T)
                 
             else:
-                raise ValueError(f"Unsupported similarity metric: {metric}")
+                raise ValueError(f"不支持的相似度度量: {metric}")
             
             return similarity
             
         except Exception as e:
-            logger.error(f"Failed to compute similarity: {e}")
+            logger.error(f"计算相似度失败: {e}")
             return np.array([])
     
     def find_most_similar(self, query_embedding: np.ndarray,
@@ -284,106 +372,6 @@ class EmbeddingManager:
         
         return results
     
-    def save_embeddings(self, embeddings: np.ndarray, 
-                       metadata: Dict[str, Any],
-                       filename: str) -> str:
-        """保存嵌入到文件"""
-        try:
-            filepath = os.path.join(self.cache_dir, filename)
-            
-            # 保存数据
-            np.savez_compressed(
-                filepath,
-                embeddings=embeddings,
-                metadata=metadata,
-                model_name=self.model_name,
-                embedding_dim=self.embedding_dim
-            )
-            
-            logger.info(f"Embeddings saved to {filepath}")
-            return filepath
-            
-        except Exception as e:
-            logger.error(f"Failed to save embeddings: {e}")
-            return ""
-    
-    def load_embeddings(self, filename: str) -> Dict[str, Any]:
-        """从文件加载嵌入"""
-        try:
-            filepath = os.path.join(self.cache_dir, filename)
-            
-            if not os.path.exists(filepath):
-                logger.warning(f"Embedding file not found: {filepath}")
-                return {}
-            
-            data = np.load(filepath, allow_pickle=True)
-            
-            result = {
-                'embeddings': data['embeddings'],
-                'metadata': data['metadata'].item() if 'metadata' in data else {},
-                'model_name': str(data['model_name']) if 'model_name' in data else '',
-                'embedding_dim': int(data['embedding_dim']) if 'embedding_dim' in data else 0
-            }
-            
-            logger.info(f"Embeddings loaded from {filepath}")
-            return result
-            
-        except Exception as e:
-            logger.error(f"Failed to load embeddings: {e}")
-            return {}
-    
-    def get_embedding_stats(self, embeddings: np.ndarray) -> Dict[str, Any]:
-        """获取嵌入统计信息"""
-        if embeddings.size == 0:
-            return {}
-        
-        stats = {
-            'shape': embeddings.shape,
-            'dtype': str(embeddings.dtype),
-            'mean': float(np.mean(embeddings)),
-            'std': float(np.std(embeddings)),
-            'min': float(np.min(embeddings)),
-            'max': float(np.max(embeddings)),
-            'norm_mean': float(np.mean(np.linalg.norm(embeddings, axis=1))),
-            'memory_mb': embeddings.nbytes / (1024 * 1024)
-        }
-        
-        return stats
-    
-    def batch_encode_with_cache(self, texts: List[str], 
-                               cache_key: str,
-                               force_recompute: bool = False) -> np.ndarray:
-        """带缓存的批量编码"""
-        cache_file = f"{cache_key}_embeddings.npz"
-        
-        # 检查缓存
-        if not force_recompute:
-            cached_data = self.load_embeddings(cache_file)
-            if cached_data and 'embeddings' in cached_data:
-                cached_embeddings = cached_data['embeddings']
-                if cached_embeddings.shape[0] == len(texts):
-                    logger.info(f"Using cached embeddings for {cache_key}")
-                    return cached_embeddings
-        
-        # 生成新的嵌入
-        logger.info(f"Computing new embeddings for {cache_key}")
-        embeddings = self.encode_texts(texts)
-        
-        # 保存到缓存
-        metadata = {
-            'text_count': len(texts),
-            'cache_key': cache_key,
-            'timestamp': self._get_timestamp()
-        }
-        self.save_embeddings(embeddings, metadata, cache_file)
-        
-        return embeddings
-    
-    def _get_timestamp(self) -> str:
-        """获取当前时间戳"""
-        from datetime import datetime
-        return datetime.now().isoformat()
-    
     def get_model_info(self) -> Dict[str, Any]:
         """获取模型信息"""
         return {
@@ -402,4 +390,4 @@ class EmbeddingManager:
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
         
-        logger.info("EmbeddingManager cleanup completed")
+        logger.info("EmbeddingManager 清理完成")
