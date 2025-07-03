@@ -12,9 +12,9 @@ except ImportError:
     CUDF_AVAILABLE = False
     logger.warning("CUDF not available, falling back to CPU processing")
     try:
-        import pkg_resources
-        cupy_pkgs = [d.project_name for d in pkg_resources.working_set
-                     if d.project_name.lower().startswith("cupy")]
+        import importlib.metadata as metadata
+        cupy_pkgs = [dist.metadata['name'] for dist in metadata.distributions()
+                     if dist.metadata['name'].lower().startswith("cupy")]
         if len(cupy_pkgs) > 1:
             logger.warning(
                 f"Multiple cupy packages detected: {cupy_pkgs}. "
