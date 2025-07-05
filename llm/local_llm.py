@@ -143,7 +143,9 @@ class LocalLLM:
             
             try:
                 import json
-                note_data = json.loads(response)
+                # 清理响应，移除可能的markdown代码块标记
+                cleaned_response = self._clean_json_response(response)
+                note_data = json.loads(cleaned_response)
                 return {
                     'original_text': chunk,
                     'content': note_data.get('content', chunk),
@@ -179,7 +181,9 @@ class LocalLLM:
         
         try:
             import json
-            return json.loads(response)
+            # 清理响应，移除可能的markdown代码块标记
+            cleaned_response = self._clean_json_response(response)
+            return json.loads(cleaned_response)
         except json.JSONDecodeError:
             return {'entities': [], 'relations': []}
     
@@ -199,6 +203,37 @@ class LocalLLM:
                 return True
         except Exception:
             return False
+    
+    def _clean_json_response(self, response: str) -> str:
+        """清理LLM响应，移除markdown代码块标记和其他格式"""
+        if not response:
+            return "{}"
+        
+        # 移除markdown代码块标记
+        response = response.strip()
+        if response.startswith('```json'):
+            response = response[7:]
+        elif response.startswith('```'):
+            response = response[3:]
+        
+        if response.endswith('```'):
+            response = response[:-3]
+        
+        # 移除可能的前后空白和换行
+        response = response.strip()
+        
+        # 尝试提取JSON对象
+        import re
+        # 查找第一个完整的JSON对象
+        json_match = re.search(r'\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}', response)
+        if json_match:
+            response = json_match.group(0)
+        
+        # 如果响应为空或不是JSON格式，返回空对象
+        if not response or not (response.startswith('{') or response.startswith('[')):
+            return "{}"
+        
+        return response
     
     def cleanup(self):
         """清理模型资源"""

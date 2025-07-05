@@ -167,7 +167,9 @@ class OllamaClient:
         prompt = EVALUATE_ANSWER_PROMPT.format(query=query, context=context, answer=answer)
         try:
             text = self.generate(prompt, system_prompt)
-            return json.loads(text)
+            # 清理响应，移除可能的markdown代码块标记
+            cleaned_text = self._clean_json_response(text)
+            return json.loads(cleaned_text)
         except Exception as e:  # pragma: no cover - runtime parsing or connection error
             logger.error(f"Answer evaluation failed: {e}")
             return {"relevance": 0.5, "accuracy": 0.5, "completeness": 0.5, "clarity": 0.5}
@@ -220,6 +222,37 @@ class OllamaClient:
         result = result.rstrip('\x00')
         
         return result
+    
+    def _clean_json_response(self, response: str) -> str:
+        """清理LLM响应，移除markdown代码块标记和其他格式"""
+        if not response:
+            return "{}"
+        
+        # 移除markdown代码块标记
+        response = response.strip()
+        if response.startswith('```json'):
+            response = response[7:]
+        elif response.startswith('```'):
+            response = response[3:]
+        
+        if response.endswith('```'):
+            response = response[:-3]
+        
+        # 移除可能的前后空白和换行
+        response = response.strip()
+        
+        # 尝试提取JSON对象
+        import re
+        # 查找第一个完整的JSON对象
+        json_match = re.search(r'\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}', response)
+        if json_match:
+            response = json_match.group(0)
+        
+        # 如果响应为空或不是JSON格式，返回空对象
+        if not response or not (response.startswith('{') or response.startswith('[')):
+            return "{}"
+        
+        return response
     
     def is_available(self) -> bool:
         """Comprehensive availability check."""
