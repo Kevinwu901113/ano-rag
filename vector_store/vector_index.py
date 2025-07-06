@@ -27,7 +27,13 @@ class VectorIndex:
         self.total_vectors = 0
         
         # 存储路径
-        self.index_dir = config.get('storage.vector_index_path', './data/vector_index')
+        self.index_dir = config.get('storage.vector_index_path')
+        if not self.index_dir:
+            work_dir = config.get('storage.work_dir')
+            if work_dir:
+                self.index_dir = os.path.join(work_dir, 'vector_index')
+            else:
+                self.index_dir = './data/vector_index'  # 回退到默认路径
         FileUtils.ensure_dir(self.index_dir)
         
         # GPU资源
@@ -158,8 +164,8 @@ class VectorIndex:
             processed_vectors = self._preprocess_vectors(vectors)
             
             # 添加向量
-            if ids is not None:
-                # 使用指定的ID
+            if ids is not None and self.index_type not in ['Flat', 'HNSW', 'LSH']:
+                # 只有某些索引类型支持自定义ID
                 if hasattr(self.index, 'add_with_ids'):
                     self.index.add_with_ids(processed_vectors, ids)
                 else:

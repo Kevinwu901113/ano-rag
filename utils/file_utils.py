@@ -2,6 +2,7 @@ import os
 import json
 import jsonlines
 import hashlib
+import numpy as np
 from pathlib import Path
 from typing import List, Dict, Any, Union, Optional
 from docx import Document
@@ -51,8 +52,39 @@ class FileUtils:
     @staticmethod
     def write_json(data: Dict[str, Any], file_path: str):
         """写入JSON文件"""
+        
+        def convert_numpy_types(obj):
+            """递归转换numpy类型为Python原生类型"""
+            if isinstance(obj, np.integer):
+                return int(obj)
+            elif isinstance(obj, np.floating):
+                return float(obj)
+            elif isinstance(obj, np.ndarray):
+                return obj.tolist()
+            elif isinstance(obj, dict):
+                # 转换字典的键和值
+                converted_dict = {}
+                for key, value in obj.items():
+                    # 转换键的类型
+                    if isinstance(key, np.integer):
+                        converted_key = int(key)
+                    elif isinstance(key, np.floating):
+                        converted_key = float(key)
+                    else:
+                        converted_key = key
+                    # 转换值的类型
+                    converted_dict[converted_key] = convert_numpy_types(value)
+                return converted_dict
+            elif isinstance(obj, list):
+                return [convert_numpy_types(item) for item in obj]
+            else:
+                return obj
+        
+        # 转换数据中的numpy类型
+        converted_data = convert_numpy_types(data)
+        
         with open(file_path, 'w', encoding='utf-8') as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
+            json.dump(converted_data, f, ensure_ascii=False, indent=2)
     
     @staticmethod
     def write_jsonl(data: List[Dict[str, Any]], file_path: str):

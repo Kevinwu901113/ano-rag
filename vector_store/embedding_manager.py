@@ -30,7 +30,13 @@ class EmbeddingManager:
         )
         
         # 缓存路径
-        self.cache_dir = config.get('storage.embedding_cache_path', './data/embeddings')
+        self.cache_dir = config.get('storage.embedding_cache_path')
+        if not self.cache_dir:
+            work_dir = config.get('storage.work_dir')
+            if work_dir:
+                self.cache_dir = os.path.join(work_dir, 'embeddings')
+            else:
+                self.cache_dir = './data/embeddings'  # 回退到默认路径
         FileUtils.ensure_dir(self.cache_dir)
         
         logger.info(f"EmbeddingManager initialized with model: {self.model_name}, device: {self.device}")

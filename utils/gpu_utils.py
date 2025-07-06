@@ -3,14 +3,20 @@ import numpy as np
 from typing import Optional, Union, List
 from loguru import logger
 
+# 检查CUDF可用性
+CUDF_AVAILABLE = False
 try:
     import cudf
     import cuml
     import cugraph
+    # 测试基本功能
+    test_df = cudf.DataFrame({'test': [1, 2, 3]})
     CUDF_AVAILABLE = True
-except ImportError:
-    CUDF_AVAILABLE = False
-    logger.warning("CUDF not available, falling back to CPU processing")
+    logger.info(f"CUDF available - version: {cudf.__version__}")
+except ImportError as e:
+    logger.info(f"CUDF not available: {e}")
+except Exception as e:
+    logger.warning(f"CUDF import failed: {e}, falling back to CPU processing")
     try:
         import importlib.metadata as metadata
         cupy_pkgs = [dist.metadata['name'] for dist in metadata.distributions()
@@ -20,8 +26,8 @@ except ImportError:
                 f"Multiple cupy packages detected: {cupy_pkgs}. "
                 "Remove conflicts and reinstall RAPIDS."
             )
-    except Exception as e:
-        logger.debug(f"Failed to check cupy packages: {e}")
+    except Exception as meta_e:
+        logger.debug(f"Failed to check cupy packages: {meta_e}")
 
 class GPUUtils:
     """GPU工具类，用于管理CUDA和cuDF的使用"""

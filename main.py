@@ -32,9 +32,20 @@ def create_new_workdir() -> str:
 
 def process_docs(args):
     work_dir = create_new_workdir() if args.new else get_latest_workdir()
-    # 更新配置中的工作目录
+    # 更新配置中的工作目录和所有存储路径
     cfg = config.load_config()
-    cfg.setdefault('storage', {})['work_dir'] = work_dir
+    storage = cfg.setdefault('storage', {})
+    storage['work_dir'] = work_dir
+    # 设置所有存储路径到工作目录下
+    storage['vector_db_path'] = os.path.join(work_dir, 'vector_store')
+    storage['graph_db_path'] = os.path.join(work_dir, 'graph_store')
+    storage['processed_docs_path'] = os.path.join(work_dir, 'processed')
+    storage['cache_path'] = os.path.join(work_dir, 'cache')
+    storage['vector_index_path'] = os.path.join(work_dir, 'vector_index')
+    storage['vector_store_path'] = os.path.join(work_dir, 'vector_store')
+    storage['embedding_cache_path'] = os.path.join(work_dir, 'embeddings')
+    # 设置评估数据集路径
+    cfg.setdefault('eval', {})['datasets_path'] = os.path.join(work_dir, 'eval_datasets')
     setup_logging(os.path.join(work_dir, 'ano-rag.log'))
     logger.info(f"Using work dir: {work_dir}")
 
@@ -56,9 +67,20 @@ def process_docs(args):
 
 def query_mode(args):
     work_dir = args.work_dir or config.get('storage.work_dir') or get_latest_workdir()
-    # 确保配置中的工作目录一致
+    # 确保配置中的工作目录和所有存储路径一致
     cfg = config.load_config()
-    cfg.setdefault('storage', {})['work_dir'] = work_dir
+    storage = cfg.setdefault('storage', {})
+    storage['work_dir'] = work_dir
+    # 设置所有存储路径到工作目录下
+    storage['vector_db_path'] = os.path.join(work_dir, 'vector_store')
+    storage['graph_db_path'] = os.path.join(work_dir, 'graph_store')
+    storage['processed_docs_path'] = os.path.join(work_dir, 'processed')
+    storage['cache_path'] = os.path.join(work_dir, 'cache')
+    storage['vector_index_path'] = os.path.join(work_dir, 'vector_index')
+    storage['vector_store_path'] = os.path.join(work_dir, 'vector_store')
+    storage['embedding_cache_path'] = os.path.join(work_dir, 'embeddings')
+    # 设置评估数据集路径
+    cfg.setdefault('eval', {})['datasets_path'] = os.path.join(work_dir, 'eval_datasets')
     setup_logging(os.path.join(work_dir, 'ano-rag.log'))
     notes_file = os.path.join(work_dir, 'atomic_notes.json')
     if not os.path.exists(notes_file):

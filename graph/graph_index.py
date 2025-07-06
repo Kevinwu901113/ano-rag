@@ -27,7 +27,7 @@ class GraphIndex:
         """Load graph data from a JSON file and build the index."""
         try:
             data = FileUtils.read_json(filepath)
-            graph = json_graph.node_link_graph(data)
+            graph = json_graph.node_link_graph(data, edges="links")
             self.build_index(graph)
             logger.info(f"Graph loaded from {filepath}")
         except Exception as e:

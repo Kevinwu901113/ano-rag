@@ -83,24 +83,24 @@ llm:
     
 # Vector Store
 vector_store:
-  index_type: "faiss"  # or "chroma", "pinecone"
+  index_type: "Flat"  # faiss index types: Flat, IVFFlat, IVFPQ, HNSW, LSH
   dimension: 1024
   similarity_metric: "cosine"
   top_k: 50
   
 # Storage Paths
 storage:
-  vector_db_path: "./data/vector_store"
-  graph_db_path: "./data/graph_store"
-  processed_docs_path: "./data/processed"
-  cache_path: "./data/cache"
-  source_docs_dir: "./data"
+  vector_db_path: null  # 将在运行时设置为工作目录下的子目录
+  graph_db_path: null   # 将在运行时设置为工作目录下的子目录
+  processed_docs_path: null  # 将在运行时设置为工作目录下的子目录
+  cache_path: null      # 将在运行时设置为工作目录下的子目录
+  source_docs_dir: "./data"  # 源文档目录保持不变
   result_root: "./result"
   work_dir: null
   
 # Evaluation
 eval:
-  datasets_path: "./data/eval_datasets"
+  datasets_path: null  # 将在运行时设置为工作目录下的子目录
   metrics: ["precision", "recall", "f1", "bleu", "rouge"]
   batch_size: 16
   
