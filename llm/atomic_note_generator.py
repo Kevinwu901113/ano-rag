@@ -104,6 +104,9 @@ class AtomicNoteGenerator:
         if not response or not response.strip():
             return ""
         
+        # 清理控制字符
+        response = self._clean_control_characters(response)
+        
         # 尝试直接解析整个响应
         try:
             import json
@@ -116,7 +119,7 @@ class AtomicNoteGenerator:
         json_pattern = r'```(?:json)?\s*({.*?})\s*```'
         matches = re.findall(json_pattern, response, re.DOTALL | re.IGNORECASE)
         if matches:
-            return matches[0].strip()
+            return self._clean_control_characters(matches[0].strip())
         
         # 查找花括号包围的内容
         brace_pattern = r'{[^{}]*(?:{[^{}]*}[^{}]*)*}'
@@ -124,10 +127,16 @@ class AtomicNoteGenerator:
         for match in matches:
             try:
                 import json
-                json.loads(match)
-                return match
+                cleaned_match = self._clean_control_characters(match)
+                json.loads(cleaned_match)
+                return cleaned_match
             except json.JSONDecodeError:
                 continue
+        
+        # 尝试修复截断的JSON
+        truncated_json = self._try_fix_truncated_json(response)
+        if truncated_json:
+            return truncated_json
         
         # 尝试修复常见的JSON格式问题
         cleaned = response.strip()
@@ -144,9 +153,73 @@ class AtomicNoteGenerator:
             potential_json = cleaned[start_idx:end_idx+1]
             try:
                 import json
-                json.loads(potential_json)
-                return potential_json
+                cleaned_json = self._clean_control_characters(potential_json)
+                json.loads(cleaned_json)
+                return cleaned_json
             except json.JSONDecodeError:
+                pass
+        
+        return ""
+    
+    def _clean_control_characters(self, text: str) -> str:
+        """清理字符串中的无效控制字符"""
+        import re
+        
+        # 移除或替换无效的控制字符，但保留有效的空白字符（空格、制表符、换行符）
+        # 保留 \t (\x09), \n (\x0A), \r (\x0D) 和普通空格 (\x20)
+        cleaned = re.sub(r'[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]', '', text)
+        
+        # 替换一些常见的问题字符
+        cleaned = cleaned.replace('\u0000', '')  # NULL字符
+        cleaned = cleaned.replace('\u0001', '')  # SOH字符
+        cleaned = cleaned.replace('\u0002', '')  # STX字符
+        
+        return cleaned
+    
+    def _try_fix_truncated_json(self, response: str) -> str:
+        """尝试修复截断的JSON响应"""
+        import re
+        import json
+        
+        # 清理响应
+        cleaned = self._clean_control_characters(response.strip())
+        
+        # 移除markdown标记
+        cleaned = re.sub(r'```(?:json)?\s*', '', cleaned)
+        cleaned = re.sub(r'```\s*$', '', cleaned)
+        
+        # 查找JSON开始位置
+        start_idx = cleaned.find('{')
+        if start_idx == -1:
+            return ""
+        
+        # 提取从开始到最后的内容
+        json_part = cleaned[start_idx:]
+        
+        # 如果JSON看起来被截断了（以...结尾或没有闭合括号）
+        if json_part.endswith('...') or json_part.count('{') > json_part.count('}'):
+            # 尝试构建一个最小的有效JSON
+            try:
+                # 移除...结尾
+                if json_part.endswith('...'):
+                    json_part = json_part[:-3]
+                
+                # 尝试找到content字段的值
+                content_match = re.search(r'"content"\s*:\s*"([^"]*)', json_part)
+                if content_match:
+                    content = content_match.group(1)
+                    # 构建最小的有效JSON
+                    minimal_json = {
+                        "content": content,
+                        "summary": content[:100] if len(content) > 100 else content,
+                        "keywords": [],
+                        "entities": [],
+                        "concepts": [],
+                        "importance_score": 0.5,
+                        "note_type": "fact"
+                    }
+                    return json.dumps(minimal_json, ensure_ascii=False)
+            except Exception:
                 pass
         
         return ""

@@ -209,6 +209,9 @@ class LocalLLM:
         if not response:
             return "{}"
         
+        # 清理控制字符
+        response = self._clean_control_characters(response)
+        
         # 移除markdown代码块标记
         response = response.strip()
         if response.startswith('```json'):
@@ -234,6 +237,21 @@ class LocalLLM:
             return "{}"
         
         return response
+    
+    def _clean_control_characters(self, text: str) -> str:
+        """清理字符串中的无效控制字符"""
+        import re
+        
+        # 移除或替换无效的控制字符，但保留有效的空白字符（空格、制表符、换行符）
+        # 保留 \t (\x09), \n (\x0A), \r (\x0D) 和普通空格 (\x20)
+        cleaned = re.sub(r'[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]', '', text)
+        
+        # 替换一些常见的问题字符
+        cleaned = cleaned.replace('\u0000', '')  # NULL字符
+        cleaned = cleaned.replace('\u0001', '')  # SOH字符
+        cleaned = cleaned.replace('\u0002', '')  # STX字符
+        
+        return cleaned
     
     def cleanup(self):
         """清理模型资源"""

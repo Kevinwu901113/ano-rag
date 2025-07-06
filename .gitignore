@@ -177,6 +177,7 @@ models/
 data/
 musique/
 result/
+公明镇去图片版本/
 checkpoints/
 *.pkl
 *.joblib
