@@ -68,11 +68,20 @@ class QueryProcessor:
         graph_notes = self.graph_retriever.retrieve(seed_ids)
         candidate_notes.extend(graph_notes)
         selected_notes = self.scheduler.schedule(candidate_notes)
+        logger.info(
+            f"Scheduling {len(candidate_notes)} notes yielded {len(selected_notes)} selected: "
+            f"{[n.get('note_id') for n in selected_notes]}"
+        )
         context = "\n".join(n.get('content','') for n in selected_notes)
         answer = self.ollama.generate_final_answer(context, query)
         scores = self.ollama.evaluate_answer(query, context, answer)
+        logger.info(f"Evaluation scores returned: {scores}")
         for n in selected_notes:
             n['feedback_score'] = scores.get('relevance',0)
+        logger.info(
+            f"Applied feedback scores to {len(selected_notes)} notes: "
+            f"{[n.get('note_id') for n in selected_notes]}"
+        )
         return {
             'query': query,
             'rewrite': rewrite,
