@@ -63,36 +63,28 @@ class OllamaClient:
             "num_ctx": safe_num_ctx,
         })
         
-        # Get timeout from kwargs or use default
-        timeout = kwargs.get("timeout", self.timeout)
-        
         try:
-            # Prepare the request
-            request_params = {
-                "model": self.model,
-                "prompt": prompt,
-                "stream": stream,
-                "options": options,
-            }
-            
+            # Use chat API instead of generate API for better compatibility
+            messages = []
             if system_prompt:
-                request_params["system"] = system_prompt
+                messages.append({"role": "system", "content": system_prompt})
+            messages.append({"role": "user", "content": prompt})
             
-            # Make the request directly - let ollama handle connection errors
-            response = self.client.generate(**request_params)
+            # Make the request using chat API
+            response = self.client.chat(
+                model=self.model,
+                messages=messages,
+                stream=stream,
+                options=options,
+            )
 
             text: str = ""
             if stream:
                 for chunk in response:
-                    chunk_text = getattr(chunk, "response", None)
-                    if chunk_text is not None:
-                        text += chunk_text
-                    elif hasattr(chunk, "message") and hasattr(chunk.message, "content"):
+                    if hasattr(chunk, "message") and hasattr(chunk.message, "content"):
                         text += chunk.message.content
             else:
-                if hasattr(response, "response"):
-                    text = response.response
-                elif hasattr(response, "message") and hasattr(response.message, "content"):
+                if hasattr(response, "message") and hasattr(response.message, "content"):
                     text = response.message.content
                 else:
                     text = str(response)
@@ -107,7 +99,7 @@ class OllamaClient:
             elif "model" in error_msg.lower() and "not found" in error_msg.lower():
                 logger.error(f"Model error: Model '{self.model}' not found - {e}")
             else:
-                logger.error(f"Generation failed: {e}")
+                logger.error(f"Generation failed: {e} (status code: {getattr(e, 'status_code', 'unknown')})")
             return ""
 
     def chat(
