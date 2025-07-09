@@ -1,0 +1,32 @@
+[
+  {
+    "id": "2hop__482757_12019",
+    "predicted_answer": "The context information does not provide the founding date of the institute that owned The Collegian.",
+    "predicted_support_idxs": [],
+    "predicted_answerable": true
+  },
+  {
+    "id": "2hop__129292_160863",
+    "predicted_answer": "The provided context information does not contain the year in which the region where Hertfordshire is located was created.",
+    "predicted_support_idxs": [],
+    "predicted_answerable": true
+  },
+  {
+    "id": "2hop__679261_120616",
+    "predicted_answer": "The provided context information does not contain details about when the studio that distributed *The Game* was abolished. Therefore, I cannot answer your question.",
+    "predicted_support_idxs": [],
+    "predicted_answerable": true
+  },
+  {
+    "id": "2hop__813857_127131",
+    "predicted_answer": "The provided context information does not contain details about when the publisher of Crux was launched. Therefore, I cannot answer your question.",
+    "predicted_support_idxs": [],
+    "predicted_answerable": true
+  },
+  {
+    "id": "2hop__144408_215084",
+    "predicted_answer": "The provided context information does not state Jan Šindel’s country of birth.",
+    "predicted_support_idxs": [],
+    "predicted_answerable": true
+  }
+]
