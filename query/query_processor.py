@@ -8,13 +8,14 @@ from vector_store import VectorRetriever
 from graph.graph_builder import GraphBuilder
 from graph.graph_index import GraphIndex
 from graph.graph_retriever import GraphRetriever
-from utils.context_scheduler import ContextScheduler
+from utils.context_scheduler import ContextScheduler, MultiHopContextScheduler
 from config import config
 
 # 尝试导入增强的多跳推理组件
 try:
     from graph.enhanced_relation_extractor import EnhancedRelationExtractor
     from graph.enhanced_graph_retriever import EnhancedGraphRetriever
+    from graph.multi_hop_query_processor import MultiHopQueryProcessor
     ENHANCED_COMPONENTS_AVAILABLE = True
 except ImportError:
     ENHANCED_COMPONENTS_AVAILABLE = False
@@ -64,8 +65,20 @@ class QueryProcessor:
             graph = builder.build_graph(atomic_notes, embeddings)
             self.graph_index = GraphIndex()
             self.graph_index.build_index(graph)
-        self.graph_retriever = GraphRetriever(self.graph_index, k_hop=config.get('graph.k_hop',2))
-        self.scheduler = ContextScheduler()
+
+        self.multi_hop_enabled = config.get('multi_hop.enabled', False) and ENHANCED_COMPONENTS_AVAILABLE
+        if self.multi_hop_enabled:
+            self.multi_hop_processor = MultiHopQueryProcessor(
+                atomic_notes,
+                embeddings,
+                graph_file=graph_file if graph_file and os.path.exists(graph_file) else None,
+                graph_index=self.graph_index,
+            )
+            self.scheduler = MultiHopContextScheduler()
+        else:
+            self.graph_retriever = GraphRetriever(self.graph_index, k_hop=config.get('graph.k_hop', 2))
+            self.scheduler = ContextScheduler()
+
         self.ollama = OllamaClient()
         self.atomic_notes = atomic_notes
 
@@ -74,10 +87,21 @@ class QueryProcessor:
         queries = rewrite['rewritten_queries']
         vector_results = self.vector_retriever.search(queries)
         candidate_notes = [note for sub in vector_results for note in sub]
-        seed_ids = [note.get('note_id') for note in candidate_notes]
-        graph_notes = self.graph_retriever.retrieve(seed_ids)
-        candidate_notes.extend(graph_notes)
-        selected_notes = self.scheduler.schedule(candidate_notes)
+        reasoning_paths: List[Dict[str, Any]] = []
+
+        if self.multi_hop_enabled:
+            query_emb = self.vector_retriever.embedding_manager.encode_queries([query])[0]
+            mh_result = self.multi_hop_processor.retrieve(query_emb)
+            graph_notes = mh_result.get('notes', [])
+            candidate_notes.extend(graph_notes)
+            for n in graph_notes:
+                reasoning_paths.extend(n.get('reasoning_paths', []))
+            selected_notes = self.scheduler.schedule_for_multi_hop(candidate_notes, reasoning_paths)
+        else:
+            seed_ids = [note.get('note_id') for note in candidate_notes]
+            graph_notes = self.graph_retriever.retrieve(seed_ids)
+            candidate_notes.extend(graph_notes)
+            selected_notes = self.scheduler.schedule(candidate_notes)
         logger.info(
             f"Scheduling {len(candidate_notes)} notes yielded {len(selected_notes)} selected: "
             f"{[n.get('note_id') for n in selected_notes]}"
@@ -104,5 +128,6 @@ class QueryProcessor:
             'answer': answer,
             'scores': scores,
             'notes': selected_notes,
-            'predicted_support_idxs': predicted_support_idxs  # 添加预测的支持段落idx
+            'predicted_support_idxs': predicted_support_idxs,
+            'reasoning': reasoning_paths if self.multi_hop_enabled else None
         }

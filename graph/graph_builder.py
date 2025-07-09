@@ -3,11 +3,21 @@ from typing import List, Dict, Any
 from loguru import logger
 from tqdm import tqdm
 from .relation_extractor import RelationExtractor
+from config import config
+try:
+    from .enhanced_relation_extractor import EnhancedRelationExtractor
+    ENHANCED_AVAILABLE = True
+except Exception:  # pragma: no cover - optional dependency
+    ENHANCED_AVAILABLE = False
 
 class GraphBuilder:
     """Builds a knowledge graph from atomic notes and relations."""
     def __init__(self):
-        self.relation_extractor = RelationExtractor()
+        use_enhanced = config.get('multi_hop.enabled', False) and ENHANCED_AVAILABLE
+        if use_enhanced:
+            self.relation_extractor = EnhancedRelationExtractor()
+        else:
+            self.relation_extractor = RelationExtractor()
 
     def build_graph(self, atomic_notes: List[Dict[str, Any]], embeddings=None) -> nx.Graph:
         """Create a graph from notes and optional embeddings."""
