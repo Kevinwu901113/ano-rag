@@ -17,7 +17,13 @@ class GraphIndex:
         if self.graph.number_of_nodes() == 0:
             logger.warning("Empty graph for indexing")
             return
-        self.node_centrality = nx.degree_centrality(self.graph)
+        # Use edge weights when calculating node importance. Fall back to
+        # PageRank which supports weighted edges.
+        try:
+            self.node_centrality = nx.pagerank(self.graph, weight="weight")
+        except Exception as e:
+            logger.error(f"Failed weighted centrality computation: {e}")
+            self.node_centrality = nx.pagerank(self.graph)
         logger.info("Graph index built")
 
     def get_centrality(self, node_id: str) -> float:
