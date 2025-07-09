@@ -38,21 +38,10 @@ class BatchProcessor:
         temp_data_dir = os.path.join(temp_dir, "data")
         os.makedirs(temp_data_dir, exist_ok=True)
         
-        # 将paragraphs转换为文档格式
-        documents = []
-        for para in data_item.get('paragraphs', []):
-            doc = {
-                "title": para.get('title', ''),
-                "content": para.get('paragraph_text', ''),
-                "idx": para.get('idx', 0)
-            }
-            documents.append(doc)
-        
-        # 写入临时文件
+        # 直接保留原始记录，确保包含paragraphs字段
         temp_file = os.path.join(temp_data_dir, "temp_data.jsonl")
         with open(temp_file, 'w', encoding='utf-8') as f:
-            for doc in documents:
-                f.write(json.dumps(doc, ensure_ascii=False) + '\n')
+            f.write(json.dumps(data_item, ensure_ascii=False) + '\n')
         
         return temp_dir
     
