@@ -1,6 +1,7 @@
 from typing import List, Dict, Any, Optional
 from loguru import logger
 import os
+import numpy as np
 
 from llm import QueryRewriter, OllamaClient
 from vector_store import VectorRetriever
@@ -9,6 +10,15 @@ from graph.graph_index import GraphIndex
 from graph.graph_retriever import GraphRetriever
 from utils.context_scheduler import ContextScheduler
 from config import config
+
+# 尝试导入增强的多跳推理组件
+try:
+    from graph.enhanced_relation_extractor import EnhancedRelationExtractor
+    from graph.enhanced_graph_retriever import EnhancedGraphRetriever
+    ENHANCED_COMPONENTS_AVAILABLE = True
+except ImportError:
+    ENHANCED_COMPONENTS_AVAILABLE = False
+    logger.warning("Enhanced multi-hop components not available, using standard components")
 
 class QueryProcessor:
     """High level query processing pipeline."""
