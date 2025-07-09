@@ -172,22 +172,24 @@ ENHANCE_QUERY_PROMPT = """
 
 # Ollama prompts
 FINAL_ANSWER_SYSTEM_PROMPT = """
-你是一个专业的知识问答助手。请根据提供的上下文信息回答用户的问题。
+You are a professional question-answering assistant. Please answer the user's question based on the provided context information.
 
-要求：
-1. 基于提供的上下文信息进行回答
-2. 如果上下文信息不足以回答问题，请明确说明
-3. 回答要准确、简洁、有条理
-4. 不要编造不存在于上下文中的信息
+Requirements:
+1. Answer questions based ONLY on the provided context information
+2. If there is insufficient information in the context to answer the question, please clearly state this
+3. Answers should be accurate, concise, and well-organized
+4. Do not add information that is not in the context
+5. If the question involves multiple aspects, please answer point by point
+6. IMPORTANT: You MUST respond in Chinese only, regardless of the language of the question
 """
 
 FINAL_ANSWER_PROMPT = """
-上下文信息：
+Context Information:
 {context}
 
-用户问题：{query}
+User Question: {query}
 
-请基于上述上下文信息回答用户问题：
+Please answer the user's question based on the above context information. Your answer must be in English.
 """
 
 EVALUATE_ANSWER_SYSTEM_PROMPT = """

@@ -21,11 +21,29 @@ class DocumentChunker:
             # 读取文档内容
             content = self._read_document_content(file_path)
             
+            # 特殊处理：如果是musique格式的JSONL数据，需要提取idx信息
+            paragraph_idx_mapping = None
+            
+            # 处理JSONL格式：如果content是列表，取第一个元素
+            if isinstance(content, list) and len(content) > 0:
+                first_item = content[0]
+                if isinstance(first_item, dict) and 'paragraphs' in first_item:
+                    paragraph_idx_mapping = self._extract_paragraph_idx_mapping(first_item)
+                    # 使用第一个JSONL条目作为内容
+                    content = first_item
+            elif isinstance(content, dict) and 'paragraphs' in content:
+                paragraph_idx_mapping = self._extract_paragraph_idx_mapping(content)
+            
             # 提取文本内容
             text_content = self._extract_text_content(content, file_path)
             
             # 分块处理
             chunks = self._chunk_text_content(text_content, file_path, source_info)
+            
+            # 为每个chunk添加paragraph_idx_mapping信息
+            if paragraph_idx_mapping:
+                for chunk in chunks:
+                    chunk['paragraph_idx_mapping'] = paragraph_idx_mapping
             
             logger.info(f"Document chunked into {len(chunks)} chunks")
             return chunks
@@ -78,18 +96,31 @@ class DocumentChunker:
         """从字典中提取文本内容"""
         text_parts = []
         
-        # 常见的文本字段
-        text_fields = ['text', 'content', 'body', 'description', 'summary', 'title']
-        
-        for field in text_fields:
-            if field in data and isinstance(data[field], str):
-                text_parts.append(data[field])
-        
-        # 如果没有找到标准字段，尝试提取所有字符串值
-        if not text_parts:
-            for key, value in data.items():
-                if isinstance(value, str) and len(value.strip()) > 10:
-                    text_parts.append(f"{key}: {value}")
+        # 处理musique数据集格式：包含paragraphs和question字段
+        if 'paragraphs' in data and 'question' in data:
+            # 提取所有段落文本
+            paragraphs = data.get('paragraphs', [])
+            for para in paragraphs:
+                if isinstance(para, dict) and 'paragraph_text' in para:
+                    text_parts.append(para['paragraph_text'])
+            
+            # 添加问题
+            question = data.get('question', '')
+            if question:
+                text_parts.append(f"Question: {question}")
+        else:
+            # 常见的文本字段
+            text_fields = ['text', 'content', 'body', 'description', 'summary', 'title']
+            
+            for field in text_fields:
+                if field in data and isinstance(data[field], str):
+                    text_parts.append(data[field])
+            
+            # 如果没有找到标准字段，尝试提取所有字符串值
+            if not text_parts:
+                for key, value in data.items():
+                    if isinstance(value, str) and len(value.strip()) > 10:
+                        text_parts.append(f"{key}: {value}")
         
         return '\n'.join(text_parts)
     
@@ -182,6 +213,23 @@ class DocumentChunker:
                 return True
         
         return False
+    
+    def _extract_paragraph_idx_mapping(self, data: Dict[str, Any]) -> Dict[str, int]:
+        """从musique数据中提取段落文本到idx的映射"""
+        mapping = {}
+        paragraphs = data.get('paragraphs', [])
+        
+        for para in paragraphs:
+            if isinstance(para, dict) and 'paragraph_text' in para and 'idx' in para:
+                paragraph_text = para['paragraph_text']
+                idx = para['idx']
+                # 使用段落文本的前100个字符作为key，避免完全匹配的问题
+                key = paragraph_text[:100] if len(paragraph_text) > 100 else paragraph_text
+                mapping[key] = idx
+                # 同时保存完整文本作为备用
+                mapping[paragraph_text] = idx
+        
+        return mapping
     
     def _get_timestamp(self) -> str:
         """获取当前时间戳"""

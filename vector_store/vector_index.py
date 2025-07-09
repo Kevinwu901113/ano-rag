@@ -33,7 +33,9 @@ class VectorIndex:
             if work_dir:
                 self.index_dir = os.path.join(work_dir, 'vector_index')
             else:
-                self.index_dir = './data/vector_index'  # 回退到默认路径
+                # 使用临时目录避免在项目根目录创建data文件夹
+                import tempfile
+                self.index_dir = os.path.join(tempfile.gettempdir(), 'anorag_vector_index')
         FileUtils.ensure_dir(self.index_dir)
         
         # GPU资源

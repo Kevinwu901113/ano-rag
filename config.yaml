@@ -2,7 +2,7 @@
 
 # Document Processing
 document:
-  chunk_size: 512
+  chunk_size: 128
   overlap: 50
   batch_size: 32
   supported_formats: ["json", "jsonl", "docx"]

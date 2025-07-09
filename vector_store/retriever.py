@@ -27,7 +27,12 @@ class VectorRetriever:
         self.index_to_note_id = {}  # 索引到笔记ID的映射
         
         # 存储路径
-        self.data_dir = config.get('storage.vector_store_path', './data/vector_store')
+        default_path = config.get('storage.vector_store_path')
+        if not default_path:
+            # 使用临时目录避免在项目根目录创建data文件夹
+            import tempfile
+            default_path = os.path.join(tempfile.gettempdir(), 'anorag_vector_store')
+        self.data_dir = default_path
         FileUtils.ensure_dir(self.data_dir)
         
         # 批处理器

@@ -36,7 +36,9 @@ class EmbeddingManager:
             if work_dir:
                 self.cache_dir = os.path.join(work_dir, 'embeddings')
             else:
-                self.cache_dir = './data/embeddings'  # 回退到默认路径
+                # 使用临时目录避免在项目根目录创建data文件夹
+                import tempfile
+                self.cache_dir = os.path.join(tempfile.gettempdir(), 'anorag_embeddings')
         FileUtils.ensure_dir(self.cache_dir)
         
         logger.info(f"EmbeddingManager initialized with model: {self.model_name}, device: {self.device}")

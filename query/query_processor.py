@@ -75,17 +75,24 @@ class QueryProcessor:
         context = "\n".join(n.get('content','') for n in selected_notes)
         answer = self.ollama.generate_final_answer(context, query)
         scores = self.ollama.evaluate_answer(query, context, answer)
-        logger.info(f"Evaluation scores returned: {scores}")
+
+        
+        # 收集所有相关的paragraph idx信息
+        predicted_support_idxs = []
         for n in selected_notes:
             n['feedback_score'] = scores.get('relevance',0)
-        logger.info(
-            f"Applied feedback scores to {len(selected_notes)} notes: "
-            f"{[n.get('note_id') for n in selected_notes]}"
-        )
+            # 从原子笔记中提取paragraph_idxs
+            if 'paragraph_idxs' in n and n['paragraph_idxs']:
+                predicted_support_idxs.extend(n['paragraph_idxs'])
+        
+        # 去重并排序
+        predicted_support_idxs = sorted(list(set(predicted_support_idxs)))
+
         return {
             'query': query,
             'rewrite': rewrite,
             'answer': answer,
             'scores': scores,
-            'notes': selected_notes
+            'notes': selected_notes,
+            'predicted_support_idxs': predicted_support_idxs  # 添加预测的支持段落idx
         }
