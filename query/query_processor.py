@@ -68,9 +68,14 @@ class QueryProcessor:
         graph_notes = self.graph_retriever.retrieve(seed_ids)
         candidate_notes.extend(graph_notes)
         selected_notes = self.scheduler.schedule(candidate_notes)
+        logger.info(
+            f"Scheduling {len(candidate_notes)} notes yielded {len(selected_notes)} selected: "
+            f"{[n.get('note_id') for n in selected_notes]}"
+        )
         context = "\n".join(n.get('content','') for n in selected_notes)
         answer = self.ollama.generate_final_answer(context, query)
         scores = self.ollama.evaluate_answer(query, context, answer)
+
         
         # 收集所有相关的paragraph idx信息
         predicted_support_idxs = []
@@ -82,7 +87,7 @@ class QueryProcessor:
         
         # 去重并排序
         predicted_support_idxs = sorted(list(set(predicted_support_idxs)))
-        
+
         return {
             'query': query,
             'rewrite': rewrite,
