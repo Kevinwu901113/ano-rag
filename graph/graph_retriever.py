@@ -15,16 +15,27 @@ class GraphRetriever:
             logger.warning("Graph is empty")
             return []
         results = []
+        visited = set()
         for seed in seed_note_ids:
             if seed not in G:
                 continue
-            nodes = nx.single_source_shortest_path_length(G, seed, cutoff=self.k_hop)
+            try:
+                nodes = nx.single_source_dijkstra_path_length(
+                    G, seed, cutoff=self.k_hop, weight="weight"
+                )
+            except Exception as e:
+                logger.error(f"Weighted traversal failed: {e}")
+                nodes = nx.single_source_shortest_path_length(G, seed, cutoff=self.k_hop)
             for node_id, dist in nodes.items():
-                if node_id == seed:
+                if node_id == seed or node_id in visited:
                     continue
+                visited.add(node_id)
                 data = G.nodes[node_id].copy()
-                data['graph_distance'] = dist
-                data['centrality'] = self.index.get_centrality(node_id)
+                data["graph_distance"] = dist
+                centrality = self.index.get_centrality(node_id)
+                data["centrality"] = centrality
+                data["graph_score"] = centrality / (dist + 1e-5)
                 results.append(data)
+        results.sort(key=lambda x: x.get("graph_score", 0), reverse=True)
         logger.info(f"Graph retrieval returned {len(results)} notes")
         return results
