@@ -44,6 +44,28 @@ graph:
     context_relation: 0.6
     topic_relation: 0.7
     semantic_similarity: 0.5
+
+# Multi-hop Reasoning
+multi_hop:
+  enabled: false
+  max_reasoning_hops: 3
+  max_paths: 10
+  min_path_score: 0.3
+  path_diversity_threshold: 0.7
+  relation_types:
+    causal:
+      weight: 1.2
+      confidence_threshold: 0.7
+    temporal:
+      weight: 1.1
+      confidence_threshold: 0.6
+    definition:
+      weight: 1.3
+      confidence_threshold: 0.8
+  llm_relation_extraction:
+    enabled: true
+    batch_size: 16
+    max_pairs_per_batch: 50
   
 # Query Processing
 query:
