@@ -45,7 +45,7 @@ class LocalLLM:
                 for attempt in range(max_retries):
                     try:
                         # 直接测试生成能力，这会自动检查服务可用性
-                        test_response = self.ollama_client.generate("Hello", timeout=10)
+                        test_response = self.ollama_client.generate("Hello")
                         if test_response:
                             logger.info("Ollama model loaded and tested successfully")
                             break
