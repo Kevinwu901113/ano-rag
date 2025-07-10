@@ -1,7 +1,7 @@
 from typing import List, Dict, Any, Optional
 from loguru import logger
 from .local_llm import LocalLLM
-from utils import BatchProcessor, TextUtils
+from utils import BatchProcessor, TextUtils, extract_json_from_response, clean_control_characters
 from config import config
 from .prompts import (
     ATOMIC_NOTEGEN_SYSTEM_PROMPT,
@@ -64,7 +64,7 @@ class AtomicNoteGenerator:
             import re
             
             # 清理响应，提取JSON部分
-            cleaned_response = self._extract_json_from_response(response)
+            cleaned_response = extract_json_from_response(response)
             
             if not cleaned_response:
                 logger.warning(f"No valid JSON found in response: {response[:200]}...")
@@ -102,84 +102,6 @@ class AtomicNoteGenerator:
             logger.warning(f"Failed to parse JSON response: {e}. Response: {response[:200]}...")
             return self._create_fallback_note(chunk_data)
     
-    def _extract_json_from_response(self, response: str) -> str:
-        """从LLM响应中提取JSON部分"""
-        import re
-        
-        if not response or not response.strip():
-            return ""
-        
-        # 清理控制字符
-        response = self._clean_control_characters(response)
-        
-        # 尝试直接解析整个响应
-        try:
-            import json
-            json.loads(response.strip())
-            return response.strip()
-        except json.JSONDecodeError:
-            pass
-        
-        # 查找JSON代码块
-        json_pattern = r'```(?:json)?\s*({.*?})\s*```'
-        matches = re.findall(json_pattern, response, re.DOTALL | re.IGNORECASE)
-        if matches:
-            return self._clean_control_characters(matches[0].strip())
-        
-        # 查找花括号包围的内容
-        brace_pattern = r'{[^{}]*(?:{[^{}]*}[^{}]*)*}'
-        matches = re.findall(brace_pattern, response, re.DOTALL)
-        for match in matches:
-            try:
-                import json
-                cleaned_match = self._clean_control_characters(match)
-                json.loads(cleaned_match)
-                return cleaned_match
-            except json.JSONDecodeError:
-                continue
-        
-        # 尝试修复截断的JSON
-        truncated_json = self._try_fix_truncated_json(response)
-        if truncated_json:
-            return truncated_json
-        
-        # 尝试修复常见的JSON格式问题
-        cleaned = response.strip()
-        
-        # 移除markdown标记
-        cleaned = re.sub(r'```(?:json)?\s*', '', cleaned)
-        cleaned = re.sub(r'```\s*$', '', cleaned)
-        
-        # 查找第一个{到最后一个}的内容
-        start_idx = cleaned.find('{')
-        end_idx = cleaned.rfind('}')
-        
-        if start_idx != -1 and end_idx != -1 and end_idx > start_idx:
-            potential_json = cleaned[start_idx:end_idx+1]
-            try:
-                import json
-                cleaned_json = self._clean_control_characters(potential_json)
-                json.loads(cleaned_json)
-                return cleaned_json
-            except json.JSONDecodeError:
-                pass
-        
-        return ""
-    
-    def _clean_control_characters(self, text: str) -> str:
-        """清理字符串中的无效控制字符"""
-        import re
-        
-        # 移除或替换无效的控制字符，但保留有效的空白字符（空格、制表符、换行符）
-        # 保留 \t (\x09), \n (\x0A), \r (\x0D) 和普通空格 (\x20)
-        cleaned = re.sub(r'[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]', '', text)
-        
-        # 替换一些常见的问题字符
-        cleaned = cleaned.replace('\u0000', '')  # NULL字符
-        cleaned = cleaned.replace('\u0001', '')  # SOH字符
-        cleaned = cleaned.replace('\u0002', '')  # STX字符
-        
-        return cleaned
     
     def _try_fix_truncated_json(self, response: str) -> str:
         """尝试修复截断的JSON响应"""
@@ -187,7 +109,7 @@ class AtomicNoteGenerator:
         import json
         
         # 清理响应
-        cleaned = self._clean_control_characters(response.strip())
+        cleaned = clean_control_characters(response.strip())
         
         # 移除markdown标记
         cleaned = re.sub(r'```(?:json)?\s*', '', cleaned)

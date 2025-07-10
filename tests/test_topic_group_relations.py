@@ -4,6 +4,7 @@ import os, sys, types
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 sys.modules['ollama'] = types.SimpleNamespace(Client=lambda *a, **k: None)
+sys.modules['loguru'] = types.SimpleNamespace(logger=types.SimpleNamespace(info=lambda *a, **k: None, debug=lambda *a, **k: None, warning=lambda *a, **k: None, error=lambda *a, **k: None))
 sys.modules['torch'] = types.SimpleNamespace(cuda=types.SimpleNamespace(is_available=lambda: False))
 sys.modules['tqdm'] = types.SimpleNamespace(tqdm=lambda x, **k: x)
 sys.modules['jsonlines'] = types.SimpleNamespace()

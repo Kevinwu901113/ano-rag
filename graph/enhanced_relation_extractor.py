@@ -4,7 +4,7 @@ import numpy as np
 from typing import List, Dict, Any, Set, Tuple, Optional
 from collections import defaultdict, Counter
 from loguru import logger
-from utils import TextUtils, GPUUtils, BatchProcessor
+from utils import TextUtils, GPUUtils, BatchProcessor, extract_json_from_response
 from config import config
 from llm import LocalLLM
 
@@ -170,7 +170,7 @@ class EnhancedRelationExtractor:
     def _parse_llm_group_relations(self, response: str, notes: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """解析LLM返回的主题组关系列表"""
         try:
-            cleaned = self._clean_json_response(response)
+            cleaned = extract_json_from_response(response)
             if not cleaned:
                 return []
             data = json.loads(cleaned)
@@ -355,7 +355,7 @@ class EnhancedRelationExtractor:
         """解析LLM关系分析响应"""
         try:
             # 清理响应
-            cleaned_response = self._clean_json_response(response)
+            cleaned_response = extract_json_from_response(response)
             if not cleaned_response:
                 return None
             
@@ -376,25 +376,6 @@ class EnhancedRelationExtractor:
         except (json.JSONDecodeError, ValueError) as e:
             logger.warning(f"Failed to parse LLM relation response: {e}")
             return None
-    
-    def _clean_json_response(self, response: str) -> str:
-        """清理LLM响应中的JSON"""
-        if not response:
-            return ""
-        
-        # 移除markdown代码块
-        import re
-        response = re.sub(r'```(?:json)?\s*', '', response)
-        response = re.sub(r'```\s*$', '', response)
-        
-        # 查找JSON对象
-        start_idx = response.find('{')
-        end_idx = response.rfind('}')
-        
-        if start_idx != -1 and end_idx != -1 and end_idx > start_idx:
-            return response[start_idx:end_idx+1]
-        
-        return ""
     
     def _extract_reasoning_path_relations(self, atomic_notes: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """提取推理路径关系"""
