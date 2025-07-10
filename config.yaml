@@ -66,6 +66,10 @@ multi_hop:
     enabled: true
     batch_size: 16
     max_pairs_per_batch: 50
+  topic_group_llm:
+    enabled: true
+    min_group_size: 3
+    max_notes: 5
   
 # Query Processing
 query:

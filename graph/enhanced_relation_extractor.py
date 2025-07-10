@@ -25,7 +25,15 @@ class EnhancedRelationExtractor:
         
         # LLM关系提取配置
         self.llm_extraction_enabled = self.multi_hop_config.get('llm_relation_extraction', {}).get('enabled', True)
-        self.llm = LocalLLM() if self.llm_extraction_enabled else None
+
+        # 主题组LLM配置
+        self.topic_group_config = self.multi_hop_config.get('topic_group_llm', {})
+        self.topic_group_enabled = self.topic_group_config.get('enabled', False)
+
+        # 如果任一LLM相关功能启用，则初始化LLM
+        self.llm = None
+        if self.llm_extraction_enabled or self.topic_group_enabled:
+            self.llm = LocalLLM()
         
         # 批处理器
         self.batch_processor = BatchProcessor(
@@ -67,6 +75,10 @@ class EnhancedRelationExtractor:
         logger.info("Extracting basic relations")
         basic_relations = self._extract_basic_relations(atomic_notes, embeddings)
         all_relations.extend(basic_relations)
+
+        # 在主题关系之后，根据主题组进一步挖掘关系
+        group_relations = self._extract_topic_group_relations(atomic_notes)
+        all_relations.extend(group_relations)
         
         # 2. 智能语义关系提取（使用LLM）
         if self.llm_extraction_enabled and self.llm:
@@ -111,6 +123,101 @@ class EnhancedRelationExtractor:
             relations.extend(self._extract_semantic_similarity_relations(atomic_notes, embeddings))
         
         return relations
+
+    def _extract_topic_group_relations(self, atomic_notes: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """对主题组使用LLM提取更高层次的关系"""
+        if not (self.topic_group_enabled and self.llm):
+            return []
+
+        relations = []
+        min_size = self.topic_group_config.get('min_group_size', 3)
+        max_notes = self.topic_group_config.get('max_notes', 5)
+
+        # 按主题/聚类分组
+        topic_to_notes = defaultdict(list)
+        for note in atomic_notes:
+            cluster_id = note.get('cluster_id')
+            topic = note.get('topic', '')
+            key = cluster_id if cluster_id is not None else topic
+            if key:
+                topic_to_notes[key].append(note)
+
+        for key, notes in topic_to_notes.items():
+            if len(notes) < min_size:
+                continue
+
+            selected = notes[:max_notes]
+            content = "\n".join(
+                f"[{idx}] {n.get('content', '')[:200]}" for idx, n in enumerate(selected)
+            )
+
+            prompt = (
+                "以下笔记属于同一主题，请分析它们之间可能存在的关系。\n"
+                f"{content}\n"
+                "请按照JSON数组返回，每个元素格式如下："
+                "{\"source_index\":0,\"target_index\":1,\"relation_type\":\"causal\",\"strength\":0.8,\"confidence\":0.9}"
+            )
+
+            try:
+                response = self.llm.generate(prompt)
+                group_relations = self._parse_llm_group_relations(response, selected)
+                relations.extend(group_relations)
+            except Exception as e:
+                logger.warning(f"Topic group relation extraction failed: {e}")
+
+        return relations
+
+    def _parse_llm_group_relations(self, response: str, notes: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """解析LLM返回的主题组关系列表"""
+        try:
+            cleaned = self._clean_json_response(response)
+            if not cleaned:
+                return []
+            data = json.loads(cleaned)
+            if isinstance(data, dict):
+                data = [data]
+
+            parsed = []
+            for item in data:
+                if not isinstance(item, dict):
+                    continue
+
+                required = ['relation_type', 'strength', 'confidence']
+                if not all(f in item for f in required):
+                    continue
+
+                r_type = item.get('relation_type')
+                if r_type not in self.relation_types and r_type != 'none':
+                    continue
+
+                if r_type == 'none':
+                    continue
+
+                s_idx = item.get('source_index')
+                t_idx = item.get('target_index')
+                if s_idx is None or t_idx is None:
+                    continue
+                if not (0 <= s_idx < len(notes) and 0 <= t_idx < len(notes)):
+                    continue
+
+                parsed.append({
+                    'source_id': notes[s_idx].get('note_id'),
+                    'target_id': notes[t_idx].get('note_id'),
+                    'relation_type': r_type,
+                    'weight': item.get('strength', 0.5),
+                    'metadata': {
+                        'reasoning': item.get('reasoning', ''),
+                        'confidence': item.get('confidence', 0.5),
+                        'direction': item.get('direction', 'bidirectional'),
+                        'extraction_method': 'llm_topic_group',
+                        'topic_group_size': len(notes)
+                    }
+                })
+
+            return parsed
+        except Exception as e:
+            logger.warning(f"Failed to parse topic group relations: {e}")
+            return []
     
     def _extract_semantic_relations_with_llm(self, atomic_notes: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """使用LLM提取语义关系"""
