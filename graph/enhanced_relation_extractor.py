@@ -365,18 +365,8 @@ class EnhancedRelationExtractor:
     
     def _calculate_qa_relevance(self, question: str, answer: str) -> float:
         """计算问答相关性"""
-        # 提取关键词
-        question_keywords = set(TextUtils.extract_keywords(question))
-        answer_keywords = set(TextUtils.extract_keywords(answer))
-        
-        # 计算关键词重叠
-        if not question_keywords or not answer_keywords:
-            return 0.0
-        
-        overlap = len(question_keywords & answer_keywords)
-        total = len(question_keywords | answer_keywords)
-        
-        return overlap / total if total > 0 else 0.0
+        # 使用TextUtils的关键词相似度计算方法
+        return TextUtils.calculate_similarity_keywords(question, answer)
     
     def _extract_definition_pattern_relations(self, atomic_notes: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """提取定义模式关系"""
@@ -474,17 +464,8 @@ class EnhancedRelationExtractor:
     
     def _calculate_text_similarity(self, text1: str, text2: str) -> float:
         """计算文本相似性"""
-        # 简单的基于关键词的相似性计算
-        keywords1 = set(TextUtils.extract_keywords(text1))
-        keywords2 = set(TextUtils.extract_keywords(text2))
-        
-        if not keywords1 or not keywords2:
-            return 0.0
-        
-        intersection = len(keywords1 & keywords2)
-        union = len(keywords1 | keywords2)
-        
-        return intersection / union if union > 0 else 0.0
+        # 使用TextUtils的关键词相似度计算方法
+        return TextUtils.calculate_similarity_keywords(text1, text2)
     
     def _calculate_reasoning_value(self, relation: Dict[str, Any]) -> float:
         """计算关系的推理价值"""

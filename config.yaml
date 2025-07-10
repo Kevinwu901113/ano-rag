@@ -25,7 +25,7 @@ clustering:
   
 # Graph Construction
 graph:
-  k_hop: 2
+  k_hop: 3
   edge_types:
     - "reference"
     - "entity_coexistence"
@@ -47,7 +47,7 @@ graph:
 
 # Multi-hop Reasoning
 multi_hop:
-  enabled: false
+  enabled: true
   max_reasoning_hops: 3
   max_paths: 10
   min_path_score: 0.3
