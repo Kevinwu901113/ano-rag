@@ -43,12 +43,22 @@ class QueryProcessor:
                 self.vector_retriever.vector_index.load_index(os.path.basename(vector_index_file))
                 self.vector_retriever.atomic_notes = atomic_notes
                 self.vector_retriever._build_id_mappings()
+                # load stored embeddings if available
+                embed_file = os.path.join(dir_path, "note_embeddings.npz")
+                if os.path.exists(embed_file):
+                    try:
+                        loaded = np.load(embed_file)
+                        self.vector_retriever.note_embeddings = loaded["embeddings"]
+                    except Exception as e:
+                        logger.warning(f"Failed to load stored embeddings: {e}")
                 logger.info(f"Loaded vector index from {vector_index_file}")
             except Exception as e:
                 logger.error(f"Failed to load vector index: {e}, rebuilding")
                 self.vector_retriever.build_index(atomic_notes)
         else:
             self.vector_retriever.build_index(atomic_notes)
+        if embeddings is None:
+            embeddings = self.vector_retriever.note_embeddings
 
         builder = GraphBuilder()
         graph = None
