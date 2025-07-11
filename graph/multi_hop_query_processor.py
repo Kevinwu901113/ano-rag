@@ -35,11 +35,11 @@ class MultiHopQueryProcessor:
             except Exception as exc:  # pragma: no cover - corrupted file
                 logger.error(f"Failed to load graph index: {exc}, rebuilding")
                 graph = builder.build_graph(atomic_notes, embeddings)
-                self.graph_index.build_index(graph)
+                self.graph_index.build_index(graph, atomic_notes, embeddings)
         else:
             graph = builder.build_graph(atomic_notes, embeddings)
             self.graph_index = GraphIndex(graph)
-            self.graph_index.build_index(graph)
+            self.graph_index.build_index(graph, atomic_notes, embeddings)
 
         self.retriever = EnhancedGraphRetriever(self.graph_index)
 
