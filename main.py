@@ -2,6 +2,7 @@ import argparse
 import os
 from datetime import datetime
 from glob import glob
+import numpy as np
 from doc import DocumentProcessor
 from config import config
 from query import QueryProcessor
@@ -91,9 +92,17 @@ def query_mode(args):
     graph_file = os.path.join(work_dir, 'graph.json')
     faiss_files = glob(os.path.join(work_dir, '*.faiss'))
     vector_index_file = faiss_files[0] if faiss_files else None
+    embed_file = os.path.join(work_dir, 'embeddings.npy')
+    embeddings = None
+    if os.path.exists(embed_file):
+        try:
+            embeddings = np.load(embed_file)
+        except Exception as e:
+            logger.warning(f'Failed to load embeddings: {e}')
 
     processor = QueryProcessor(
         notes,
+        embeddings,
         graph_file=graph_file if os.path.exists(graph_file) else None,
         vector_index_file=vector_index_file if vector_index_file and os.path.exists(vector_index_file) else None,
     )
