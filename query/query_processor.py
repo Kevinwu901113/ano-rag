@@ -60,11 +60,11 @@ class QueryProcessor:
             except Exception as e:
                 logger.error(f"Failed to load graph index: {e}, rebuilding")
                 graph = builder.build_graph(atomic_notes, embeddings)
-                self.graph_index.build_index(graph)
+                self.graph_index.build_index(graph, atomic_notes, embeddings)
         else:
             graph = builder.build_graph(atomic_notes, embeddings)
             self.graph_index = GraphIndex()
-            self.graph_index.build_index(graph)
+            self.graph_index.build_index(graph, atomic_notes, embeddings)
 
         self.multi_hop_enabled = config.get('multi_hop.enabled', False) and ENHANCED_COMPONENTS_AVAILABLE
         if self.multi_hop_enabled:
