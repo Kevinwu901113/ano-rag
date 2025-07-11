@@ -2,6 +2,7 @@ import unittest
 from unittest.mock import patch, MagicMock
 import os, sys, types
 import numpy as np
+import networkx as nx
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 sys.modules['ollama'] = types.SimpleNamespace(Client=lambda *a, **k: None)
 sys.modules['loguru'] = types.SimpleNamespace(logger=types.SimpleNamespace(info=lambda *a, **k: None, debug=lambda *a, **k: None, warning=lambda *a, **k: None, error=lambda *a, **k: None))
@@ -20,6 +21,8 @@ sys.modules['sentence_transformers'] = types.SimpleNamespace(SentenceTransformer
 sys.modules['faiss'] = types.SimpleNamespace()
 
 from query.query_processor import QueryProcessor
+from graph.graph_index import GraphIndex
+from graph.multi_hop_query_processor import MultiHopQueryProcessor
 from config import config
 
 class QueryProcessorTestCase(unittest.TestCase):
@@ -71,6 +74,23 @@ class QueryProcessorTestCase(unittest.TestCase):
         self.assertFalse(processor.multi_hop_enabled)
         self.assertIsNone(res['reasoning'])
         self.assertNotIn('reasoning_paths', res['notes'][0])
+
+    @patch('graph.multi_hop_query_processor.GraphBuilder')
+    @patch('graph.enhanced_graph_retriever.logger')
+    def test_multi_hop_initial_candidates(self, mock_logger, mock_builder):
+        g = nx.Graph()
+        g.add_edge('n1', 'n2', weight=1.0)
+        embeddings = np.eye(2)
+        index = GraphIndex()
+        from unittest.mock import patch
+        with patch('networkx.pagerank', return_value={'n1':1.0,'n2':1.0}):
+            index.build_index(g, self.notes, embeddings)
+        mock_builder.return_value = MagicMock()
+        proc = MultiHopQueryProcessor(self.notes, embeddings, graph_index=index)
+        mock_logger.warning = MagicMock()
+        res = proc.retrieve(embeddings[0])
+        self.assertTrue(res['notes'])
+        mock_logger.warning.assert_not_called()
 
 if __name__ == '__main__':
     unittest.main()
