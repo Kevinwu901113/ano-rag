@@ -14,6 +14,10 @@ class ContextScheduler:
         self.top_n = cs.get('top_n_notes', 10)
 
     def schedule(self, candidate_notes: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        if not candidate_notes:
+            logger.warning("No candidate notes provided to scheduler")
+            return []
+        
         scored = []
         seen_contents = set()
         for note in candidate_notes:
@@ -30,9 +34,19 @@ class ContextScheduler:
             seen_contents.add(note.get('content'))
             note['context_score'] = score
             scored.append(note)
+        
         scored.sort(key=lambda x: x.get('context_score', 0), reverse=True)
-        selected = scored[:self.top_n]
-        logger.info(f"Context scheduler selected {len(selected)} notes")
+        
+        # 调试信息：显示前几个笔记的分数
+        if scored:
+            logger.info(f"Top 3 note scores: {[n.get('context_score', 0) for n in scored[:3]]}")
+            logger.info(f"Score breakdown for top note: semantic={scored[0].get('retrieval_info', {}).get('similarity', 0)}, graph={scored[0].get('centrality', 0)}, topic={1.0 if scored[0].get('cluster_id') is not None else 0.0}, feedback={scored[0].get('feedback_score', 0)}")
+        
+        # 确保至少选择一些笔记，即使分数很低
+        min_selection = min(3, len(scored))  # 至少选择3个笔记或所有可用笔记
+        selected = scored[:max(self.top_n, min_selection)]
+        
+        logger.info(f"Context scheduler selected {len(selected)} notes from {len(candidate_notes)} candidates")
         return selected
 
 
@@ -44,6 +58,10 @@ class MultiHopContextScheduler(ContextScheduler):
         candidate_notes: List[Dict[str, Any]],
         reasoning_paths: List[Dict[str, Any]],
     ) -> List[Dict[str, Any]]:
+        if not candidate_notes:
+            logger.warning("No candidate notes provided to multi-hop scheduler")
+            return []
+        
         path_scores = self._calculate_path_scores(candidate_notes, reasoning_paths)
 
         scored_notes = []
@@ -56,8 +74,29 @@ class MultiHopContextScheduler(ContextScheduler):
             note["multi_hop_score"] = total
             scored_notes.append(note)
 
+        # 调试信息：显示前几个笔记的分数
+        if scored_notes:
+            scored_notes.sort(key=lambda x: x.get("multi_hop_score", 0), reverse=True)
+            logger.info(f"Top 3 multi-hop note scores: {[n.get('multi_hop_score', 0) for n in scored_notes[:3]]}")
+            if scored_notes:
+                top_note = scored_notes[0]
+                base_score = self._calculate_base_score(top_note)
+                note_id = top_note.get("note_id")
+                path_score = path_scores.get(note_id, 0)
+                completeness = self._calculate_completeness_score(top_note, reasoning_paths)
+                logger.info(f"Score breakdown for top note: base={base_score}, path={path_score}, completeness={completeness}")
+
         selected = self._ensure_reasoning_chain_completeness(scored_notes, reasoning_paths)
-        return selected[: self.top_n]
+        
+        # 确保至少选择一些笔记，即使分数很低
+        if not selected and scored_notes:
+            min_selection = min(3, len(scored_notes))
+            selected = scored_notes[:min_selection]
+            logger.info(f"No notes selected by reasoning chain logic, selecting top {len(selected)} notes")
+        
+        final_selected = selected[: self.top_n]
+        logger.info(f"Multi-hop scheduler selected {len(final_selected)} notes from {len(candidate_notes)} candidates")
+        return final_selected
 
     # Helper methods
     def _calculate_base_score(self, note: Dict[str, Any]) -> float:

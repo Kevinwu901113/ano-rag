@@ -113,6 +113,7 @@ vector_store:
   dimension: 1024
   similarity_metric: "cosine"
   top_k: 50
+  similarity_threshold: 0.1  # 降低相似度阈值以增加召回
   
 # Storage Paths
 storage:
