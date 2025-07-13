@@ -139,6 +139,18 @@ graph:
     entity_coexistence: 0.8
     context_relation: 0.6
 
+# 多跳推理
+multi_hop:
+  max_reasoning_hops: 3      # 最大推理步数
+  max_paths: 10              # 路径数量上限
+  min_path_score: 0.3        # 初始路径分数阈值
+  min_path_score_floor: 0.1  # 最低阈值，路径过少时逐步降低
+  min_path_score_step: 0.05  # 阈值降低步长
+  path_diversity_threshold: 0.7  # 路径多样性阈值
+
+在推理路径过少时，检索器会按照 `min_path_score_step` 逐步降低阈值，
+最低不低于 `min_path_score_floor`，以便在弱连接图中也能找到可行路径。
+
 # LLM配置
 llm:
   ollama:
