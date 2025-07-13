@@ -52,6 +52,8 @@ multi_hop:
   max_reasoning_hops: 3
   max_paths: 10
   min_path_score: 0.3
+  min_path_score_floor: 0.1
+  min_path_score_step: 0.05
   path_diversity_threshold: 0.7
   relation_types:
     causal:

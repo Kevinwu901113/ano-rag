@@ -18,6 +18,8 @@ class EnhancedGraphRetriever:
         self.max_hops = self.multi_hop_config.get('max_hops', 3)
         self.max_paths = self.multi_hop_config.get('max_paths', 10)
         self.min_path_score = self.multi_hop_config.get('min_path_score', 0.3)
+        self.min_path_score_floor = self.multi_hop_config.get('min_path_score_floor', 0.1)
+        self.min_path_score_step = self.multi_hop_config.get('min_path_score_step', 0.05)
         self.path_diversity_threshold = self.multi_hop_config.get('path_diversity_threshold', 0.7)
         
         # 推理路径权重
@@ -217,15 +219,23 @@ class EnhancedGraphRetriever:
                              query_embedding: np.ndarray) -> List[Tuple[List[str], float]]:
         """评估推理路径的得分"""
         scored_paths = []
-        
-        for path in paths:
-            score = self._calculate_path_score(path, query_embedding)
-            if score >= self.min_path_score:
-                scored_paths.append((path, score))
-        
-        # 按得分排序
+        threshold = self.min_path_score
+
+        while True:
+            scored_paths = []
+            for path in paths:
+                score = self._calculate_path_score(path, query_embedding)
+                if score >= threshold:
+                    scored_paths.append((path, score))
+
+            if scored_paths or threshold <= self.min_path_score_floor:
+                break
+
+            threshold = max(threshold - self.min_path_score_step, self.min_path_score_floor)
+            logger.debug(f"Lowering path score threshold to {threshold:.2f} due to sparse results")
+
         scored_paths.sort(key=lambda x: x[1], reverse=True)
-        
+
         return scored_paths
     
     def _calculate_path_score(self, path: List[str], query_embedding: np.ndarray) -> float:
