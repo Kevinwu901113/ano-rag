@@ -44,6 +44,7 @@ graph:
     context_relation: 0.6
     topic_relation: 0.7
     semantic_similarity: 0.5
+    personal_relation: 0.9
 
 # Multi-hop Reasoning
 multi_hop:
