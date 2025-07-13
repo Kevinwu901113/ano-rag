@@ -95,7 +95,12 @@ class AtomicNoteGenerator:
             # 提取额外的实体（如果LLM没有提取到）
             if not atomic_note['entities']:
                 atomic_note['entities'] = TextUtils.extract_entities(text)
-            
+
+            # 确保包含主要实体
+            primary_entity = chunk_data.get('primary_entity')
+            if primary_entity and primary_entity not in atomic_note['entities']:
+                atomic_note['entities'].insert(0, primary_entity)
+
             return atomic_note
             
         except (json.JSONDecodeError, ValueError) as e:
@@ -154,13 +159,17 @@ class AtomicNoteGenerator:
     def _create_fallback_note(self, chunk_data: Dict[str, Any]) -> Dict[str, Any]:
         """创建备用的原子笔记（当LLM生成失败时）"""
         text = chunk_data.get('text', '')
-        
+        primary_entity = chunk_data.get('primary_entity')
+        entities = TextUtils.extract_entities(text)
+        if not entities and primary_entity:
+            entities = [primary_entity]
+
         return {
             'original_text': text,
             'content': text,
             'summary': text[:100] + '...' if len(text) > 100 else text,
             'keywords': [],
-            'entities': TextUtils.extract_entities(text),
+            'entities': entities,
             'concepts': [],
             'importance_score': 0.5,
             'note_type': 'fact',

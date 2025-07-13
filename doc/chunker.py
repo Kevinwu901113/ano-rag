@@ -157,26 +157,52 @@ class DocumentChunker:
         
         # 使用TextUtils进行分块
         text_chunks = TextUtils.chunk_text(
-            cleaned_text, 
-            chunk_size=self.chunk_size, 
+            cleaned_text,
+            chunk_size=self.chunk_size,
             overlap=self.overlap
         )
+
+        search_pos = 0  # 用于在原文中定位每个块的起始位置
         
         # 创建分块数据结构
         chunks = []
         for i, chunk_data in enumerate(text_chunks):
+            original_text = chunk_data['text']
+
+            # 在全文中定位当前块的起始位置
+            start_idx = cleaned_text.find(original_text, search_pos)
+            if start_idx == -1:
+                start_idx = search_pos
+
+            pre_context = cleaned_text[max(0, start_idx - 100):start_idx]
+            pre_entities = TextUtils.extract_entities(pre_context)
+            chunk_entities = TextUtils.extract_entities(original_text)
+            pronouns = {'He', 'She', 'They', 'It', 'him', 'her', 'them', 'his', 'her', 'their'}
+            chunk_entities = [e for e in chunk_entities if e not in pronouns]
+
+            final_text = original_text
+            primary_entity = None
+            if not chunk_entities and pre_entities:
+                primary_entity = pre_entities[-1]
+                final_text = f"{primary_entity} {original_text}"
+            elif chunk_entities:
+                primary_entity = chunk_entities[0]
+
             chunk = {
-                'text': chunk_data['text'],
+                'text': final_text,
                 'chunk_index': i,
                 'chunk_id': f"{source_info.get('file_name', 'unknown')}_{i:04d}",
                 'length': chunk_data['length'],
                 'source_info': source_info.copy(),
-                'created_at': self._get_timestamp()
+                'created_at': self._get_timestamp(),
+                'primary_entity': primary_entity
             }
-            
+
             # 添加上下文信息
-            chunk['context'] = self._extract_context_info(chunk_data['text'], cleaned_text, i)
-            
+            chunk['context'] = self._extract_context_info(final_text, cleaned_text, i)
+
+            search_pos = start_idx + len(original_text)
+
             chunks.append(chunk)
         
         return chunks
