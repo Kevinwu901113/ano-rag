@@ -48,6 +48,7 @@ class EnhancedRelationExtractor:
             'context_relation': {'weight': 0.6, 'reasoning_value': 0.6},
             'topic_relation': {'weight': 0.7, 'reasoning_value': 0.5},
             'semantic_similarity': {'weight': 0.5, 'reasoning_value': 0.4},
+            'personal_relation': {'weight': config.get('graph.weights.personal_relation', 0.9), 'reasoning_value': 0.6},
             # 新增的推理关系类型
             'causal': {'weight': 1.2, 'reasoning_value': 1.0},
             'temporal': {'weight': 1.1, 'reasoning_value': 0.9},
@@ -121,7 +122,10 @@ class EnhancedRelationExtractor:
         # 语义相似性关系
         if embeddings is not None:
             relations.extend(self._extract_semantic_similarity_relations(atomic_notes, embeddings))
-        
+
+        # 个人关系
+        relations.extend(self._extract_personal_relations(atomic_notes))
+
         return relations
 
     def _extract_topic_group_relations(self, atomic_notes: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -903,6 +907,50 @@ class EnhancedRelationExtractor:
         similarity_matrix = np.dot(normalized_embeddings, normalized_embeddings.T)
         
         return similarity_matrix
+
+    def _extract_personal_relations(self, atomic_notes: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """解析婚姻等个人关系"""
+        relations = []
+
+        entity_to_notes = defaultdict(list)
+        for note in atomic_notes:
+            note_id = note.get('note_id')
+            for entity in note.get('entities', []):
+                entity_to_notes[entity].append(note_id)
+
+        patterns = [
+            r"([A-Z][a-zA-Z]+(?:\s+[A-Z][a-zA-Z]+)*) is married to ([A-Z][a-zA-Z]+(?:\s+[A-Z][a-zA-Z]+)*)",
+            r"([A-Z][a-zA-Z]+(?:\s+[A-Z][a-zA-Z]+)*)'s wife ([A-Z][a-zA-Z]+(?:\s+[A-Z][a-zA-Z]+)*)",
+            r"([A-Z][a-zA-Z]+(?:\s+[A-Z][a-zA-Z]+)*)'s husband ([A-Z][a-zA-Z]+(?:\s+[A-Z][a-zA-Z]+)*)",
+            r"([A-Z][a-zA-Z]+(?:\s+[A-Z][a-zA-Z]+)*)'s spouse ([A-Z][a-zA-Z]+(?:\s+[A-Z][a-zA-Z]+)*)",
+        ]
+
+        for note in atomic_notes:
+            content = note.get('content', '')
+            for pattern in patterns:
+                for match in re.finditer(pattern, content):
+                    name1 = match.group(1).strip()
+                    name2 = match.group(2).strip()
+                    snippet = match.group(0).strip()
+                    ids1 = entity_to_notes.get(name1, [])
+                    ids2 = entity_to_notes.get(name2, [])
+                    for id1 in ids1:
+                        for id2 in ids2:
+                            if id1 == id2:
+                                continue
+                            relations.append({
+                                'source_id': id1,
+                                'target_id': id2,
+                                'relation_type': 'personal_relation',
+                                'weight': self.relation_types['personal_relation']['weight'],
+                                'metadata': {
+                                    'relation_subtype': 'spouse',
+                                    'confidence': 0.9,
+                                    'snippet': snippet
+                                }
+                            })
+
+        return relations
     
     def _get_similarity_rank(self, i: int, j: int, similarity_matrix: np.ndarray) -> int:
         """获取相似度排名"""

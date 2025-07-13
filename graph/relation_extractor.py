@@ -28,7 +28,8 @@ class RelationExtractor:
             'entity_coexistence': config.get('graph.weights.entity_coexistence', 0.8),
             'context_relation': config.get('graph.weights.context_relation', 0.6),
             'topic_relation': config.get('graph.weights.topic_relation', 0.7),
-            'semantic_similarity': config.get('graph.weights.semantic_similarity', 0.5)
+            'semantic_similarity': config.get('graph.weights.semantic_similarity', 0.5),
+            'personal_relation': config.get('graph.weights.personal_relation', 0.9)
         }
         
         logger.info("RelationExtractor initialized")
@@ -70,6 +71,11 @@ class RelationExtractor:
                 atomic_notes, embeddings
             )
             all_relations.extend(similarity_relations)
+
+        # 6. 个人关系
+        logger.info("Extracting personal relations")
+        personal_relations = self.extract_personal_relations(atomic_notes)
+        all_relations.extend(personal_relations)
         
         # 去重和过滤
         filtered_relations = self._filter_and_deduplicate_relations(all_relations)
@@ -316,7 +322,52 @@ class RelationExtractor:
                     relations.append(relation)
         
         return relations
-    
+
+    def extract_personal_relations(self, atomic_notes: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """解析婚姻等个人关系"""
+        relations = []
+
+        # 构建实体到笔记的映射
+        entity_to_notes = defaultdict(list)
+        for note in atomic_notes:
+            note_id = note.get('note_id')
+            for entity in note.get('entities', []):
+                entity_to_notes[entity].append(note_id)
+
+        patterns = [
+            r"([A-Z][a-zA-Z]+(?:\s+[A-Z][a-zA-Z]+)*) is married to ([A-Z][a-zA-Z]+(?:\s+[A-Z][a-zA-Z]+)*)",
+            r"([A-Z][a-zA-Z]+(?:\s+[A-Z][a-zA-Z]+)*)'s wife ([A-Z][a-zA-Z]+(?:\s+[A-Z][a-zA-Z]+)*)",
+            r"([A-Z][a-zA-Z]+(?:\s+[A-Z][a-zA-Z]+)*)'s husband ([A-Z][a-zA-Z]+(?:\s+[A-Z][a-zA-Z]+)*)",
+            r"([A-Z][a-zA-Z]+(?:\s+[A-Z][a-zA-Z]+)*)'s spouse ([A-Z][a-zA-Z]+(?:\s+[A-Z][a-zA-Z]+)*)",
+        ]
+
+        for note in atomic_notes:
+            content = note.get('content', '')
+            for pattern in patterns:
+                for match in re.finditer(pattern, content):
+                    name1 = match.group(1).strip()
+                    name2 = match.group(2).strip()
+                    snippet = match.group(0).strip()
+                    ids1 = entity_to_notes.get(name1, [])
+                    ids2 = entity_to_notes.get(name2, [])
+                    for id1 in ids1:
+                        for id2 in ids2:
+                            if id1 == id2:
+                                continue
+                            relations.append({
+                                'source_id': id1,
+                                'target_id': id2,
+                                'relation_type': 'personal_relation',
+                                'weight': self.relation_weights['personal_relation'],
+                                'metadata': {
+                                    'relation_subtype': 'spouse',
+                                    'confidence': 0.9,
+                                    'snippet': snippet
+                                }
+                            })
+
+        return relations
+
     def _find_references_in_text(self, text: str, available_note_ids: Set[str]) -> List[str]:
         """在文本中查找引用"""
         references = []
@@ -449,7 +500,7 @@ class RelationExtractor:
             relation_type = relation.get('relation_type')
             
             # 创建标准化的关系键（确保方向一致性）
-            if relation_type in ['entity_coexistence', 'semantic_similarity', 'topic_relation']:
+            if relation_type in ['entity_coexistence', 'semantic_similarity', 'topic_relation', 'personal_relation']:
                 # 这些关系是无向的
                 relation_key = (min(source_id, target_id), max(source_id, target_id), relation_type)
             else:
