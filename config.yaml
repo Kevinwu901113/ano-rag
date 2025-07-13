@@ -75,6 +75,7 @@ multi_hop:
 query:
   rewrite_enabled: true
   split_multi_queries: true
+  placeholder_split: false
   add_prior_knowledge: false  # switch for LLM hallucination prevention
   parallel_processing: true
   

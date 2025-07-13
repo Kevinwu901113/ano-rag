@@ -22,6 +22,7 @@ class QueryRewriter:
         self.llm = llm or LocalLLM()
         self.enable_rewrite = config.get('query.rewrite_enabled', True)
         self.split_multi_queries = config.get('query.split_multi_queries', True)
+        self.placeholder_split = config.get('query.placeholder_split', False)
         self.add_prior_knowledge = config.get('query.add_prior_knowledge', False)
         
     def rewrite_query(self, query: str) -> Dict[str, Any]:
@@ -95,27 +96,53 @@ class QueryRewriter:
             }
     
     def _split_multi_queries(self, query: str) -> List[str]:
-        """拆分多个查询"""
+        """拆分多个查询，优先使用规则方式，失败则回退到LLM"""
+        if self.placeholder_split:
+            rule_based = self._rule_based_split(query)
+            if rule_based:
+                return rule_based
+        return self._llm_split_multi_queries(query)
+
+    def _llm_split_multi_queries(self, query: str) -> List[str]:
+        """使用LLM拆分查询"""
         system_prompt = SPLIT_QUERY_SYSTEM_PROMPT
-        
+
         prompt = SPLIT_QUERY_PROMPT.format(query=query)
-        
+
         try:
             response = self.llm.generate(prompt, system_prompt)
             cleaned_response = extract_json_from_response(response)
             result = json.loads(cleaned_response)
             sub_queries = result.get('sub_queries', [query])
-            
-            # 验证拆分结果
+
             if not sub_queries or len(sub_queries) == 0:
                 return [query]
-            
+
             return sub_queries
-            
+
         except Exception as e:
             logger.warning(f"Query splitting failed: {e}")
-            # 简单的拆分逻辑作为备用
             return self._simple_split_query(query)
+
+    def _rule_based_split(self, query: str) -> Optional[List[str]]:
+        """基于模式的多跳查询拆分，保留占位符"""
+        import re
+
+        pattern = re.compile(r"of ((?:[^']+'s )+[^?]+)")
+        m = pattern.search(query)
+        if not m:
+            return None
+
+        yz_full = m.group(1)
+        inner_match = re.findall(r"[^']+'s [^']+", yz_full)
+        if not inner_match:
+            return None
+
+        yz = inner_match[0]
+        y, z = yz.split("'s ", 1)
+        first = f"What is {y}'s {z}?"
+        second = query.replace(yz, "<result_of_q1>")
+        return [first.strip(), second.strip()]
     
     def _simple_split_query(self, query: str) -> List[str]:
         """简单的查询拆分逻辑"""
