@@ -325,8 +325,10 @@ class EnhancedGraphRetriever:
                 # 节点中心性
                 centrality = self.graph_index.centrality_scores.get(node_id, 0.0)
                 
+                # 节点重要性
+                importance = self.graph.nodes[node_id].get("importance_score", 1.0)
                 # 节点得分
-                node_score = 0.7 * similarity + 0.3 * centrality
+                node_score = (0.7 * similarity + 0.3 * centrality) * importance
                 node_scores.append(node_score)
             else:
                 node_scores.append(0.1)
