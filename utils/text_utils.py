@@ -67,12 +67,47 @@ class TextUtils:
         text = text.strip()
         return text
     
+    STOP_WORDS = {"The", "Created", "After"}
+
     @staticmethod
-    def extract_entities(text: str) -> List[str]:
+    def _estimate_confidence(entity: str) -> float:
+        """基于长度的简单置信度估计"""
+        letters = re.sub(r'[^A-Za-z]', '', entity)
+        if not letters:
+            return 0.0
+        return min(1.0, len(letters) / 10)
+
+    @staticmethod
+    def extract_entities(
+        text: str,
+        *,
+        confidence_threshold: float = 0.5,
+        stop_words: List[str] | None = None,
+    ) -> List[str]:
         """简单的实体提取（可以后续用NER模型替换）"""
-        # 简单的实体提取：大写字母开头的词组
-        entities = re.findall(r'\b[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*\b', text)
-        return list(set(entities))
+        if stop_words is None:
+            stop_words = list(TextUtils.STOP_WORDS)
+
+        entities = re.findall(r"\b[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*\b", text)
+
+        filtered = []
+        for ent in set(entities):
+            words = ent.split()
+            # 移除位于开头或结尾的停用词
+            while words and words[0] in stop_words:
+                words = words[1:]
+            while words and words[-1] in stop_words:
+                words = words[:-1]
+            if not words:
+                continue
+            if any(w in stop_words for w in words):
+                continue
+            ent_clean = " ".join(words)
+            confidence = TextUtils._estimate_confidence(ent_clean)
+            if confidence >= confidence_threshold:
+                filtered.append(ent_clean)
+
+        return filtered
     
     @staticmethod
     def calculate_similarity_keywords(text1: str, text2: str) -> float:
