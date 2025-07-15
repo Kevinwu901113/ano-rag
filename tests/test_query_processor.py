@@ -23,6 +23,7 @@ sys.modules['faiss'] = types.SimpleNamespace()
 from query.query_processor import QueryProcessor
 from graph.graph_index import GraphIndex
 from graph.multi_hop_query_processor import MultiHopQueryProcessor
+from graph.graph_retriever import GraphRetriever
 from config import config
 
 class QueryProcessorTestCase(unittest.TestCase):
@@ -91,6 +92,27 @@ class QueryProcessorTestCase(unittest.TestCase):
         res = proc.retrieve(embeddings[0])
         self.assertTrue(res['notes'])
         mock_logger.warning.assert_not_called()
+
+    def test_importance_score_affects_retrieval(self):
+        notes = [
+            {"note_id": "n1", "content": "seed", "importance_score": 1.0},
+            {"note_id": "n2", "content": "two", "importance_score": 1.0},
+            {"note_id": "n3", "content": "three", "importance_score": 0.1},
+        ]
+        g = nx.Graph()
+        g.add_node('n1', **notes[0])
+        g.add_node('n2', **notes[1])
+        g.add_node('n3', **notes[2])
+        g.add_edge('n1', 'n2', weight=1.0)
+        g.add_edge('n1', 'n3', weight=1.0)
+        embeddings = np.eye(3)
+        index = GraphIndex()
+        with patch('networkx.pagerank', return_value={'n1': 1.0, 'n2': 0.5, 'n3': 0.8}):
+            index.build_index(g, notes, embeddings)
+        retriever = GraphRetriever(index, k_hop=1)
+        res = retriever.retrieve(['n1'])
+        ordered = [n['note_id'] for n in res]
+        self.assertEqual(ordered[0], 'n2')
 
 if __name__ == '__main__':
     unittest.main()

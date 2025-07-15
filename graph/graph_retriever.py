@@ -34,7 +34,8 @@ class GraphRetriever:
                 data["graph_distance"] = dist
                 centrality = self.index.get_centrality(node_id)
                 data["centrality"] = centrality
-                data["graph_score"] = centrality / (dist + 1e-5)
+                importance = data.get("importance_score", 1.0)
+                data["graph_score"] = (centrality / (dist + 1e-5)) * importance
                 results.append(data)
         results.sort(key=lambda x: x.get("graph_score", 0), reverse=True)
         logger.info(f"Graph retrieval returned {len(results)} notes")
