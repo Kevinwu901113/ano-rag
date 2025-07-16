@@ -1,0 +1,81 @@
+# 原子笔记验证配置
+validation:
+  # 是否启用验证功能
+  enabled: true
+  
+  # 实体唯一性校验配置
+  entity_uniqueness:
+    enabled: true
+    # 是否自动修复多实体问题
+    auto_fix: true
+    # 实体选择策略: frequency（频率）, known_actors（已知演员优先）, first（第一个）
+    selection_strategy: "known_actors"
+    
+  # 源文档实体回溯约束配置
+  source_traceability:
+    enabled: true
+    # 是否严格模式（严格要求所有实体都能在源文档中找到）
+    strict_mode: false
+    # 相似度阈值（用于模糊匹配）
+    similarity_threshold: 0.8
+    
+  # 已知配音演员列表（可扩展）
+  known_voice_actors:
+    "Dan Castellaneta":
+      - "Krusty the Clown"
+      - "Homer Simpson"
+      - "Groundskeeper Willie"
+      - "Mayor Quimby"
+    "Adriana Caselotti":
+      - "Snow White"
+    "Florian St. Pierre":
+      - "Various characters"
+    "Nancy Cartwright":
+      - "Bart Simpson"
+    "Yeardley Smith":
+      - "Lisa Simpson"
+    "Julie Kavner":
+      - "Marge Simpson"
+    "Hank Azaria":
+      - "Moe Szyslak"
+      - "Chief Wiggum"
+      - "Apu Nahasapeemapetilon"
+    "Harry Shearer":
+      - "Mr. Burns"
+      - "Ned Flanders"
+      - "Principal Skinner"
+      
+  # 人名识别模式
+  person_name_patterns:
+    - "\\b[A-Z][a-z]+\\s+[A-Z][a-z]+\\b"  # 标准英文姓名
+    - "\\b[A-Z][a-z]+\\s+[A-Z]\\.\\s+[A-Z][a-z]+\\b"  # 中间名缩写
+    - "\\b[A-Z][a-z]+\\s+[A-Z][a-z]+\\s+[A-Z][a-z]+\\b"  # 三个词的姓名
+    - "\\b[A-Z][a-z]+\\s+[A-Z][a-z]+\\s+[A-Z][a-z]+\\s+[A-Z][a-z]+\\b"  # 四个词的姓名
+    
+  # 人名指示词（用于辅助识别）
+  person_indicators:
+    - "actor"
+    - "actress"
+    - "voice"
+    - "performer"
+    - "artist"
+    - "singer"
+    - "comedian"
+    - "narrator"
+    
+  # 验证报告配置
+  reporting:
+    # 是否生成详细报告
+    detailed_report: true
+    # 是否保存验证日志
+    save_logs: true
+    # 日志文件路径
+    log_file: "validation_logs.json"
+    
+  # 错误处理配置
+  error_handling:
+    # 遇到验证错误时的处理方式: ignore（忽略）, warn（警告）, fail（失败）
+    on_entity_uniqueness_error: "warn"
+    on_source_traceability_error: "warn"
+    # 是否在验证失败时继续处理
+    continue_on_error: true
