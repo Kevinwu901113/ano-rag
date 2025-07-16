@@ -58,18 +58,24 @@ class AtomicNoteGenerator:
         prompt = ATOMIC_NOTEGEN_PROMPT.format(text=text)
         
         response = self.llm.generate(prompt, system_prompt)
-        
+
         try:
             import json
             import re
-            
+
             # 清理响应，提取JSON部分
             cleaned_response = extract_json_from_response(response)
-            
+
             if not cleaned_response:
-                logger.warning(f"No valid JSON found in response: {response[:200]}...")
-                return self._create_fallback_note(chunk_data)
-            
+                fixed = self._try_fix_truncated_json(response)
+                if fixed:
+                    cleaned_response = fixed
+                else:
+                    logger.warning(
+                        f"No valid JSON found in response: {response[:200]}..."
+                    )
+                    return self._create_fallback_note(chunk_data)
+
             note_data = json.loads(cleaned_response)
             
             # 提取相关的paragraph idx信息
