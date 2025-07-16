@@ -299,17 +299,29 @@ class AtomicNoteGenerator:
     def validate_atomic_notes(self, atomic_notes: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """验证原子笔记的质量"""
         valid_notes = []
-        
+        similarity_threshold = config.get('document.note_similarity_threshold', 0.3)
+
         for note in atomic_notes:
             # 基本验证
             if not note.get('content') or len(note['content'].strip()) < 10:
                 logger.warning(f"Skipping note with insufficient content: {note.get('note_id')}")
                 continue
-            
+
+            # 内容与原文相似度验证
+            similarity = TextUtils.calculate_similarity_keywords(
+                note.get('content', ''),
+                note.get('original_text', '')
+            )
+            if similarity < similarity_threshold:
+                logger.warning(
+                    f"Skipping note with low content similarity: {note.get('note_id')}"
+                )
+                continue
+
             # 重要性评分验证
             if note.get('importance_score', 0) < 0.1:
                 logger.warning(f"Note has very low importance score: {note.get('note_id')}")
-            
+
             valid_notes.append(note)
         
         logger.info(f"Validated {len(valid_notes)} out of {len(atomic_notes)} atomic notes")
