@@ -13,7 +13,8 @@ class DocumentChunker:
         self.overlap = config.get('document.overlap', 50)
         self.supported_formats = config.get('document.supported_formats', ['json', 'jsonl', 'docx'])
         
-    def chunk_document(self, file_path: str, source_info: Dict[str, Any] = None) -> List[Dict[str, Any]]:
+    def chunk_document(self, file_path: str, source_info: Dict[str, Any] = None,
+                       include_question: bool = False) -> List[Dict[str, Any]]:
         """对单个文档进行分块"""
         logger.info(f"Chunking document: {file_path}")
         
@@ -35,7 +36,8 @@ class DocumentChunker:
                 paragraph_idx_mapping = self._extract_paragraph_idx_mapping(content)
             
             # 提取文本内容
-            text_content = self._extract_text_content(content, file_path)
+            text_content = self._extract_text_content(content, file_path,
+                                                    include_question)
             
             # 分块处理
             chunks = self._chunk_text_content(text_content, file_path, source_info)
@@ -77,22 +79,25 @@ class DocumentChunker:
             logger.error(f"Failed to read document {file_path}: {e}")
             raise
     
-    def _extract_text_content(self, content: Union[str, Dict, List], file_path: str) -> str:
+    def _extract_text_content(self, content: Union[str, Dict, List],
+                             file_path: str,
+                             include_question: bool = False) -> str:
         """从不同格式的内容中提取文本"""
         if isinstance(content, str):
             return content
         
         elif isinstance(content, dict):
-            return self._extract_text_from_dict(content)
+            return self._extract_text_from_dict(content, include_question)
         
         elif isinstance(content, list):
-            return self._extract_text_from_list(content)
+            return self._extract_text_from_list(content, include_question)
         
         else:
             logger.warning(f"Unknown content type for {file_path}: {type(content)}")
             return str(content)
     
-    def _extract_text_from_dict(self, data: Dict[str, Any]) -> str:
+    def _extract_text_from_dict(self, data: Dict[str, Any],
+                               include_question: bool = False) -> str:
         """从字典中提取文本内容"""
         text_parts = []
         
@@ -103,10 +108,10 @@ class DocumentChunker:
             for para in paragraphs:
                 if isinstance(para, dict) and 'paragraph_text' in para:
                     text_parts.append(para['paragraph_text'])
-            
+
             # 添加问题
             question = data.get('question', '')
-            if question:
+            if include_question and question:
                 text_parts.append(f"Question: {question}")
         else:
             # 常见的文本字段
@@ -124,7 +129,8 @@ class DocumentChunker:
         
         return '\n'.join(text_parts)
     
-    def _extract_text_from_list(self, data: List[Any]) -> str:
+    def _extract_text_from_list(self, data: List[Any],
+                               include_question: bool = False) -> str:
         """从列表中提取文本内容"""
         text_parts = []
         
@@ -132,7 +138,8 @@ class DocumentChunker:
             if isinstance(item, str):
                 text_parts.append(item)
             elif isinstance(item, dict):
-                text_parts.append(self._extract_text_from_dict(item))
+                text_parts.append(self._extract_text_from_dict(item,
+                                                            include_question))
             else:
                 text_parts.append(str(item))
         
