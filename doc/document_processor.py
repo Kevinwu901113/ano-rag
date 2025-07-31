@@ -144,6 +144,7 @@ class DocumentProcessor:
             FileUtils.write_json(clustering_result, cluster_file)
         
         graph_file = os.path.join(self.processed_docs_path, "graph.json")
+        graphml_file = os.path.join(self.processed_docs_path, "graph.graphml")
         if (not force_reprocess and not chunks_updated
                 and os.path.exists(graph_file)):
             logger.info(f"Loading graph from {graph_file}")
@@ -155,6 +156,15 @@ class DocumentProcessor:
             )
             graph_data = nx.node_link_data(graph)
             FileUtils.write_json(graph_data, graph_file)
+            
+            # 导出GraphML格式
+            try:
+                from graph.graphml_exporter import GraphMLExporter
+                exporter = GraphMLExporter()
+                exporter.export_graph(graph, graphml_file)
+                logger.info(f"Graph exported to GraphML format: {graphml_file}")
+            except Exception as e:
+                logger.warning(f"Failed to export GraphML: {e}")
         
         # 保存处理结果
         result = {

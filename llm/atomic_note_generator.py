@@ -1,4 +1,4 @@
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Union
 from loguru import logger
 from .local_llm import LocalLLM
 from utils import BatchProcessor, TextUtils, extract_json_from_response, clean_control_characters
@@ -26,6 +26,10 @@ class AtomicNoteGenerator:
         system_prompt = self._get_atomic_note_system_prompt()
         
         def process_batch(batch):
+            # 检查batch是否是单个item（当batch_processor回退到单个处理时）
+            if not isinstance(batch, list):
+                batch = [batch]
+            
             results = []
             for chunk_data in batch:
                 try:
@@ -45,14 +49,36 @@ class AtomicNoteGenerator:
         
         # 后处理：添加ID和元数据
         for i, note in enumerate(atomic_notes):
+            # 确保note是字典类型
+            if not isinstance(note, dict):
+                logger.warning(f"Note at index {i} is not a dict, got {type(note)}: {note}")
+                # 如果note是列表，尝试提取第一个元素
+                if isinstance(note, list) and len(note) > 0 and isinstance(note[0], dict):
+                    note = note[0]
+                    atomic_notes[i] = note
+                else:
+                    # 创建一个基本的字典结构
+                    note = {'content': str(note), 'error': True}
+                    atomic_notes[i] = note
+            
             note['note_id'] = f"note_{i:06d}"
             note['created_at'] = self._get_timestamp()
         
         logger.info(f"Generated {len(atomic_notes)} atomic notes")
         return atomic_notes
     
-    def _generate_single_atomic_note(self, chunk_data: Dict[str, Any], system_prompt: str) -> Dict[str, Any]:
+    def _generate_single_atomic_note(self, chunk_data: Union[Dict[str, Any], Any], system_prompt: str) -> Dict[str, Any]:
         """生成单个原子笔记"""
+        # 确保 chunk_data 是字典类型
+        if not isinstance(chunk_data, dict):
+            logger.warning(f"chunk_data is not a dict, got {type(chunk_data)}: {chunk_data}")
+            # 如果是字符串，创建基本的字典结构
+            if isinstance(chunk_data, str):
+                chunk_data = {'text': chunk_data}
+            else:
+                logger.error(f"Unsupported chunk_data type: {type(chunk_data)}")
+                return self._create_fallback_note({'text': str(chunk_data)})
+        
         text = chunk_data.get('text', '')
         
         prompt = ATOMIC_NOTEGEN_PROMPT.format(text=text)
@@ -156,8 +182,15 @@ class AtomicNoteGenerator:
         
         return ""
     
-    def _create_fallback_note(self, chunk_data: Dict[str, Any]) -> Dict[str, Any]:
+    def _create_fallback_note(self, chunk_data: Union[Dict[str, Any], Any]) -> Dict[str, Any]:
         """创建备用的原子笔记（当LLM生成失败时）"""
+        # 确保 chunk_data 是字典类型
+        if not isinstance(chunk_data, dict):
+            if isinstance(chunk_data, str):
+                chunk_data = {'text': chunk_data}
+            else:
+                chunk_data = {'text': str(chunk_data)}
+        
         text = chunk_data.get('text', '')
         primary_entity = chunk_data.get('primary_entity')
         entities = TextUtils.extract_entities(text)

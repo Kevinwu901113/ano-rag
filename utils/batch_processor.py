@@ -41,10 +41,34 @@ class BatchProcessor:
                     # 尝试逐个处理
                     for item in batch:
                         try:
-                            item_result = process_func([item], **kwargs)
-                            results.extend(item_result)
+                            # 检查是否是原子笔记生成器的方法
+                            if hasattr(process_func, '__self__') and hasattr(process_func.__self__, '_generate_single_atomic_note'):
+                                # 直接调用单个处理方法，传递系统提示词
+                                system_prompt = kwargs.get('system_prompt', process_func.__self__._get_atomic_note_system_prompt())
+                                item_result = process_func.__self__._generate_single_atomic_note(item, system_prompt)
+                                results.append(item_result)
+                            else:
+                                # 对于其他类型的处理函数，仍然包装成列表
+                                item_result = process_func([item], **kwargs)
+                                # 确保item_result是列表，然后扩展到results中
+                                if isinstance(item_result, list):
+                                    results.extend(item_result)
+                                else:
+                                    results.append(item_result)
                         except Exception as item_e:
                             logger.error(f"Item processing failed: {item_e}")
+                            # 创建一个基本的fallback结果
+                            if hasattr(process_func, '__self__') and hasattr(process_func.__self__, '_create_fallback_note'):
+                                fallback_result = process_func.__self__._create_fallback_note(item)
+                                results.append(fallback_result)
+                            else:
+                                # 如果没有fallback方法，创建一个基本的错误结果
+                                error_result = {
+                                    'error': True,
+                                    'error_message': str(item_e),
+                                    'original_data': item
+                                }
+                                results.append(error_result)
                         pbar.update(1)
         
         return results

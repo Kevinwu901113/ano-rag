@@ -96,7 +96,24 @@ class QueryProcessor:
         rewrite = self.rewriter.rewrite_query(query)
         queries = rewrite['rewritten_queries']
         vector_results = self.vector_retriever.search(queries)
-        candidate_notes = [note for sub in vector_results for note in sub]
+        
+        # 合并结果并去重
+        candidate_notes = []
+        seen_note_ids = set()
+        for sub in vector_results:
+            for note in sub:
+                note_id = note.get('note_id')
+                if note_id and note_id not in seen_note_ids:
+                    candidate_notes.append(note)
+                    seen_note_ids.add(note_id)
+                elif not note_id:  # 如果没有note_id，基于内容去重
+                    content = note.get('content', '')
+                    content_hash = hash(content)
+                    if content_hash not in seen_note_ids:
+                        candidate_notes.append(note)
+                        seen_note_ids.add(content_hash)
+        
+        logger.info(f"After deduplication: {len(candidate_notes)} unique notes from {sum(len(sub) for sub in vector_results)} total results")
         reasoning_paths: List[Dict[str, Any]] = []
 
         if self.multi_hop_enabled:

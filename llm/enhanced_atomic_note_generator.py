@@ -109,6 +109,18 @@ class EnhancedAtomicNoteGenerator:
         
         # 后处理：添加ID和元数据
         for i, note in enumerate(atomic_notes):
+            # 确保note是字典类型
+            if not isinstance(note, dict):
+                logger.warning(f"Note at index {i} is not a dict, got {type(note)}: {note}")
+                # 如果note是列表，尝试提取第一个元素
+                if isinstance(note, list) and len(note) > 0 and isinstance(note[0], dict):
+                    note = note[0]
+                    atomic_notes[i] = note
+                else:
+                    # 创建一个基本的字典结构
+                    note = {'content': str(note), 'error': True}
+                    atomic_notes[i] = note
+            
             note['note_id'] = f"note_{i:06d}"
             note['created_at'] = self._get_timestamp()
         
@@ -121,6 +133,14 @@ class EnhancedAtomicNoteGenerator:
         
         enhanced_notes = []
         for note in atomic_notes:
+            # 确保note是字典类型
+            if not isinstance(note, dict):
+                logger.warning(f"Note in _enhance_entities is not a dict, got {type(note)}: {note}")
+                if isinstance(note, list) and len(note) > 0 and isinstance(note[0], dict):
+                    note = note[0]
+                else:
+                    note = {'content': str(note), 'error': True, 'entities': []}
+            
             enhanced_note = note.copy()
             
             # 使用增强NER提取实体

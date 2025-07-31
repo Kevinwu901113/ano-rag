@@ -18,20 +18,41 @@ class ContextScheduler:
             logger.warning("No candidate notes provided to scheduler")
             return []
         
-        scored = []
+        # 先进行去重，保留相似度最高的版本
+        unique_notes = []
         seen_contents = set()
+        seen_note_ids = set()
+        
         for note in candidate_notes:
+            note_id = note.get('note_id')
+            content = note.get('content', '')
+            
+            # 基于note_id去重
+            if note_id and note_id in seen_note_ids:
+                continue
+            
+            # 基于内容去重
+            if content in seen_contents:
+                continue
+            
+            unique_notes.append(note)
+            if note_id:
+                seen_note_ids.add(note_id)
+            seen_contents.add(content)
+        
+        logger.info(f"After content deduplication: {len(unique_notes)} unique notes from {len(candidate_notes)} candidates")
+        
+        # 对去重后的笔记进行评分
+        scored = []
+        for note in unique_notes:
             semantic = note.get('retrieval_info', {}).get('similarity', 0)
             graph_score = note.get('centrality', 0)
             topic_score = 1.0 if note.get('cluster_id') is not None else 0.0
             feedback = note.get('feedback_score', 0)
-            redundancy = 1.0 if note.get('content') in seen_contents else 0.0
             score = (self.t1 * semantic +
                      self.t2 * graph_score +
                      self.t3 * topic_score +
-                     self.t4 * feedback -
-                     self.t5 * redundancy)
-            seen_contents.add(note.get('content'))
+                     self.t4 * feedback)
             note['context_score'] = score
             scored.append(note)
         

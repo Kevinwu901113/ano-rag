@@ -110,3 +110,46 @@ class GraphIndex:
             logger.info(f"Graph saved to {filepath}")
         except Exception as e:
             logger.error(f"Failed to save graph index: {e}")
+
+    def save_graphml(self, filepath: str) -> None:
+        """Save the graph in GraphML format for visualization and analysis."""
+        try:
+            # 确保文件路径以.graphml结尾
+            if not filepath.endswith('.graphml'):
+                filepath = filepath + '.graphml'
+            
+            # 创建一个图的副本用于导出，处理节点和边的属性
+            export_graph = self.graph.copy()
+            
+            # 为节点添加中心性分数
+            for node_id in export_graph.nodes():
+                centrality = self.get_centrality(node_id)
+                export_graph.nodes[node_id]['centrality'] = centrality
+            
+            # 确保所有属性都是GraphML兼容的类型（字符串、数字、布尔值）
+            for node_id, node_data in export_graph.nodes(data=True):
+                for key, value in list(node_data.items()):
+                    if isinstance(value, (list, dict, tuple)):
+                        # 将复杂类型转换为字符串
+                        export_graph.nodes[node_id][key] = str(value)
+                    elif value is None:
+                        # 移除None值
+                        del export_graph.nodes[node_id][key]
+            
+            for u, v, edge_data in export_graph.edges(data=True):
+                for key, value in list(edge_data.items()):
+                    if isinstance(value, (list, dict, tuple)):
+                        # 将复杂类型转换为字符串
+                        export_graph.edges[u, v][key] = str(value)
+                    elif value is None:
+                        # 移除None值
+                        del export_graph.edges[u, v][key]
+            
+            # 保存为GraphML格式
+            nx.write_graphml(export_graph, filepath, encoding='utf-8')
+            
+            logger.info(f"Graph saved in GraphML format to {filepath}")
+            logger.info(f"GraphML contains {export_graph.number_of_nodes()} nodes and {export_graph.number_of_edges()} edges")
+            
+        except Exception as e:
+            logger.error(f"Failed to save graph in GraphML format: {e}")

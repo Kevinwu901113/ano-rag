@@ -84,11 +84,11 @@ query:
   
 # Context Scheduler Weights
 context_scheduler:
-  semantic_weight: 0.3      # t1
-  graph_weight: 0.25        # t2  
+  semantic_weight: 0.15      # t1
+  graph_weight: 0.35        # t2  
   topic_weight: 0.2         # t3
   feedback_weight: 0.15     # t4
-  redundancy_penalty: 0.1   # t5
+  redundancy_penalty: 0.15   # t5
   top_n_notes: 10
   
 # LLM Configuration
@@ -96,14 +96,14 @@ llm:
   # For atomic note generation and query rewriting
   local_model:
     base_url: "http://localhost:11434"
-    model: "gemma3:4b-it-fp16"
+    model: "qwen2.5:7b-instruct-fp16"
     temperature: 0.1
-    max_tokens: 2048
+    max_tokens: 4096
     
   # For final generation and feedback (Ollama required)
   ollama:
     base_url: "http://localhost:11434"
-    model: "gemma3:4b-it-fp16"
+    model: "qwen2.5:7b-instruct-fp16"
     temperature: 0.7
     max_tokens: 4096
     # LightRAG-inspired configuration
