@@ -15,6 +15,12 @@ from sklearn.metrics.pairwise import cosine_similarity
 
 from config import config
 
+try:
+    # Optional import used for isinstance checks
+    from graph.multi_hop_query_processor import MultiHopQueryProcessor
+except Exception:  # pragma: no cover - optional dependency
+    MultiHopQueryProcessor = None
+
 class EnhancedRecallOptimizer:
     """增强召回优化器"""
     
@@ -484,25 +490,52 @@ class EnhancedRecallOptimizer:
     def _execute_multi_hop_retrieval(self, hop_query: str, existing_ids: Set[str]) -> List[Dict[str, Any]]:
         """执行多跳检索"""
         try:
-            # 使用图检索器进行多跳检索
-            if hasattr(self.graph_retriever, 'retrieve_with_reasoning'):
-                hop_results = self.graph_retriever.retrieve_with_reasoning(hop_query)
-            else:
+            hop_results: List[Dict[str, Any]] = []
+
+            hop_embedding = None
+            if hasattr(self.vector_retriever, "embedding_manager"):
+                try:
+                    embeddings = self.vector_retriever.embedding_manager.encode_queries([hop_query])
+                    if isinstance(embeddings, list):
+                        hop_embedding = embeddings[0]
+                    elif getattr(embeddings, "shape", None) is not None:
+                        hop_embedding = embeddings[0]
+                except Exception as exc:  # pragma: no cover - encoding failure
+                    logger.warning(f"生成多跳查询嵌入失败: {exc}")
+
+            if self.graph_retriever and hop_embedding is not None:
+                if MultiHopQueryProcessor and isinstance(self.graph_retriever, MultiHopQueryProcessor):
+                    try:
+                        result = self.graph_retriever.retrieve(hop_embedding)
+                        hop_results = result.get("notes", []) if isinstance(result, dict) else []
+                    except Exception as exc:
+                        logger.warning(f"图检索器retrieve调用失败: {exc}")
+                elif hasattr(self.graph_retriever, "retrieve_with_reasoning_paths"):
+                    try:
+                        hop_results = self.graph_retriever.retrieve_with_reasoning_paths(hop_embedding)
+                    except Exception as exc:
+                        logger.warning(f"图检索器retrieve_with_reasoning_paths调用失败: {exc}")
+
+            if not hop_results:
                 # 回退到向量检索
                 hop_results = self.vector_retriever.search([hop_query], top_k=3)
                 hop_results = hop_results[0] if hop_results else []
-                
+
             # 过滤已存在的结果
-            filtered_results = []
+            filtered_results: List[Dict[str, Any]] = []
             for result in hop_results:
-                if result.get('note_id') not in existing_ids:
-                    similarity = result.get('similarity_score', 0)
+                note_id = result.get("note_id")
+                if note_id and note_id not in existing_ids:
+                    similarity = result.get(
+                        "similarity_score",
+                        result.get("retrieval_info", {}).get("similarity", 0),
+                    )
                     if similarity >= self.hop_similarity_threshold:
                         filtered_results.append(result)
-                        
+
             return filtered_results
-            
-        except Exception as e:
+
+        except Exception as e:  # pragma: no cover - unexpected failure
             logger.warning(f"多跳检索失败: {e}")
             return []
             
