@@ -683,7 +683,8 @@ class EnhancedRelationExtractor:
                 related_entities = note_to_entities.get(related_note_id, set())
                 common_entities = note_entities & related_entities
                 
-                if len(common_entities) >= self.entity_cooccurrence_threshold:
+                # Allow pairs that share at least one entity
+                if len(common_entities) >= max(self.entity_cooccurrence_threshold, 1):
                     # 计算权重（基于共同实体数量和类型）
                     weight = self.relation_types['entity_coexistence']['weight'] * \
                            min(len(common_entities) / 5.0, 1.0)

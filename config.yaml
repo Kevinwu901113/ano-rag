@@ -34,7 +34,7 @@ graph:
   centrality_weight: 0.3
   path_value_weight: 0.2
   similarity_threshold: 0.7
-  entity_cooccurrence_threshold: 2
+  entity_cooccurrence_threshold: 1
   context_window: 3
   batch_size: 64
   max_relations_per_note: 10
