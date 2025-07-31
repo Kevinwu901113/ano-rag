@@ -10,6 +10,7 @@ from .clustering import TopicClustering
 from .incremental_processor import IncrementalProcessor
 from llm import AtomicNoteGenerator, LocalLLM
 from utils import BatchProcessor, FileUtils
+from utils.enhanced_ner import EnhancedNER
 from config import config
 from vector_store import EmbeddingManager
 from graph import GraphBuilder
@@ -221,7 +222,10 @@ class DocumentProcessor:
             
             # 验证原子笔记质量
             valid_notes = self.atomic_note_generator.validate_atomic_notes(atomic_notes)
-            
+
+            # 实体归一化和追踪增强
+            valid_notes = EnhancedNER().enhance_entity_tracing(valid_notes)
+
             # 增强笔记关系
             enhanced_notes = self.atomic_note_generator.enhance_notes_with_relations(valid_notes)
             
