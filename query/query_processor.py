@@ -4,7 +4,7 @@ import os
 import numpy as np
 
 from llm import QueryRewriter, OllamaClient
-from vector_store import VectorRetriever
+from vector_store import VectorRetriever, EnhancedRecallOptimizer
 from graph.graph_builder import GraphBuilder
 from graph.graph_index import GraphIndex
 from graph.graph_retriever import GraphRetriever
@@ -89,6 +89,12 @@ class QueryProcessor:
             self.graph_retriever = GraphRetriever(self.graph_index, k_hop=config.get('graph.k_hop', 2))
             self.scheduler = ContextScheduler()
 
+        self.recall_optimization_enabled = config.get('vector_store.recall_optimization.enabled', True)
+        if self.multi_hop_enabled:
+            self.recall_optimizer = EnhancedRecallOptimizer(self.vector_retriever, self.multi_hop_processor)
+        else:
+            self.recall_optimizer = EnhancedRecallOptimizer(self.vector_retriever, self.graph_retriever)
+
         self.ollama = OllamaClient()
         self.atomic_notes = atomic_notes
 
@@ -96,7 +102,7 @@ class QueryProcessor:
         rewrite = self.rewriter.rewrite_query(query)
         queries = rewrite['rewritten_queries']
         vector_results = self.vector_retriever.search(queries)
-        
+
         # 合并结果并去重
         candidate_notes = []
         seen_note_ids = set()
@@ -116,8 +122,11 @@ class QueryProcessor:
         logger.info(f"After deduplication: {len(candidate_notes)} unique notes from {sum(len(sub) for sub in vector_results)} total results")
         reasoning_paths: List[Dict[str, Any]] = []
 
+        query_emb = self.vector_retriever.embedding_manager.encode_queries([query])[0]
+        if self.recall_optimization_enabled:
+            candidate_notes = self.recall_optimizer.optimize_recall(candidate_notes, query, query_emb)
+
         if self.multi_hop_enabled:
-            query_emb = self.vector_retriever.embedding_manager.encode_queries([query])[0]
             mh_result = self.multi_hop_processor.retrieve(query_emb)
             graph_notes = mh_result.get('notes', [])
             candidate_notes.extend(graph_notes)
