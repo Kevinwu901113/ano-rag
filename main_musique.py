@@ -62,24 +62,38 @@ class MusiqueProcessor:
         self.debug = debug  # 调试模式，不清理中间文件
         self.base_work_dir = work_dir or create_new_workdir()
         logger.info(f"Using base work directory: {self.base_work_dir}")
+
+    def _create_paragraph_files(self, item: Dict[str, Any], work_dir: str) -> List[str]:
+        """将item的每个段落保存为独立的JSON文件并返回文件路径列表"""
+        item_id = item.get('id', 'unknown')
+        question = item.get('question', '')
+        paragraphs = item.get('paragraphs', [])
+
+        file_paths = []
+        for i, para in enumerate(paragraphs):
+            idx = para.get('idx', i)
+            file_name = f"{item_id}_para_{idx}.json"
+            file_path = os.path.join(work_dir, file_name)
+            with open(file_path, 'w', encoding='utf-8') as f:
+                json.dump({'question': question, 'paragraphs': [para]}, f, ensure_ascii=False)
+            file_paths.append(file_path)
+
+        return file_paths
         
     def process_single_item(self, item: Dict[str, Any], work_dir: str) -> Dict[str, Any]:
         """处理单个musique测试项"""
         item_id = item.get('id', 'unknown')
-        paragraphs = item.get('paragraphs', [])
         question = item.get('question', '')
         
         logger.info(f"Processing item {item_id}")
         
         try:
-            # 1. 创建临时文件存储paragraphs数据
-            temp_file = os.path.join(work_dir, f"{item_id}_data.jsonl")
-            with open(temp_file, 'w', encoding='utf-8') as f:
-                json.dump(item, f, ensure_ascii=False)
-            
+            # 1. 为每个段落创建独立的文件
+            paragraph_files = self._create_paragraph_files(item, work_dir)
+
             # 2. 处理文档（构建知识库）
             processor = DocumentProcessor(output_dir=work_dir)
-            process_result = processor.process_documents([temp_file], force_reprocess=True, output_dir=work_dir)
+            process_result = processor.process_documents(paragraph_files, force_reprocess=True, output_dir=work_dir)
             
             if not process_result.get('atomic_notes'):
                 logger.warning(f"No atomic notes generated for item {item_id}")
@@ -121,12 +135,13 @@ class MusiqueProcessor:
             
             # 调试模式下保留临时文件
             if not self.debug:
-                try:
-                    os.remove(temp_file)
-                except:
-                    pass
+                for p in paragraph_files:
+                    try:
+                        os.remove(p)
+                    except Exception:
+                        pass
             else:
-                logger.info(f"Debug mode: keeping temp file {temp_file}")
+                logger.info(f"Debug mode: keeping temp files {paragraph_files}")
             
             # 6. 收集召回的原子文档信息
             recalled_notes = query_result.get('notes', [])
