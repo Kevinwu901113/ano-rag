@@ -82,7 +82,7 @@ query:
   add_prior_knowledge: false  # switch for LLM hallucination prevention
   parallel_processing: true
   
-# Context Scheduler Weights
+# Context Scheduler Weights (Legacy)
 context_scheduler:
   semantic_weight: 0.15      # t1
   graph_weight: 0.35        # t2  
@@ -90,6 +90,26 @@ context_scheduler:
   feedback_weight: 0.15     # t4
   redundancy_penalty: 0.15   # t5
   top_n_notes: 10
+
+# Context Dispatcher (New Structure-Enhanced Approach)
+context_dispatcher:
+  enabled: true              # Enable new structure-enhanced context dispatcher
+  
+  # Stage 1: Semantic Recall Parameters
+  semantic_top_n: 10         # n: top-n semantic recall
+  semantic_threshold: 0.1    # minimum similarity threshold
+  
+  # Stage 2: Graph Expansion Parameters  
+  graph_expand_top_p: 3     # p: top-p notes for graph expansion (p < n)
+  k_hop: 3                   # k: k-hop graph expansion
+  graph_threshold: 0.0       # minimum graph score threshold
+  
+  # Stage 3: Context Scheduling Parameters
+  final_semantic_count: 2    # x: final semantic results to select
+  final_graph_count: 3       # y: final graph results to select
+  
+  # Context Template
+  context_template: "Note {note_id}: {content}\n"
   
 # LLM Configuration
 llm:
