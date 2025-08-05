@@ -33,17 +33,17 @@ graph:
     - "topic_link"
   centrality_weight: 0.3
   path_value_weight: 0.2
-  similarity_threshold: 0.7
-  entity_cooccurrence_threshold: 1
+  similarity_threshold: 0.4
+  entity_cooccurrence_threshold: 0.5
   context_window: 3
   batch_size: 64
-  max_relations_per_note: 10
+  max_relations_per_note: 20
   weights:
     reference: 1.0
-    entity_coexistence: 0.8
-    context_relation: 0.6
+    entity_coexistence: 0.9
+    context_relation: 0.8
     topic_relation: 0.7
-    semantic_similarity: 0.5
+    semantic_similarity: 0.7
     personal_relation: 0.9
 
 # Multi-hop Reasoning
@@ -67,8 +67,9 @@ multi_hop:
       confidence_threshold: 0.8
   llm_relation_extraction:
     enabled: true
-    batch_size: 16
-    max_pairs_per_batch: 50
+    batch_size: 32
+    max_pairs_per_batch: 100
+    candidate_selection_threshold: 0.2
   topic_group_llm:
     enabled: true
     min_group_size: 3
@@ -97,16 +98,16 @@ context_dispatcher:
   
   # Stage 1: Semantic Recall Parameters
   semantic_top_n: 10         # n: top-n semantic recall
-  semantic_threshold: 0.1    # minimum similarity threshold
+  semantic_threshold: 0.15    # minimum similarity threshold
   
   # Stage 2: Graph Expansion Parameters  
-  graph_expand_top_p: 3     # p: top-p notes for graph expansion (p < n)
+  graph_expand_top_p: 5     # p: top-p notes for graph expansion (p < n)
   k_hop: 3                   # k: k-hop graph expansion
-  graph_threshold: 0.0       # minimum graph score threshold
+  graph_threshold: 0.15       # minimum graph score threshold
   
   # Stage 3: Context Scheduling Parameters
-  final_semantic_count: 2    # x: final semantic results to select
-  final_graph_count: 3       # y: final graph results to select
+  final_semantic_count: 5    # x: final semantic results to select
+  final_graph_count: 10       # y: final graph results to select
   
   # Context Template
   context_template: "Note {note_id}: {content}\n"
@@ -158,6 +159,14 @@ eval:
   batch_size: 16
   
 
+# Summary Auditor Configuration
+summary_auditor:
+  enabled: false                    # 是否启用摘要校验器
+  llm_check_ratio: 0.2            # 控制最多多少比例的数据可触发LLM校验
+  ner_model: "spacy"              # 设置使用的NER工具，可选值为spacy或ltp
+  entity_similarity_threshold: 0.8 # 实体相似度阈值
+  missing_entity_threshold: 0.3    # 缺失实体比例阈值
+  
 # Performance
 performance:
   use_gpu: true

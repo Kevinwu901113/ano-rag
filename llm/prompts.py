@@ -9,12 +9,12 @@ ATOMIC_NOTE_SYSTEM_PROMPT = """
 2. 内容简洁明了，易于理解
 3. 保留关键信息和上下文
 4. 使用结构化的格式
+5. 必须使用英文
 
 请以JSON格式返回，包含以下字段：
 - content: 笔记内容
 - keywords: 关键词列表
 - entities: 实体列表
-- summary: 简要总结
 """
 
 ATOMIC_NOTE_PROMPT = """
@@ -50,15 +50,15 @@ ATOMIC_NOTEGEN_SYSTEM_PROMPT = """
 2. 内容简洁明了，避免冗余
 3. 保留关键信息和必要的上下文
 4. 便于后续的检索和组合
+5. 必须使用英文
 
 提取要求：
-1. content: 提取核心知识点，保持完整性和准确性
-2. summary: 用一句话概括主要内容
-3. keywords: 提取3-5个关键词，有助于检索
-4. entities: 识别人名、地名、机构名、专业术语等
-5. concepts: 识别重要概念和理论
-6. importance_score: 评估内容重要性（0-1分）
-7. note_type: 分类为fact（事实）、concept（概念）、procedure（流程）、example（示例）
+1. content: 提取核心知识点，保持完整性和准确性，包含所有重要信息
+2. keywords: 提取3-5个关键词，有助于检索
+3. entities: 识别人名、地名、机构名、专业术语等
+4. concepts: 识别重要概念和理论
+5. importance_score: 评估内容重要性（0-1分）
+6. note_type: 分类为fact（事实）、concept（概念）、procedure（流程）、example（示例）
 
 重要：你必须严格按照JSON格式返回结果，不要添加任何解释文字或markdown标记。只返回纯JSON对象。
 """
@@ -71,8 +71,7 @@ ATOMIC_NOTEGEN_PROMPT = """
 
 请严格按照以下JSON格式返回，不要添加任何其他文字或解释：
 {{
-    "content": "原子笔记的主要内容",
-    "summary": "简要总结",
+    "content": "原子笔记的完整内容，包含所有重要信息",
     "keywords": ["关键词1", "关键词2"],
     "entities": ["实体1", "实体2"],
     "concepts": ["概念1", "概念2"],
@@ -180,7 +179,8 @@ Requirements:
 3. Answers should be accurate, concise, and well-organized
 4. Do not add information that is not in the context
 5. If the question involves multiple aspects, please answer point by point
-6. IMPORTANT: You MUST respond in Chinese only, regardless of the language of the question
+6. IMPORTANT: You MUST respond in English only, regardless of the language of the question
+7. The output answer only needs to be brief and short, without additional description
 """
 
 FINAL_ANSWER_PROMPT = """

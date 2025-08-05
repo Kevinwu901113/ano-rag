@@ -243,43 +243,114 @@ class EnhancedRelationExtractor:
         return relations
     
     def _select_candidate_pairs_for_llm_analysis(self, atomic_notes: List[Dict[str, Any]]) -> List[Tuple[Dict, Dict]]:
-        """选择候选笔记对进行LLM分析"""
+        """选择候选笔记对进行LLM分析（优化版）"""
         pairs = []
-        max_pairs = self.multi_hop_config.get('llm_relation_extraction', {}).get('max_pairs_per_batch', 50)
+        max_pairs = self.multi_hop_config.get('llm_relation_extraction', {}).get('max_pairs_per_batch', 100)
+        candidate_threshold = 0.2  # 降低阈值以发现更多关系
         
-        # 基于关键词和实体重叠选择候选对
+        # 多维度候选对选择
         for i, note1 in enumerate(atomic_notes):
             for j, note2 in enumerate(atomic_notes[i+1:], i+1):
                 if len(pairs) >= max_pairs:
                     break
                 
-                # 计算初步相关性
-                relevance_score = self._calculate_pair_relevance(note1, note2)
+                # 多维度相关性评估
+                keyword_sim = self._calculate_keyword_similarity(note1, note2)
+                entity_sim = self._calculate_entity_similarity(note1, note2)
+                topic_sim = self._calculate_topic_similarity_enhanced(note1, note2)
+                content_sim = self._calculate_content_similarity(note1, note2)
                 
-                if relevance_score > 0.3:  # 只分析有一定相关性的对
+                # 综合相关性分数
+                relevance_score = (
+                    keyword_sim * 0.3 + 
+                    entity_sim * 0.3 + 
+                    topic_sim * 0.2 +
+                    content_sim * 0.2
+                )
+                
+                if relevance_score > candidate_threshold:
                     pairs.append((note1, note2))
         
         # 按相关性排序，选择最有希望的对
         pairs.sort(key=lambda x: self._calculate_pair_relevance(x[0], x[1]), reverse=True)
         return pairs[:max_pairs]
     
-    def _calculate_pair_relevance(self, note1: Dict[str, Any], note2: Dict[str, Any]) -> float:
-        """计算笔记对的初步相关性"""
-        # 关键词重叠
+    def _calculate_keyword_similarity(self, note1: Dict[str, Any], note2: Dict[str, Any]) -> float:
+        """计算关键词相似性"""
         keywords1 = set(note1.get('keywords', []))
         keywords2 = set(note2.get('keywords', []))
-        keyword_overlap = len(keywords1 & keywords2) / max(len(keywords1 | keywords2), 1)
         
-        # 实体重叠
+        if not keywords1 or not keywords2:
+            return 0.0
+        
+        return len(keywords1 & keywords2) / len(keywords1 | keywords2)
+    
+    def _calculate_entity_similarity(self, note1: Dict[str, Any], note2: Dict[str, Any]) -> float:
+        """计算实体相似性"""
         entities1 = set(note1.get('entities', []))
         entities2 = set(note2.get('entities', []))
-        entity_overlap = len(entities1 & entities2) / max(len(entities1 | entities2), 1)
+        
+        if not entities1 or not entities2:
+            return 0.0
+        
+        return len(entities1 & entities2) / len(entities1 | entities2)
+    
+    def _calculate_topic_similarity_enhanced(self, note1: Dict[str, Any], note2: Dict[str, Any]) -> float:
+        """计算增强的主题相似性"""
+        # 检查cluster_id
+        cluster1 = note1.get('cluster_id')
+        cluster2 = note2.get('cluster_id')
+        
+        if cluster1 is not None and cluster2 is not None and cluster1 == cluster2:
+            return 1.0
+        
+        # 检查topic字段
+        topic1 = note1.get('topic', '')
+        topic2 = note2.get('topic', '')
+        
+        if topic1 and topic2 and topic1 == topic2:
+            return 0.8
+        
+        return 0.0
+    
+    def _calculate_content_similarity(self, note1: Dict[str, Any], note2: Dict[str, Any]) -> float:
+        """计算内容相似性（基于文本重叠）"""
+        content1 = note1.get('content', '').lower()
+        content2 = note2.get('content', '').lower()
+        
+        if not content1 or not content2:
+            return 0.0
+        
+        # 简单的词汇重叠计算
+        words1 = set(content1.split())
+        words2 = set(content2.split())
+        
+        if not words1 or not words2:
+            return 0.0
+        
+        return len(words1 & words2) / len(words1 | words2)
+    
+    def _calculate_pair_relevance(self, note1: Dict[str, Any], note2: Dict[str, Any]) -> float:
+        """计算笔记对的综合相关性分数"""
+        keyword_sim = self._calculate_keyword_similarity(note1, note2)
+        entity_sim = self._calculate_entity_similarity(note1, note2)
+        topic_sim = self._calculate_topic_similarity_enhanced(note1, note2)
+        content_sim = self._calculate_content_similarity(note1, note2)
         
         # 文本长度相似性（避免过短或过长的文本）
         len1, len2 = len(note1.get('content', '')), len(note2.get('content', ''))
         length_similarity = 1 - abs(len1 - len2) / max(len1 + len2, 1)
         
-        return 0.4 * keyword_overlap + 0.4 * entity_overlap + 0.2 * length_similarity
+        # 综合相关性
+        relevance = (
+            keyword_sim * 0.25 + 
+            entity_sim * 0.25 + 
+            topic_sim * 0.25 +
+            content_sim * 0.15 +
+            length_similarity * 0.1
+        )
+        
+        return relevance
     
     def _analyze_relations_batch(self, note_pairs: List[Tuple[Dict, Dict]]) -> List[Dict[str, Any]]:
         """批量分析笔记对的关系"""
@@ -965,43 +1036,100 @@ class EnhancedRelationExtractor:
         return int(rank)
     
     def _filter_and_deduplicate_relations(self, relations: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """过滤和去重关系"""
+        """优化的关系过滤和去重"""
         if not relations:
             return []
         
-        # 去重：基于source_id, target_id, relation_type
-        seen_relations = set()
-        unique_relations = []
-        
+        # 按source_id, target_id, relation_type去重，保留权重最高的
+        unique_relations = {}
         for relation in relations:
             source_id = relation.get('source_id')
             target_id = relation.get('target_id')
             relation_type = relation.get('relation_type')
             
-            # 创建关系键（双向）
-            key1 = (source_id, target_id, relation_type)
-            key2 = (target_id, source_id, relation_type)
-            
-            if key1 not in seen_relations and key2 not in seen_relations:
-                seen_relations.add(key1)
-                unique_relations.append(relation)
+            # 跳过无效的关系
+            if source_id is None or target_id is None or relation_type is None:
+                continue
+                
+            key = (source_id, target_id, relation_type)
+            if key not in unique_relations or relation.get('weight', 0) > unique_relations[key].get('weight', 0):
+                unique_relations[key] = relation
+        
+        filtered_relations = list(unique_relations.values())
+        
+        # 基于关系类型的重要性过滤
+        filtered_relations = self._filter_relations_by_importance(filtered_relations)
         
         # 按权重排序
-        unique_relations.sort(key=lambda x: x.get('weight', 0), reverse=True)
+        filtered_relations.sort(key=lambda x: x.get('weight', 0), reverse=True)
         
-        # 限制每个笔记的最大关系数
-        note_relation_count = defaultdict(int)
+        # 动态限制每个笔记的关系数量（基于笔记重要性）
+        final_relations = self._apply_dynamic_relation_limits(filtered_relations)
+        
+        return final_relations
+    
+    def _filter_relations_by_importance(self, relations: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """基于重要性的关系过滤"""
+        # 按关系类型分组
+        relation_groups = defaultdict(list)
+        for rel in relations:
+            rel_type = rel.get('relation_type')
+            relation_groups[rel_type].append(rel)
+        
         filtered_relations = []
         
-        for relation in unique_relations:
+        # 为不同类型的关系设置不同的保留策略
+        type_limits = {
+            'reference': 100,  # 引用关系最重要
+            'causal': 80,
+            'definition': 60,
+            'entity_coexistence': 50,
+            'temporal': 40,
+            'comparison': 30,
+            'semantic_similarity': 40,
+            'context_relation': 30,
+            'topic_relation': 25,
+            'personal_relation': 70
+        }
+        
+        for rel_type, rels in relation_groups.items():
+            limit = type_limits.get(rel_type, 20)
+            # 按权重排序并取前N个
+            sorted_rels = sorted(rels, key=lambda x: x.get('weight', 0), reverse=True)
+            filtered_relations.extend(sorted_rels[:limit])
+        
+        return filtered_relations
+    
+    def _apply_dynamic_relation_limits(self, relations: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """应用动态关系数量限制"""
+        note_relation_count = defaultdict(int)
+        note_importance = defaultdict(float)
+        
+        # 计算笔记重要性（基于关系数量和权重）
+        for relation in relations:
+            source_id = relation.get('source_id')
+            target_id = relation.get('target_id')
+            weight = relation.get('weight', 0)
+            
+            note_importance[source_id] += weight
+            note_importance[target_id] += weight
+        
+        # 为重要笔记分配更多关系配额
+        final_relations = []
+        for relation in relations:
             source_id = relation.get('source_id')
             target_id = relation.get('target_id')
             
-            if (note_relation_count[source_id] < self.max_relations_per_note and
-                note_relation_count[target_id] < self.max_relations_per_note):
-                
-                filtered_relations.append(relation)
+            # 基于重要性调整限制
+            source_limit = min(self.max_relations_per_note * 2, 
+                             self.max_relations_per_note + int(note_importance[source_id] / 10))
+            target_limit = min(self.max_relations_per_note * 2, 
+                             self.max_relations_per_note + int(note_importance[target_id] / 10))
+            
+            if (note_relation_count[source_id] < source_limit and 
+                note_relation_count[target_id] < target_limit):
+                final_relations.append(relation)
                 note_relation_count[source_id] += 1
                 note_relation_count[target_id] += 1
         
-        return filtered_relations
+        return final_relations

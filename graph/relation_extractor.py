@@ -487,19 +487,21 @@ class RelationExtractor:
         return int(rank)
     
     def _filter_and_deduplicate_relations(self, relations: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """过滤和去重关系"""
+        """优化的关系过滤和去重"""
         if not relations:
             return []
         
-        # 去重：基于source_id, target_id, relation_type
-        seen_relations = set()
-        unique_relations = []
-        
+        # 按source_id, target_id, relation_type去重，保留权重最高的
+        unique_relations = {}
         for relation in relations:
             source_id = relation.get('source_id')
             target_id = relation.get('target_id')
             relation_type = relation.get('relation_type')
             
+            # 跳过无效的关系
+            if source_id is None or target_id is None or relation_type is None:
+                continue
+                
             # 创建标准化的关系键（确保方向一致性）
             if relation_type in ['entity_coexistence', 'semantic_similarity', 'topic_relation', 'personal_relation']:
                 # 这些关系是无向的
@@ -508,31 +510,84 @@ class RelationExtractor:
                 # 有向关系
                 relation_key = (source_id, target_id, relation_type)
             
-            if relation_key not in seen_relations:
-                seen_relations.add(relation_key)
-                unique_relations.append(relation)
+            if relation_key not in unique_relations or relation.get('weight', 0) > unique_relations[relation_key].get('weight', 0):
+                unique_relations[relation_key] = relation
+        
+        filtered_relations = list(unique_relations.values())
+        
+        # 基于关系类型的重要性过滤
+        filtered_relations = self._filter_relations_by_importance(filtered_relations)
         
         # 按权重排序
-        unique_relations.sort(key=lambda x: x.get('weight', 0), reverse=True)
+        filtered_relations.sort(key=lambda x: x.get('weight', 0), reverse=True)
         
-        # 限制每个笔记的关系数量
-        note_relation_counts = defaultdict(int)
+        # 动态限制每个笔记的关系数量
+        final_relations = self._apply_dynamic_relation_limits(filtered_relations)
+        
+        logger.info(f"Filtered relations: {len(final_relations)} from {len(relations)}")
+        return final_relations
+    
+    def _filter_relations_by_importance(self, relations: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """基于重要性的关系过滤"""
+        # 按关系类型分组
+        relation_groups = defaultdict(list)
+        for rel in relations:
+            rel_type = rel.get('relation_type')
+            relation_groups[rel_type].append(rel)
+        
         filtered_relations = []
         
-        for relation in unique_relations:
+        # 为不同类型的关系设置不同的保留策略
+        type_limits = {
+            'reference': 100,  # 引用关系最重要
+            'entity_coexistence': 60,
+            'context_relation': 40,
+            'topic_relation': 30,
+            'semantic_similarity': 50,
+            'personal_relation': 80
+        }
+        
+        for rel_type, rels in relation_groups.items():
+            limit = type_limits.get(rel_type, 25)
+            # 按权重排序并取前N个
+            sorted_rels = sorted(rels, key=lambda x: x.get('weight', 0), reverse=True)
+            filtered_relations.extend(sorted_rels[:limit])
+        
+        return filtered_relations
+    
+    def _apply_dynamic_relation_limits(self, relations: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """应用动态关系数量限制"""
+        note_relation_counts = defaultdict(int)
+        note_importance = defaultdict(float)
+        
+        # 计算笔记重要性（基于关系数量和权重）
+        for relation in relations:
+            source_id = relation.get('source_id')
+            target_id = relation.get('target_id')
+            weight = relation.get('weight', 0)
+            
+            note_importance[source_id] += weight
+            note_importance[target_id] += weight
+        
+        # 为重要笔记分配更多关系配额
+        final_relations = []
+        for relation in relations:
             source_id = relation.get('source_id')
             target_id = relation.get('target_id')
             
-            # 检查关系数量限制
-            if (note_relation_counts[source_id] < self.max_relations_per_note and 
-                note_relation_counts[target_id] < self.max_relations_per_note):
-                
-                filtered_relations.append(relation)
+            # 基于重要性调整限制
+            source_limit = min(self.max_relations_per_note * 2, 
+                             self.max_relations_per_note + int(note_importance[source_id] / 10))
+            target_limit = min(self.max_relations_per_note * 2, 
+                             self.max_relations_per_note + int(note_importance[target_id] / 10))
+            
+            if (note_relation_counts[source_id] < source_limit and 
+                note_relation_counts[target_id] < target_limit):
+                final_relations.append(relation)
                 note_relation_counts[source_id] += 1
                 note_relation_counts[target_id] += 1
         
-        logger.info(f"Filtered relations: {len(filtered_relations)} from {len(relations)}")
-        return filtered_relations
+        return final_relations
     
     def get_relation_statistics(self, relations: List[Dict[str, Any]]) -> Dict[str, Any]:
         """获取关系统计信息"""

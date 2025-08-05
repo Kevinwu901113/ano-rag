@@ -337,21 +337,21 @@ class EnhancedAtomicNoteGenerator:
         for paragraph_text, idx in paragraph_idx_mapping.items():
             match_found = False
             
-            # 1. 直接文本包含检查
-            if paragraph_text in text:
+            # 1. 双向文本包含检查
+            if paragraph_text in text or text in paragraph_text:
                 match_found = True
             
-            # 2. 检查段落的前100个字符是否在文本中
+            # 2. 检查段落的前100个字符是否在文本中，或文本是否在段落中
             elif len(paragraph_text) > 100:
                 prefix = paragraph_text[:100]
-                if prefix in text:
+                if prefix in text or text in paragraph_text:
                     match_found = True
             
             # 3. 按句子分割检查（针对长段落）
             if not match_found:
                 sentences = [s.strip() for s in paragraph_text.split('.') if len(s.strip()) > 30]
                 for sentence in sentences[:3]:  # 只检查前3个句子
-                    if sentence in text:
+                    if sentence in text or text in sentence:
                         match_found = True
                         break
             

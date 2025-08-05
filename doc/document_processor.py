@@ -118,6 +118,18 @@ class DocumentProcessor:
             logger.info("Step 2: Generating atomic notes")
             atomic_notes = self._generate_atomic_notes(all_chunks)
             FileUtils.write_json(atomic_notes, atomic_file)
+            
+            # 保存被标记为需要重写的摘要（如果启用了摘要校验器）
+            summary_auditor_enabled = config.get('summary_auditor.enabled', False)
+            if summary_auditor_enabled:
+                try:
+                    from utils.summary_auditor import SummaryAuditor
+                    auditor = SummaryAuditor()
+                    auditor.save_flagged_summaries(atomic_notes, self.processed_docs_path)
+                except ImportError as e:
+                    logger.warning(f"Failed to import SummaryAuditor: {e}")
+                except Exception as e:
+                    logger.error(f"Failed to save flagged summaries: {e}")
         note_count = len(atomic_notes)
         
         if not atomic_notes:

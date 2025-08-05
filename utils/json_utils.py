@@ -106,9 +106,7 @@ def _extract_fallback_json(text: str) -> str:
         content_match = re.search(r'content[^:]*:[^"]*"([^"]+)"', text, re.IGNORECASE)
         content = content_match.group(1) if content_match else text[:200]
         
-        # 尝试提取summary字段
-        summary_match = re.search(r'summary[^:]*:[^"]*"([^"]+)"', text, re.IGNORECASE)
-        summary = summary_match.group(1) if summary_match else content[:100]
+        # 不再使用summary字段
         
         # 尝试提取keywords字段
         keywords_match = re.search(r'keywords[^:]*:\s*\[([^\]]+)\]', text, re.IGNORECASE)
@@ -129,7 +127,6 @@ def _extract_fallback_json(text: str) -> str:
         # 构建备用JSON
         fallback_data = {
             "content": content,
-            "summary": summary,
             "keywords": keywords,
             "entities": entities,
             "concepts": [],

@@ -14,14 +14,14 @@ class EnhancedNoiseFilter:
         # 评分权重
         self.weights = {
             'importance_score': self.config.get('weights.importance_score', 0.4),
-            'summary_length_score': self.config.get('weights.summary_length_score', 0.3),
+            'content_length_score': self.config.get('weights.content_length_score', 0.3),
             'verified_entity_ratio': self.config.get('weights.verified_entity_ratio', 0.3)
         }
         
         # 阈值设置
         self.usefulness_threshold = self.config.get('usefulness_threshold', 0.65)
         self.min_content_length = self.config.get('min_content_length', 20)
-        self.max_summary_length_for_score = self.config.get('max_summary_length_for_score', 100)
+        self.max_content_length_for_score = self.config.get('max_content_length_for_score', 100)
         
         # 质量指标权重
         self.quality_weights = {
@@ -54,7 +54,6 @@ class EnhancedNoiseFilter:
         """计算笔记的有用性评分"""
         # 获取基础信息
         content = note.get('content', '')
-        summary = note.get('summary', '')
         entities = note.get('entities', [])
         importance_score = note.get('importance_score', 0.5)
         
@@ -62,10 +61,10 @@ class EnhancedNoiseFilter:
         w1 = self.weights['importance_score']
         score1 = float(importance_score)
         
-        # 2. 摘要长度评分
-        w2 = self.weights['summary_length_score']
-        summary_length = len(summary) if summary else len(content)
-        score2 = min(summary_length / self.max_summary_length_for_score, 1.0)
+        # 2. 内容长度评分
+        w2 = self.weights['content_length_score']
+        content_length = len(content)
+        score2 = min(content_length / self.max_content_length_for_score, 1.0)
         
         # 3. 验证实体比例
         w3 = self.weights['verified_entity_ratio']
@@ -81,7 +80,6 @@ class EnhancedNoiseFilter:
     def assess_note_quality(self, note: Dict[str, Any]) -> Dict[str, Any]:
         """全面评估笔记质量"""
         content = note.get('content', '')
-        summary = note.get('summary', '')
         entities = note.get('entities', [])
         
         quality_scores = {}
@@ -99,7 +97,7 @@ class EnhancedNoiseFilter:
         quality_scores['linguistic_quality'] = self._assess_linguistic_quality(content)
         
         # 5. 事实一致性
-        quality_scores['factual_consistency'] = self._assess_factual_consistency(content, summary)
+        quality_scores['factual_consistency'] = self._assess_factual_consistency(content)
         
         # 计算综合质量分数
         overall_quality = sum(
@@ -288,33 +286,21 @@ class EnhancedNoiseFilter:
         
         return min(score, 1.0)
     
-    def _assess_factual_consistency(self, content: str, summary: str) -> float:
+    def _assess_factual_consistency(self, content: str) -> float:
         """评估事实一致性"""
         if not content:
             return 0.0
         
-        if not summary:
-            return 0.7  # 没有摘要时给中等分数
-        
-        # 简单的一致性检查：提取关键实体和数字
+        # 基于内容质量评估一致性
+        # 检查内容中是否有关键实体和数字
         content_entities = set(re.findall(r'\b[A-Z][a-z]+\b', content))
-        summary_entities = set(re.findall(r'\b[A-Z][a-z]+\b', summary))
-        
         content_numbers = set(re.findall(r'\b\d+\b', content))
-        summary_numbers = set(re.findall(r'\b\d+\b', summary))
         
-        # 计算一致性
-        entity_consistency = 1.0
-        if summary_entities:
-            entity_overlap = len(content_entities.intersection(summary_entities))
-            entity_consistency = entity_overlap / len(summary_entities)
+        # 基于内容的丰富程度评估
+        entity_score = min(len(content_entities) / 5, 1.0)  # 假设5个实体为满分
+        number_score = min(len(content_numbers) / 3, 1.0)   # 假设3个数字为满分
         
-        number_consistency = 1.0
-        if summary_numbers:
-            number_overlap = len(content_numbers.intersection(summary_numbers))
-            number_consistency = number_overlap / len(summary_numbers)
-        
-        return (entity_consistency + number_consistency) / 2
+        return (entity_score + number_score) / 2
     
     def _is_obvious_noise(self, note: Dict[str, Any]) -> bool:
         """检查是否为明显的噪声"""

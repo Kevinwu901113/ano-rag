@@ -17,6 +17,8 @@ class AtomicNoteGenerator:
             batch_size=config.get('document.batch_size', 32),
             use_gpu=config.get('performance.use_gpu', True)
         )
+        # 摘要校验器将在需要时动态导入，避免循环导入
+        self.summary_auditor = None
         
     def generate_atomic_notes(self, text_chunks: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """从文本块生成原子笔记"""
@@ -64,6 +66,19 @@ class AtomicNoteGenerator:
             note['note_id'] = f"note_{i:06d}"
             note['created_at'] = self._get_timestamp()
         
+        # 摘要校验：仅在启用时进行
+        if config.get('summary_auditor.enabled', False):
+            try:
+                from utils.summary_auditor import SummaryAuditor
+                logger.info("Starting summary audit for generated atomic notes")
+                auditor = SummaryAuditor()
+                atomic_notes = auditor.batch_audit_summaries(atomic_notes)
+                logger.info("Summary audit completed")
+            except ImportError as e:
+                logger.warning(f"Failed to import SummaryAuditor: {e}")
+            except Exception as e:
+                logger.error(f"Summary audit failed: {e}")
+        
         logger.info(f"Generated {len(atomic_notes)} atomic notes")
         return atomic_notes
     
@@ -106,7 +121,6 @@ class AtomicNoteGenerator:
             atomic_note = {
                 'original_text': text,
                 'content': note_data.get('content', text),
-                'summary': note_data.get('summary', ''),
                 'keywords': self._clean_list(note_data.get('keywords', [])),
                 'entities': self._clean_list(note_data.get('entities', [])),
                 'concepts': self._clean_list(note_data.get('concepts', [])),
@@ -169,7 +183,6 @@ class AtomicNoteGenerator:
                     # 构建最小的有效JSON
                     minimal_json = {
                         "content": content,
-                        "summary": content[:100] if len(content) > 100 else content,
                         "keywords": [],
                         "entities": [],
                         "concepts": [],
@@ -200,7 +213,6 @@ class AtomicNoteGenerator:
         return {
             'original_text': text,
             'content': text,
-            'summary': text[:100] + '...' if len(text) > 100 else text,
             'keywords': [],
             'entities': entities,
             'concepts': [],
@@ -236,26 +248,26 @@ class AtomicNoteGenerator:
         if not paragraph_idx_mapping:
             return relevant_idxs
         
-        # 对于每个段落文本，检查是否在当前chunk的文本中
+        # 对于每个段落文本，检查是否与当前chunk的文本相关
         for paragraph_text, idx in paragraph_idx_mapping.items():
             # 多种匹配策略
             match_found = False
             
-            # 1. 直接文本包含检查
-            if paragraph_text in text:
+            # 1. 双向文本包含检查
+            if paragraph_text in text or text in paragraph_text:
                 match_found = True
             
-            # 2. 检查段落的前100个字符是否在文本中
+            # 2. 检查段落的前100个字符是否在文本中，或文本是否在段落中
             elif len(paragraph_text) > 100:
                 prefix = paragraph_text[:100]
-                if prefix in text:
+                if prefix in text or text in paragraph_text:
                     match_found = True
             
             # 3. 按句子分割检查（针对长段落）
             if not match_found:
                 sentences = [s.strip() for s in paragraph_text.split('.') if len(s.strip()) > 30]
                 for sentence in sentences[:3]:  # 只检查前3个句子
-                    if sentence in text:
+                    if sentence in text or text in sentence:
                         match_found = True
                         break
             

@@ -96,15 +96,15 @@ class DocumentChunker:
         """从字典中提取文本内容"""
         text_parts = []
         
-        # 处理musique数据集格式：包含paragraphs和question字段
-        if 'paragraphs' in data and 'question' in data:
+        # 处理musique数据集格式：包含paragraphs字段（可能包含或不包含question字段）
+        if 'paragraphs' in data:
             # 只提取段落文本，不包含问题部分
             paragraphs = data.get('paragraphs', [])
             for para in paragraphs:
                 if isinstance(para, dict) and 'paragraph_text' in para:
                     text_parts.append(para['paragraph_text'])
             
-            # 注意：不再添加question部分，原子笔记应该只来源于paragraphs
+            # 注意：不添加question部分，原子笔记应该只来源于paragraphs
         else:
             # 常见的文本字段
             text_fields = ['text', 'content', 'body', 'description', 'summary', 'title']

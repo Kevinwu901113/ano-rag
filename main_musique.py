@@ -4,9 +4,12 @@ Musique数据集批量处理脚本
 
 该脚本用于批量处理musique测试集，对每个测试样本：
 1. 提取id、paragraphs、question
-2. 使用paragraphs构建知识库（process阶段）
+2. 将每个段落视为独立文档，使用paragraphs构建知识库（process阶段）
+   - 注意：question字段不参与文档构建过程，确保原子笔记只来源于段落内容
 3. 使用question进行查询（query阶段）
 4. 输出包含predicted_answer、predicted_support_idxs等信息的结果
+
+处理方式符合项目标准：每个段落一个文件，用于构建笔记和图谱。
 """
 
 import argparse
@@ -64,9 +67,12 @@ class MusiqueProcessor:
         logger.info(f"Using base work directory: {self.base_work_dir}")
 
     def _create_paragraph_files(self, item: Dict[str, Any], work_dir: str) -> List[str]:
-        """将item的每个段落保存为独立的JSON文件并返回文件路径列表"""
+        """将item的每个段落保存为独立的JSON文件并返回文件路径列表
+        
+        注意：只保存段落内容，不包含question字段，确保question不参与文档构建过程。
+        每个段落被视为一个独立的文档，用于构建原子笔记和知识图谱。
+        """
         item_id = item.get('id', 'unknown')
-        question = item.get('question', '')
         paragraphs = item.get('paragraphs', [])
 
         file_paths = []
@@ -74,8 +80,13 @@ class MusiqueProcessor:
             idx = para.get('idx', i)
             file_name = f"{item_id}_para_{idx}.json"
             file_path = os.path.join(work_dir, file_name)
+            # 只保存段落信息，不包含question，确保与项目标准一致
+            para_data = {
+                'id': f"{item_id}_para_{idx}",
+                'paragraphs': [para]  # 保持与项目标准一致的结构
+            }
             with open(file_path, 'w', encoding='utf-8') as f:
-                json.dump({'question': question, 'paragraphs': [para]}, f, ensure_ascii=False)
+                json.dump(para_data, f, ensure_ascii=False)
             file_paths.append(file_path)
 
         return file_paths
@@ -318,6 +329,8 @@ def main():
     parser.add_argument('--debug', action='store_true', help='调试模式，保留所有中间文件和工作目录')
     parser.add_argument('--work-dir', help='指定工作目录，如果不指定则自动创建新目录')
     parser.add_argument('--new', action='store_true', help='强制创建新的工作目录')
+    parser.add_argument('--test-auditor', action='store_true', help='测试摘要校验器功能')
+    parser.add_argument('--audit-file', help='指定要审核的原子笔记文件路径')
     
     args = parser.parse_args()
     
@@ -351,6 +364,47 @@ def main():
         log_file = os.path.join(work_dir, 'musique_processing.log')
     
     setup_logging(log_file)
+    
+    # 测试摘要校验器功能
+    if args.test_auditor:
+        if not args.audit_file:
+            logger.error("测试摘要校验器需要指定 --audit-file 参数")
+            return
+        
+        logger.info(f"开始测试摘要校验器，审核文件: {args.audit_file}")
+        try:
+            from utils.summary_auditor import SummaryAuditor
+            auditor = SummaryAuditor()
+        except ImportError as e:
+            logger.error(f"Failed to import SummaryAuditor: {e}")
+            return
+        except Exception as e:
+            logger.error(f"Failed to initialize SummaryAuditor: {e}")
+            return
+        
+        # 读取原子笔记文件
+        try:
+            atomic_notes = FileUtils.read_json(args.audit_file)
+            logger.info(f"加载了 {len(atomic_notes)} 个原子笔记")
+            
+            # 执行批量审核
+            audit_results = auditor.batch_audit_summaries(atomic_notes)
+            
+            # 输出审核结果统计
+            total_notes = len(atomic_notes)
+            flagged_count = sum(1 for note in atomic_notes if note.get('audit_result', {}).get('needs_rewrite', False))
+            
+            logger.info(f"审核完成: 总计 {total_notes} 个笔记，标记需要重写 {flagged_count} 个")
+            logger.info(f"标记率: {flagged_count/total_notes*100:.2f}%")
+            
+            # 保存审核结果
+            output_dir = os.path.dirname(args.audit_file)
+            auditor.save_flagged_summaries(atomic_notes, output_dir)
+            
+        except Exception as e:
+            logger.error(f"测试摘要校验器时出错: {e}")
+        
+        return
     
     # 检查输入文件
     if not os.path.exists(args.input_file):

@@ -222,7 +222,7 @@ class NoteSimilarityCalculator:
             note = candidate['note']
             related_note = {
                 'id': note.get('id', str(hash(note.get('content', '')))),
-                'title': note.get('summary', note.get('content', '')[:50] + '...'),
+                'title': note.get('content', '')[:50] + '...',
                 'similarity': round(candidate['similarity'], 3),
                 'base_similarity': round(candidate['base_similarity'], 3),
                 'entity_similarity': round(candidate['entity_similarity'], 3),
@@ -267,10 +267,7 @@ class NoteSimilarityCalculator:
             if content:
                 texts.append(content)
         
-        if self.use_summary and note.get('summary'):
-            summary = note['summary'].strip()
-            if summary and summary != note.get('content', '').strip():
-                texts.append(summary)
+        # 不再使用summary字段
         
         # 如果都没有，使用关键词
         if not texts and note.get('keywords'):
@@ -285,8 +282,7 @@ class NoteSimilarityCalculator:
     def _get_cache_key(self, note: Dict[str, Any]) -> str:
         """生成缓存键"""
         content = note.get('content', '')
-        summary = note.get('summary', '')
-        return f"{hash(content)}_{hash(summary)}"
+        return f"{hash(content)}"
     
     def compute_similarity_statistics(self, notes: List[Dict[str, Any]]) -> Dict[str, Any]:
         """计算相似度统计信息"""
@@ -344,7 +340,7 @@ class NoteSimilarityCalculator:
             for note in notes:
                 node = {
                     'id': note.get('id', str(hash(note.get('content', '')))),
-                    'title': note.get('summary', note.get('content', '')[:50] + '...'),
+                    'title': note.get('content', '')[:50] + '...',
                     'cluster_id': note.get('cluster_id', -1),
                     'importance_score': note.get('importance_score', 0),
                     'entities': note.get('entities', []),
