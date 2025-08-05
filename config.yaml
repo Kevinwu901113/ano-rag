@@ -108,10 +108,7 @@ context_dispatcher:
   # Stage 3: Context Scheduling Parameters
   final_semantic_count: 5    # x: final semantic results to select
   final_graph_count: 10       # y: final graph results to select
-  
-  # Context Template
-  context_template: "Note {note_id}: {content}\n"
-  
+
 # LLM Configuration
 llm:
   # For atomic note generation and query rewriting
