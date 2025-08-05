@@ -102,7 +102,7 @@ context_dispatcher:
   
   # Stage 2: Graph Expansion Parameters  
   graph_expand_top_p: 5     # p: top-p notes for graph expansion (p < n)
-  k_hop: 3                   # k: k-hop graph expansion
+  k_hop: 4                   # k: k-hop graph expansion
   graph_threshold: 0.15       # minimum graph score threshold
   
   # Stage 3: Context Scheduling Parameters
