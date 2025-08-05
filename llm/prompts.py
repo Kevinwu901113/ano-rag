@@ -1,5 +1,7 @@
 """Centralized prompt templates used across the project."""
 
+from typing import Any, Dict, List
+
 # Atomic note generation
 ATOMIC_NOTE_SYSTEM_PROMPT = """
 你是一个专业的知识提取专家。请将给定的文本块转换为原子笔记。
@@ -191,6 +193,34 @@ User Question: {query}
 
 Please answer the user's question based on the above context information. Your answer must be in English.
 """
+
+# Context note formatting and helpers
+CONTEXT_NOTE_TEMPLATE = (
+    "-----\n"
+    "Note ID: {note_id}\n"
+    "Content: {content}\n"
+    "Keywords: {keywords}\n"
+    "Similarity: {final_similarity:.4f}"
+)
+
+
+def build_context_prompt(notes: List[Dict[str, Any]], question: str) -> str:
+    """Build the final prompt with formatted notes and the user question."""
+    context_parts: List[str] = []
+    for note in notes:
+        keywords = ", ".join(note.get("keywords", [])) if note.get("keywords") else ""
+        similarity = note.get("retrieval_info", {}).get("final_similarity", 0.0)
+        context_parts.append(
+            CONTEXT_NOTE_TEMPLATE.format(
+                note_id=note.get("note_id", ""),
+                content=note.get("content", ""),
+                keywords=keywords,
+                final_similarity=similarity,
+            )
+        )
+
+    context = "\n".join(context_parts)
+    return FINAL_ANSWER_PROMPT.format(context=context, query=question)
 
 EVALUATE_ANSWER_SYSTEM_PROMPT = """
 你是一个专业的答案质量评估专家。请从以下几个维度评估答案的质量：

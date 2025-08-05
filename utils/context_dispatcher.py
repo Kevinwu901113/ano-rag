@@ -12,6 +12,7 @@ import numpy as np
 from config import config
 from vector_store import VectorRetriever
 from graph.graph_retriever import GraphRetriever
+from llm.prompts import CONTEXT_NOTE_TEMPLATE, build_context_prompt
 
 
 class ContextDispatcher:
@@ -42,12 +43,6 @@ class ContextDispatcher:
         # 阶段3：上下文调度参数
         self.final_semantic_count = dispatcher_config.get('final_semantic_count', 8)  # x
         self.final_graph_count = dispatcher_config.get('final_graph_count', 5)  # y
-        
-        # 上下文模板
-        self.context_template = dispatcher_config.get(
-            'context_template',
-            "Note {note_id}: {content}\n"
-        )
         
         # 相似度阈值
         self.semantic_threshold = dispatcher_config.get('semantic_threshold', 0.1)
@@ -86,10 +81,12 @@ class ContextDispatcher:
             semantic_results,
             graph_results
         )
+        final_prompt = build_context_prompt(selected_notes, query)
         logger.info(f"Stage 3 - Context scheduling: {len(selected_notes)} final notes")
-        
+
         return {
             'context': final_context,
+            'prompt': final_prompt,
             'selected_notes': selected_notes,
             'semantic_results': semantic_results,
             'graph_results': graph_results,
@@ -277,10 +274,15 @@ class ContextDispatcher:
             note_id = note.get('note_id', f'note_{i}')
             content = note.get('content', '')
 
+            keywords = ", ".join(note.get('keywords', [])) if note.get('keywords') else ""
+            similarity = note.get('retrieval_info', {}).get('final_similarity', 0.0)
+
             # 使用模板格式化上下文
-            formatted_content = self.context_template.format(
+            formatted_content = CONTEXT_NOTE_TEMPLATE.format(
                 note_id=note_id,
-                content=content
+                content=content,
+                keywords=keywords,
+                final_similarity=similarity,
             )
             context_parts.append(formatted_content)
 
