@@ -82,7 +82,9 @@ class ContextDispatcher:
         
         # 阶段3：上下文调度
         final_context, selected_notes = self._context_scheduling(
-            semantic_results, graph_results
+            query,
+            semantic_results,
+            graph_results
         )
         logger.info(f"Stage 3 - Context scheduling: {len(selected_notes)} final notes")
         
@@ -190,52 +192,100 @@ class ContextDispatcher:
             logger.error(f"Graph expansion recall failed: {e}")
             return []
     
-    def _context_scheduling(self, 
-                          semantic_results: List[Dict[str, Any]], 
-                          graph_results: List[Dict[str, Any]]) -> Tuple[str, List[Dict[str, Any]]]:
+    def _context_scheduling(self,
+                           query: str,
+                           semantic_results: List[Dict[str, Any]],
+                           graph_results: List[Dict[str, Any]]) -> Tuple[str, List[Dict[str, Any]]]:
         """阶段3：上下文调度
-        
+
         从语义和图谱结果中分别选取前x和前y个笔记，合并去重后生成最终上下文
         """
         selected_notes = []
-        
+
         # 选择前x个语义结果
         semantic_selected = semantic_results[:self.final_semantic_count]
         for note in semantic_selected:
             note['selection_reason'] = 'semantic_top'
             selected_notes.append(note)
-        
+
         # 选择前y个图谱结果（去重）
         semantic_note_ids = {note.get('note_id') for note in semantic_selected}
         graph_selected = []
-        
+
         for note in graph_results:
             if len(graph_selected) >= self.final_graph_count:
                 break
-            
+
             note_id = note.get('note_id')
             if note_id and note_id not in semantic_note_ids:
                 note['selection_reason'] = 'graph_expansion'
                 graph_selected.append(note)
                 selected_notes.append(note)
-        
+
         logger.info(f"Selected {len(semantic_selected)} semantic + {len(graph_selected)} graph notes")
-        
-        # 生成最终上下文
+
+        # 计算查询嵌入
+        try:
+            query_embedding = self.vector_retriever.embedding_manager.encode_queries([query])[0]
+        except Exception as e:
+            logger.error(f"Failed to encode query embedding: {e}")
+            query_embedding = np.array([])
+
+        # 计算每个笔记与查询的最终相似度
+        for note in selected_notes:
+            note_id = note.get('note_id')
+            note_embedding = None
+
+            if note_id is not None:
+                idx = self.vector_retriever.note_id_to_index.get(note_id)
+                if (idx is not None and self.vector_retriever.note_embeddings is not None and
+                        idx < len(self.vector_retriever.note_embeddings)):
+                    note_embedding = self.vector_retriever.note_embeddings[idx]
+
+            if note_embedding is None:
+                try:
+                    note_embedding = self.vector_retriever.embedding_manager.encode_atomic_notes([note])[0]
+                except Exception as e:
+                    logger.error(f"Failed to encode note {note_id}: {e}")
+                    note_embedding = np.array([])
+
+            if query_embedding.size > 0 and note_embedding.size > 0:
+                similarity = float(
+                    self.vector_retriever.embedding_manager.compute_similarity(
+                        query_embedding, note_embedding
+                    )[0][0]
+                )
+            else:
+                similarity = 0.0
+
+            if 'retrieval_info' not in note:
+                note['retrieval_info'] = {}
+            note['retrieval_info']['final_similarity'] = similarity
+
+        # 按最终相似度排序
+        selected_notes.sort(
+            key=lambda n: n.get('retrieval_info', {}).get('final_similarity', 0.0),
+            reverse=True
+        )
+
+        # 生成最终上下文并标注排名
         context_parts = []
         for i, note in enumerate(selected_notes, 1):
+            note['final_rank'] = i
+            note['retrieval_info']['final_rank'] = i
+
             note_id = note.get('note_id', f'note_{i}')
             content = note.get('content', '')
-            
+
             # 使用模板格式化上下文
             formatted_content = self.context_template.format(
                 note_id=note_id,
                 content=content
             )
             context_parts.append(formatted_content)
-        
+
         final_context = '\n'.join(context_parts)
-        
+
         return final_context, selected_notes
     
     def get_config_summary(self) -> Dict[str, Any]:
