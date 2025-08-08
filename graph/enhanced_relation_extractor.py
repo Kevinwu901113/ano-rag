@@ -10,6 +10,7 @@ from utils.batch_processor import BatchProcessor
 from utils.json_utils import extract_json_from_response
 from config import config
 from llm import LocalLLM
+from sentence_transformers import SentenceTransformer
 
 class EnhancedRelationExtractor:
     """增强的关系提取器，专门针对多跳推理优化"""
@@ -25,9 +26,12 @@ class EnhancedRelationExtractor:
         self.multi_hop_config = config.get('multi_hop', {})
         self.max_reasoning_hops = self.multi_hop_config.get('max_reasoning_hops', 3)
         self.min_path_confidence = self.multi_hop_config.get('min_path_confidence', 0.6)
-        
+
         # LLM关系提取配置
-        self.llm_extraction_enabled = self.multi_hop_config.get('llm_relation_extraction', {}).get('enabled', True)
+        llm_rel_cfg = self.multi_hop_config.get('llm_relation_extraction', {})
+        self.llm_relation_config = llm_rel_cfg
+        self.llm_extraction_enabled = llm_rel_cfg.get('enabled', True)
+        self.use_fast_model = llm_rel_cfg.get('use_fast_model', False)
 
         # 主题组LLM配置
         self.topic_group_config = self.multi_hop_config.get('topic_group_llm', {})
@@ -35,7 +39,7 @@ class EnhancedRelationExtractor:
 
         # 如果任一LLM相关功能启用，则初始化LLM
         self.llm = None
-        if self.llm_extraction_enabled or self.topic_group_enabled:
+        if ((self.llm_extraction_enabled and not self.use_fast_model) or self.topic_group_enabled):
             self.llm = LocalLLM()
         
         # 批处理器
@@ -83,11 +87,17 @@ class EnhancedRelationExtractor:
         # 在主题关系之后，根据主题组进一步挖掘关系
         group_relations = self._extract_topic_group_relations(atomic_notes)
         all_relations.extend(group_relations)
-        
-        # 2. 智能语义关系提取（使用LLM）
-        if self.llm_extraction_enabled and self.llm:
-            logger.info("Extracting semantic relations with LLM")
-            semantic_relations = self._extract_semantic_relations_with_llm(atomic_notes)
+
+        # 2. 智能语义关系提取
+        if self.llm_extraction_enabled:
+            if self.use_fast_model:
+                logger.info("Extracting semantic relations with fast model")
+                semantic_relations = self._extract_semantic_relations_fast(atomic_notes)
+            elif self.llm:
+                logger.info("Extracting semantic relations with LLM")
+                semantic_relations = self._extract_semantic_relations_with_llm(atomic_notes)
+            else:
+                semantic_relations = []
             all_relations.extend(semantic_relations)
         
         # 3. 推理路径关系提取
@@ -225,6 +235,55 @@ class EnhancedRelationExtractor:
         except Exception as e:
             logger.warning(f"Failed to parse topic group relations: {e}")
             return []
+
+    def _extract_semantic_relations_fast(self, atomic_notes: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """使用本地小模型快速提取语义关系"""
+        if not atomic_notes:
+            return []
+
+        # 延迟加载模型
+        if not hasattr(self, "_fast_model"):
+            model_name = self.llm_relation_config.get(
+                "fast_model_name", "sentence-transformers/distiluse-base-multilingual-cased"
+            )
+            self._fast_model = SentenceTransformer(model_name)
+
+        contents = [note.get("content", "") for note in atomic_notes]
+        note_ids = [note.get("note_id") for note in atomic_notes]
+        embeddings = self._fast_model.encode(contents, convert_to_numpy=True)
+        id_to_emb = {nid: emb for nid, emb in zip(note_ids, embeddings)}
+
+        candidate_pairs = self._select_candidate_pairs_for_llm_analysis(atomic_notes)
+
+        relations = []
+        for note1, note2 in candidate_pairs:
+            emb1 = id_to_emb.get(note1.get("note_id"))
+            emb2 = id_to_emb.get(note2.get("note_id"))
+            if emb1 is None or emb2 is None:
+                continue
+
+            sim = float(np.dot(emb1, emb2) / (np.linalg.norm(emb1) * np.linalg.norm(emb2) + 1e-8))
+
+            # 简单的基于相似度的启发式分类
+            if sim > 0.75:
+                relation_type = "support"
+            elif sim > 0.6:
+                relation_type = "comparison"
+            else:
+                continue
+
+            relations.append({
+                "source_id": note1.get("note_id"),
+                "target_id": note2.get("note_id"),
+                "relation_type": relation_type,
+                "weight": sim,
+                "metadata": {
+                    "similarity": sim,
+                    "extraction_method": "fast_semantic"
+                }
+            })
+
+        return relations
     
     def _extract_semantic_relations_with_llm(self, atomic_notes: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """使用LLM提取语义关系"""
