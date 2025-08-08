@@ -4,7 +4,10 @@ import numpy as np
 from typing import List, Dict, Any, Set, Tuple, Optional
 from collections import defaultdict, Counter
 from loguru import logger
-from utils import TextUtils, GPUUtils, BatchProcessor, extract_json_from_response
+from utils.text_utils import TextUtils
+from utils.gpu_utils import GPUUtils
+from utils.batch_processor import BatchProcessor
+from utils.json_utils import extract_json_from_response
 from config import config
 from llm import LocalLLM
 

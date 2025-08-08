@@ -2,7 +2,7 @@ import json
 from typing import List, Dict, Any, Optional
 from loguru import logger
 from .local_llm import LocalLLM
-from utils import extract_json_from_response
+from utils.json_utils import extract_json_from_response
 from config import config
 from .prompts import (
     QUERY_ANALYSIS_SYSTEM_PROMPT,

@@ -8,7 +8,6 @@ from collections import defaultdict
 
 from config import config
 from .enhanced_ner import EnhancedNER
-from llm import LocalLLM
 
 
 class SummaryAuditor:
@@ -49,9 +48,10 @@ class SummaryAuditor:
         }
     
     @property
-    def llm(self) -> LocalLLM:
+    def llm(self):
         """延迟加载LLM"""
         if self._llm is None:
+            from llm.local_llm import LocalLLM
             self._llm = LocalLLM()
         return self._llm
     

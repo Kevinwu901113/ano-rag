@@ -48,9 +48,9 @@ class BatchProcessor:
                                 item_result = process_func.__self__._generate_single_atomic_note(item, system_prompt)
                                 results.append(item_result)
                             else:
-                                # 对于其他类型的处理函数，仍然包装成列表
-                                item_result = process_func([item], **kwargs)
-                                # 确保item_result是列表，然后扩展到results中
+                                # 对于其他类型的处理函数，直接调用单个item处理
+                                item_result = process_func(item, **kwargs)
+                                # 确保结果被正确添加
                                 if isinstance(item_result, list):
                                     results.extend(item_result)
                                 else:

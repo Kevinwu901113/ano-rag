@@ -1,7 +1,9 @@
-from typing import List, Dict, Any, Optional, Union
+from typing import List, Dict, Any, Union
 from loguru import logger
 from .local_llm import LocalLLM
-from utils import BatchProcessor, TextUtils, extract_json_from_response, clean_control_characters
+from utils.batch_processor import BatchProcessor
+from utils.text_utils import TextUtils
+from utils.json_utils import extract_json_from_response, clean_control_characters
 from config import config
 from .prompts import (
     ATOMIC_NOTEGEN_SYSTEM_PROMPT,
@@ -30,13 +32,34 @@ class AtomicNoteGenerator:
         def process_batch(batch):
             # 检查batch是否是单个item（当batch_processor回退到单个处理时）
             if not isinstance(batch, list):
-                batch = [batch]
+                # 单个item处理，直接返回单个结果而不是列表
+                try:
+                    note = self._generate_single_atomic_note(batch, system_prompt)
+                    return note
+                except Exception as e:
+                    logger.error(f"Failed to generate atomic note: {e}")
+                    return self._create_fallback_note(batch)
             
+            # 批处理多个items
             results = []
             for chunk_data in batch:
                 try:
                     note = self._generate_single_atomic_note(chunk_data, system_prompt)
                     results.append(note)
+                    
+                    # 检查是否有额外的原子笔记需要处理
+                    if '_additional_notes' in chunk_data:
+                        additional_notes = chunk_data.pop('_additional_notes')
+                        for additional_note_data in additional_notes:
+                            try:
+                                # 为每个额外的笔记创建完整的原子笔记
+                                additional_note = self._create_atomic_note_from_data(
+                                    additional_note_data, chunk_data
+                                )
+                                results.append(additional_note)
+                            except Exception as e:
+                                logger.error(f"Failed to process additional note: {e}")
+                                
                 except Exception as e:
                     logger.error(f"Failed to generate atomic note: {e}")
                     # 创建基本的原子笔记
@@ -113,40 +136,65 @@ class AtomicNoteGenerator:
             
             note_data = json.loads(cleaned_response)
             
-            # 提取相关的paragraph idx信息
-            paragraph_idx_mapping = chunk_data.get('paragraph_idx_mapping', {})
-            relevant_idxs = self._extract_relevant_paragraph_idxs(text, paragraph_idx_mapping)
+            # 处理 note_data 的不同类型
+            if isinstance(note_data, list):
+                # 如果是列表，处理所有有效的字典项
+                valid_notes = [item for item in note_data if isinstance(item, dict)]
+                if valid_notes:
+                    logger.info(f"Processing {len(valid_notes)} atomic notes from list")
+                    # 处理第一个笔记，其余的将在后续处理中返回
+                    note_data = valid_notes[0]
+                    # 如果有多个笔记，我们需要特殊处理
+                    if len(valid_notes) > 1:
+                        # 存储额外的笔记以便后续处理
+                        chunk_data['_additional_notes'] = valid_notes[1:]
+                else:
+                    logger.warning("No valid dict found in list, creating fallback note")
+                    return self._create_fallback_note(chunk_data)
+            elif not isinstance(note_data, dict):
+                logger.warning(f"note_data is not a dict or list, got {type(note_data)}: {note_data}")
+                return self._create_fallback_note(chunk_data)
             
-            # 验证和清理数据
-            atomic_note = {
-                'original_text': text,
-                'content': note_data.get('content', text),
-                'keywords': self._clean_list(note_data.get('keywords', [])),
-                'entities': self._clean_list(note_data.get('entities', [])),
-                'concepts': self._clean_list(note_data.get('concepts', [])),
-                'importance_score': float(note_data.get('importance_score', 0.5)),
-                'note_type': note_data.get('note_type', 'fact'),
-                'source_info': chunk_data.get('source_info', {}),
-                'chunk_index': chunk_data.get('chunk_index', 0),
-                'length': len(text),
-                'paragraph_idxs': relevant_idxs  # 添加相关的paragraph idx信息
-            }
-            
-            # 提取额外的实体（如果LLM没有提取到）
-            if not atomic_note['entities']:
-                atomic_note['entities'] = TextUtils.extract_entities(text)
-
-            # 确保包含主要实体
-            primary_entity = chunk_data.get('primary_entity')
-            if primary_entity and primary_entity not in atomic_note['entities']:
-                atomic_note['entities'].insert(0, primary_entity)
-
-            return atomic_note
+            # 使用统一的方法创建原子笔记
+            return self._create_atomic_note_from_data(note_data, chunk_data)
             
         except (json.JSONDecodeError, ValueError) as e:
             logger.warning(f"Failed to parse JSON response: {e}. Response: {response[:200]}...")
             return self._create_fallback_note(chunk_data)
     
+    def _create_atomic_note_from_data(self, note_data: Dict[str, Any], chunk_data: Dict[str, Any]) -> Dict[str, Any]:
+        """从note_data和chunk_data创建完整的原子笔记"""
+        text = chunk_data.get('text', '')
+        
+        # 提取相关的paragraph idx信息
+        paragraph_idx_mapping = chunk_data.get('paragraph_idx_mapping', {})
+        relevant_idxs = self._extract_relevant_paragraph_idxs(text, paragraph_idx_mapping)
+        
+        # 验证和清理数据
+        atomic_note = {
+            'original_text': text,
+            'content': note_data.get('content', text),
+            'keywords': self._clean_list(note_data.get('keywords', [])),
+            'entities': self._clean_list(note_data.get('entities', [])),
+            'concepts': self._clean_list(note_data.get('concepts', [])),
+            'importance_score': float(note_data.get('importance_score', 0.5)),
+            'note_type': note_data.get('note_type', 'fact'),
+            'source_info': chunk_data.get('source_info', {}),
+            'chunk_index': chunk_data.get('chunk_index', 0),
+            'length': len(text),
+            'paragraph_idxs': relevant_idxs
+        }
+        
+        # 提取额外的实体（如果LLM没有提取到）
+        if not atomic_note['entities']:
+            atomic_note['entities'] = TextUtils.extract_entities(text)
+        
+        # 确保包含主要实体
+        primary_entity = chunk_data.get('primary_entity')
+        if primary_entity and primary_entity not in atomic_note['entities']:
+            atomic_note['entities'].insert(0, primary_entity)
+        
+        return atomic_note
     
     def _try_fix_truncated_json(self, response: str) -> str:
         """尝试修复截断的JSON响应"""

@@ -1,7 +1,9 @@
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Union
 from loguru import logger
 from .local_llm import LocalLLM
-from utils import BatchProcessor, TextUtils, extract_json_from_response, clean_control_characters
+from utils.batch_processor import BatchProcessor
+from utils.text_utils import TextUtils
+from utils.json_utils import extract_json_from_response, clean_control_characters
 from utils.note_validator import NoteValidator
 from utils.enhanced_ner import EnhancedNER
 from utils.enhanced_relation_extractor import EnhancedRelationExtractor
@@ -34,10 +36,10 @@ class EnhancedAtomicNoteGenerator:
         self.validator = NoteValidator() if enable_validation else None
         
         # 增强组件
-        self.enhanced_ner = EnhancedNER(self.config.get('ner', {}))
-        self.relation_extractor = EnhancedRelationExtractor(self.config.get('relation_extraction', {}))
-        self.noise_filter = EnhancedNoiseFilter(self.config.get('noise_filter', {}))
-        self.similarity_calculator = NoteSimilarityCalculator(self.config.get('similarity', {}))
+        self.enhanced_ner = EnhancedNER()
+        self.relation_extractor = EnhancedRelationExtractor()
+        self.noise_filter = EnhancedNoiseFilter()
+        self.similarity_calculator = NoteSimilarityCalculator()
         
         # 功能开关
         self.enable_enhanced_ner = self.config.get('enable_enhanced_ner', True)
@@ -287,8 +289,15 @@ class EnhancedAtomicNoteGenerator:
             logger.warning(f"Failed to parse JSON response: {e}. Response: {response[:200]}...")
             return self._create_fallback_note(chunk_data)
     
-    def _create_fallback_note(self, chunk_data: Dict[str, Any]) -> Dict[str, Any]:
+    def _create_fallback_note(self, chunk_data: Union[Dict[str, Any], Any]) -> Dict[str, Any]:
         """创建备用的原子笔记（当LLM生成失败时）"""
+        # 确保 chunk_data 是字典类型
+        if not isinstance(chunk_data, dict):
+            if isinstance(chunk_data, str):
+                chunk_data = {'text': chunk_data}
+            else:
+                chunk_data = {'text': str(chunk_data)}
+        
         text = chunk_data.get('text', '')
         primary_entity = chunk_data.get('primary_entity')
         entities = TextUtils.extract_entities(text)

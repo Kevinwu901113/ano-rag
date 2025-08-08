@@ -3,7 +3,8 @@ from transformers import AutoTokenizer, AutoModelForCausalLM, pipeline
 from typing import List, Dict, Any, Optional
 from loguru import logger
 from config import config
-from utils import BatchProcessor, extract_json_from_response
+from utils.batch_processor import BatchProcessor
+from utils.json_utils import extract_json_from_response
 from .ollama_client import OllamaClient
 from .prompts import (
     ATOMIC_NOTE_SYSTEM_PROMPT,
