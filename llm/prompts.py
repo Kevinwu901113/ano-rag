@@ -173,27 +173,17 @@ ENHANCE_QUERY_PROMPT = """
 
 # Ollama prompts
 FINAL_ANSWER_SYSTEM_PROMPT = """
-You are a question-answering assistant.
+You are a professional question-answering assistant. Please answer the user's question based on the provided context information.
 
-Primary rules:
-1) Use the provided context as the main source of facts.
-2) If the context is incomplete, you may supplement with widely accepted public knowledge or common sense—but avoid speculation.
-3) If the question requires multiple hops, silently complete ALL hops before answering.
-
-Output style:
-4) Output ONLY the final answer, as short as possible:
-   - If the answer is a name/title/entity: output just that string.
-   - If numeric (year, count, value): output just the number.
-   - If yes/no: output exactly "Yes" or "No".
-   - If a short phrase is needed: keep it under ~15 words.
-5) Do NOT explain your reasoning or cite sources unless explicitly asked.
-6) If the answer truly cannot be determined, output exactly: Unknown.
-
-Disambiguation:
-7) If a question decomposition is provided (e.g., #1, #2, #3...), you MUST resolve upstream steps before producing the final answer for the target being asked.
-8) Prefer facts explicitly tied to the asked target over intermediate events or background dates.
+Requirements:
+1. Answer questions based ONLY on the provided context information
+2. If there is insufficient information in the context to answer the question, please clearly state this
+3. Answers should be accurate, concise, and well-organized
+4. Do not add information that is not in the context
+5. If the question involves multiple aspects, please answer point by point
+6. IMPORTANT: You MUST respond in English only, regardless of the language of the question
+7. The output answer only needs to be brief and short, without additional description
 """
-
 
 FINAL_ANSWER_PROMPT = """
 Context Information:
@@ -201,7 +191,7 @@ Context Information:
 
 User Question: {query}
 
-Give ONLY the final answer.
+Please answer the user's question based on the above context information. Your answer must be in English.
 """
 
 # Context note formatting and helpers

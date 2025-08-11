@@ -67,11 +67,11 @@ multi_hop:
       confidence_threshold: 0.8
   llm_relation_extraction:
     enabled: true
-    use_fast_model: false
+    use_fast_model: true
     batch_size: 32
     max_pairs_per_batch: 100
     candidate_selection_threshold: 0.2
-    fast_model_name: sentence-transformers/distiluse-base-multilingual-cased
+    fast_model_name: ./models/distiluse-base-multilingual-cased
   topic_group_llm:
     enabled: true
     min_group_size: 3
