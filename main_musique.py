@@ -201,6 +201,13 @@ class MusiqueProcessor:
         """批量处理musique数据集"""
         logger.info(f"Starting batch processing of {input_file}")
         
+        # 预先初始化EmbeddingManager以避免并行处理时的模型加载冲突
+        if parallel:
+            logger.info("Pre-initializing EmbeddingManager for parallel processing...")
+            from vector_store.embedding_manager import EmbeddingManager
+            embedding_manager = EmbeddingManager()
+            logger.info("EmbeddingManager pre-initialization completed")
+        
         # 读取输入数据
         if input_file.endswith('.jsonl'):
             with open(input_file, 'r', encoding='utf-8') as f:

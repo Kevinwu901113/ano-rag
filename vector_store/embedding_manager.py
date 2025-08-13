@@ -10,38 +10,61 @@ from config import config
 class EmbeddingManager:
     """嵌入管理器，专注于本地模型加载"""
     
+    _instance = None
+    _model_loaded = False
+    _lock = None
+    
+    def __new__(cls):
+        if cls._instance is None:
+            cls._instance = super(EmbeddingManager, cls).__new__(cls)
+            import threading
+            cls._lock = threading.Lock()
+        return cls._instance
+    
     def __init__(self):
-        # 配置参数
-        self.model_name = config.get('embedding.model_name', 'BAAI/bge-m3')
-        self.batch_size = config.get('embedding.batch_size', 32)
-        self.device = GPUUtils.get_device()
-        self.max_length = config.get('embedding.max_length', 512)
-        self.normalize_embeddings = config.get('embedding.normalize', True)
-        
-        # 初始化模型
-        self.model = None
-        self.embedding_dim = None
-        self._load_local_model()
-        
-        # 批处理器
-        self.batch_processor = BatchProcessor(
-            batch_size=self.batch_size,
-            use_gpu=config.get('performance.use_gpu', True)
-        )
-        
-        # 缓存路径
-        self.cache_dir = config.get('storage.embedding_cache_path')
-        if not self.cache_dir:
-            work_dir = config.get('storage.work_dir')
-            if work_dir:
-                self.cache_dir = os.path.join(work_dir, 'embeddings')
-            else:
-                # 使用临时目录避免在项目根目录创建data文件夹
-                import tempfile
-                self.cache_dir = os.path.join(tempfile.gettempdir(), 'anorag_embeddings')
-        FileUtils.ensure_dir(self.cache_dir)
-        
-        logger.info(f"EmbeddingManager initialized with model: {self.model_name}, device: {self.device}")
+        # 如果模型已经加载，直接返回
+        if self._model_loaded:
+            return
+            
+        with self._lock:
+            # 双重检查锁定模式
+            if self._model_loaded:
+                return
+                
+            # 配置参数
+            self.model_name = config.get('embedding.model_name', 'BAAI/bge-m3')
+            self.batch_size = config.get('embedding.batch_size', 32)
+            self.device = GPUUtils.get_device()
+            self.max_length = config.get('embedding.max_length', 512)
+            self.normalize_embeddings = config.get('embedding.normalize', True)
+            
+            # 初始化模型
+            self.model = None
+            self.embedding_dim = None
+            self._load_local_model()
+            
+            # 批处理器
+            self.batch_processor = BatchProcessor(
+                batch_size=self.batch_size,
+                use_gpu=config.get('performance.use_gpu', True)
+            )
+            
+            # 缓存路径
+            self.cache_dir = config.get('storage.embedding_cache_path')
+            if not self.cache_dir:
+                work_dir = config.get('storage.work_dir')
+                if work_dir:
+                    self.cache_dir = os.path.join(work_dir, 'embeddings')
+                else:
+                    # 使用临时目录避免在项目根目录创建data文件夹
+                    import tempfile
+                    self.cache_dir = os.path.join(tempfile.gettempdir(), 'anorag_embeddings')
+            FileUtils.ensure_dir(self.cache_dir)
+            
+            logger.info(f"EmbeddingManager initialized with model: {self.model_name}, device: {self.device}")
+            
+            # 标记模型已加载
+            EmbeddingManager._model_loaded = True
     
     def _load_local_model(self):
         """专门加载本地模型"""
