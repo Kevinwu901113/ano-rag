@@ -16,7 +16,7 @@ import argparse
 import json
 import os
 import shutil
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from tqdm import tqdm
 from loguru import logger
@@ -25,6 +25,7 @@ from doc import DocumentProcessor
 from query import QueryProcessor
 from config import config
 from utils import FileUtils, setup_logging
+from llm import LocalLLM
 
 
 RESULT_ROOT = config.get('storage.result_root', 'result')
@@ -59,11 +60,12 @@ def create_item_workdir(base_work_dir: str, item_id: str) -> str:
 
 class MusiqueProcessor:
     """Musique数据集处理器"""
-    
-    def __init__(self, max_workers: int = 4, debug: bool = False, work_dir: str = None):
+
+    def __init__(self, max_workers: int = 4, debug: bool = False, work_dir: str = None, llm: Optional[LocalLLM] = None):
         self.max_workers = max_workers
         self.debug = debug  # 调试模式，不清理中间文件
         self.base_work_dir = work_dir or create_new_workdir()
+        self.llm = llm or LocalLLM()
         logger.info(f"Using base work directory: {self.base_work_dir}")
 
     def _create_paragraph_files(self, item: Dict[str, Any], work_dir: str) -> List[str]:
@@ -103,7 +105,7 @@ class MusiqueProcessor:
             paragraph_files = self._create_paragraph_files(item, work_dir)
 
             # 2. 处理文档（构建知识库）
-            processor = DocumentProcessor(output_dir=work_dir)
+            processor = DocumentProcessor(output_dir=work_dir, llm=self.llm)
             process_result = processor.process_documents(paragraph_files, force_reprocess=True, output_dir=work_dir)
             
             if not process_result.get('atomic_notes'):
@@ -134,7 +136,8 @@ class MusiqueProcessor:
                 atomic_notes,
                 embeddings,
                 graph_file=graph_file if os.path.exists(graph_file) else None,
-                vector_index_file=None  # 不使用预构建的向量索引
+                vector_index_file=None,  # 不使用预构建的向量索引
+                llm=self.llm
             )
             
             # 4. 执行查询

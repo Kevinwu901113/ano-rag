@@ -8,6 +8,7 @@ from config import config
 from query import QueryProcessor
 from utils import FileUtils, setup_logging
 from loguru import logger
+from llm import LocalLLM
 
 
 RESULT_ROOT = config.get('storage.result_root', 'result')
@@ -50,7 +51,8 @@ def process_docs(args):
     setup_logging(os.path.join(work_dir, 'ano-rag.log'))
     logger.info(f"Using work dir: {work_dir}")
 
-    processor = DocumentProcessor(output_dir=work_dir)
+    llm = LocalLLM()
+    processor = DocumentProcessor(output_dir=work_dir, llm=llm)
 
     extensions = [".json", ".jsonl", ".docx"]
     src_dir = cfg.get('storage', {}).get('source_docs_dir', 'data')
@@ -100,11 +102,13 @@ def query_mode(args):
         except Exception as e:
             logger.warning(f'Failed to load embeddings: {e}')
 
+    llm = LocalLLM()
     processor = QueryProcessor(
         notes,
         embeddings,
         graph_file=graph_file if os.path.exists(graph_file) else None,
         vector_index_file=vector_index_file if vector_index_file and os.path.exists(vector_index_file) else None,
+        llm=llm,
     )
     output = processor.process(args.query)
     print(output['answer'])

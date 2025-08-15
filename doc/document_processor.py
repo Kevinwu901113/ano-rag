@@ -17,8 +17,8 @@ from graph import GraphBuilder
 
 class DocumentProcessor:
     """文档处理器主类，整合所有文档处理功能"""
-    
-    def __init__(self, output_dir: Optional[str] = None):
+
+    def __init__(self, output_dir: Optional[str] = None, llm: Optional[LocalLLM] = None):
         # 初始化组件
         self.chunker = DocumentChunker()
         self.clustering = TopicClustering()
@@ -31,7 +31,7 @@ class DocumentProcessor:
             if work_dir:
                 cache_dir = os.path.join(work_dir, 'cache')
         self.incremental_processor = IncrementalProcessor(cache_dir=cache_dir)
-        self.llm = LocalLLM()
+        self.llm = llm or LocalLLM()
         self.atomic_note_generator = AtomicNoteGenerator(self.llm)
         self.batch_processor = BatchProcessor(
             batch_size=config.get('document.batch_size', 32),
