@@ -17,7 +17,15 @@ from .prompts import (
 class LocalLLM:
     """本地LLM类，用于原子笔记生成和查询重写等任务"""
     
-    def __init__(self, model_name: str = None, device: str = None):
+    def __init__(self, model_name: str = None, device: str = None, base_url: str | None = None):
+        """初始化本地LLM
+
+        Args:
+            model_name: 指定模型名称
+            device: 指定运行设备
+            base_url: Ollama服务的基础URL，可用于指定不同端口
+        """
+
         # 获取provider配置
         self.provider = config.get('llm.local_model.provider', 'ollama')
         
@@ -34,6 +42,8 @@ class LocalLLM:
         self.device = device or config.get('llm.local_model.device', 'auto')
         self.temperature = config.get('llm.local_model.temperature') or config.get(f'{config_section}.temperature', 0.1)
         self.max_tokens = config.get('llm.local_model.max_tokens') or config.get(f'{config_section}.max_tokens', 2048)
+        # 允许通过参数覆盖Ollama的base_url，以支持多端口并行
+        self.base_url = base_url or config.get('llm.ollama.base_url', 'http://localhost:11434')
         
         self.tokenizer = None
         self.model = None
@@ -46,7 +56,9 @@ class LocalLLM:
         self.is_openai_model = (self.provider == 'openai')
         self.is_ollama_model = (self.provider == 'ollama')
         
-        logger.info(f"Initialized LocalLLM with provider: {self.provider}, model: {self.model_name}")
+        logger.info(
+            f"Initialized LocalLLM with provider: {self.provider}, model: {self.model_name}, base_url: {self.base_url}"
+        )
         
     def load_model(self):
         """加载模型"""
@@ -54,9 +66,8 @@ class LocalLLM:
             logger.info(f"Loading model: {self.model_name}")
             
             if self.is_ollama_model:
-                # 使用Ollama客户端，从ollama配置段获取参数
-                base_url = config.get('llm.ollama.base_url', 'http://localhost:11434')
-                self.ollama_client = OllamaClient(base_url=base_url, model=self.model_name)
+                # 使用Ollama客户端，可指定不同的base_url
+                self.ollama_client = OllamaClient(base_url=self.base_url, model=self.model_name)
                 
                 # 直接测试连接和生成能力，避免递归调用
                 max_retries = 3
