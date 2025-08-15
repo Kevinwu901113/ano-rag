@@ -3,7 +3,7 @@ from loguru import logger
 import os
 import numpy as np
 
-from llm import QueryRewriter, OllamaClient
+from llm import QueryRewriter, OllamaClient, LocalLLM
 from vector_store import VectorRetriever, EnhancedRecallOptimizer
 from graph.graph_builder import GraphBuilder
 from graph.graph_index import GraphIndex
@@ -31,8 +31,9 @@ class QueryProcessor:
         embeddings=None,
         graph_file: Optional[str] = None,
         vector_index_file: Optional[str] = None,
+        llm: Optional[LocalLLM] = None,
     ):
-        self.rewriter = QueryRewriter()
+        self.rewriter = QueryRewriter(llm=llm)
         self.vector_retriever = VectorRetriever()
         if vector_index_file and os.path.exists(vector_index_file):
             try:
