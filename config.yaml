@@ -121,6 +121,7 @@ llm:
     
   # Ollama Configuration
   ollama:
+    # 单实例配置（向后兼容）
     base_url: "http://localhost:11434"
     model: "gpt-oss:latest"
     temperature: 0.7
@@ -129,6 +130,22 @@ llm:
     num_ctx: 32768          # Context window size
     max_async: 8            # Max concurrent requests
     timeout: 60             # Request timeout in seconds
+    
+    # 多实例配置（用于提升并行效率）
+    multiple_instances:
+      enabled: false         # 是否启用多实例负载均衡
+      instances:
+        - base_url: "http://localhost:11434"
+          model: "gpt-oss:latest"
+        - base_url: "http://localhost:11435"
+          model: "gpt-oss:latest"
+        - base_url: "http://localhost:11436"
+          model: "gpt-oss:latest"
+        - base_url: "http://localhost:11437"
+          model: "gpt-oss:latest"
+      load_balancing: "round_robin"  # 负载均衡策略: round_robin, random, least_busy
+      health_check_interval: 30      # 健康检查间隔（秒）
+      max_retries_per_instance: 2    # 每个实例的最大重试次数
     
   # OpenAI API Configuration
   openai:

@@ -94,7 +94,7 @@ class AtomicNoteGenerator:
             try:
                 from utils.summary_auditor import SummaryAuditor
                 logger.info("Starting summary audit for generated atomic notes")
-                auditor = SummaryAuditor()
+                auditor = SummaryAuditor(llm=self.llm)
                 atomic_notes = auditor.batch_audit_summaries(atomic_notes)
                 logger.info("Summary audit completed")
             except ImportError as e:

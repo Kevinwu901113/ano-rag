@@ -17,10 +17,10 @@ except Exception:  # pragma: no cover - optional dependency
 
 class GraphBuilder:
     """Builds a knowledge graph from atomic notes and relations."""
-    def __init__(self):
+    def __init__(self, llm=None):
         use_enhanced = config.get('multi_hop.enabled', False) and ENHANCED_AVAILABLE
         if use_enhanced:
-            self.relation_extractor = EnhancedRelationExtractor()
+            self.relation_extractor = EnhancedRelationExtractor(llm=llm)
         else:
             self.relation_extractor = RelationExtractor()
 

@@ -351,7 +351,7 @@ def main():
         work_dir = args.work_dir
         os.makedirs(work_dir, exist_ok=True)
     else:
-        work_dir = create_new_workdir()  # 确保总是有工作目录
+        work_dir = get_latest_workdir()  # 使用最新的工作目录继续任务
     
     # 将所有输出文件路径调整到工作目录内
     if not os.path.isabs(args.output_file):
@@ -384,7 +384,9 @@ def main():
         logger.info(f"开始测试摘要校验器，审核文件: {args.audit_file}")
         try:
             from utils.summary_auditor import SummaryAuditor
-            auditor = SummaryAuditor()
+            # 为测试功能创建 LocalLLM 实例
+            test_llm = LocalLLM()
+            auditor = SummaryAuditor(llm=test_llm)
         except ImportError as e:
             logger.error(f"Failed to import SummaryAuditor: {e}")
             return
@@ -426,11 +428,17 @@ def main():
     logger.info(f"Atomic notes file: {atomic_notes_file}")
     logger.info(f"Log file: {log_file}")
     
+    # 创建共享的 LocalLLM 实例
+    logger.info("Initializing shared LocalLLM instance...")
+    shared_llm = LocalLLM()
+    logger.info("LocalLLM instance initialized successfully")
+    
     # 创建处理器并开始处理
     processor = MusiqueProcessor(
         max_workers=args.workers,
         debug=args.debug,
-        work_dir=work_dir
+        work_dir=work_dir,
+        llm=shared_llm
     )
     processor.process_dataset(
         args.input_file, 

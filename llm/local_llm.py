@@ -6,6 +6,7 @@ from config import config
 from utils.batch_processor import BatchProcessor
 from utils.json_utils import extract_json_from_response
 from .ollama_client import OllamaClient
+from .multi_ollama_client import MultiOllamaClient
 from .openai_client import OpenAIClient
 from .prompts import (
     ATOMIC_NOTE_SYSTEM_PROMPT,
@@ -54,9 +55,9 @@ class LocalLLM:
             logger.info(f"Loading model: {self.model_name}")
             
             if self.is_ollama_model:
-                # 使用Ollama客户端，从ollama配置段获取参数
+                # 使用多实例Ollama客户端，支持负载均衡
                 base_url = config.get('llm.ollama.base_url', 'http://localhost:11434')
-                self.ollama_client = OllamaClient(base_url=base_url, model=self.model_name)
+                self.ollama_client = MultiOllamaClient(base_url=base_url, model=self.model_name)
                 
                 # 直接测试连接和生成能力，避免递归调用
                 max_retries = 3
@@ -236,7 +237,7 @@ class LocalLLM:
                 # 避免递归调用load_model，直接创建临时客户端检查
                 if self.ollama_client is None:
                     base_url = config.get('llm.ollama.base_url', 'http://localhost:11434')
-                    temp_client = OllamaClient(base_url=base_url, model=self.model_name)
+                    temp_client = MultiOllamaClient(base_url=base_url, model=self.model_name)
                     return temp_client.is_available()
                 return self.ollama_client.is_available()
             elif self.is_openai_model:

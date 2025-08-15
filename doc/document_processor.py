@@ -38,7 +38,7 @@ class DocumentProcessor:
             use_gpu=config.get('performance.use_gpu', True)
         )
         self.embedding_manager = EmbeddingManager()
-        self.graph_builder = GraphBuilder()
+        self.graph_builder = GraphBuilder(llm=self.llm)
         
         # 存储路径，默认使用配置中的工作目录
         self.processed_docs_path = output_dir or config.get('storage.work_dir') or config.get('storage.processed_docs_path', './data/processed')
@@ -124,7 +124,7 @@ class DocumentProcessor:
             if summary_auditor_enabled:
                 try:
                     from utils.summary_auditor import SummaryAuditor
-                    auditor = SummaryAuditor()
+                    auditor = SummaryAuditor(llm=self.llm)
                     auditor.save_flagged_summaries(atomic_notes, self.processed_docs_path)
                 except ImportError as e:
                     logger.warning(f"Failed to import SummaryAuditor: {e}")

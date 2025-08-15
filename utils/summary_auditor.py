@@ -17,7 +17,7 @@ class SummaryAuditor:
     阶段二（精准判断）：当第一阶段发现疑似丢失信息时，调用LLM进一步判断
     """
     
-    def __init__(self):
+    def __init__(self, llm=None):
         self.config = config.get('summary_auditor', {})
         self.enabled = self.config.get('enabled', True)
         self.llm_check_ratio = self.config.get('llm_check_ratio', 0.2)
@@ -37,7 +37,7 @@ class SummaryAuditor:
             self.ner = EnhancedNER()
         
         # 初始化LLM（延迟加载）
-        self._llm = None
+        self._llm = llm
         
         # 统计信息
         self.audit_stats = {

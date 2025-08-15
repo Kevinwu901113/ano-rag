@@ -12,7 +12,7 @@ from sentence_transformers import SentenceTransformer
 class EnhancedRelationExtractor:
     """增强的关系提取器，专门针对多跳推理优化"""
     
-    def __init__(self):
+    def __init__(self, llm=None):
         # 基础配置
         self.similarity_threshold = config.get('graph.similarity_threshold', 0.6)  # 降低阈值
         self.entity_cooccurrence_threshold = config.get('graph.entity_cooccurrence_threshold', 2)
@@ -35,9 +35,10 @@ class EnhancedRelationExtractor:
         self.topic_group_enabled = self.topic_group_config.get('enabled', False)
 
         # 如果任一LLM相关功能启用，则初始化LLM
-        self.llm = None
         if ((self.llm_extraction_enabled and not self.use_fast_model) or self.topic_group_enabled):
-            self.llm = LocalLLM()
+            self.llm = llm or LocalLLM()
+        else:
+            self.llm = llm
         
         # 批处理器
         self.batch_processor = BatchProcessor(
