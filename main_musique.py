@@ -37,7 +37,13 @@ def get_latest_workdir() -> str:
     subdirs = [d for d in os.listdir(RESULT_ROOT) if os.path.isdir(os.path.join(RESULT_ROOT, d))]
     if not subdirs:
         return create_new_workdir()
-    latest = sorted(subdirs)[-1]
+    # 按数字排序而不是字符串排序，确保21排在9后面
+    numeric_subdirs = [d for d in subdirs if d.isdigit()]
+    if numeric_subdirs:
+        latest = str(max(int(d) for d in numeric_subdirs))
+    else:
+        # 如果没有纯数字目录，回退到字符串排序
+        latest = sorted(subdirs)[-1]
     return os.path.join(RESULT_ROOT, latest)
 
 
