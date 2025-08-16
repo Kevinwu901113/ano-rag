@@ -45,6 +45,10 @@ for ((i=0; i<$NUM_INSTANCES; i++)); do
     echo "启动Ollama实例 $((i+1))/$NUM_INSTANCES 在端口 $PORT..."
     
     # 设置环境变量并启动ollama服务
+    # 设置GPU环境变量以确保使用GPU加速
+    export CUDA_VISIBLE_DEVICES="0,1"
+    export OLLAMA_GPU_LAYERS=999
+    export OLLAMA_NUM_PARALLEL=1
     OLLAMA_HOST="0.0.0.0:$PORT" nohup ollama serve > "$LOG_FILE" 2>&1 &
     
     # 记录进程ID

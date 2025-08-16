@@ -105,22 +105,88 @@ llm:
 - **自动恢复**：故障实例恢复后会重新加入负载均衡
 - **重试机制**：请求失败时会自动重试其他实例
 
-## 管理脚本
+## 脚本使用
 
-### 启动实例
+### 统一管理工具（推荐）
+
+使用 `ollama_manager.sh` 统一管理所有Ollama实例：
+
 ```bash
-./scripts/start_multiple_ollama.sh [实例数] [起始端口] [模型名]
+# 查看帮助
+./scripts/ollama_manager.sh help
+
+# 启动4个实例
+./scripts/ollama_manager.sh start 4
+
+# 快速并行下载模型（推荐）
+./scripts/ollama_manager.sh quick-download 4 11434 gpt-oss:latest
+
+# 重启并完整配置实例
+./scripts/ollama_manager.sh restart 4
+
+# 检查状态
+./scripts/ollama_manager.sh status
+
+# 停止所有实例
+./scripts/ollama_manager.sh stop
+
+# 测试模型
+./scripts/ollama_manager.sh test 11434 gpt-oss:latest
+
+# 查看日志
+./scripts/ollama_manager.sh logs 11434
+
+# 清理临时文件
+./scripts/ollama_manager.sh cleanup
 ```
 
-### 停止所有实例
+### 单独脚本使用
+
+#### 启动实例
+```bash
+./scripts/start_multiple_ollama.sh [实例数] [起始端口] [模型名]
+
+# 启动4个实例，从端口11434开始，使用gpt-oss:latest模型
+./scripts/start_multiple_ollama.sh 4 11434 gpt-oss:latest
+
+# 使用默认参数（4个实例，端口11434-11437，gpt-oss:latest模型）
+./scripts/start_multiple_ollama.sh
+```
+
+#### 停止所有实例
 ```bash
 ./scripts/stop_multiple_ollama.sh
 ```
 
-### 检查状态
+##### 检查状态
 ```bash
 ./scripts/check_ollama_status.sh
 ```
+
+#### 下载模型
+
+**串行下载（稳定但较慢）：**
+```bash
+# 为4个实例下载gpt-oss:latest模型
+./scripts/download_models_for_instances.sh 4 11434 gpt-oss:latest
+```
+
+**并行下载（快速但占用资源多）：**
+```bash
+# 快速并行下载，适合多核服务器
+./scripts/quick_download_models.sh 4 11434 gpt-oss:latest
+```
+
+## 脚本功能对比
+
+| 脚本名称 | 功能 | 特点 | 适用场景 |
+|---------|------|------|----------|
+| `ollama_manager.sh` | 统一管理工具 | 集成所有功能，易用 | 日常管理（推荐） |
+| `start_multiple_ollama.sh` | 启动实例 | 自动配置，日志记录 | 初始化部署 |
+| `stop_multiple_ollama.sh` | 停止实例 | 强制清理，端口检查 | 维护重启 |
+| `check_ollama_status.sh` | 状态检查 | 详细信息，资源监控 | 故障诊断 |
+| `download_models_for_instances.sh` | 串行下载 | 稳定可靠，进度显示 | 网络较慢时 |
+| `quick_download_models.sh` | 并行下载 | 速度快，资源占用高 | 高性能服务器 |
 
 ## 性能优化建议
 
