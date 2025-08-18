@@ -1,11 +1,10 @@
 import torch
-from transformers import AutoTokenizer, AutoModelForCausalLM, pipeline
-from typing import List, Dict, Any, Optional
+from transformers import AutoTokenizer, AutoModelForCausalLM
+from typing import List, Dict, Any
 from loguru import logger
 from config import config
 from utils.batch_processor import BatchProcessor
 from utils.json_utils import extract_json_from_response
-from .ollama_client import OllamaClient
 from .multi_ollama_client import MultiOllamaClient
 from .openai_client import OpenAIClient
 from .factory import LLMFactory
@@ -105,8 +104,6 @@ class LocalLLM:
                 # 使用OpenAI客户端，从openai配置段获取参数
                 api_key = config.get('llm.openai.api_key')
                 base_url = config.get('llm.openai.base_url')
-                timeout = config.get('llm.openai.timeout', 60)
-                max_retries = config.get('llm.openai.max_retries', 3)
                 
                 self.openai_client = OpenAIClient(
                     api_key=api_key, 
@@ -321,9 +318,6 @@ class LocalLLM:
         if self.pipeline is not None:
             del self.pipeline
             self.pipeline = None
-            
-        if self.ollama_client is not None:
-            self.ollama_client = None
-        
+
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
