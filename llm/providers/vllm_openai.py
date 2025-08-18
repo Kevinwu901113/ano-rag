@@ -1,8 +1,7 @@
 import asyncio
-from typing import List, Dict, Any, Optional, AsyncGenerator, Generator
+from typing import List, Dict, Any, AsyncGenerator, Generator
 from openai import OpenAI, AsyncOpenAI
 from loguru import logger
-from config import config
 
 
 class VLLMOpenAIProvider:
