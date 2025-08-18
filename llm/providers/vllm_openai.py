@@ -231,5 +231,10 @@ class VLLMOpenAIProvider:
         if hasattr(self.client, 'close'):
             self.client.close()
         if hasattr(self.async_client, 'close'):
-            asyncio.create_task(self.async_client.aclose())
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                asyncio.run(self.async_client.aclose())
+            else:
+                loop.create_task(self.async_client.aclose())
         logger.info("VLLMOpenAIProvider cleaned up")
