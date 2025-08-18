@@ -12,9 +12,11 @@ import time
 import json
 import statistics
 import argparse
+import csv
 from typing import List, Dict, Any
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from loguru import logger
+import pynvml
 
 
 @dataclass
@@ -31,6 +33,11 @@ class BenchmarkResult:
     throughput: float  # requests per second
     error_rate: float
     latencies: List[float]
+    gpu_metrics: List[Dict[str, float]]
+    avg_gpu_util: float
+    max_gpu_util: float
+    avg_gpu_mem: float
+    max_gpu_mem: float
 
 
 class VLLMBenchmark:
@@ -54,6 +61,20 @@ class VLLMBenchmark:
             "AI 在医疗领域有哪些应用？",
             "请谈谈 AI 的发展前景。"
         ]
+
+    async def _monitor_gpu(self, stop_event: asyncio.Event, stats: List[Dict[str, float]],
+                           interval: float = 1.0, device: int = 0) -> None:
+        """GPU 监控协程"""
+        handle = pynvml.nvmlDeviceGetHandleByIndex(device)
+        while not stop_event.is_set():
+            util = pynvml.nvmlDeviceGetUtilizationRates(handle)
+            mem = pynvml.nvmlDeviceGetMemoryInfo(handle)
+            stats.append({
+                "time": time.time(),
+                "utilization": float(util.gpu),
+                "memory": mem.used / (1024 ** 2)
+            })
+            await asyncio.sleep(interval)
     
     async def single_request(self, session: aiohttp.ClientSession, message: str, 
                            max_tokens: int = 256, temperature: float = 0.0) -> Dict[str, Any]:
@@ -142,16 +163,24 @@ class VLLMBenchmark:
             async with semaphore:
                 return await self.single_request(session, message, max_tokens, temperature)
         
-        # 执行压测
+        # 执行压测并记录 GPU
+        pynvml.nvmlInit()
+        gpu_stats: List[Dict[str, float]] = []
+        stop_event = asyncio.Event()
+        monitor_task = asyncio.create_task(self._monitor_gpu(stop_event, gpu_stats))
+
         start_time = time.time()
-        
         connector = aiohttp.TCPConnector(limit=concurrency * 2, limit_per_host=concurrency * 2)
         timeout = aiohttp.ClientTimeout(total=120)
-        
-        async with aiohttp.ClientSession(connector=connector, timeout=timeout) as session:
-            tasks = [bounded_request(session, message) for message in messages]
-            results = await asyncio.gather(*tasks, return_exceptions=True)
-        
+        try:
+            async with aiohttp.ClientSession(connector=connector, timeout=timeout) as session:
+                tasks = [bounded_request(session, message) for message in messages]
+                results = await asyncio.gather(*tasks, return_exceptions=True)
+        finally:
+            stop_event.set()
+            await monitor_task
+            pynvml.nvmlShutdown()
+
         end_time = time.time()
         total_time = end_time - start_time
         
@@ -184,7 +213,14 @@ class VLLMBenchmark:
         
         throughput = successful_count / total_time if total_time > 0 else 0
         error_rate = failed_count / total_requests * 100
-        
+
+        util_vals = [s["utilization"] for s in gpu_stats]
+        mem_vals = [s["memory"] for s in gpu_stats]
+        avg_gpu_util = statistics.mean(util_vals) if util_vals else 0
+        max_gpu_util = max(util_vals) if util_vals else 0
+        avg_gpu_mem = statistics.mean(mem_vals) if mem_vals else 0
+        max_gpu_mem = max(mem_vals) if mem_vals else 0
+
         return BenchmarkResult(
             total_requests=total_requests,
             successful_requests=successful_count,
@@ -196,7 +232,12 @@ class VLLMBenchmark:
             p99_latency=p99_latency,
             throughput=throughput,
             error_rate=error_rate,
-            latencies=latencies
+            latencies=latencies,
+            gpu_metrics=gpu_stats,
+            avg_gpu_util=avg_gpu_util,
+            max_gpu_util=max_gpu_util,
+            avg_gpu_mem=avg_gpu_mem,
+            max_gpu_mem=max_gpu_mem,
         )
     
     def print_result(self, result: BenchmarkResult, concurrency: int):
@@ -223,9 +264,23 @@ class VLLMBenchmark:
         print("🚀 吞吐量:")
         print(f"QPS:          {result.throughput:.2f} requests/s")
         print(f"每分钟请求数: {result.throughput * 60:.0f} requests/min")
-    
-    async def progressive_benchmark(self, concurrency_levels: List[int] = None, 
-                                  requests_per_level: int = 100):
+        print("")
+        print("🖥️ GPU 统计:")
+        print(f"平均利用率:   {result.avg_gpu_util:.1f}%")
+        print(f"峰值利用率:   {result.max_gpu_util:.1f}%")
+        print(f"平均显存占用: {result.avg_gpu_mem:.1f} MB")
+        print(f"峰值显存占用: {result.max_gpu_mem:.1f} MB")
+
+    def save_gpu_metrics_csv(self, result: BenchmarkResult, filepath: str) -> None:
+        """保存 GPU 监控数据到 CSV"""
+        with open(filepath, "w", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=["time", "utilization", "memory"])
+            writer.writeheader()
+            writer.writerows(result.gpu_metrics)
+        logger.info(f"GPU metrics saved to {filepath}")
+
+    async def progressive_benchmark(self, concurrency_levels: List[int] = None,
+                                  requests_per_level: int = 100, csv_prefix: str = None):
         """渐进式压测
         
         Args:
@@ -249,6 +304,8 @@ class VLLMBenchmark:
                 )
                 results.append((concurrency, result))
                 self.print_result(result, concurrency)
+                if csv_prefix:
+                    self.save_gpu_metrics_csv(result, f"{csv_prefix}_c{concurrency}.csv")
                 
                 # 检查错误率，如果太高就停止
                 if result.error_rate > 50:
@@ -314,10 +371,14 @@ async def main():
     parser.add_argument("--progressive", action="store_true", help="渐进式压测")
     parser.add_argument("--max-tokens", type=int, default=256, help="最大token数")
     parser.add_argument("--temperature", type=float, default=0.0, help="温度参数")
-    
+    parser.add_argument("--csv", help="保存 GPU 监控数据的 CSV 文件路径 (渐进式模式会附加并发数后缀)")
+    parser.add_argument("--log-file", help="日志文件路径")
+
     args = parser.parse_args()
-    
+
     benchmark = VLLMBenchmark(base_url=args.base_url, model=args.model)
+    if args.log_file:
+        logger.add(args.log_file)
     
     # 首先检查服务可用性
     print("🔍 检查 vLLM 服务可用性...")
@@ -337,7 +398,7 @@ async def main():
     
     if args.progressive:
         # 渐进式压测
-        await benchmark.progressive_benchmark(requests_per_level=args.requests)
+        await benchmark.progressive_benchmark(requests_per_level=args.requests, csv_prefix=args.csv)
     elif args.concurrency:
         # 单次压测
         result = await benchmark.run_benchmark(
@@ -347,9 +408,11 @@ async def main():
             temperature=args.temperature
         )
         benchmark.print_result(result, args.concurrency)
+        if args.csv:
+            benchmark.save_gpu_metrics_csv(result, args.csv)
     else:
         # 默认渐进式压测
-        await benchmark.progressive_benchmark(requests_per_level=args.requests)
+        await benchmark.progressive_benchmark(requests_per_level=args.requests, csv_prefix=args.csv)
 
 
 if __name__ == "__main__":
