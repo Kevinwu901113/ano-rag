@@ -34,9 +34,11 @@ class EnhancedRelationExtractor:
         self.topic_group_config = self.multi_hop_config.get('topic_group_llm', {})
         self.topic_group_enabled = self.topic_group_config.get('enabled', False)
 
-        # 如果任一LLM相关功能启用，则初始化LLM
+        # 如果任一LLM相关功能启用，则需要LLM实例
         if ((self.llm_extraction_enabled and not self.use_fast_model) or self.topic_group_enabled):
-            self.llm = llm or LocalLLM()
+            if llm is None:
+                raise ValueError("EnhancedRelationExtractor requires a LocalLLM instance when LLM features are enabled")
+            self.llm = llm
         else:
             self.llm = llm
         

@@ -71,7 +71,9 @@ class MusiqueProcessor:
         self.max_workers = max_workers
         self.debug = debug  # 调试模式，不清理中间文件
         self.base_work_dir = work_dir or create_new_workdir()
-        self.llm = llm or LocalLLM()
+        if llm is None:
+            raise ValueError("MusiqueProcessor requires a LocalLLM instance to be passed")
+        self.llm = llm
         logger.info(f"Using base work directory: {self.base_work_dir}")
 
     def _create_paragraph_files(self, item: Dict[str, Any], work_dir: str) -> List[str]:

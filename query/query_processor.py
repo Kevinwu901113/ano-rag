@@ -62,7 +62,7 @@ class QueryProcessor:
         if embeddings is None:
             embeddings = self.vector_retriever.note_embeddings
 
-        builder = GraphBuilder()
+        builder = GraphBuilder(llm=llm)
         graph = None
         if graph_file and os.path.exists(graph_file):
             self.graph_index = GraphIndex()

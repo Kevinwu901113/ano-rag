@@ -30,8 +30,13 @@ class DocumentProcessor:
             work_dir = config.get('storage.work_dir')
             if work_dir:
                 cache_dir = os.path.join(work_dir, 'cache')
+            else:
+                # 默认缓存目录
+                cache_dir = './cache'
         self.incremental_processor = IncrementalProcessor(cache_dir=cache_dir)
-        self.llm = llm or LocalLLM()
+        if llm is None:
+            raise ValueError("DocumentProcessor requires a LocalLLM instance to be passed")
+        self.llm = llm
         self.atomic_note_generator = AtomicNoteGenerator(self.llm)
         self.batch_processor = BatchProcessor(
             batch_size=config.get('document.batch_size', 32),
@@ -41,7 +46,7 @@ class DocumentProcessor:
         self.graph_builder = GraphBuilder(llm=self.llm)
         
         # 存储路径，默认使用配置中的工作目录
-        self.processed_docs_path = output_dir or config.get('storage.work_dir') or config.get('storage.processed_docs_path', './data/processed')
+        self.processed_docs_path = output_dir or config.get('storage.work_dir') or config.get('storage.processed_docs_path') or './data/processed'
         FileUtils.ensure_dir(self.processed_docs_path)
         
     def process_documents(self, file_paths: List[str], force_reprocess: bool = False, output_dir: Optional[str] = None) -> Dict[str, Any]:

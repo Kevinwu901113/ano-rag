@@ -113,7 +113,30 @@ context_dispatcher:
 
 # LLM Configuration
 llm:
-  # For atomic note generation and query rewriting
+  # Provider selection: "vllm_openai", "ollama", "openai"
+  provider: vllm_openai
+  
+  # vLLM Routes Configuration
+  routes:
+    tiny_qwen:
+      base_url: http://127.0.0.1:8001/v1
+      model: qwen2_5_0_5b
+    large_qwen:
+      base_url: http://127.0.0.1:8002/v1
+      model: qwen2_5_7b
+    # Add more routes as needed
+  
+  # Default route to use
+  default_route: tiny_qwen
+  
+  # Global parameters for all routes
+  params:
+    temperature: 0.0
+    max_tokens: 256
+    top_p: 1.0
+    timeout: 60
+  
+  # For atomic note generation and query rewriting (legacy support)
   local_model:
     provider: "ollama"  # Switch between "ollama" and "openai"
     temperature: 0.1
@@ -134,7 +157,7 @@ llm:
     # 多实例配置（用于提升并行效率）
     # 注意：当前使用GPU优化端口11440-11441，避免与系统ollama服务冲突
     multiple_instances:
-      enabled: true          # 是否启用多实例负载均衡
+      enabled: false          # 是否启用多实例负载均衡
       instances:
         - base_url: "http://localhost:11440"
           model: "gpt-oss:latest"

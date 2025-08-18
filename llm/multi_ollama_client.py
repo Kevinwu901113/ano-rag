@@ -84,6 +84,10 @@ class MultiOllamaClient:
         
         self.instances = [OllamaInstance(base_url=base_url, model=model)]
         self.load_balancing_strategy = LoadBalancingStrategy.ROUND_ROBIN
+        
+        # 设置重试配置，确保单实例模式下也有这个属性
+        self.max_retries_per_instance = config.get("llm.ollama.multiple_instances.max_retries_per_instance", 2)
+        
         logger.info(f"Initialized single Ollama instance: {base_url}")
     
     def _init_multi_instance(self):

@@ -36,7 +36,9 @@ class SummaryAuditor:
             logger.warning(f"Unknown NER model: {self.ner_model}, using spacy")
             self.ner = EnhancedNER()
         
-        # 初始化LLM（延迟加载）
+        # 初始化LLM
+        if llm is None:
+            raise ValueError("SummaryAuditor requires a LocalLLM instance to be passed during initialization")
         self._llm = llm
         
         # 统计信息
@@ -49,10 +51,9 @@ class SummaryAuditor:
     
     @property
     def llm(self):
-        """延迟加载LLM"""
+        """获取LLM实例"""
         if self._llm is None:
-            from llm.local_llm import LocalLLM
-            self._llm = LocalLLM()
+            raise ValueError("SummaryAuditor requires a LocalLLM instance to be passed during initialization")
         return self._llm
     
     def audit_summary(self, original_text: str, summary: str, note_id: str = None) -> Dict[str, Any]:

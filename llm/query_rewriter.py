@@ -19,7 +19,9 @@ class QueryRewriter:
     """查询重写器，用于优化和拆分用户查询"""
     
     def __init__(self, llm: LocalLLM = None):
-        self.llm = llm or LocalLLM()
+        if llm is None:
+            raise ValueError("QueryRewriter requires a LocalLLM instance to be passed")
+        self.llm = llm
         self.enable_rewrite = config.get('query.rewrite_enabled', True)
         self.split_multi_queries = config.get('query.split_multi_queries', True)
         self.placeholder_split = config.get('query.placeholder_split', False)

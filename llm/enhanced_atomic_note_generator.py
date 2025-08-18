@@ -22,7 +22,9 @@ class EnhancedAtomicNoteGenerator:
     """增强的原子笔记生成器，集成了NER优化、关系抽取、去噪机制和笔记联动功能"""
     
     def __init__(self, llm: LocalLLM = None, enable_validation: bool = True, config_override: Optional[Dict[str, Any]] = None):
-        self.llm = llm or LocalLLM()
+        if llm is None:
+            raise ValueError("EnhancedAtomicNoteGenerator requires a LocalLLM instance to be passed")
+        self.llm = llm
         self.batch_processor = BatchProcessor(
             batch_size=config.get('document.batch_size', 32),
             use_gpu=config.get('performance.use_gpu', True)

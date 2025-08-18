@@ -14,7 +14,9 @@ class AtomicNoteGenerator:
     """原子笔记生成器，专门用于文档处理阶段的原子笔记构建"""
     
     def __init__(self, llm: LocalLLM = None):
-        self.llm = llm or LocalLLM()
+        if llm is None:
+            raise ValueError("AtomicNoteGenerator requires a LocalLLM instance to be passed")
+        self.llm = llm
         self.batch_processor = BatchProcessor(
             batch_size=config.get('document.batch_size', 32),
             use_gpu=config.get('performance.use_gpu', True)
