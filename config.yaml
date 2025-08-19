@@ -118,23 +118,37 @@ llm:
   
   # vLLM Routes Configuration
   routes:
+    gpt20_a:
+      base_url: http://127.0.0.1:8002/v1
+      model: gpt_oss_20b
+      timeout: 60
+    # 可选的第二个实例用于负载均衡
+    # gpt20_b:
+    #   base_url: http://127.0.0.1:8202/v1
+    #   model: gpt_oss_20b
+    #   timeout: 60
+    # 备用较小模型路由
     tiny_qwen:
       base_url: http://127.0.0.1:8001/v1
       model: qwen2_5_0_5b
-    large_qwen:
-      base_url: http://127.0.0.1:8002/v1
-      model: qwen2_5_7b
-    # Add more routes as needed
+      timeout: 60
   
   # Default route to use
-  default_route: tiny_qwen
+  default_route: gpt20_a
+  
+  # Fallback route when default fails
+  fallback_route: null
+  
+  # Load balancing policy: round_robin | least_latency
+  lb_policy: round_robin
   
   # Global parameters for all routes
   params:
     temperature: 0.0
-    max_tokens: 256
+    max_tokens: 1024
     top_p: 1.0
     timeout: 60
+    max_retries: 3
   
   # For atomic note generation and query rewriting (legacy support)
   local_model:

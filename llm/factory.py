@@ -76,30 +76,33 @@ class LLMFactory:
         Returns:
             VLLMOpenAIProvider 实例
         """
-        # 获取默认路由
-        if route_name is None:
-            route_name = config.get('llm.default_route', 'tiny_qwen')
+        # 获取所有路由配置
+        routes = config.get('llm.routes', {})
+        if not routes:
+            raise ValueError("No routes configured for vLLM provider")
         
-        # 获取路由配置
-        route_config = config.get(f'llm.routes.{route_name}', {})
-        if not route_config:
-            raise ValueError(f"Route '{route_name}' not found in configuration")
+        # 获取默认路由
+        default_route = route_name or config.get('llm.default_route', 'gpt20_a')
+        fallback_route = config.get('llm.fallback_route')
+        lb_policy = config.get('llm.lb_policy', 'round_robin')
         
         # 合并参数
         params = {
-            'base_url': route_config.get('base_url', 'http://127.0.0.1:8001/v1'),
-            'model': route_config.get('model', 'qwen2_5_0_5b'),
-            'api_key': route_config.get('api_key', 'EMPTY'),
+            'routes': routes,
+            'default_route': default_route,
+            'fallback_route': fallback_route,
+            'lb_policy': lb_policy,
             'temperature': config.get('llm.params.temperature', 0.0),
-            'max_tokens': config.get('llm.params.max_tokens', 256),
+            'max_tokens': config.get('llm.params.max_tokens', 1024),
             'top_p': config.get('llm.params.top_p', 1.0),
             'timeout': config.get('llm.params.timeout', 60),
+            'max_retries': config.get('llm.params.max_retries', 3),
         }
         
         # 覆盖用户提供的参数
         params.update(kwargs)
         
-        logger.info(f"Creating vLLM provider with route: {route_name}")
+        logger.info(f"Creating vLLM provider with {len(routes)} routes, default: {default_route}")
         return VLLMOpenAIProvider(**params)
     
     @classmethod

@@ -5,8 +5,9 @@ scipy>=1.7.0
 scikit-learn>=1.0.0
 
 # FAISS - GPU version preferred, fallback to CPU
-faiss-gpu>=1.7.0; platform_machine=="x86_64"
-faiss-cpu>=1.7.0; platform_machine!="x86_64"
+# Using faiss-gpu-cu12 for Python 3.12 compatibility
+faiss-gpu-cu12>=1.7.4; platform_machine=="x86_64"
+faiss-cpu>=1.7.4; platform_machine!="x86_64"
 
 # Deep Learning and Transformers
 transformers>=4.20.0
