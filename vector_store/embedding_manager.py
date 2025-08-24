@@ -4,8 +4,42 @@ from typing import List, Dict, Any, Optional, Union
 from loguru import logger
 from sentence_transformers import SentenceTransformer
 import torch
-from utils import BatchProcessor, GPUUtils, FileUtils
-from config import config
+# 避免循环导入，直接导入需要的模块
+try:
+    from utils.batch_processor import BatchProcessor
+    from utils.gpu_utils import GPUUtils
+    from utils.file_utils import FileUtils
+except ImportError:
+    # 如果导入失败，定义简单的替代类
+    class BatchProcessor:
+        @staticmethod
+        def process_in_batches(items, batch_size, process_func):
+            for i in range(0, len(items), batch_size):
+                yield process_func(items[i:i+batch_size])
+    
+    class GPUUtils:
+        @staticmethod
+        def get_optimal_device():
+            return 'cuda' if torch.cuda.is_available() else 'cpu'
+    
+    class FileUtils:
+        @staticmethod
+        def ensure_dir(path):
+            os.makedirs(path, exist_ok=True)
+
+try:
+    from config import config
+except ImportError:
+    # 如果config导入失败，使用默认配置
+    config = {
+        'embedding': {
+            'model_name': 'BAAI/bge-m3',
+            'device': 'cpu',
+            'batch_size': 32,
+            'max_length': 512,
+            'normalize': True
+        }
+    }
 
 class EmbeddingManager:
     """嵌入管理器，专注于本地模型加载"""
@@ -67,30 +101,125 @@ class EmbeddingManager:
             EmbeddingManager._model_loaded = True
     
     def _load_local_model(self):
-        """专门加载本地模型"""
+        """专门加载本地模型，如果本地不存在则自动下载"""
         try:
-            # 设置离线模式，避免网络请求
-            os.environ['TRANSFORMERS_OFFLINE'] = '1'
-            os.environ['HF_HUB_OFFLINE'] = '1'
-            
             # 获取本地模型目录
             repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
             local_models_dir = os.path.join(repo_root, 'models/embedding')
             
-            # 定义本地模型路径映射
+            # 首先检查本地模型是否存在
             local_model_paths = self._get_local_model_paths(local_models_dir)
+            model_exists = any(os.path.exists(path) for path in local_model_paths)
             
-            # 尝试加载本地模型
-            for model_path in local_model_paths:
-                if self._try_load_model_from_path(model_path):
-                    return
+            if model_exists:
+                logger.info("检测到本地模型，尝试加载...")
+                # 设置离线模式，避免网络请求
+                os.environ['TRANSFORMERS_OFFLINE'] = '1'
+                os.environ['HF_HUB_OFFLINE'] = '1'
+                
+                # 尝试加载本地模型
+                for model_path in local_model_paths:
+                    if self._try_load_model_from_path(model_path):
+                        return
+                
+                logger.warning("本地模型存在但加载失败，尝试重新下载...")
+            else:
+                logger.info("未检测到本地模型，开始自动下载...")
             
-            # 如果所有路径都失败，抛出异常
-            raise RuntimeError(f"无法从本地路径加载任何嵌入模型。检查的路径: {local_model_paths}")
+            # 如果本地模型不存在或加载失败，尝试下载
+            self._download_and_load_model(local_models_dir)
             
         except Exception as e:
-            logger.error(f"加载本地嵌入模型失败: {e}")
+            logger.error(f"加载嵌入模型失败: {e}")
             raise RuntimeError(f"无法加载嵌入模型: {e}")
+    
+    def _download_and_load_model(self, local_models_dir: str):
+        """下载并加载模型"""
+        try:
+            # 清除离线模式环境变量，允许网络请求
+            if 'TRANSFORMERS_OFFLINE' in os.environ:
+                del os.environ['TRANSFORMERS_OFFLINE']
+            if 'HF_HUB_OFFLINE' in os.environ:
+                del os.environ['HF_HUB_OFFLINE']
+            
+            logger.info(f"开始下载模型: {self.model_name}")
+            
+            # 确保模型目录存在
+            os.makedirs(local_models_dir, exist_ok=True)
+            
+            # 直接使用SentenceTransformer下载模型
+            # 这会自动下载到HuggingFace缓存目录
+            logger.info("正在从HuggingFace下载模型，这可能需要几分钟...")
+            model = SentenceTransformer(
+                self.model_name,
+                device=self.device,
+                trust_remote_code=True
+            )
+            
+            # 保存模型信息
+            self.model = model
+            self.embedding_dim = model.get_sentence_embedding_dimension()
+            self.max_seq_length = getattr(model, 'max_seq_length', 512)
+            
+            logger.info(f"模型下载并加载成功: {self.model_name}")
+            logger.info(f"嵌入维度: {self.embedding_dim}, 最大序列长度: {self.max_seq_length}")
+            
+            # 可选：将模型保存到本地目录以便下次使用
+            self._save_model_locally(model, local_models_dir)
+            
+        except Exception as e:
+            logger.error(f"下载模型失败: {e}")
+            # 如果下载失败，尝试使用备用模型
+            self._try_fallback_model()
+    
+    def _save_model_locally(self, model, local_models_dir: str):
+        """将下载的模型保存到本地目录"""
+        try:
+            # 创建本地模型路径
+            safe_name = self.model_name.replace('/', '_')
+            local_model_path = os.path.join(local_models_dir, safe_name)
+            
+            logger.info(f"保存模型到本地: {local_model_path}")
+            model.save(local_model_path)
+            logger.info("模型保存成功")
+            
+        except Exception as e:
+            logger.warning(f"保存模型到本地失败: {e}，但模型已成功加载")
+    
+    def _try_fallback_model(self):
+        """尝试使用备用模型"""
+        fallback_models = [
+            "sentence-transformers/all-MiniLM-L6-v2",
+            "sentence-transformers/all-mpnet-base-v2",
+            "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
+        ]
+        
+        logger.info("尝试使用备用模型...")
+        
+        for fallback_model in fallback_models:
+            try:
+                logger.info(f"尝试加载备用模型: {fallback_model}")
+                model = SentenceTransformer(
+                    fallback_model,
+                    device=self.device,
+                    trust_remote_code=True
+                )
+                
+                # 保存模型信息
+                self.model = model
+                self.embedding_dim = model.get_sentence_embedding_dimension()
+                self.max_seq_length = getattr(model, 'max_seq_length', 512)
+                self.model_name = fallback_model  # 更新模型名称
+                
+                logger.info(f"备用模型加载成功: {fallback_model}")
+                return
+                
+            except Exception as e:
+                logger.warning(f"备用模型 {fallback_model} 加载失败: {e}")
+                continue
+        
+        # 如果所有备用模型都失败，抛出异常
+        raise RuntimeError("所有模型（包括备用模型）都无法加载")
     
     def _get_local_model_paths(self, local_models_dir: str) -> List[str]:
         """获取所有可能的本地模型路径"""

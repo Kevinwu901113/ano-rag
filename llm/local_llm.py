@@ -6,8 +6,8 @@ from config import config
 from utils.batch_processor import BatchProcessor
 from utils.json_utils import extract_json_from_response
 from .ollama_client import OllamaClient
-from .multi_ollama_client import MultiOllamaClient
 from .openai_client import OpenAIClient
+from .lmstudio_client import LMStudioClient
 from .factory import LLMFactory
 from .prompts import (
     ATOMIC_NOTE_SYSTEM_PROMPT,
@@ -29,30 +29,16 @@ class LocalLLM:
         self.pipeline = None
         self.ollama_client = None
         self.openai_client = None
-        self.vllm_client = None  # 新增 vLLM 客户端
+        self.lmstudio_client = None
         self.batch_processor = BatchProcessor()
         
         # 根据provider选择配置段和默认值
-        if self.provider == 'vllm_openai':
-            # 使用工厂模式创建 vLLM provider
-            try:
-                self.vllm_client = LLMFactory.create_provider('vllm_openai')
-                self.model_name = self.vllm_client.model
-                self.temperature = self.vllm_client.temperature
-                self.max_tokens = self.vllm_client.max_tokens
-                self.is_vllm_model = True
-                self.is_openai_model = False
-                self.is_ollama_model = False
-                logger.info(f"Initialized LocalLLM with vLLM provider: {self.model_name}")
-                return  # vLLM 客户端已经初始化完成
-            except Exception as e:
-                logger.warning(f"Failed to initialize vLLM provider: {e}, falling back to ollama")
-                self.provider = 'ollama'
-        
-        # 传统的 provider 配置逻辑
         if self.provider == 'openai':
             config_section = 'llm.openai'
             default_model = 'gpt-3.5-turbo'
+        elif self.provider == 'lmstudio':
+            config_section = 'llm.lmstudio'
+            default_model = 'gpt-oss-20b'
         else:  # ollama (默认)
             config_section = 'llm.ollama'
             default_model = 'llama3.1:8b'
@@ -64,9 +50,9 @@ class LocalLLM:
         self.max_tokens = config.get('llm.local_model.max_tokens') or config.get(f'{config_section}.max_tokens', 2048)
         
         # 根据provider确定模型类型
-        self.is_vllm_model = False
         self.is_openai_model = (self.provider == 'openai')
         self.is_ollama_model = (self.provider == 'ollama')
+        self.is_lmstudio_model = (self.provider == 'lmstudio')
         
         logger.info(f"Initialized LocalLLM with provider: {self.provider}, model: {self.model_name}")
         
@@ -79,9 +65,9 @@ class LocalLLM:
             logger.info(f"Loading model: {self.model_name}")
             
             if self.is_ollama_model:
-                # 使用多实例Ollama客户端，支持负载均衡
+                # 使用单实例Ollama客户端
                 base_url = config.get('llm.ollama.base_url', 'http://localhost:11434')
-                self.ollama_client = MultiOllamaClient(base_url=base_url, model=self.model_name)
+                self.ollama_client = OllamaClient(base_url=base_url, model=self.model_name)
                 
                 # 直接测试连接和生成能力，避免递归调用
                 max_retries = 3
@@ -119,6 +105,16 @@ class LocalLLM:
                     raise Exception("Failed to connect to OpenAI API")
                 
                 logger.info("OpenAI model loaded and tested successfully")
+            elif self.is_lmstudio_model:
+                # 使用LM Studio客户端
+                base_url = config.get('llm.lmstudio.base_url', f'http://localhost:{config.get("llm.lmstudio.port", 1234)}/v1')
+                self.lmstudio_client = LMStudioClient(base_url=base_url, model=self.model_name)
+                
+                # 测试LM Studio连接
+                if not self.lmstudio_client.is_available():
+                    raise Exception("Failed to connect to LM Studio API")
+                
+                logger.info("LM Studio model loaded and tested successfully")
             else:
                 # 使用transformers直接加载
                 import torch
@@ -142,22 +138,7 @@ class LocalLLM:
         """生成文本"""
         
         try:
-            if self.is_vllm_model and self.vllm_client:
-                # 使用 vLLM 客户端生成
-                if system_prompt:
-                    messages = [
-                        {"role": "system", "content": system_prompt},
-                        {"role": "user", "content": prompt}
-                    ]
-                else:
-                    messages = [{"role": "user", "content": prompt}]
-                
-                return self.vllm_client.chat(
-                    messages=messages,
-                    temperature=kwargs.get('temperature', self.temperature),
-                    max_tokens=kwargs.get('max_tokens', self.max_tokens)
-                )
-            elif self.is_ollama_model and self.ollama_client:
+            if self.is_ollama_model and self.ollama_client:
                 # 使用Ollama客户端生成
                 return self.ollama_client.generate(
                     prompt=prompt,
@@ -168,6 +149,14 @@ class LocalLLM:
             elif self.is_openai_model and self.openai_client:
                 # 使用OpenAI客户端生成
                 return self.openai_client.generate(
+                    prompt=prompt,
+                    system_prompt=system_prompt,
+                    temperature=kwargs.get('temperature', self.temperature),
+                    max_tokens=kwargs.get('max_tokens', self.max_tokens)
+                )
+            elif self.is_lmstudio_model and self.lmstudio_client:
+                # 使用LM Studio客户端生成
+                return self.lmstudio_client.generate(
                     prompt=prompt,
                     system_prompt=system_prompt,
                     temperature=kwargs.get('temperature', self.temperature),
@@ -270,16 +259,11 @@ class LocalLLM:
     def is_available(self) -> bool:
         """检查模型是否可用"""
         try:
-            if self.is_vllm_model:
-                # 检查 vLLM 客户端可用性
-                if self.vllm_client is None:
-                    return False
-                return self.vllm_client.is_available()
-            elif self.is_ollama_model:
+            if self.is_ollama_model:
                 # 避免递归调用load_model，直接创建临时客户端检查
                 if self.ollama_client is None:
                     base_url = config.get('llm.ollama.base_url', 'http://localhost:11434')
-                    temp_client = MultiOllamaClient(base_url=base_url, model=self.model_name)
+                    temp_client = OllamaClient(base_url=base_url, model=self.model_name)
                     return temp_client.is_available()
                 return self.ollama_client.is_available()
             elif self.is_openai_model:
@@ -290,6 +274,13 @@ class LocalLLM:
                     temp_client = OpenAIClient(api_key=api_key, model=self.model_name, base_url=base_url)
                     return temp_client.is_available()
                 return self.openai_client.is_available()
+            elif self.is_lmstudio_model:
+                # 检查LM Studio客户端可用性
+                if self.lmstudio_client is None:
+                    base_url = config.get('llm.lmstudio.base_url', f'http://localhost:{config.get("llm.lmstudio.port", 1234)}/v1')
+                    temp_client = LMStudioClient(base_url=base_url, model=self.model_name)
+                    return temp_client.is_available()
+                return self.lmstudio_client.is_available()
             else:
                 if self.model is None:
                     self.load_model()
@@ -300,10 +291,6 @@ class LocalLLM:
     
     def cleanup(self):
         """清理模型资源"""
-        if self.vllm_client is not None:
-            self.vllm_client.cleanup()
-            self.vllm_client = None
-            
         if self.ollama_client is not None:
             self.ollama_client = None
             

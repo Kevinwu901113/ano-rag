@@ -79,7 +79,7 @@ multi_hop:
   
 # Query Processing
 query:
-  rewrite_enabled: true
+  rewrite_enabled: false
   split_multi_queries: true
   placeholder_split: false
   add_prior_knowledge: false  # switch for LLM hallucination prevention
@@ -100,91 +100,37 @@ context_dispatcher:
   
   # Stage 1: Semantic Recall Parameters
   semantic_top_n: 10         # n: top-n semantic recall
-  semantic_threshold: 0.15    # minimum similarity threshold
+  semantic_threshold: 0.25    # minimum similarity threshold
   
   # Stage 2: Graph Expansion Parameters  
   graph_expand_top_p: 5     # p: top-p notes for graph expansion (p < n)
-  k_hop: 4                   # k: k-hop graph expansion
-  graph_threshold: 0.15       # minimum graph score threshold
+  k_hop: 3                   # k: k-hop graph expansion
+  graph_threshold: 0.25       # minimum graph score threshold
   
   # Stage 3: Context Scheduling Parameters
-  final_semantic_count: 5    # x: final semantic results to select
-  final_graph_count: 10       # y: final graph results to select
+  final_semantic_count: 3    # x: final semantic results to select
+  final_graph_count: 5      # y: final graph results to select
 
 # LLM Configuration
 llm:
-  # Provider selection: "vllm_openai", "ollama", "openai"
-  provider: vllm_openai
-  
-  # vLLM Routes Configuration
-  routes:
-    gpt20_a:
-      base_url: http://127.0.0.1:8002/v1
-      model: gpt_oss_20b
-      timeout: 60
-    # 可选的第二个实例用于负载均衡
-    # gpt20_b:
-    #   base_url: http://127.0.0.1:8202/v1
-    #   model: gpt_oss_20b
-    #   timeout: 60
-    # 备用较小模型路由
-    tiny_qwen:
-      base_url: http://127.0.0.1:8001/v1
-      model: qwen2_5_0_5b
-      timeout: 60
-  
-  # Default route to use
-  default_route: gpt20_a
-  
-  # Fallback route when default fails
-  fallback_route: null
-  
-  # Load balancing policy: round_robin | least_latency
-  lb_policy: round_robin
-  
-  # Global parameters for all routes
-  params:
-    temperature: 0.0
-    max_tokens: 1024
-    top_p: 1.0
-    timeout: 60
-    max_retries: 3
+  # Provider selection: "ollama", "openai"
+  provider: lmstudio
   
   # For atomic note generation and query rewriting (legacy support)
   local_model:
-    provider: "ollama"  # Switch between "ollama" and "openai"
     temperature: 0.1
     max_tokens: 4096
     
   # Ollama Configuration
   ollama:
-    # 单实例配置（向后兼容）
     base_url: "http://localhost:11434"
     model: "gpt-oss:latest"
     temperature: 0.7
     max_tokens: 4096
     # LightRAG-inspired configuration
     num_ctx: 32768          # Context window size
-    max_async: 8            # Max concurrent requests
+    max_async: 32            # Max concurrent requests
     timeout: 60             # Request timeout in seconds
-    
-    # 多实例配置（用于提升并行效率）
-    # 注意：当前使用GPU优化端口11440-11441，避免与系统ollama服务冲突
-    multiple_instances:
-      enabled: false          # 是否启用多实例负载均衡
-      instances:
-        - base_url: "http://localhost:11440"
-          model: "gpt-oss:latest"
-        - base_url: "http://localhost:11441"
-          model: "gpt-oss:latest"
-        # 备用实例（如需要更多实例时启用）
-        # - base_url: "http://localhost:11442"
-        #   model: "gpt-oss:latest"
-        # - base_url: "http://localhost:11443"
-        #   model: "gpt-oss:latest"
-      load_balancing: "round_robin"  # 负载均衡策略: round_robin, random, least_busy
-      health_check_interval: 30      # 健康检查间隔（秒）
-      max_retries_per_instance: 2    # 每个实例的最大重试次数
     
   # OpenAI API Configuration
   openai:
@@ -195,6 +141,35 @@ llm:
     max_tokens: 4096
     timeout: 60
     max_retries: 3
+    
+  # LM Studio Configuration
+  lmstudio:
+    # 单实例配置（默认配置）
+    port: 1234                                        # LM Studio默认端口
+    base_url: "http://localhost:1234/v1"             # LM Studio API地址
+    model: "gpt-oss-20b"                           # 模型名称，需要与LM Studio中加载的模型匹配
+    temperature: 0.7
+    max_tokens: 8192
+    timeout: 60
+    
+    # 多实例配置（优化版：自动检测LM Studio中的模型实例）
+    multiple_instances:
+      enabled: true           # 是否启用多实例负载均衡（支持自动检测）
+      # 注意：启用后会自动检测LM Studio中加载的所有模型，
+      # 相同模型会自动添加序号后缀（如 model:2, model:3）
+      # 所有实例使用相同端口1234，通过模型名称区分
+      instances:
+        # 以下配置仅在自动检测失败时作为备用配置
+        - port: 1234
+          base_url: "http://localhost:1234/v1"
+          model: "default-model"
+        # 备用实例配置（可选）
+        # - port: 1234
+        #   base_url: "http://localhost:1234/v1"
+        #   model: "another-model"
+      load_balancing: "round_robin"  # 负载均衡策略: round_robin, random, least_busy
+      health_check_interval: 30      # 健康检查间隔（秒）
+      max_retries_per_instance: 2    # 每个实例的最大重试次数
     
 # Vector Store
 vector_store:

@@ -3,24 +3,24 @@ from loguru import logger
 from config import config
 
 # Import providers
-from .providers.vllm_openai import VLLMOpenAIProvider
 from .ollama_client import OllamaClient
-from .multi_ollama_client import MultiOllamaClient
 from .openai_client import OpenAIClient
+from .lmstudio_client import LMStudioClient
+from .multi_lmstudio_client import MultiLMStudioClient
 
 
 class LLMFactory:
     """LLM Provider 工厂类
     
     负责根据配置创建和管理不同的 LLM Provider
-    支持 vLLM、Ollama、OpenAI 等多种 Provider
+    支持 Ollama、OpenAI 等多种 Provider
     """
     
     # 注册的 Provider 类型
     PROVIDERS = {
-        'vllm_openai': VLLMOpenAIProvider,
-        'ollama': MultiOllamaClient,  # 使用多实例 Ollama 客户端
+        'ollama': OllamaClient,  # 使用单实例 Ollama 客户端
         'openai': OpenAIClient,
+        'lmstudio': MultiLMStudioClient,  # 使用多实例 LM Studio 客户端
     }
     
     @classmethod
@@ -28,7 +28,7 @@ class LLMFactory:
         """创建 LLM Provider 实例
         
         Args:
-            provider_type: Provider 类型，如 'vllm_openai', 'ollama', 'openai'
+            provider_type: Provider 类型，如 'ollama', 'openai'
             route_name: 路由名称，用于获取特定路由的配置
             **kwargs: 额外的参数
             
@@ -48,12 +48,12 @@ class LLMFactory:
         
         try:
             # 根据不同的 provider 类型创建实例
-            if provider_type == 'vllm_openai':
-                return cls._create_vllm_provider(route_name, **kwargs)
-            elif provider_type == 'ollama':
+            if provider_type == 'ollama':
                 return cls._create_ollama_provider(**kwargs)
             elif provider_type == 'openai':
                 return cls._create_openai_provider(**kwargs)
+            elif provider_type == 'lmstudio':
+                return cls._create_lmstudio_provider(**kwargs)
             else:
                 raise ValueError(f"Unknown provider type: {provider_type}")
                 
@@ -65,62 +65,23 @@ class LLMFactory:
                 return cls._create_ollama_provider(**kwargs)
             raise
     
+
     @classmethod
-    def _create_vllm_provider(cls, route_name: str = None, **kwargs) -> VLLMOpenAIProvider:
-        """创建 vLLM OpenAI Provider
-        
-        Args:
-            route_name: 路由名称
-            **kwargs: 额外参数
-            
-        Returns:
-            VLLMOpenAIProvider 实例
-        """
-        # 获取所有路由配置
-        routes = config.get('llm.routes', {})
-        if not routes:
-            raise ValueError("No routes configured for vLLM provider")
-        
-        # 获取默认路由
-        default_route = route_name or config.get('llm.default_route', 'gpt20_a')
-        fallback_route = config.get('llm.fallback_route')
-        lb_policy = config.get('llm.lb_policy', 'round_robin')
-        
-        # 合并参数
-        params = {
-            'routes': routes,
-            'default_route': default_route,
-            'fallback_route': fallback_route,
-            'lb_policy': lb_policy,
-            'temperature': config.get('llm.params.temperature', 0.0),
-            'max_tokens': config.get('llm.params.max_tokens', 1024),
-            'top_p': config.get('llm.params.top_p', 1.0),
-            'timeout': config.get('llm.params.timeout', 60),
-            'max_retries': config.get('llm.params.max_retries', 3),
-        }
-        
-        # 覆盖用户提供的参数
-        params.update(kwargs)
-        
-        logger.info(f"Creating vLLM provider with {len(routes)} routes, default: {default_route}")
-        return VLLMOpenAIProvider(**params)
-    
-    @classmethod
-    def _create_ollama_provider(cls, **kwargs) -> MultiOllamaClient:
+    def _create_ollama_provider(cls, **kwargs) -> OllamaClient:
         """创建 Ollama Provider
         
         Args:
             **kwargs: 额外参数
             
         Returns:
-            MultiOllamaClient 实例
+            OllamaClient 实例
         """
         # 获取 Ollama 配置
         base_url = kwargs.get('base_url') or config.get('llm.ollama.base_url', 'http://localhost:11434')
         model = kwargs.get('model') or config.get('llm.ollama.model', 'llama3.1:8b')
         
         logger.info(f"Creating Ollama provider with model: {model}")
-        return MultiOllamaClient(base_url=base_url, model=model)
+        return OllamaClient(base_url=base_url, model=model)
     
     @classmethod
     def _create_openai_provider(cls, **kwargs) -> OpenAIClient:
@@ -142,6 +103,24 @@ class LLMFactory:
         
         logger.info(f"Creating OpenAI provider with model: {model}")
         return OpenAIClient(api_key=api_key, model=model, base_url=base_url)
+    
+    @classmethod
+    def _create_lmstudio_provider(cls, **kwargs) -> MultiLMStudioClient:
+        """创建 LM Studio Provider
+        
+        Args:
+            **kwargs: 额外参数
+            
+        Returns:
+            MultiLMStudioClient 实例
+        """
+        # 获取 LM Studio 配置
+        base_url = kwargs.get('base_url') or config.get('llm.lmstudio.base_url')
+        model = kwargs.get('model') or config.get('llm.lmstudio.model', 'default-model')
+        port = kwargs.get('port') or config.get('llm.lmstudio.port', 1234)
+        
+        logger.info(f"Creating LM Studio provider with model: {model} on port: {port}")
+        return MultiLMStudioClient(base_url=base_url, model=model, port=port)
     
     @classmethod
     def get_available_providers(cls) -> Dict[str, bool]:
@@ -171,8 +150,8 @@ class LLMFactory:
         Returns:
             str: 最佳可用的 Provider 名称
         """
-        # 优先级顺序：vllm_openai > ollama > openai
-        priority_order = ['vllm_openai', 'ollama', 'openai']
+        # 优先级顺序：ollama > lmstudio > openai
+        priority_order = ['ollama', 'lmstudio', 'openai']
         
         available_providers = cls.get_available_providers()
         
