@@ -7,9 +7,19 @@ from utils import TextUtils, GPUUtils, BatchProcessor
 from config import config
 
 class RelationExtractor:
-    """关系提取器，负责从原子笔记中提取各种类型的关系"""
+    """统一的关系提取器，支持基础关系提取和LLM增强的语义关系提取"""
     
-    def __init__(self):
+    def __init__(self, local_llm=None):
+        # LLM支持（可选）
+        self.local_llm = local_llm
+        self.llm_enabled = local_llm is not None
+        
+        # 增强配置
+        self.enhanced_config = config.get('enhanced_relation_extraction', {})
+        self.use_llm_extraction = self.enhanced_config.get('use_llm_extraction', False) and self.llm_enabled
+        self.use_fast_model = self.enhanced_config.get('use_fast_model', True)
+        self.enable_topic_groups = self.enhanced_config.get('enable_topic_groups', True)
+        self.enable_reasoning_paths = self.enhanced_config.get('enable_reasoning_paths', True)
         # 配置参数
         self.similarity_threshold = config.get('graph.similarity_threshold', 0.7)
         self.entity_cooccurrence_threshold = config.get('graph.entity_cooccurrence_threshold', 2)
@@ -22,26 +32,71 @@ class RelationExtractor:
             use_gpu=config.get('performance.use_gpu', True)
         )
         
-        # 关系类型权重
-        self.relation_weights = {
-            'reference': config.get('graph.weights.reference', 1.0),
-            'entity_coexistence': config.get('graph.weights.entity_coexistence', 0.8),
-            'context_relation': config.get('graph.weights.context_relation', 0.6),
-            'topic_relation': config.get('graph.weights.topic_relation', 0.7),
-            'semantic_similarity': config.get('graph.weights.semantic_similarity', 0.5),
-            'personal_relation': config.get('graph.weights.personal_relation', 0.9)
+        # 扩展的关系类型权重和推理价值
+        self.relation_types = {
+            'reference': {'weight': config.get('graph.weights.reference', 1.0), 'reasoning_value': 0.4},
+            'entity_coexistence': {'weight': config.get('graph.weights.entity_coexistence', 0.8), 'reasoning_value': 0.3},
+            'context': {'weight': config.get('graph.weights.context_relation', 0.6), 'reasoning_value': 0.5},
+            'topic': {'weight': config.get('graph.weights.topic_relation', 0.7), 'reasoning_value': 0.4},
+            'semantic_similarity': {'weight': config.get('graph.weights.semantic_similarity', 0.5), 'reasoning_value': 0.6},
+            'personal': {'weight': config.get('graph.weights.personal_relation', 0.9), 'reasoning_value': 0.3},
+            # 增强关系类型
+            'causal': {'weight': 0.9, 'reasoning_value': 1.0},
+            'temporal': {'weight': 0.8, 'reasoning_value': 0.8},
+            'definition': {'weight': 0.7, 'reasoning_value': 0.7},
+            'comparison': {'weight': 0.6, 'reasoning_value': 0.6},
+            'elaboration': {'weight': 0.5, 'reasoning_value': 0.5},
+            'contradiction': {'weight': 0.8, 'reasoning_value': 0.9}
         }
+        
+        # 向后兼容的权重字典
+        self.relation_weights = {k: v['weight'] for k, v in self.relation_types.items()}
         
         logger.info("RelationExtractor initialized")
     
     def extract_all_relations(self, atomic_notes: List[Dict[str, Any]], 
-                             embeddings: Optional[np.ndarray] = None) -> List[Dict[str, Any]]:
-        """提取所有类型的关系"""
+                             embeddings: Optional[np.ndarray] = None,
+                             topic_groups: Optional[List[List[str]]] = None) -> List[Dict[str, Any]]:
+        """提取所有类型的关系（基础+增强）"""
         if not atomic_notes:
             return []
         
         logger.info(f"Extracting relations from {len(atomic_notes)} atomic notes")
         
+        all_relations = []
+        
+        # 1. 基础关系提取
+        basic_relations = self._extract_basic_relations(atomic_notes, embeddings)
+        all_relations.extend(basic_relations)
+        
+        # 2. 主题组关系（如果启用）
+        if self.enable_topic_groups and topic_groups:
+            logger.info("Extracting topic group relations")
+            topic_group_relations = self._extract_topic_group_relations(atomic_notes, topic_groups)
+            all_relations.extend(topic_group_relations)
+        
+        # 3. LLM增强的语义关系（如果启用）
+        if self.use_llm_extraction:
+            logger.info("Extracting LLM-enhanced semantic relations")
+            llm_relations = self._extract_llm_semantic_relations(atomic_notes)
+            all_relations.extend(llm_relations)
+        
+        # 4. 推理路径关系（如果启用）
+        if self.enable_reasoning_paths:
+            logger.info("Extracting reasoning path relations")
+            reasoning_relations = self._extract_reasoning_path_relations(all_relations, atomic_notes)
+            all_relations.extend(reasoning_relations)
+        
+        # 过滤、去重和计算推理价值
+        filtered_relations = self._filter_and_deduplicate_relations(all_relations)
+        enhanced_relations = self._calculate_reasoning_values(filtered_relations)
+        
+        logger.info(f"Extracted {len(enhanced_relations)} total relations")
+        return enhanced_relations
+    
+    def _extract_basic_relations(self, atomic_notes: List[Dict[str, Any]], 
+                               embeddings: Optional[np.ndarray] = None) -> List[Dict[str, Any]]:
+        """提取基础关系"""
         all_relations = []
         
         # 1. 引用关系
@@ -77,11 +132,248 @@ class RelationExtractor:
         personal_relations = self.extract_personal_relations(atomic_notes)
         all_relations.extend(personal_relations)
         
-        # 去重和过滤
-        filtered_relations = self._filter_and_deduplicate_relations(all_relations)
+        return all_relations
+    
+    def _extract_topic_group_relations(self, atomic_notes: List[Dict[str, Any]], 
+                                     topic_groups: List[List[str]]) -> List[Dict[str, Any]]:
+        """提取主题组内的关系"""
+        relations = []
+        note_id_to_note = {note['note_id']: note for note in atomic_notes}
         
-        logger.info(f"Extracted {len(filtered_relations)} relations ({len(all_relations)} before filtering)")
-        return filtered_relations
+        for group in topic_groups:
+            if len(group) < 2:
+                continue
+            
+            # 在同一主题组内的笔记之间建立关系
+            for i in range(len(group)):
+                for j in range(i + 1, len(group)):
+                    note1_id, note2_id = group[i], group[j]
+                    
+                    if note1_id in note_id_to_note and note2_id in note_id_to_note:
+                        note1 = note_id_to_note[note1_id]
+                        note2 = note_id_to_note[note2_id]
+                        
+                        # 计算主题相似度
+                        topic_similarity = self._calculate_note_topic_similarity(note1, note2)
+                        
+                        if topic_similarity > 0.3:  # 主题相似度阈值
+                            relations.append({
+                                'source_id': note1_id,
+                                'target_id': note2_id,
+                                'relation_type': 'topic_group',
+                                'weight': topic_similarity * self.relation_types['topic']['weight'],
+                                'metadata': {
+                                    'topic_similarity': topic_similarity,
+                                    'group_size': len(group)
+                                }
+                            })
+        
+        logger.info(f"Extracted {len(relations)} topic group relations")
+        return relations
+    
+    def _extract_llm_semantic_relations(self, atomic_notes: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """使用LLM提取语义关系"""
+        if not self.llm_enabled:
+            return []
+        
+        relations = []
+        
+        # 选择模型
+        model_name = 'fast_model' if self.use_fast_model else 'default_model'
+        
+        # 批量处理笔记对
+        note_pairs = []
+        for i in range(len(atomic_notes)):
+            for j in range(i + 1, min(i + 10, len(atomic_notes))):  # 限制每个笔记的比较数量
+                note_pairs.append((atomic_notes[i], atomic_notes[j]))
+        
+        # 分批处理
+        batch_size = 5
+        for i in range(0, len(note_pairs), batch_size):
+            batch = note_pairs[i:i + batch_size]
+            batch_relations = self._process_llm_relation_batch(batch, model_name)
+            relations.extend(batch_relations)
+        
+        logger.info(f"Extracted {len(relations)} LLM semantic relations")
+        return relations
+    
+    def _process_llm_relation_batch(self, note_pairs: List[Tuple[Dict, Dict]], 
+                                  model_name: str) -> List[Dict[str, Any]]:
+        """处理一批笔记对的LLM关系提取"""
+        relations = []
+        
+        for note1, note2 in note_pairs:
+            try:
+                # 构建提示
+                prompt = self._build_relation_extraction_prompt(note1, note2)
+                
+                # 调用LLM
+                response = self.local_llm.generate(
+                    prompt=prompt,
+                    model_name=model_name,
+                    max_tokens=200,
+                    temperature=0.1
+                )
+                
+                # 解析响应
+                extracted_relations = self._parse_llm_relation_response(response, note1['note_id'], note2['note_id'])
+                relations.extend(extracted_relations)
+                
+            except Exception as e:
+                logger.warning(f"LLM relation extraction failed for {note1['note_id']}-{note2['note_id']}: {e}")
+                continue
+        
+        return relations
+    
+    def _build_relation_extraction_prompt(self, note1: Dict, note2: Dict) -> str:
+        """构建关系提取的提示"""
+        prompt = f"""分析以下两个笔记之间的语义关系：
+
+笔记1: {note1.get('title', '')}
+内容: {note1.get('content', '')[:200]}...
+
+笔记2: {note2.get('title', '')}
+内容: {note2.get('content', '')[:200]}...
+
+请识别它们之间的关系类型，可能的关系包括：
+- causal: 因果关系
+- temporal: 时间关系
+- definition: 定义关系
+- comparison: 比较关系
+- elaboration: 详细说明关系
+- contradiction: 矛盾关系
+
+如果存在关系，请回答格式：关系类型|置信度(0-1)|简短说明
+如果不存在明显关系，请回答：none"""
+        
+        return prompt
+    
+    def _parse_llm_relation_response(self, response: str, note1_id: str, note2_id: str) -> List[Dict[str, Any]]:
+        """解析LLM关系提取响应"""
+        relations = []
+        
+        if not response or response.strip().lower() == 'none':
+            return relations
+        
+        try:
+            parts = response.strip().split('|')
+            if len(parts) >= 2:
+                relation_type = parts[0].strip()
+                confidence = float(parts[1].strip())
+                explanation = parts[2].strip() if len(parts) > 2 else ''
+                
+                if relation_type in self.relation_types and confidence > 0.5:
+                    relations.append({
+                        'source_id': note1_id,
+                        'target_id': note2_id,
+                        'relation_type': relation_type,
+                        'weight': confidence * self.relation_types[relation_type]['weight'],
+                        'metadata': {
+                            'confidence': confidence,
+                            'explanation': explanation,
+                            'extraction_method': 'llm'
+                        }
+                    })
+        
+        except Exception as e:
+            logger.warning(f"Failed to parse LLM response: {response}, error: {e}")
+        
+        return relations
+    
+    def _extract_reasoning_path_relations(self, existing_relations: List[Dict[str, Any]], 
+                                        atomic_notes: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """基于现有关系提取推理路径关系"""
+        relations = []
+        
+        # 构建关系图
+        relation_graph = defaultdict(list)
+        for rel in existing_relations:
+            relation_graph[rel['source_id']].append(rel)
+        
+        # 寻找间接关系（2跳路径）
+        for note in atomic_notes:
+            note_id = note['note_id']
+            
+            # 找到从该笔记出发的直接关系
+            direct_relations = relation_graph.get(note_id, [])
+            
+            for direct_rel in direct_relations:
+                target_id = direct_rel['target_id']
+                
+                # 找到从目标笔记出发的关系
+                indirect_relations = relation_graph.get(target_id, [])
+                
+                for indirect_rel in indirect_relations:
+                    final_target = indirect_rel['target_id']
+                    
+                    # 避免自环和已存在的直接关系
+                    if final_target != note_id and not self._relation_exists(existing_relations, note_id, final_target):
+                        # 计算推理路径强度
+                        path_strength = direct_rel['weight'] * indirect_rel['weight'] * 0.5  # 衰减因子
+                        
+                        if path_strength > 0.1:  # 最小强度阈值
+                            relations.append({
+                                'source_id': note_id,
+                                'target_id': final_target,
+                                'relation_type': 'reasoning_path',
+                                'weight': path_strength,
+                                'metadata': {
+                                    'path': [note_id, target_id, final_target],
+                                    'intermediate_relations': [
+                                        direct_rel['relation_type'],
+                                        indirect_rel['relation_type']
+                                    ],
+                                    'path_strength': path_strength
+                                }
+                            })
+        
+        logger.info(f"Extracted {len(relations)} reasoning path relations")
+        return relations
+    
+    def _relation_exists(self, relations: List[Dict[str, Any]], source_id: str, target_id: str) -> bool:
+        """检查关系是否已存在"""
+        for rel in relations:
+            if ((rel['source_id'] == source_id and rel['target_id'] == target_id) or
+                (rel['source_id'] == target_id and rel['target_id'] == source_id)):
+                return True
+        return False
+    
+    def _calculate_reasoning_values(self, relations: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """为关系计算推理价值"""
+        for relation in relations:
+            relation_type = relation['relation_type']
+            if relation_type in self.relation_types:
+                reasoning_value = self.relation_types[relation_type]['reasoning_value']
+                relation['reasoning_value'] = reasoning_value
+            else:
+                relation['reasoning_value'] = 0.5  # 默认值
+        
+        return relations
+    
+    # 使用下面已有的_calculate_note_topic_similarity方法
+    
+    def _group_notes_by_topic(self, atomic_notes: List[Dict[str, Any]]) -> List[List[str]]:
+        """根据主题对笔记进行分组"""
+        topic_groups = []
+        
+        # 简单的基于关键词的分组
+        topic_to_notes = defaultdict(list)
+        
+        for note in atomic_notes:
+            topics = note.get('topics', [])
+            if topics:
+                # 使用第一个主题作为分组依据
+                main_topic = topics[0]
+                topic_to_notes[main_topic].append(note['note_id'])
+        
+        # 只保留包含多个笔记的组
+        for topic, note_ids in topic_to_notes.items():
+            if len(note_ids) > 1:
+                topic_groups.append(note_ids)
+        
+        return topic_groups
+    
+    # 原有的基础关系提取方法保持不变
     
     def extract_reference_relations(self, atomic_notes: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """提取引用关系"""
@@ -219,7 +511,7 @@ class RelationExtractor:
                     # 计算距离权重
                     distance = abs(i - j)
                     distance_weight = 1.0 / distance if distance > 0 else 1.0
-                    weight = self.relation_weights['context_relation'] * distance_weight
+                    weight = self.relation_weights['context'] * distance_weight
                     
                     relation = {
                         'source_id': note_id,
@@ -267,7 +559,7 @@ class RelationExtractor:
                     
                     # 计算笔记间的主题相关性
                     note_similarity = self._calculate_note_topic_similarity(note1, note2)
-                    weight = self.relation_weights['topic_relation'] * topic_weight * note_similarity
+                    weight = self.relation_weights['topic'] * topic_weight * note_similarity
                     
                     relation = {
                         'source_id': note1_id,
@@ -359,7 +651,7 @@ class RelationExtractor:
                                 'source_id': id1,
                                 'target_id': id2,
                                 'relation_type': 'personal_relation',
-                                'weight': self.relation_weights['personal_relation'],
+                                'weight': self.relation_weights['personal'],
                                 'metadata': {
                                     'relation_subtype': 'spouse',
                                     'confidence': 0.9,

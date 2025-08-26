@@ -1,0 +1,44 @@
+# 谓词标准化器自定义配置
+# 这个文件包含了谓词映射和分类的自定义配置
+
+# 自定义谓词映射
+custom_mapping:
+  # 可以在这里添加特定领域的谓词映射
+  "创始人": "founded_by"
+  "创立者": "founded_by"
+  "所在地": "located_in"
+  "总部位于": "located_in"
+  "隶属": "member_of"
+  "从属于": "member_of"
+
+# 谓词分类配置
+predicate_categories:
+  # 关系类型分类
+  organizational:
+    - "founded_by"
+    - "member_of"
+    - "owns"
+    - "controls"
+    - "manages"
+  
+  spatial:
+    - "located_in"
+    - "situated_in"
+    - "based_in"
+  
+  temporal:
+    - "founded_in"
+    - "established_in"
+    - "created_in"
+  
+  professional:
+    - "works_at"
+    - "serves_as"
+    - "employed_by"
+    - "graduated_from"
+    - "studied_at"
+  
+  publication:
+    - "published_by"
+    - "released_by"
+    - "distributed_by"

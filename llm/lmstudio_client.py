@@ -1,7 +1,14 @@
 import json
+import random
+import time
+import threading
 from typing import Any, Dict, Iterator, List, Union, Optional
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass
+from enum import Enum
 
 import openai
+import requests
 from loguru import logger
 
 from config import config
@@ -13,95 +20,180 @@ from .prompts import (
 )
 
 
-class LMStudioClient:
-    """LM Studio客户端，提供与OpenAI兼容的API接口。
-    
-    LM Studio使用本地1234端口提供OpenAI兼容的API服务。
-    支持chat completions、embeddings等功能。
-    """
+class LoadBalancingStrategy(Enum):
+    """负载均衡策略枚举"""
+    ROUND_ROBIN = "round_robin"
+    RANDOM = "random"
+    LEAST_BUSY = "least_busy"
+    CONCURRENT_OPTIMAL = "concurrent_optimal"  # 针对并发处理优化的策略
 
-    def __init__(self, base_url: str = None, model: str = None, port: int = None):
-        # 设置默认配置
-        self.port = port or config.get("llm.lmstudio.port", 1234)
-        self.base_url = base_url or config.get("llm.lmstudio.base_url", f"http://localhost:{self.port}/v1")
-        self.model = model or config.get("llm.lmstudio.model", "default-model")
-        self.temperature = config.get("llm.lmstudio.temperature", 0.7)
-        self.max_tokens = config.get("llm.lmstudio.max_tokens", 4096)
-        
-        # LM Studio specific configuration
-        self.timeout = config.get("llm.lmstudio.timeout", 60)
-        self.max_retries = config.get("llm.lmstudio.max_retries", 3)
-        
-        # Initialize OpenAI client pointing to LM Studio
+
+@dataclass
+class LMStudioInstance:
+    """LM Studio实例配置"""
+    base_url: str
+    model: str
+    port: int
+    client: Optional[openai.OpenAI] = None
+    is_healthy: bool = True
+    last_health_check: float = 0
+    active_requests: int = 0
+    total_requests: int = 0
+    error_count: int = 0
+    
+    def __post_init__(self):
+        if self.client is None:
+            self._init_client()
+    
+    def _init_client(self):
+        """初始化OpenAI客户端"""
         client_kwargs = {
             "api_key": "lm-studio",  # LM Studio doesn't require a real API key
             "base_url": self.base_url,
-            "timeout": self.timeout,
-            "max_retries": self.max_retries,
+            "timeout": config.get("llm.lmstudio.timeout", 60),
+            "max_retries": config.get("llm.lmstudio.max_retries", 3),
         }
-            
         self.client = openai.OpenAI(**client_kwargs)
+
+
+class LMStudioClient:
+    """LM Studio客户端
+    
+    利用LM Studio的内置队列功能实现并发处理：
+    - 单一模型实例：连接到LM Studio加载的模型
+    - 并发处理：利用LM Studio的请求队列机制处理多个并发请求
+    - 线程池：使用ThreadPoolExecutor管理并发请求
+    
+    提供统一的API接口，支持并发原子笔记生成。
+    """
+
+    def __init__(self, base_url: str = None, model: str = None, port: int = None):
+        # 基础配置
+        self.temperature = config.get("llm.lmstudio.temperature", 0.7)
+        self.max_tokens = config.get("llm.lmstudio.max_tokens", 4096)
+        self.timeout = config.get("llm.lmstudio.timeout", 60)
+        self.max_retries = config.get("llm.lmstudio.max_retries", 3)
         
-        # Default options for all requests
+        # 默认选项
         self.default_options = {
             "temperature": self.temperature,
             "max_tokens": self.max_tokens,
         }
         
-        logger.info(f"Initialized LM Studio client: {self.base_url}, model: {self.model}")
-
-    def generate(
+        # 初始化单一LM Studio连接
+        self._init_connection(base_url, model, port)
+        
+        # 并发处理配置
+        self.concurrent_enabled = config.get("llm.lmstudio.multiple_instances.enabled", False)
+        if self.concurrent_enabled:
+            self.max_concurrent_requests = config.get("llm.lmstudio.multiple_instances.target_instance_count", 2)
+            self.executor = ThreadPoolExecutor(max_workers=self.max_concurrent_requests)
+            logger.info(f"LM Studio concurrent processing enabled with {self.max_concurrent_requests} max concurrent requests")
+        else:
+            self.max_concurrent_requests = 1
+            self.executor = None
+        
+        logger.info(f"Initialized LM Studio client: {'concurrent' if self.concurrent_enabled else 'single-threaded'} mode")
+    
+    def _init_connection(self, base_url: str = None, model: str = None, port: int = None):
+        """初始化LM Studio连接"""
+        port = port or config.get("llm.lmstudio.port", 1234)
+        base_url = base_url or config.get("llm.lmstudio.base_url", f"http://localhost:{port}/v1")
+        model = model or config.get("llm.lmstudio.model", "default-model")
+        
+        # 创建单一实例
+        self.instance = LMStudioInstance(base_url=base_url, model=model, port=port)
+        
+        # 为了兼容性，保留instances列表
+        self.instances = [self.instance]
+        
+        logger.info(f"Connected to LM Studio: {base_url} (model: {model})")
+    
+    def generate_concurrent(self, prompts: List[str], **kwargs) -> List[str]:
+        """并发生成多个响应"""
+        if not self.concurrent_enabled or len(prompts) == 1:
+            # 单线程处理
+            return [self.generate(prompt, **kwargs) for prompt in prompts]
+        
+        # 使用线程池并发处理
+        futures = []
+        with self.executor as executor:
+            for prompt in prompts:
+                future = executor.submit(self.generate, prompt, **kwargs)
+                futures.append(future)
+            
+            results = []
+            for future in as_completed(futures):
+                try:
+                    result = future.result()
+                    results.append(result)
+                except Exception as e:
+                    logger.error(f"Concurrent generation failed: {e}")
+                    results.append("")
+        
+        return results
+    
+    def generate(self, prompt: str, system_prompt: str = None, **kwargs) -> str:
+        """生成单个响应"""
+        try:
+            # 提取system_prompt参数，避免传递给OpenAI API
+            options = {**self.default_options}
+            for key, value in kwargs.items():
+                if key != 'system_prompt':
+                    options[key] = value
+            
+            # 准备消息
+            messages = []
+            if system_prompt:
+                messages.append({"role": "system", "content": system_prompt})
+            messages.append({"role": "user", "content": prompt})
+            
+            # 调用OpenAI客户端生成响应
+            response = self.instance.client.chat.completions.create(
+                model=self.instance.model,
+                messages=messages,
+                **options
+            )
+            
+            return response.choices[0].message.content.strip()
+            
+        except Exception as e:
+            logger.error(f"LM Studio generation failed: {e}")
+            return ""
+    
+    def generate_stream(
         self,
         prompt: str,
         system_prompt: str | None = None,
-        *,
-        stream: bool = False,
         **kwargs: Any,
-    ) -> str:
-        """Generate text from a prompt with improved error handling."""
-        # Merge default options with kwargs
-        options = self.default_options.copy()
-        options.update({
-            "temperature": kwargs.get("temperature", self.temperature),
-            "max_tokens": kwargs.get("max_tokens", self.max_tokens),
-        })
-        
-        # Prepare messages
-        messages = []
-        if system_prompt:
-            messages.append({"role": "system", "content": system_prompt})
-        messages.append({"role": "user", "content": prompt})
-        
+    ) -> Iterator[str]:
+        """生成流式响应"""
         try:
-            response = self.client.chat.completions.create(
-                model=self.model,
-                messages=messages,
-                stream=stream,
-                **options,
-            )
-
-            if stream:
-                text = ""
-                for chunk in response:
-                    if chunk.choices[0].delta.content:
-                        text += chunk.choices[0].delta.content
-                return self._clean_response(text)
-            else:
-                return self._clean_response(response.choices[0].message.content or "")
+            # 合并默认选项和传入的参数
+            options = {**self.default_options, **kwargs}
             
+            # 准备消息
+            messages = []
+            if system_prompt:
+                messages.append({"role": "system", "content": system_prompt})
+            messages.append({"role": "user", "content": prompt})
+            
+            # 调用OpenAI客户端生成流式响应
+            response = self.instance.client.chat.completions.create(
+                model=self.instance.model,
+                messages=messages,
+                stream=True,
+                **options
+            )
+            
+            for chunk in response:
+                if chunk.choices[0].delta.content:
+                    yield chunk.choices[0].delta.content
+                    
         except Exception as e:
-            # Log the specific error for debugging
-            error_msg = str(e)
-            if "connection" in error_msg.lower():
-                logger.error(f"Connection error: Failed to connect to LM Studio at {self.base_url} - {e}")
-            elif "model" in error_msg.lower() and "not found" in error_msg.lower():
-                logger.error(f"Model error: Model '{self.model}' not found in LM Studio - {e}")
-            elif "timeout" in error_msg.lower():
-                logger.error(f"Timeout error: LM Studio request timed out - {e}")
-            else:
-                logger.error(f"Generation failed: {e}")
-            return ""
-
+            logger.error(f"LM Studio stream generation failed: {e}")
+            yield ""
+    
     def chat(
         self,
         messages: list[dict[str, str]],
@@ -109,17 +201,13 @@ class LMStudioClient:
         stream: bool = False,
         **kwargs: Any,
     ) -> Union[str, Iterator[str]]:
-        """Chat with the model using a list of messages."""
-        # Merge default options with kwargs
-        options = self.default_options.copy()
-        options.update({
-            "temperature": kwargs.get("temperature", self.temperature),
-            "max_tokens": kwargs.get("max_tokens", self.max_tokens),
-        })
-        
+        """与模型进行对话"""
         try:
-            response = self.client.chat.completions.create(
-                model=self.model,
+            # 合并默认选项和传入的参数
+            options = {**self.default_options, **kwargs}
+            
+            response = self.instance.client.chat.completions.create(
+                model=self.instance.model,
                 messages=messages,
                 stream=stream,
                 **options,
@@ -133,18 +221,52 @@ class LMStudioClient:
                 return stream_generator()
             else:
                 return self._clean_response(response.choices[0].message.content or "")
-                
+        
         except Exception as e:
             logger.error(f"Chat failed: {e}")
             if stream:
                 return iter([])
             return ""
-
+    
+    def batch_generate(
+        self,
+        prompts: List[str],
+        system_prompt: str | None = None,
+        **kwargs: Any,
+    ) -> List[str]:
+        """批量生成响应"""
+        if len(prompts) <= 1:
+            # 单个提示，使用串行处理
+            results = []
+            for prompt in prompts:
+                try:
+                    result = self.generate(prompt, system_prompt, **kwargs)
+                    results.append(result)
+                except Exception as e:
+                    logger.error(f"Batch generation failed for prompt: {e}")
+                    results.append("")
+            return results
+        
+        # 使用线程池并行处理
+        if self.executor:
+            return self.generate_concurrent(prompts, system_prompt, **kwargs)
+        else:
+            # 回退到串行处理
+            results = []
+            for prompt in prompts:
+                try:
+                    result = self.generate(prompt, system_prompt, **kwargs)
+                    results.append(result)
+                except Exception as e:
+                    logger.error(f"Batch generation failed for prompt: {e}")
+                    results.append("")
+            return results
+    
     def generate_final_answer(self, context: str, query: str) -> str:
         """Generate final answer using context and query."""
         prompt = FINAL_ANSWER_PROMPT.format(context=context, query=query)
         return self.generate(prompt, FINAL_ANSWER_SYSTEM_PROMPT)
-
+    
     def evaluate_answer(self, query: str, context: str, answer: str) -> Dict[str, float]:
         """Evaluate answer quality."""
         prompt = EVALUATE_ANSWER_PROMPT.format(query=query, context=context, answer=answer)
@@ -155,33 +277,7 @@ class LMStudioClient:
         except json.JSONDecodeError:
             logger.warning(f"Failed to parse evaluation response: {response}")
             return {"relevance": 0.5, "completeness": 0.5, "accuracy": 0.5}
-
-    def batch_generate(
-        self,
-        prompts: List[str],
-        system_prompt: str | None = None,
-        *,
-        stream: bool = False,
-        **kwargs: Any,
-    ) -> List[str]:
-        """Generate responses for multiple prompts."""
-        return [self.generate(prompt, system_prompt, stream=stream, **kwargs) for prompt in prompts]
-
-    def _quick_health_check(self) -> bool:
-        """Quick health check for LM Studio API."""
-        try:
-            # Simple test request
-            response = self.client.chat.completions.create(
-                model=self.model,
-                messages=[{"role": "user", "content": "Hello"}],
-                max_tokens=1,
-                temperature=0,
-            )
-            return response.choices[0].message.content is not None
-        except Exception as e:
-            logger.debug(f"Health check failed for LM Studio at {self.base_url}: {e}")
-            return False
-
+    
     def _clean_response(self, response: str) -> str:
         """Clean and normalize response text."""
         if not response:
@@ -194,7 +290,7 @@ class LMStudioClient:
         response = self._clean_control_characters(response)
         
         return response
-
+    
     def _clean_json_response(self, response: str) -> str:
         """Clean JSON response by extracting valid JSON."""
         response = response.strip()
@@ -217,35 +313,116 @@ class LMStudioClient:
             return json_str
         
         return response
-
+    
     def _clean_control_characters(self, text: str) -> str:
         """Remove control characters from text."""
         import re
         # Remove control characters except newlines and tabs
         cleaned = re.sub(r'[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]', '', text)
         return cleaned
-
+    
+    def _quick_health_check(self, instance: LMStudioInstance) -> bool:
+        """Quick health check for LM Studio API."""
+        try:
+            # Simple test request
+            response = instance.client.chat.completions.create(
+                model=instance.model,
+                messages=[{"role": "user", "content": "Hello"}],
+                max_tokens=1,
+                temperature=0,
+            )
+            return response.choices[0].message.content is not None
+        except Exception as e:
+            logger.debug(f"Health check failed for LM Studio at {instance.base_url}: {e}")
+            return False
+    
     def is_available(self) -> bool:
         """Check if LM Studio API is available."""
-        return self._quick_health_check()
-
+        if not self.concurrent_enabled:
+            return self._quick_health_check(self.instances[0])
+        
+        return any(instance.is_healthy and self._quick_health_check(instance) for instance in self.instances)
+    
     def list_models(self) -> List[str]:
         """List available models from LM Studio."""
-        try:
-            models = self.client.models.list()
-            return [model.id for model in models.data]
-        except Exception as e:
-            logger.error(f"Failed to list models from LM Studio: {e}")
-            return []
+        if not self.multi_instance_enabled:
+            try:
+                models = self.instances[0].client.models.list()
+                return [model.id for model in models.data]
+            except Exception as e:
+                logger.error(f"Failed to list models from LM Studio: {e}")
+                return []
+        
+        # 多实例模式：列出所有实例的可用模型
+        all_models = set()
+        for instance in self.instances:
+            if instance.is_healthy:
+                try:
+                    models = instance.client.models.list()
+                    all_models.update([model.id for model in models.data])
+                except Exception as e:
+                    logger.error(f"Failed to list models from {instance.base_url}: {e}")
+        return list(all_models)
     
     def get_model_info(self) -> Dict[str, Any]:
         """Get model information."""
-        return {
+        base_info = {
             'provider': 'lmstudio',
-            'base_url': self.base_url,
-            'port': self.port,
-            'model_name': self.model,
+            'multi_instance_enabled': self.multi_instance_enabled,
             'temperature': self.temperature,
             'max_tokens': self.max_tokens,
             'is_available': self.is_available()
         }
+        
+        if not self.multi_instance_enabled:
+            # 单实例模式
+            instance = self.instances[0]
+            base_info.update({
+                'base_url': instance.base_url,
+                'port': instance.port,
+                'model_name': instance.model,
+            })
+        else:
+            # 多实例模式
+            base_info.update({
+                'instances_count': len(self.instances),
+                'healthy_instances_count': sum(1 for inst in self.instances if inst.is_healthy),
+                'load_balancing_strategy': self.load_balancing_strategy.value,
+                'stats': self.get_stats()
+            })
+        
+        return base_info
+    
+    def get_stats(self) -> Dict[str, Any]:
+        """获取实例统计信息（仅多实例模式）"""
+        if not self.multi_instance_enabled:
+            return {}
+        
+        total_requests = sum(inst.total_requests for inst in self.instances)
+        total_errors = sum(inst.error_count for inst in self.instances)
+        healthy_count = sum(1 for inst in self.instances if inst.is_healthy)
+        
+        return {
+            "total_instances": len(self.instances),
+            "healthy_instances": healthy_count,
+            "total_requests": total_requests,
+            "total_errors": total_errors,
+            "error_rate": total_errors / max(total_requests, 1),
+            "load_balancing_strategy": self.load_balancing_strategy.value if hasattr(self, 'load_balancing_strategy') else 'round_robin',
+            "instances": [
+                {
+                    "base_url": inst.base_url,
+                    "model": inst.model,
+                    "port": inst.port,
+                    "is_healthy": inst.is_healthy,
+                    "active_requests": inst.active_requests,
+                    "total_requests": inst.total_requests,
+                    "error_count": inst.error_count,
+                }
+                for inst in self.instances
+            ]
+        }
+
+
+# 为了向后兼容，保留原有的类名别名
+MultiLMStudioClient = LMStudioClient

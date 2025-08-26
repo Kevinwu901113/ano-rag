@@ -7,6 +7,25 @@ from .context_dispatcher import ContextDispatcher
 from .logging_utils import setup_logging
 from .json_utils import clean_control_characters, extract_json_from_response
 from .summary_auditor import SummaryAuditor
+from .entity_predicate_normalizer import (
+    EntityNormalizer,
+    PredicateNormalizer,
+    EntityPredicateNormalizer,
+    NormalizationRule,
+    AliasEntry,
+    create_entity_predicate_normalizer,
+    normalize_entities_and_predicates
+)
+from .model_consistency import (
+    ModelConsistencyChecker,
+    ModelSignature,
+    ConsistencyLevel,
+    ModelCompatibility,
+    ConsistencyViolation,
+    create_model_consistency_checker,
+    create_model_signature,
+    check_models_compatibility
+)
 
 __all__ = [
     'FileUtils',
@@ -19,4 +38,19 @@ __all__ = [
     'clean_control_characters',
     'extract_json_from_response',
     'SummaryAuditor',
+    'EntityNormalizer',
+    'PredicateNormalizer',
+    'EntityPredicateNormalizer',
+    'NormalizationRule',
+    'AliasEntry',
+    'create_entity_predicate_normalizer',
+    'normalize_entities_and_predicates',
+    'ModelConsistencyChecker',
+    'ModelSignature',
+    'ConsistencyLevel',
+    'ModelCompatibility',
+    'ConsistencyViolation',
+    'create_model_consistency_checker',
+    'create_model_signature',
+    'check_models_compatibility',
 ]

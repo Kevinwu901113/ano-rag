@@ -8,6 +8,7 @@ from utils.json_utils import extract_json_from_response
 from .ollama_client import OllamaClient
 from .openai_client import OpenAIClient
 from .lmstudio_client import LMStudioClient
+from .multi_model_client import MultiModelClient
 from .factory import LLMFactory
 from .prompts import (
     ATOMIC_NOTE_SYSTEM_PROMPT,
@@ -17,11 +18,22 @@ from .prompts import (
 )
 
 class LocalLLM:
-    """本地LLM类，用于原子笔记生成和查询重写等任务"""
+    """统一LLM类，支持本地和在线模型，用于原子笔记生成和查询重写等任务
     
-    def __init__(self, model_name: str = None, device: str = None, provider: str = None):
+    支持的provider类型：
+    - ollama: 本地Ollama服务
+    - openai: OpenAI API或兼容的在线服务
+    - lmstudio: LM Studio本地服务
+    - transformers: 直接使用transformers库加载本地模型
+    """
+    
+    def __init__(self, model_name: str = None, device: str = None, provider: str = None, api_key: str = None, base_url: str = None):
         # 获取provider配置，支持新的配置结构
         self.provider = provider or config.get('llm.provider') or config.get('llm.local_model.provider', 'ollama')
+        
+        # 支持在线服务的额外参数
+        self.api_key = api_key
+        self.base_url = base_url
         
         # 初始化客户端变量
         self.tokenizer = None
@@ -30,6 +42,7 @@ class LocalLLM:
         self.ollama_client = None
         self.openai_client = None
         self.lmstudio_client = None
+        self.multi_model_client = None
         self.batch_processor = BatchProcessor()
         
         # 根据provider选择配置段和默认值
@@ -88,9 +101,9 @@ class LocalLLM:
                         else:
                             raise Exception(f"Failed to connect to Ollama after {max_retries} attempts: {e}")
             elif self.is_openai_model:
-                # 使用OpenAI客户端，从openai配置段获取参数
-                api_key = config.get('llm.openai.api_key')
-                base_url = config.get('llm.openai.base_url')
+                # 使用OpenAI客户端，支持参数覆盖
+                api_key = self.api_key or config.get('llm.openai.api_key')
+                base_url = self.base_url or config.get('llm.openai.base_url')
                 timeout = config.get('llm.openai.timeout', 60)
                 max_retries = config.get('llm.openai.max_retries', 3)
                 
@@ -106,15 +119,24 @@ class LocalLLM:
                 
                 logger.info("OpenAI model loaded and tested successfully")
             elif self.is_lmstudio_model:
-                # 使用LM Studio客户端
-                base_url = config.get('llm.lmstudio.base_url', f'http://localhost:{config.get("llm.lmstudio.port", 1234)}/v1')
-                self.lmstudio_client = LMStudioClient(base_url=base_url, model=self.model_name)
+                # 检查是否启用多模型并行
+                multi_model_enabled = config.get('llm.multi_model.enabled', False)
                 
-                # 测试LM Studio连接
-                if not self.lmstudio_client.is_available():
-                    raise Exception("Failed to connect to LM Studio API")
-                
-                logger.info("LM Studio model loaded and tested successfully")
+                if multi_model_enabled:
+                    # 使用多模型客户端
+                    logger.info("Multi-model mode enabled, initializing MultiModelClient...")
+                    self.multi_model_client = MultiModelClient()
+                    logger.info("MultiModelClient initialized successfully")
+                else:
+                    # 使用单个LM Studio客户端
+                    base_url = config.get('llm.lmstudio.base_url', f'http://localhost:{config.get("llm.lmstudio.port", 1234)}/v1')
+                    self.lmstudio_client = LMStudioClient(base_url=base_url, model=self.model_name)
+                    
+                    # 测试LM Studio连接
+                    if not self.lmstudio_client.is_available():
+                        raise Exception("Failed to connect to LM Studio API")
+                    
+                    logger.info("LM Studio model loaded and tested successfully")
             else:
                 # 使用transformers直接加载
                 import torch
@@ -154,14 +176,23 @@ class LocalLLM:
                     temperature=kwargs.get('temperature', self.temperature),
                     max_tokens=kwargs.get('max_tokens', self.max_tokens)
                 )
-            elif self.is_lmstudio_model and self.lmstudio_client:
-                # 使用LM Studio客户端生成
-                return self.lmstudio_client.generate(
-                    prompt=prompt,
-                    system_prompt=system_prompt,
-                    temperature=kwargs.get('temperature', self.temperature),
-                    max_tokens=kwargs.get('max_tokens', self.max_tokens)
-                )
+            elif self.is_lmstudio_model:
+                if self.multi_model_client:
+                    # 使用多模型客户端生成
+                    return self.multi_model_client.generate(
+                        prompt=prompt,
+                        system_prompt=system_prompt,
+                        temperature=kwargs.get('temperature', self.temperature),
+                        max_tokens=kwargs.get('max_tokens', self.max_tokens)
+                    )
+                elif self.lmstudio_client:
+                    # 使用单个LM Studio客户端生成
+                    return self.lmstudio_client.generate(
+                        prompt=prompt,
+                        system_prompt=system_prompt,
+                        temperature=kwargs.get('temperature', self.temperature),
+                        max_tokens=kwargs.get('max_tokens', self.max_tokens)
+                    )
             else:
                 # 使用transformers生成
                 if system_prompt:
@@ -314,3 +345,34 @@ class LocalLLM:
         
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
+            
+        logger.info("LocalLLM resources cleaned up")
+    
+    def get_model_info(self) -> Dict[str, Any]:
+        """获取模型信息"""
+        return {
+            'provider': self.provider,
+            'model_name': self.model_name,
+            'temperature': self.temperature,
+            'max_tokens': self.max_tokens,
+            'device': self.device,
+            'is_available': self.is_available(),
+            'api_key_configured': bool(self.api_key) if self.is_openai_model else None,
+            'base_url': self.base_url if self.is_openai_model else None
+        }
+    
+    def list_available_models(self) -> List[str]:
+        """列出可用的模型"""
+        try:
+            if self.is_ollama_model and self.ollama_client:
+                return self.ollama_client.list_models()
+            elif self.is_openai_model and self.openai_client:
+                return self.openai_client.list_models()
+            elif self.is_lmstudio_model and self.lmstudio_client:
+                return self.lmstudio_client.list_models()
+            else:
+                # 对于transformers模型，返回当前模型
+                return [self.model_name] if self.model_name else []
+        except Exception as e:
+            logger.error(f"Failed to list models: {e}")
+            return []

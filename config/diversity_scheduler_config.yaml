@@ -1,0 +1,161 @@
+# 多样性调度器配置
+# 这个文件包含了多样性调度器的完整配置
+
+# 多样性调度器配置
+diversity_scheduler:
+  # 基本配置
+  strategy: "balanced"              # 多样性策略: balanced, aggressive, conservative
+  max_candidates: 50                # 最大候选数量
+  diversity_threshold: 0.7          # 多样性阈值
+  
+  # 去重配置
+  deduplication:
+    method: "semantic"              # 去重方法: exact, fuzzy, semantic, hybrid
+    similarity_threshold: 0.85      # 相似度阈值
+    
+    # 聚类去重配置
+    clustering:
+      enabled: true                 # 是否启用聚类去重
+      threshold: 0.8                # 聚类阈值
+      min_cluster_size: 2           # 最小聚类大小
+      max_clusters: 10              # 最大聚类数量
+    
+    # 覆盖度权重
+    coverage_weight: 0.3            # 覆盖度权重
+    
+    # 去重配置详细参数
+    exact_match:
+      enabled: true                 # 启用精确匹配去重
+      case_sensitive: false         # 是否区分大小写
+      ignore_punctuation: true      # 是否忽略标点符号
+    
+    fuzzy_match:
+      enabled: true                 # 启用模糊匹配去重
+      edit_distance_threshold: 3    # 编辑距离阈值
+      jaccard_threshold: 0.8        # Jaccard相似度阈值
+    
+    semantic_match:
+      enabled: true                 # 启用语义匹配去重
+      embedding_model: "sentence-transformers/all-MiniLM-L6-v2"
+      cosine_threshold: 0.85        # 余弦相似度阈值
+      batch_size: 32                # 批处理大小
+  
+  # 语义多样性配置
+  semantic_diversity:
+    enabled: true                   # 启用语义多样性
+    weight: 0.4                     # 语义多样性权重
+    embedding_model: "sentence-transformers/all-MiniLM-L6-v2"
+    min_distance: 0.3               # 最小语义距离
+    max_similarity: 0.7             # 最大语义相似度
+    
+    # 语义聚类配置
+    clustering:
+      method: "kmeans"              # 聚类方法: kmeans, hierarchical, dbscan
+      n_clusters: 5                 # 聚类数量
+      random_state: 42              # 随机种子
+    
+    # 主题建模配置
+    topic_modeling:
+      enabled: false                # 启用主题建模
+      method: "lda"                 # 主题建模方法: lda, nmf, bertopic
+      n_topics: 10                  # 主题数量
+      min_topic_weight: 0.1         # 最小主题权重
+  
+  # 主题多样性配置
+  topic_diversity:
+    enabled: true                   # 启用主题多样性
+    weight: 0.3                     # 主题多样性权重
+    min_topics: 3                   # 最小主题数量
+    max_topic_overlap: 0.5          # 最大主题重叠度
+    
+    # 主题提取配置
+    topic_extraction:
+      method: "keyword"             # 主题提取方法: keyword, lda, bertopic
+      max_keywords: 10              # 最大关键词数量
+      min_keyword_freq: 2           # 最小关键词频率
+      
+      # 关键词提取配置
+      keyword_extraction:
+        method: "tfidf"             # 关键词提取方法: tfidf, textrank, yake
+        ngram_range: [1, 2]         # N-gram范围
+        max_features: 1000          # 最大特征数量
+        stop_words: "english"       # 停用词语言
+  
+  # 时间多样性配置
+  temporal_diversity:
+    enabled: false                  # 启用时间多样性
+    weight: 0.2                     # 时间多样性权重
+    time_window: "1d"               # 时间窗口: 1h, 1d, 1w, 1m
+    max_items_per_window: 5         # 每个时间窗口最大项目数
+    
+    # 时间衰减配置
+    temporal_decay:
+      enabled: true                 # 启用时间衰减
+      decay_factor: 0.9             # 衰减因子
+      half_life: "7d"               # 半衰期
+  
+  # 来源多样性配置
+  source_diversity:
+    enabled: true                   # 启用来源多样性
+    weight: 0.1                     # 来源多样性权重
+    max_items_per_source: 10        # 每个来源最大项目数
+    boost_factor: 1.2               # 提升因子
+    authority_preference: 0.8       # 权威性偏好
+    
+    # 来源权重配置
+    source_weights:
+      "official": 1.0              # 官方来源权重
+      "academic": 0.9              # 学术来源权重
+      "news": 0.8                  # 新闻来源权重
+      "blog": 0.6                  # 博客来源权重
+      "forum": 0.4                 # 论坛来源权重
+      "social": 0.3                # 社交媒体权重
+  
+  # 性能配置
+  performance:
+    batch_size: 100                 # 批处理大小
+    max_processing_time: 30         # 最大处理时间(秒)
+    enable_parallel: true           # 启用并行处理
+    num_workers: 4                  # 工作线程数
+    
+    # 缓存配置
+    cache:
+      enabled: true                 # 启用缓存
+      max_size: 1000                # 最大缓存大小
+      ttl: 3600                     # 缓存生存时间(秒)
+      
+    # 内存管理
+    memory_management:
+      max_memory_usage: "1GB"       # 最大内存使用量
+      gc_threshold: 0.8             # 垃圾回收阈值
+      enable_memory_monitoring: true # 启用内存监控
+  
+  # 质量控制配置
+  quality_control:
+    enabled: true                   # 启用质量控制
+    min_quality_score: 0.5          # 最小质量分数
+    quality_weights:
+      relevance: 0.4                # 相关性权重
+      diversity: 0.3                # 多样性权重
+      freshness: 0.2                # 新鲜度权重
+      authority: 0.1                # 权威性权重
+    
+    # 质量评估配置
+    quality_assessment:
+      method: "composite"           # 质量评估方法: simple, composite, ml
+      factors: ["relevance", "diversity", "freshness", "authority"]
+      normalization: "minmax"       # 归一化方法: minmax, zscore, robust
+  
+  # 调试和监控配置
+  debug:
+    enabled: false                  # 启用调试模式
+    log_level: "INFO"               # 日志级别
+    save_intermediate_results: false # 保存中间结果
+    
+  monitoring:
+    enabled: true                   # 启用监控
+    metrics: ["diversity_score", "processing_time", "memory_usage"]
+    alert_thresholds:
+      low_diversity: 0.3            # 低多样性告警阈值
+      high_processing_time: 60      # 高处理时间告警阈值(秒)
+      high_memory_usage: 0.9        # 高内存使用告警阈值

@@ -1,5 +1,7 @@
 from typing import List, Dict, Any, Union
 from loguru import logger
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import threading
 from .local_llm import LocalLLM
 from utils.batch_processor import BatchProcessor
 from utils.text_utils import TextUtils
@@ -24,10 +26,54 @@ class AtomicNoteGenerator:
         # 摘要校验器将在需要时动态导入，避免循环导入
         self.summary_auditor = None
         
+        # 并发处理配置
+        self.concurrent_enabled = config.get('document.concurrent_processing.enabled', True)
+        self.max_concurrent_workers = config.get('document.concurrent_processing.max_workers', 4)
+        self._lock = threading.Lock()
+        
+        # 检查LLM是否支持并发处理（包括多模型并行）
+        self.concurrent_support = self._check_concurrent_support()
+    
+    def _check_concurrent_support(self) -> bool:
+        """检查LLM是否支持并发处理（包括多模型并行和单实例队列）"""
+        try:
+            # 检查是否是MultiModelClient（多模型并行）
+            if hasattr(self.llm, 'client') and hasattr(self.llm.client, 'model_instances'):
+                instances = getattr(self.llm.client, 'model_instances', [])
+                return len(instances) > 1
+            
+            # 检查是否是LMStudioClient且启用了并发
+            if hasattr(self.llm, 'lmstudio_client'):
+                client = self.llm.lmstudio_client
+                return getattr(client, 'concurrent_enabled', False)
+            
+            # 检查是否直接是并发客户端
+            if hasattr(self.llm, 'client'):
+                client = self.llm.client
+                return (getattr(client, 'concurrent_enabled', False) or 
+                       hasattr(client, 'model_instances'))
+            
+            return False
+        except Exception as e:
+            logger.warning(f"Failed to check concurrent support: {e}")
+            return False
+        
     def generate_atomic_notes(self, text_chunks: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """从文本块生成原子笔记"""
         logger.info(f"Generating atomic notes for {len(text_chunks)} text chunks")
         
+        # 如果启用并发且支持并发处理，使用并发处理
+        if self.concurrent_enabled and self.concurrent_support:
+            client = getattr(self.llm, 'lmstudio_client', None) or getattr(self.llm, 'client', None)
+            instance_count = len(getattr(client, 'model_instances', getattr(client, 'instances', []))) if client else 1
+            logger.info(f"Using concurrent processing with {instance_count} instances")
+            return self._generate_atomic_notes_concurrent(text_chunks)
+        else:
+            logger.info("Using sequential processing")
+            return self._generate_atomic_notes_sequential(text_chunks)
+    
+    def _generate_atomic_notes_sequential(self, text_chunks: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """顺序生成原子笔记（原有逻辑）"""
         # 准备提示词模板
         system_prompt = self._get_atomic_note_system_prompt()
         
@@ -107,6 +153,92 @@ class AtomicNoteGenerator:
         logger.info(f"Generated {len(atomic_notes)} atomic notes")
         return atomic_notes
     
+    def _generate_atomic_notes_concurrent(self, text_chunks: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """并发生成原子笔记，利用多个LM Studio实例"""
+        system_prompt = self._get_atomic_note_system_prompt()
+        atomic_notes = [None] * len(text_chunks)  # 预分配结果列表
+        
+        # 计算实际的并发工作线程数
+        client = getattr(self.llm, 'lmstudio_client', None) or getattr(self.llm, 'client', None)
+        instance_count = len(getattr(client, 'model_instances', getattr(client, 'instances', []))) if client else 1
+        max_workers = min(self.max_concurrent_workers, instance_count, len(text_chunks))
+        
+        logger.info(f"Starting concurrent processing with {max_workers} workers for {len(text_chunks)} chunks")
+        
+        def process_chunk_with_index(chunk_index_pair):
+            """处理单个文本块并返回索引和结果"""
+            chunk_data, index = chunk_index_pair
+            try:
+                note = self._generate_single_atomic_note(chunk_data, system_prompt)
+                return index, note, None
+            except Exception as e:
+                logger.error(f"Failed to generate atomic note for chunk {index}: {e}")
+                fallback_note = self._create_fallback_note(chunk_data)
+                return index, fallback_note, e
+        
+        # 创建索引化的任务列表
+        indexed_chunks = [(chunk, i) for i, chunk in enumerate(text_chunks)]
+        
+        # 使用ThreadPoolExecutor进行并发处理
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            # 提交所有任务
+            future_to_index = {executor.submit(process_chunk_with_index, chunk_pair): chunk_pair[1] 
+                             for chunk_pair in indexed_chunks}
+            
+            # 收集结果
+            completed_count = 0
+            error_count = 0
+            
+            for future in as_completed(future_to_index):
+                try:
+                    index, note, error = future.result()
+                    atomic_notes[index] = note
+                    
+                    if error:
+                        error_count += 1
+                    
+                    completed_count += 1
+                    if completed_count % 10 == 0:  # 每10个任务记录一次进度
+                        logger.info(f"Completed {completed_count}/{len(text_chunks)} atomic notes")
+                        
+                except Exception as e:
+                    original_index = future_to_index[future]
+                    logger.error(f"Future execution failed for chunk {original_index}: {e}")
+                    # 创建fallback note
+                    if original_index < len(text_chunks):
+                        atomic_notes[original_index] = self._create_fallback_note(text_chunks[original_index])
+                    error_count += 1
+        
+        logger.info(f"Concurrent processing completed: {len(text_chunks)} notes generated, {error_count} errors")
+        
+        # 后处理：添加ID和元数据
+        for i, note in enumerate(atomic_notes):
+            if note is None:
+                # 如果某个位置没有结果，创建fallback note
+                note = self._create_fallback_note(text_chunks[i] if i < len(text_chunks) else {'text': ''})
+                atomic_notes[i] = note
+            
+            # 确保note是字典类型
+            if not isinstance(note, dict):
+                logger.warning(f"Note at index {i} is not a dict, got {type(note)}: {note}")
+                note = {'content': str(note), 'error': True}
+                atomic_notes[i] = note
+            
+            note['note_id'] = f"note_{i:06d}"
+            note['created_at'] = self._get_timestamp()
+        
+        # 摘要校验：仅在启用时进行
+        if config.get('summary_auditor.enabled', False):
+            try:
+                from utils.summary_auditor import SummaryAuditor
+                logger.info("Starting summary audit for generated atomic notes")
+                auditor = SummaryAuditor(llm=self.llm)
+                atomic_notes = auditor.audit_atomic_notes(atomic_notes)
+            except Exception as e:
+                logger.error(f"Summary audit failed: {e}")
+        
+        return atomic_notes
+    
     def _generate_single_atomic_note(self, chunk_data: Union[Dict[str, Any], Any], system_prompt: str) -> Dict[str, Any]:
         """生成单个原子笔记"""
         # 确保 chunk_data 是字典类型
@@ -172,13 +304,22 @@ class AtomicNoteGenerator:
         paragraph_idx_mapping = chunk_data.get('paragraph_idx_mapping', {})
         relevant_idxs = self._extract_relevant_paragraph_idxs(text, paragraph_idx_mapping)
         
+        # 提取title和raw_span信息
+        title = self._extract_title_from_chunk(chunk_data)
+        raw_span = text  # raw_span就是原始文本内容
+        
         # 验证和清理数据
         atomic_note = {
             'original_text': text,
             'content': note_data.get('content', text),
+            'summary': note_data.get('summary', note_data.get('content', text)),  # 保留summary字段用于前端显示
+            'title': title,
+            'raw_span': raw_span,
             'keywords': self._clean_list(note_data.get('keywords', [])),
             'entities': self._clean_list(note_data.get('entities', [])),
             'concepts': self._clean_list(note_data.get('concepts', [])),
+            'normalized_entities': self._clean_list(note_data.get('normalized_entities', [])),
+            'normalized_predicates': self._clean_list(note_data.get('normalized_predicates', [])),
             'importance_score': float(note_data.get('importance_score', 0.5)),
             'note_type': note_data.get('note_type', 'fact'),
             'source_info': chunk_data.get('source_info', {}),
@@ -197,6 +338,43 @@ class AtomicNoteGenerator:
             atomic_note['entities'].insert(0, primary_entity)
         
         return atomic_note
+    
+    def _extract_title_from_chunk(self, chunk_data: Dict[str, Any]) -> str:
+        """从chunk_data中提取title信息"""
+        # 首先尝试从paragraph_info中提取title
+        paragraph_info = chunk_data.get('paragraph_info', [])
+        if paragraph_info:
+            # 查找与当前文本最匹配的段落的title
+            text = chunk_data.get('text', '')
+            for para_info in paragraph_info:
+                if isinstance(para_info, dict):
+                    para_text = para_info.get('paragraph_text', '')
+                    title = para_info.get('title', '')
+                    # 如果段落文本与chunk文本有重叠，使用该段落的title
+                    if para_text and text and para_text in text:
+                        return title
+                    # 或者如果chunk文本在段落文本中
+                    elif para_text and text and text in para_text:
+                        return title
+        
+        # 如果没有找到匹配的title，尝试从source_info中提取
+        source_info = chunk_data.get('source_info', {})
+        if isinstance(source_info, dict):
+            title = source_info.get('title', '')
+            if title:
+                return title
+        
+        # 最后尝试从文本开头提取可能的标题
+        text = chunk_data.get('text', '')
+        if text:
+            lines = text.split('\n')
+            if lines:
+                first_line = lines[0].strip()
+                # 如果第一行较短且不以句号结尾，可能是标题
+                if len(first_line) < 100 and not first_line.endswith('.'):
+                    return first_line
+        
+        return ''  # 如果都没有找到，返回空字符串
     
     def _try_fix_truncated_json(self, response: str) -> str:
         """尝试修复截断的JSON响应"""

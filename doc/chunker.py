@@ -21,18 +21,21 @@ class DocumentChunker:
             # 读取文档内容
             content = self._read_document_content(file_path)
             
-            # 特殊处理：如果是musique格式的JSONL数据，需要提取idx信息
+            # 特殊处理：如果是musique格式的JSONL数据，需要提取idx信息和段落信息
             paragraph_idx_mapping = None
+            paragraph_info = []
             
             # 处理JSONL格式：如果content是列表，取第一个元素
             if isinstance(content, list) and len(content) > 0:
                 first_item = content[0]
                 if isinstance(first_item, dict) and 'paragraphs' in first_item:
                     paragraph_idx_mapping = self._extract_paragraph_idx_mapping(first_item)
+                    paragraph_info = self._extract_paragraph_info(first_item)
                     # 使用第一个JSONL条目作为内容
                     content = first_item
             elif isinstance(content, dict) and 'paragraphs' in content:
                 paragraph_idx_mapping = self._extract_paragraph_idx_mapping(content)
+                paragraph_info = self._extract_paragraph_info(content)
             
             # 提取文本内容
             text_content = self._extract_text_content(content, file_path)
@@ -40,10 +43,14 @@ class DocumentChunker:
             # 分块处理
             chunks = self._chunk_text_content(text_content, file_path, source_info)
             
-            # 为每个chunk添加paragraph_idx_mapping信息
+            # 为每个chunk添加paragraph_idx_mapping和paragraph_info信息
             if paragraph_idx_mapping:
                 for chunk in chunks:
                     chunk['paragraph_idx_mapping'] = paragraph_idx_mapping
+            
+            if paragraph_info:
+                for chunk in chunks:
+                    chunk['paragraph_info'] = paragraph_info
             
             logger.info(f"Document chunked into {len(chunks)} chunks")
             return chunks
@@ -120,6 +127,23 @@ class DocumentChunker:
                         text_parts.append(f"{key}: {value}")
         
         return '\n'.join(text_parts)
+    
+    def _extract_paragraph_info(self, data: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """从数据中提取段落信息，包括title和paragraph_text"""
+        paragraph_info = []
+        
+        if 'paragraphs' in data:
+            paragraphs = data.get('paragraphs', [])
+            for para in paragraphs:
+                if isinstance(para, dict) and 'paragraph_text' in para:
+                    info = {
+                        'title': para.get('title', ''),
+                        'paragraph_text': para.get('paragraph_text', ''),
+                        'idx': para.get('idx', -1)
+                    }
+                    paragraph_info.append(info)
+        
+        return paragraph_info
     
     def _extract_text_from_list(self, data: List[Any]) -> str:
         """从列表中提取文本内容"""

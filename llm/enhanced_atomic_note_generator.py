@@ -6,7 +6,7 @@ from utils.text_utils import TextUtils
 from utils.json_utils import extract_json_from_response, clean_control_characters
 from utils.note_validator import NoteValidator
 from utils.enhanced_ner import EnhancedNER
-from utils.enhanced_relation_extractor import EnhancedRelationExtractor
+# from utils.enhanced_relation_extractor import EnhancedRelationExtractor  # Module not found
 from utils.enhanced_noise_filter import EnhancedNoiseFilter
 from utils.note_similarity import NoteSimilarityCalculator
 from config import config
@@ -39,7 +39,8 @@ class EnhancedAtomicNoteGenerator:
         
         # 增强组件
         self.enhanced_ner = EnhancedNER()
-        self.relation_extractor = EnhancedRelationExtractor()
+        # self.relation_extractor = EnhancedRelationExtractor()  # Module not found
+        self.relation_extractor = None
         self.noise_filter = EnhancedNoiseFilter()
         self.similarity_calculator = NoteSimilarityCalculator()
         
@@ -47,7 +48,7 @@ class EnhancedAtomicNoteGenerator:
         self.enable_enhanced_ner = self.config.get('enable_enhanced_ner', True)
         self.enable_relation_extraction = self.config.get('enable_relation_extraction', True)
         self.enable_enhanced_noise_filter = self.config.get('enable_enhanced_noise_filter', True)
-        self.enable_note_similarity = self.config.get('enable_note_similarity', True)
+        self.enable_note_similarity = self.config.get('enable_note_similarity', False)  # Disabled due to network issues
         
         logger.info(f"Enhanced Atomic Note Generator initialized with features: "
                    f"NER={self.enable_enhanced_ner}, RE={self.enable_relation_extraction}, "
@@ -178,6 +179,14 @@ class EnhancedAtomicNoteGenerator:
         """抽取实体关系"""
         logger.info("Phase 3: Extracting entity relations")
         
+        if self.relation_extractor is None:
+            logger.warning("Relation extractor not available, skipping relation extraction")
+            # 为每个笔记添加空的关系信息
+            for note in atomic_notes:
+                note['extracted_relations'] = []
+                note['relation_graph_connections'] = 0
+            return atomic_notes
+        
         # 批量抽取关系
         enhanced_notes = self.relation_extractor.extract_relations_from_notes(atomic_notes)
         
@@ -260,14 +269,22 @@ class EnhancedAtomicNoteGenerator:
             paragraph_idx_mapping = chunk_data.get('paragraph_idx_mapping', {})
             relevant_idxs = self._extract_relevant_paragraph_idxs(text, paragraph_idx_mapping)
             
+            # 提取title和raw_span信息
+            title = self._extract_title_from_chunk(chunk_data)
+            raw_span = text  # raw_span就是原始文本内容
+            
             # 验证和清理数据
             atomic_note = {
                 'original_text': text,
                 'content': note_data.get('content', text),
-                'summary': note_data.get('summary', ''),
+                'summary': note_data.get('summary', note_data.get('content', text)),  # 保留summary字段用于前端显示
+                'title': title,
+                'raw_span': raw_span,
                 'keywords': self._clean_list(note_data.get('keywords', [])),
                 'entities': self._clean_list(note_data.get('entities', [])),
                 'concepts': self._clean_list(note_data.get('concepts', [])),
+                'normalized_entities': self._clean_list(note_data.get('normalized_entities', [])),
+                'normalized_predicates': self._clean_list(note_data.get('normalized_predicates', [])),
                 'importance_score': float(note_data.get('importance_score', 0.5)),
                 'note_type': note_data.get('note_type', 'fact'),
                 'source_info': chunk_data.get('source_info', {}),
@@ -291,6 +308,43 @@ class EnhancedAtomicNoteGenerator:
             logger.warning(f"Failed to parse JSON response: {e}. Response: {response[:200]}...")
             return self._create_fallback_note(chunk_data)
     
+    def _extract_title_from_chunk(self, chunk_data: Dict[str, Any]) -> str:
+        """从chunk_data中提取title信息"""
+        # 首先尝试从paragraph_info中提取title
+        paragraph_info = chunk_data.get('paragraph_info', [])
+        if paragraph_info:
+            # 查找与当前文本最匹配的段落的title
+            text = chunk_data.get('text', '')
+            for para_info in paragraph_info:
+                if isinstance(para_info, dict):
+                    para_text = para_info.get('paragraph_text', '')
+                    title = para_info.get('title', '')
+                    # 如果段落文本与chunk文本有重叠，使用该段落的title
+                    if para_text and text and para_text in text:
+                        return title
+                    # 或者如果chunk文本在段落文本中
+                    elif para_text and text and text in para_text:
+                        return title
+        
+        # 如果没有找到匹配的title，尝试从source_info中提取
+        source_info = chunk_data.get('source_info', {})
+        if isinstance(source_info, dict):
+            title = source_info.get('title', '')
+            if title:
+                return title
+        
+        # 最后尝试从文本开头提取可能的标题
+        text = chunk_data.get('text', '')
+        if text:
+            lines = text.split('\n')
+            if lines:
+                first_line = lines[0].strip()
+                # 如果第一行较短且不以句号结尾，可能是标题
+                if len(first_line) < 100 and not first_line.endswith('.'):
+                    return first_line
+        
+        return ''  # 如果都没有找到，返回空字符串
+    
     def _create_fallback_note(self, chunk_data: Union[Dict[str, Any], Any]) -> Dict[str, Any]:
         """创建备用的原子笔记（当LLM生成失败时）"""
         # 确保 chunk_data 是字典类型
@@ -305,14 +359,22 @@ class EnhancedAtomicNoteGenerator:
         entities = TextUtils.extract_entities(text)
         if not entities and primary_entity:
             entities = [primary_entity]
+        
+        # 提取title和raw_span信息
+        title = self._extract_title_from_chunk(chunk_data)
+        raw_span = text
 
         return {
             'original_text': text,
             'content': text,
             'summary': text[:100] + '...' if len(text) > 100 else text,
+            'title': title,
+            'raw_span': raw_span,
             'keywords': [],
             'entities': entities,
             'concepts': [],
+            'normalized_entities': [],
+            'normalized_predicates': [],
             'importance_score': 0.5,
             'note_type': 'fact',
             'source_info': chunk_data.get('source_info', {}),

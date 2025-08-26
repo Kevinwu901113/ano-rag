@@ -9,20 +9,11 @@ try:
     from .graph_quality import compute_metrics
 except Exception:  # pragma: no cover - optional dependency
     compute_metrics = None  # type: ignore
-try:
-    from .enhanced_relation_extractor import EnhancedRelationExtractor
-    ENHANCED_AVAILABLE = True
-except Exception:  # pragma: no cover - optional dependency
-    ENHANCED_AVAILABLE = False
-
 class GraphBuilder:
     """Builds a knowledge graph from atomic notes and relations."""
     def __init__(self, llm=None):
-        use_enhanced = config.get('multi_hop.enabled', False) and ENHANCED_AVAILABLE
-        if use_enhanced:
-            self.relation_extractor = EnhancedRelationExtractor(llm=llm)
-        else:
-            self.relation_extractor = RelationExtractor()
+        # 使用统一的RelationExtractor，支持增强功能
+        self.relation_extractor = RelationExtractor(local_llm=llm)
 
     def build_graph(self, atomic_notes: List[Dict[str, Any]], embeddings=None) -> nx.Graph:
         """Create a graph from notes and optional embeddings."""

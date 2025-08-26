@@ -243,4 +243,43 @@ EVALUATE_ANSWER_PROMPT = """
 
 请评估上述答案的质量：
 """
+# Sub-question decomposition prompts
+SUBQUESTION_DECOMPOSITION_SYSTEM_PROMPT = """
+You are a professional question analysis and decomposition expert. Your task is to decompose complex multi-hop questions into multiple independent sub-questions.
+
+Decomposition principles:
+1. Each sub-question should be independent and complete, answerable on its own
+2. Sub-questions should have logical relationships and collectively serve the original question
+3. Maintain the core intent and semantics of the original question
+4. Avoid information loss and duplication
+5. The number of sub-questions should be reasonable (2-5)
+6. Must use English
+
+Output requirements:
+- Return strictly in JSON format
+- Include sub_questions field with a list of sub-questions as value
+- Each sub-question should be a complete sentence
+- Do not add any explanatory text or markdown markers
+"""
+
+SUBQUESTION_DECOMPOSITION_PROMPT = """
+Please decompose the following complex question into multiple independent sub-questions:
+
+Original question: {query}
+
+Please return strictly in the following JSON format, do not add any other text or explanation:
+{{
+    "sub_questions": [
+        "Sub-question 1",
+        "Sub-question 2",
+        "Sub-question 3"
+    ]
+}}
+
+Note:
+- Only return JSON object, do not include markdown code block markers
+- Each sub-question should be a complete English sentence
+- Number of sub-questions should be between 2-5
+"""
+
 

@@ -26,6 +26,7 @@ from query import QueryProcessor
 from config import config
 from utils import FileUtils, setup_logging
 from llm import LocalLLM
+from parallel import create_parallel_interface, ProcessingMode, ParallelStrategy
 
 
 RESULT_ROOT = config.get('storage.result_root', 'result')
@@ -208,12 +209,14 @@ class MusiqueProcessor:
             }
             return error_result, error_atomic_notes
     
-    def process_dataset(self, input_file: str, output_file: str, atomic_notes_file: str = None, parallel: bool = True) -> None:
+    def process_dataset(self, input_file: str, output_file: str, atomic_notes_file: str = None, 
+                       parallel: bool = True, use_engine_parallel: bool = False, 
+                       parallel_workers: int = 4, parallel_strategy: str = 'hybrid') -> None:
         """批量处理musique数据集"""
         logger.info(f"Starting batch processing of {input_file}")
         
         # 预先初始化EmbeddingManager以避免并行处理时的模型加载冲突
-        if parallel:
+        if parallel and not use_engine_parallel:
             logger.info("Pre-initializing EmbeddingManager for parallel processing...")
             from vector_store.embedding_manager import EmbeddingManager
             embedding_manager = EmbeddingManager()
@@ -233,7 +236,13 @@ class MusiqueProcessor:
         results = []
         atomic_notes_records = []  # 用于保存召回的原子文档信息
         
-        if parallel and len(items) > 1:
+        if use_engine_parallel:
+             # 使用并行引擎处理
+             results = self._process_with_parallel_engine(
+                 items, parallel_workers, parallel_strategy
+             )
+             atomic_notes_records = []  # 并行引擎暂不支持原子笔记记录
+        elif parallel and len(items) > 1:
             # 并行处理
             with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
                 # 为每个item创建独立的工作目录
@@ -334,6 +343,44 @@ class MusiqueProcessor:
             logger.info(f"Debug mode: All intermediate files preserved in {self.base_work_dir}")
             logger.info(f"  - Item work directories: {self.base_work_dir}/item_<id>/")
             logger.info(f"  - Each item directory contains: atomic_notes.json, graph.json, embeddings.npy, etc.")
+    
+    def _process_with_parallel_engine(self, items: List[Dict[str, Any]], 
+                                      parallel_workers: int, parallel_strategy: str) -> List[Dict[str, Any]]:
+         """使用并行引擎处理Musique数据集"""
+         logger.info(f"Starting parallel engine processing with {len(items)} items")
+         
+         # 策略映射
+         strategy_map = {
+             'copy': ParallelStrategy.DATA_COPY,
+             'split': ParallelStrategy.DATA_SPLIT,
+             'dispatch': ParallelStrategy.TASK_DISPATCH,
+             'hybrid': ParallelStrategy.HYBRID
+         }
+         
+         # 创建并行接口
+         parallel_interface = create_parallel_interface(
+             max_workers=parallel_workers,
+             processing_mode=ProcessingMode.AUTO,
+             strategy=strategy_map.get(parallel_strategy, ParallelStrategy.HYBRID),
+             debug=self.debug
+         )
+         
+         try:
+             # 使用并行引擎处理Musique数据集
+             results = parallel_interface.process_musique_dataset(
+                 items=items,
+                 base_work_dir=self.base_work_dir
+             )
+             
+             # 获取性能统计
+             perf_stats = parallel_interface.get_performance_stats()
+             if perf_stats:
+                 logger.info(f"Parallel engine stats: {perf_stats}")
+             
+             return results
+             
+         finally:
+             parallel_interface.cleanup()
 
 
 def main():
@@ -342,6 +389,10 @@ def main():
     parser.add_argument('output_file', nargs='?', default='musique_results.jsonl', help='输出结果文件（.jsonl格式），默认：musique_results.jsonl')
     parser.add_argument('--workers', type=int, default=4, help='并行处理的工作线程数（默认：4）')
     parser.add_argument('--serial', action='store_true', help='使用串行处理而非并行处理')
+    parser.add_argument('--use-engine-parallel', action='store_true', help='使用并行引擎进行处理')
+    parser.add_argument('--parallel-workers', type=int, default=4, help='并行引擎工作进程数（默认：4）')
+    parser.add_argument('--parallel-strategy', choices=['copy', 'split', 'dispatch', 'hybrid'], 
+                       default='hybrid', help='并行处理策略（默认：hybrid）')
     parser.add_argument('--log-file', help='日志文件路径')
     parser.add_argument('--atomic-notes-file', default='atomic_notes_recall.jsonl', help='保存召回原子文档的文件路径，默认：atomic_notes_recall.jsonl')
     parser.add_argument('--debug', action='store_true', help='调试模式，保留所有中间文件和工作目录')
@@ -452,7 +503,10 @@ def main():
         args.input_file, 
         output_file, 
         atomic_notes_file=atomic_notes_file,
-        parallel=not args.serial
+        parallel=not args.serial,
+        use_engine_parallel=args.use_engine_parallel,
+        parallel_workers=args.parallel_workers,
+        parallel_strategy=args.parallel_strategy
     )
 
 

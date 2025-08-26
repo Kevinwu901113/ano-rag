@@ -1,6 +1,8 @@
 import os
+import json
+import hashlib
 import numpy as np
-from typing import List, Dict, Any, Optional, Union
+from typing import List, Dict, Any, Optional, Union, Tuple
 from loguru import logger
 from sentence_transformers import SentenceTransformer
 import torch
@@ -26,6 +28,17 @@ except ImportError:
         @staticmethod
         def ensure_dir(path):
             os.makedirs(path, exist_ok=True)
+
+# 导入模型一致性模块
+try:
+    from utils.model_consistency import (
+        ModelConsistencyChecker, ModelSignature, 
+        create_model_consistency_checker, create_model_signature
+    )
+    MODEL_CONSISTENCY_AVAILABLE = True
+except ImportError:
+    MODEL_CONSISTENCY_AVAILABLE = False
+    logger.warning("Model consistency module not available")
 
 try:
     from config import config
@@ -68,7 +81,7 @@ class EmbeddingManager:
             # 配置参数
             self.model_name = config.get('embedding.model_name', 'BAAI/bge-m3')
             self.batch_size = config.get('embedding.batch_size', 32)
-            self.device = GPUUtils.get_device()
+            self.device = GPUUtils.get_optimal_device()
             self.max_length = config.get('embedding.max_length', 512)
             self.normalize_embeddings = config.get('embedding.normalize', True)
             
@@ -94,6 +107,19 @@ class EmbeddingManager:
                     import tempfile
                     self.cache_dir = os.path.join(tempfile.gettempdir(), 'anorag_embeddings')
             FileUtils.ensure_dir(self.cache_dir)
+            
+            # 初始化模型一致性检查器
+            self.consistency_checker = None
+            if MODEL_CONSISTENCY_AVAILABLE:
+                try:
+                    self.consistency_checker = create_model_consistency_checker(config)
+                    logger.info("Model consistency checker initialized")
+                    
+                    # 注册模型签名
+                    if self.model is not None:
+                        self.register_model_signature()
+                except Exception as e:
+                    logger.warning(f"Failed to initialize model consistency checker: {e}")
             
             logger.info(f"EmbeddingManager initialized with model: {self.model_name}, device: {self.device}")
             
@@ -383,43 +409,142 @@ class EmbeddingManager:
     def encode_atomic_notes(self, atomic_notes: List[Dict[str, Any]], 
                            content_field: str = 'content',
                            include_metadata: bool = True) -> np.ndarray:
-        """编码原子笔记为向量嵌入"""
+        """编码原子笔记为向量嵌入，使用配置化的文本策略"""
         if not atomic_notes:
             return np.array([])
         
+        # 获取嵌入策略配置
+        embedding_config = config.get('embedding_strategy', {}).get('atomic_note_embedding', {})
+        text_strategy = embedding_config.get('text_strategy', 'title_raw_span')
+        field_priority = embedding_config.get('field_priority', ['title', 'raw_span', 'original_text', 'content'])
+        text_combination = embedding_config.get('text_combination', {})
+        preprocessing = embedding_config.get('preprocessing', {})
+        quality_control = embedding_config.get('quality_control', {})
+        
         # 提取文本内容
         texts = []
-        for note in atomic_notes:
-            text_parts = []
-            
-            # 主要内容
-            content = note.get(content_field, '')
-            if content:
-                text_parts.append(content)
-            
-            # 包含元数据
-            if include_metadata:
-                # 关键词
-                keywords = note.get('keywords', [])
-                if keywords:
-                    text_parts.append(f"Keywords: {', '.join(keywords)}")
-                
-                # 实体
-                entities = note.get('entities', [])
-                if entities:
-                    text_parts.append(f"Entities: {', '.join(entities)}")
-                
-                # 主题
-                topic = note.get('topic', '')
-                if topic:
-                    text_parts.append(f"Topic: {topic}")
-            
-            # 合并文本
-            full_text = ' '.join(text_parts) if text_parts else 'Empty note'
-            texts.append(full_text)
+        skipped_count = 0
         
-        logger.info(f"编码 {len(atomic_notes)} 个原子笔记")
+        for i, note in enumerate(atomic_notes):
+            try:
+                # 根据策略提取文本
+                if text_strategy == 'title_raw_span':
+                    text = self._extract_title_raw_span_text(note, field_priority, text_combination)
+                elif text_strategy == 'content_only':
+                    text = note.get(content_field, '')
+                elif text_strategy == 'title_content':
+                    text = self._extract_title_content_text(note, content_field, text_combination)
+                else:  # custom or fallback
+                    text = self._extract_title_raw_span_text(note, field_priority, text_combination)
+                
+                # 文本预处理
+                text = self._preprocess_embedding_text(text, preprocessing)
+                
+                # 质量控制
+                if self._should_skip_note(text, quality_control):
+                    if quality_control.get('log_skipped_notes', True):
+                        logger.debug(f"跳过笔记 {i}: 文本质量不符合要求")
+                    skipped_count += 1
+                    text = "Empty note"  # 使用占位符
+                
+                texts.append(text)
+                
+            except Exception as e:
+                logger.warning(f"处理笔记 {i} 时出错: {e}")
+                if quality_control.get('skip_invalid_encoding', True):
+                    skipped_count += 1
+                    texts.append("Empty note")
+                else:
+                    texts.append(note.get(content_field, 'Empty note'))
+        
+        if skipped_count > 0:
+            logger.info(f"编码 {len(atomic_notes)} 个原子笔记，跳过 {skipped_count} 个，使用策略: {text_strategy}")
+        else:
+            logger.info(f"编码 {len(atomic_notes)} 个原子笔记，使用策略: {text_strategy}")
+        
         return self.encode_texts(texts)
+    
+    def _extract_title_raw_span_text(self, note: Dict[str, Any], field_priority: List[str], 
+                                   text_combination: Dict[str, Any]) -> str:
+        """提取title+raw_span组合文本"""
+        text_parts = []
+        separator = text_combination.get('separator', ' ')
+        max_length = text_combination.get('max_combined_length', 512)
+        enable_dedup = text_combination.get('enable_deduplication', True)
+        
+        # 按优先级提取字段
+        for field in field_priority:
+            value = note.get(field, '').strip()
+            if value:
+                if not enable_dedup or value not in text_parts:
+                    text_parts.append(value)
+        
+        # 组合文本
+        combined_text = separator.join(text_parts)
+        
+        # 截断处理
+        if len(combined_text) > max_length:
+            truncate_strategy = text_combination.get('truncate_strategy', 'tail')
+            if truncate_strategy == 'head':
+                combined_text = combined_text[:max_length]
+            elif truncate_strategy == 'tail':
+                combined_text = combined_text[-max_length:]
+            elif truncate_strategy == 'middle':
+                half = max_length // 2
+                combined_text = combined_text[:half] + combined_text[-half:]
+        
+        return combined_text or "Empty note"
+    
+    def _extract_title_content_text(self, note: Dict[str, Any], content_field: str, 
+                                  text_combination: Dict[str, Any]) -> str:
+        """提取title+content组合文本"""
+        text_parts = []
+        separator = text_combination.get('separator', ' ')
+        
+        title = note.get('title', '').strip()
+        content = note.get(content_field, '').strip()
+        
+        if title:
+            text_parts.append(title)
+        if content:
+            text_parts.append(content)
+        
+        return separator.join(text_parts) or "Empty note"
+    
+    def _preprocess_embedding_text(self, text: str, preprocessing: Dict[str, Any]) -> str:
+        """预处理嵌入文本"""
+        if not text:
+            return text
+        
+        # 移除多余空白
+        if preprocessing.get('remove_extra_whitespace', True):
+            import re
+            text = re.sub(r'\s+', ' ', text).strip()
+        
+        # Unicode标准化
+        if preprocessing.get('normalize_unicode', True):
+            import unicodedata
+            text = unicodedata.normalize('NFKC', text)
+        
+        # 移除控制字符
+        if preprocessing.get('remove_control_chars', True):
+            import re
+            text = re.sub(r'[\x00-\x1f\x7f-\x9f]', '', text)
+        
+        return text
+    
+    def _should_skip_note(self, text: str, quality_control: Dict[str, Any]) -> bool:
+        """判断是否应该跳过笔记"""
+        # 检查空笔记
+        if quality_control.get('skip_empty_notes', True) and not text.strip():
+            return True
+        
+        # 检查最小长度
+        min_length = quality_control.get('min_text_length', 3)
+        if len(text.strip()) < min_length:
+            return True
+        
+        return False
     
     def encode_queries(self, queries: List[str], 
                       query_prefix: str = "Represent this sentence for searching relevant passages: ") -> np.ndarray:
@@ -534,7 +659,7 @@ class EmbeddingManager:
     
     def get_model_info(self) -> Dict[str, Any]:
         """获取模型信息"""
-        return {
+        info = {
             'model_name': self.model_name,
             'embedding_dim': self.embedding_dim,
             'device': str(self.device),
@@ -542,6 +667,21 @@ class EmbeddingManager:
             'batch_size': self.batch_size,
             'normalize_embeddings': self.normalize_embeddings
         }
+        
+        # 添加模型一致性信息
+        if self.consistency_checker:
+            try:
+                signature = self.get_model_signature()
+                info['consistency_check'] = {
+                    'signature': signature,
+                    'stats': self.consistency_checker.get_stats()
+                }
+            except Exception as e:
+                info['consistency_check'] = {
+                    'error': str(e)
+                }
+        
+        return info
     
     def cleanup(self):
         """清理资源"""
@@ -551,3 +691,87 @@ class EmbeddingManager:
                 torch.cuda.empty_cache()
         
         logger.info("EmbeddingManager 清理完成")
+    
+    def register_model_signature(self) -> None:
+        """注册当前模型签名"""
+        if not self.consistency_checker or not self.model:
+            return
+        
+        try:
+            # 创建当前模型签名
+            current_signature = create_model_signature(
+                model_name=self.model_name,
+                model_type="sentence_transformer",
+                dimension=self.embedding_dim,
+                max_length=self.max_length,
+                normalize=self.normalize_embeddings,
+                metadata={
+                    'device': str(self.device),
+                    'batch_size': self.batch_size
+                }
+            )
+            
+            # 注册模型签名
+            model_id = f"embedding_manager_{self.model_name}"
+            self.consistency_checker.register_model(model_id, current_signature)
+            
+            logger.info(f"Model signature registered: {model_id}")
+                    
+        except Exception as e:
+            logger.error(f"Error during model signature registration: {e}")
+    
+    def get_model_signature(self) -> Optional[Dict[str, Any]]:
+        """获取当前模型签名"""
+        if not self.model:
+            return None
+            
+        try:
+            signature = create_model_signature(
+                model_name=self.model_name,
+                model_type="sentence_transformer",
+                dimension=self.embedding_dim,
+                max_length=self.max_length,
+                normalize=self.normalize_embeddings,
+                metadata={
+                    'device': str(self.device),
+                    'batch_size': self.batch_size
+                }
+            )
+            return signature.to_dict()
+        except Exception as e:
+            logger.error(f"Failed to create model signature: {e}")
+            return None
+    
+    def validate_model_consistency(self, other_signature: Optional[Dict[str, Any]] = None) -> Tuple[bool, Optional[str]]:
+        """验证模型一致性"""
+        if not self.model:
+            return True, None
+        
+        try:
+            # 创建当前模型签名
+            current_signature = self.get_model_signature()
+            if not current_signature:
+                return False, "Failed to create model signature"
+            
+            # 如果提供了其他签名，进行比较
+            if other_signature:
+                # 检查关键属性是否一致
+                key_attrs = ['model_name', 'model_type', 'dimension', 'normalize']
+                for attr in key_attrs:
+                    if current_signature.get(attr) != other_signature.get(attr):
+                        return False, f"Inconsistent {attr}: {current_signature.get(attr)} vs {other_signature.get(attr)}"
+                
+                return True, "Model signatures are consistent"
+            
+            # 如果有consistency_checker，使用它进行验证
+            if self.consistency_checker:
+                model_id = f"embedding_manager_{self.model_name}"
+                violations = self.consistency_checker.get_violations()
+                if violations:
+                    return False, f"Found {len(violations)} consistency violations"
+            
+            return True, "Model consistency validated"
+            
+        except Exception as e:
+            logger.error(f"Error during model consistency validation: {e}")
+            return False, str(e)

@@ -10,7 +10,7 @@ import numpy as np
 from config import config
 from .graph_builder import GraphBuilder
 from .graph_index import GraphIndex
-from .enhanced_graph_retriever import EnhancedGraphRetriever
+from .graph_retriever import GraphRetriever
 
 
 class MultiHopQueryProcessor:
@@ -41,7 +41,7 @@ class MultiHopQueryProcessor:
             self.graph_index = GraphIndex(graph)
             self.graph_index.build_index(graph, atomic_notes, embeddings)
 
-        self.retriever = EnhancedGraphRetriever(self.graph_index)
+        self.retriever = GraphRetriever(self.graph_index)
 
     def retrieve(
         self,

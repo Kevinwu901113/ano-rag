@@ -6,7 +6,7 @@ from config import config
 from .ollama_client import OllamaClient
 from .openai_client import OpenAIClient
 from .lmstudio_client import LMStudioClient
-from .multi_lmstudio_client import MultiLMStudioClient
+from .multi_model_client import MultiModelClient
 
 
 class LLMFactory:
@@ -20,7 +20,8 @@ class LLMFactory:
     PROVIDERS = {
         'ollama': OllamaClient,  # 使用单实例 Ollama 客户端
         'openai': OpenAIClient,
-        'lmstudio': MultiLMStudioClient,  # 使用多实例 LM Studio 客户端
+        'lmstudio': LMStudioClient,  # 使用统一的 LM Studio 客户端（支持单实例和并发）
+        'multi_model': MultiModelClient,  # 多模型并行客户端
     }
     
     @classmethod
@@ -54,6 +55,8 @@ class LLMFactory:
                 return cls._create_openai_provider(**kwargs)
             elif provider_type == 'lmstudio':
                 return cls._create_lmstudio_provider(**kwargs)
+            elif provider_type == 'multi_model':
+                return cls._create_multi_model_provider(**kwargs)
             else:
                 raise ValueError(f"Unknown provider type: {provider_type}")
                 
@@ -105,22 +108,46 @@ class LLMFactory:
         return OpenAIClient(api_key=api_key, model=model, base_url=base_url)
     
     @classmethod
-    def _create_lmstudio_provider(cls, **kwargs) -> MultiLMStudioClient:
+    def _create_lmstudio_provider(cls, **kwargs) -> LMStudioClient:
         """创建 LM Studio Provider
         
         Args:
             **kwargs: 额外参数
             
         Returns:
-            MultiLMStudioClient 实例
+            LMStudioClient 实例（统一客户端，自动支持单实例和多实例模式）
         """
         # 获取 LM Studio 配置
         base_url = kwargs.get('base_url') or config.get('llm.lmstudio.base_url')
         model = kwargs.get('model') or config.get('llm.lmstudio.model', 'default-model')
         port = kwargs.get('port') or config.get('llm.lmstudio.port', 1234)
         
-        logger.info(f"Creating LM Studio provider with model: {model} on port: {port}")
-        return MultiLMStudioClient(base_url=base_url, model=model, port=port)
+        # 检查是否启用并发模式
+        concurrent_enabled = config.get('llm.lmstudio.concurrent.enabled', False)
+        mode = 'concurrent' if concurrent_enabled else 'single-instance'
+        
+        logger.info(f"Creating LM Studio provider in {mode} mode with model: {model} on port: {port}")
+        return LMStudioClient(base_url=base_url, model=model, port=port)
+    
+    @classmethod
+    def _create_multi_model_provider(cls, **kwargs) -> MultiModelClient:
+        """创建多模型并行 Provider
+        
+        Args:
+            **kwargs: 额外参数
+            
+        Returns:
+            MultiModelClient 实例
+        """
+        # 检查是否启用多模型并行模式
+        multi_model_enabled = config.get('llm.multi_model.enabled', False)
+        
+        if not multi_model_enabled:
+            logger.warning("Multi-model mode is not enabled in config, falling back to single LM Studio client")
+            return cls._create_lmstudio_provider(**kwargs)
+        
+        logger.info("Creating Multi-Model provider for parallel model processing")
+        return MultiModelClient()
     
     @classmethod
     def get_available_providers(cls) -> Dict[str, bool]:

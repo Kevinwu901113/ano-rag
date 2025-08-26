@@ -10,7 +10,6 @@ from collections import defaultdict
 import numpy as np
 
 from config import config
-from vector_store import VectorRetriever
 from graph.graph_retriever import GraphRetriever
 from llm.prompts import CONTEXT_NOTE_TEMPLATE, build_context_prompt
 
@@ -25,7 +24,7 @@ class ContextDispatcher:
     """
     
     def __init__(self, 
-                 vector_retriever: VectorRetriever,
+                 vector_retriever,  # VectorRetriever
                  graph_retriever: GraphRetriever):
         self.vector_retriever = vector_retriever
         self.graph_retriever = graph_retriever

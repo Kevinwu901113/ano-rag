@@ -50,6 +50,11 @@ class GPUUtils:
         return "cpu"
     
     @staticmethod
+    def get_optimal_device() -> str:
+        """获取最优设备（与get_device相同，为了兼容性）"""
+        return GPUUtils.get_device()
+    
+    @staticmethod
     def to_cudf(data: Union[np.ndarray, List, dict], use_gpu: bool = True) -> Union['cudf.DataFrame', 'pd.DataFrame']:
         """将数据转换为cuDF DataFrame（如果可用）"""
         if use_gpu and CUDF_AVAILABLE:

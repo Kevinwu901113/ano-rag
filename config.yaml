@@ -7,6 +7,11 @@ document:
   batch_size: 32
   supported_formats: ["json", "jsonl", "docx"]
   
+  # 并发处理配置（用于原子笔记生成）
+  # concurrent_processing:
+  #   enabled: true          # 是否启用并发处理
+  #   max_workers: 4         # 最大并发工作线程数
+  
 # Embedding Model
 embedding:
   model_name: "BAAI/bge-m3"  # or "nomic-ai/nomic-embed-text-v1"
@@ -78,38 +83,69 @@ multi_hop:
     max_notes: 5
   
 # Query Processing
+# Note: Query rewriting functionality has been completely removed from the system
 query:
-  rewrite_enabled: false
-  split_multi_queries: true
-  placeholder_split: false
-  add_prior_knowledge: false  # switch for LLM hallucination prevention
-  parallel_processing: true
+  # Sub-question decomposition for multi-hop complex queries
+  use_subquestion_decomposition: false  # Default: disabled
+  subquestion:
+    max_subquestions: 5                 # Maximum number of sub-questions to generate
+    min_subquestions: 2                 # Minimum number of sub-questions to generate
+    parallel_retrieval: true            # Enable parallel retrieval for sub-questions
+    merge_strategy: "weighted"          # Strategy for merging evidence: "simple", "weighted", "ranked"
+
+# Parallel Processing Engine
+parallel:
+  enabled: true                    # 是否启用并行处理引擎
+  # default_workers: 4               # 默认工作线程数
+  # max_workers: 8                   # 最大工作线程数
   
-# Context Scheduler Weights (Legacy)
-context_scheduler:
-  semantic_weight: 0.15      # t1
-  graph_weight: 0.35        # t2  
-  topic_weight: 0.2         # t3
-  feedback_weight: 0.15     # t4
-  redundancy_penalty: 0.15   # t5
-  top_n_notes: 10
+  # 并行策略配置
+  strategy:
+    default: "DATA_COPY"           # 默认并行策略: DATA_COPY, DATA_SPLIT, TASK_DISPATCH, HYBRID
+    auto_select: true              # 是否自动选择最优策略
+    
+  # 策略选择阈值
+  thresholds:
+    data_copy_max_tasks: 10        # 数据复制策略的最大任务数阈值
+    task_dispatch_min_tasks: 20    # 任务分发策略的最小任务数阈值
+    hybrid_threshold: 50           # 混合策略的任务数阈值
+    
+  # 性能优化配置
+  optimization:
+    batch_size: 64                 # 批处理大小
+    timeout: 300                   # 任务超时时间（秒）
+    retry_attempts: 3              # 失败重试次数
+    memory_limit_mb: 4096          # 内存限制（MB）
+    
+  # 调试和监控
+  debug:
+    enabled: false                 # 是否启用调试模式
+    log_performance: true          # 是否记录性能统计
+    detailed_stats: false          # 是否记录详细统计信息
+    
+  # 资源管理
+  resources:
+    cleanup_timeout: 30            # 资源清理超时时间（秒）
+    memory_check_interval: 60      # 内存检查间隔（秒）
+    auto_gc: true                  # 是否自动垃圾回收
+  
 
 # Context Dispatcher (New Structure-Enhanced Approach)
 context_dispatcher:
   enabled: true              # Enable new structure-enhanced context dispatcher
   
   # Stage 1: Semantic Recall Parameters
-  semantic_top_n: 10         # n: top-n semantic recall
-  semantic_threshold: 0.25    # minimum similarity threshold
+  semantic_top_n: 5         # n: top-n semantic recall
+  semantic_threshold: 0.35    # minimum similarity threshold
   
   # Stage 2: Graph Expansion Parameters  
-  graph_expand_top_p: 5     # p: top-p notes for graph expansion (p < n)
-  k_hop: 3                   # k: k-hop graph expansion
-  graph_threshold: 0.25       # minimum graph score threshold
+  graph_expand_top_p: 3     # p: top-p notes for graph expansion (p < n)
+  k_hop: 2                   # k: k-hop graph expansion
+  graph_threshold: 0.35       # minimum graph score threshold
   
   # Stage 3: Context Scheduling Parameters
-  final_semantic_count: 3    # x: final semantic results to select
-  final_graph_count: 5      # y: final graph results to select
+  final_semantic_count: 2    # x: final semantic results to select
+  final_graph_count: 3      # y: final graph results to select
 
 # LLM Configuration
 llm:
@@ -119,7 +155,7 @@ llm:
   # For atomic note generation and query rewriting (legacy support)
   local_model:
     temperature: 0.1
-    max_tokens: 4096
+    max_tokens: 8192
     
   # Ollama Configuration
   ollama:
@@ -147,40 +183,129 @@ llm:
     # 单实例配置（默认配置）
     port: 1234                                        # LM Studio默认端口
     base_url: "http://localhost:1234/v1"             # LM Studio API地址
-    model: "gpt-oss-20b"                           # 模型名称，需要与LM Studio中加载的模型匹配
+    model: "openai/gpt-oss-20b"                           # 模型名称，需要与LM Studio中加载的模型匹配
     temperature: 0.7
     max_tokens: 8192
     timeout: 60
     
-    # 多实例配置（优化版：自动检测LM Studio中的模型实例）
-    multiple_instances:
-      enabled: true           # 是否启用多实例负载均衡（支持自动检测）
-      # 注意：启用后会自动检测LM Studio中加载的所有模型，
-      # 相同模型会自动添加序号后缀（如 model:2, model:3）
-      # 所有实例使用相同端口1234，通过模型名称区分
-      instances:
-        # 以下配置仅在自动检测失败时作为备用配置
-        - port: 1234
-          base_url: "http://localhost:1234/v1"
-          model: "default-model"
-        # 备用实例配置（可选）
-        # - port: 1234
-        #   base_url: "http://localhost:1234/v1"
-        #   model: "another-model"
-      load_balancing: "round_robin"  # 负载均衡策略: round_robin, random, least_busy
-      health_check_interval: 30      # 健康检查间隔（秒）
-      max_retries_per_instance: 2    # 每个实例的最大重试次数
+    # 并发处理配置（利用LM Studio内置队列功能）
+    # concurrent:
+    #   enabled: true                # 是否启用并发处理
+    #   max_requests: 4              # 最大并发请求数
+  
+  # 多模型并行配置（利用LM Studio的自动命名机制）
+  multi_model:
+    enabled: true                # 是否启用多模型并行模式
+    instance_count: 3            # 模型实例数量
+    base_port: 1234              # LM Studio端口（所有实例共享）
+    model_name: "openai/gpt-oss-20b"    # 基础模型名称
+    temperature: 0.1
+    max_tokens: 8192
+    timeout: 60
+    max_retries: 3               # 最大重试次数
+    
+    # 使用说明：
+    # 1. 在LM Studio中重复加载相同模型多次
+    # 2. LM Studio会自动为重复的模型分配不同名称：
+    #    - 第1次加载：gpt-oss-20b
+    #    - 第2次加载：gpt-oss-20b:2
+    #    - 第3次加载：gpt-oss-20b:3
+    # 3. 所有模型实例共享同一个端口，通过模型名称区分
+    
+    # GPU资源管理
+    # gpu:
+    #   memory_per_model: 4096     # 每个模型预估显存使用量（MB）
+    #   auto_allocate: true        # 是否自动分配GPU资源
+    
+    # 负载均衡策略
+    load_balancing: "gpu_optimal"  # 策略: round_robin, random, least_busy, gpu_optimal, performance_based
+    
+    # 健康检查配置
+    health_check_interval: 30    # 健康检查间隔（秒）
+    
+    # 自定义实例配置（可选，如果不配置则使用默认的自动命名）
+    instances:
+      # - model_name: "gpt-oss-20b"      # 第一个实例
+      #   port: 1234
+      #   base_url: "http://localhost:1234/v1"
+      # - model_name: "gpt-oss-20b:2"    # 第二个实例（LM Studio自动命名）
+      #   port: 1234
+      #   base_url: "http://localhost:1234/v1"
+      # - model_name: "gpt-oss-20b:3"    # 第三个实例（LM Studio自动命名）
+      #   port: 1234
+      #   base_url: "http://localhost:1234/v1"
     
 # Vector Store
 vector_store:
   index_type: "Flat"  # faiss index types: Flat, IVFFlat, IVFPQ, HNSW, LSH
   dimension: 1024
   similarity_metric: "cosine"
-  top_k: 50
-  similarity_threshold: 0.1  # 降低相似度阈值以增加召回
+  top_k: 20
+  similarity_threshold: 0.5
+  batch_size: 32
   recall_optimization:
     enabled: true
   
+  # 检索器扩展配置
+  retriever_enhancement:
+    topk_multiplier: 3.0                    # 初始检索倍数，用于扩大候选池
+    must_have_terms_penalty: 0.6             # 未包含必需词汇的降权系数
+    entity_boost_factor: 1.2                 # 实体匹配的加权系数
+    predicate_boost_factor: 1.15             # 谓词匹配的加权系数
+    enable_filter_logging: true              # 是否启用过滤日志
+    
+    # 默认参数
+    default_must_have_terms: []              # 默认必需词汇列表
+    default_boost_entities: []               # 默认提升实体列表
+    default_boost_predicates: []             # 默认提升谓词列表
+  
+  # BM25 回退机制
+  bm25_fallback:
+    enabled: true
+    k1: 1.2
+    b: 0.75
+  
+  # 混合检索配置
+  hybrid_search:
+    enable_hybrid_search: false              # 是否启用混合检索
+    fusion_method: "rrf"                     # 融合方法: rrf, linear, cross_encoder
+    rrf_k: 60                               # RRF参数k值
+    linear_weights:
+      vector: 0.7                           # 向量检索权重
+      sparse: 0.3                           # 稀疏检索权重
+    cross_encoder:
+      model_name: "cross-encoder/ms-marco-MiniLM-L-6-v2"
+      batch_size: 16
+      timeout_seconds: 30
+
+# 混合检索配置
+hybrid_search:
+  # 融合策略: rrf, linear, weighted_sum
+  fusion_strategy: "rrf"
+  
+  # 融合权重
+  sparse_weight: 0.5      # 稀疏检索权重
+  dense_weight: 0.5       # 向量检索权重
+  
+  # RRF参数
+  rrf_k: 60              # RRF常数，用于平滑排名
+  
+  # BM25参数
+  bm25_k1: 1.2           # BM25 k1参数
+  bm25_b: 0.75           # BM25 b参数
+  
+  # SPLADE配置
+  enable_splade: false    # 是否启用SPLADE（需要额外依赖）
+  splade_model: "naver/splade-cocondenser-ensembledistil"
+  
+  # 命名空间过滤
+  enable_namespace_filtering: true
+  
+  # 性能配置
+  sparse_top_k_multiplier: 2.0  # 稀疏检索候选池扩展倍数
+  enable_cache: true            # 是否启用缓存
+  cache_size: 1000             # 缓存大小
+   
 # Storage Paths
 storage:
   vector_db_path: null  # 将在运行时设置为工作目录下的子目录
@@ -205,10 +330,320 @@ summary_auditor:
   ner_model: "spacy"              # 设置使用的NER工具，可选值为spacy或ltp
   entity_similarity_threshold: 0.8 # 实体相似度阈值
   missing_entity_threshold: 0.3    # 缺失实体比例阈值
+
+# Query Planner Configuration
+query_planner:
+  # 基本配置
+  enable_rule_decomposition: true   # 启用基于规则的查询分解
+  enable_llm_rewriting: false       # 启用基于LLM的查询改写
+  max_sub_queries: 5                # 最大子查询数量
+  min_query_length: 3               # 最小查询长度
   
+  # 执行策略
+  execution_strategy: "parallel"    # 执行策略：parallel, sequential, adaptive
+  merge_strategy: "weighted"        # 合并策略：weighted, ranked, clustered
+  max_workers: 4                    # 并行执行最大工作线程数
+  
+  # 查询分解器配置文件路径
+  query_decomposer_config_file: "config/query_decomposer_config.yaml"
+
+# Path Aware Ranker Configuration
+path_aware_ranker:
+  # 基本配置
+  k_hop: 2                         # k-hop扩展深度
+  max_paths_per_candidate: 5       # 每个候选最大路径数
+  min_path_score: 0.1              # 最小路径分数阈值
+  
+  # 融合权重
+  path_weight: 0.3                 # 路径分数权重
+  semantic_weight: 0.5             # 语义分数权重
+  sparse_weight: 0.2               # 稀疏分数权重
+  
+  # 图提取器配置文件路径
+  graph_extractor_config_file: "config/graph_extractor_config.yaml"
+  
+# Entity and Predicate Normalizer Configuration
+entity_predicate_normalizer:
+  # 自定义规则配置文件路径
+  custom_rules_config_file: "config/entity_predicate_custom_rules_config.yaml"
+  
+  # 实体标准化器配置
+  entity_normalizer:
+    min_confidence: 0.7              # 最小置信度阈值
+    enable_fuzzy_matching: true      # 启用模糊匹配
+    cache_size: 10000               # 缓存大小
+    alias_dict_file: ""             # 别名词典文件路径
+  
+  # 谓词标准化器配置
+  predicate_normalizer:
+    min_confidence: 0.7              # 最小置信度阈值
+    enable_fuzzy_matching: true      # 启用模糊匹配
+
+# 模型一致性配置
+model_consistency:
+  # 一致性级别: strict, moderate, permissive, disabled
+  consistency_level: "moderate"
+  
+  # 最大违规记录数
+  max_violations: 100
+  
+  # 启用缓存
+  enable_caching: true
+  
+  # 自动注册模型签名
+  auto_register: true
+  
+  # 兼容性检查配置
+  compatibility_check:
+    check_dimension: true      # 检查嵌入维度
+    check_normalize: true      # 检查归一化设置
+    check_model_type: true     # 检查模型类型
+    allow_compatible_models: true  # 允许兼容模型混用
+  
+  # 违规处理配置
+  violation_handling:
+    log_violations: true       # 记录违规日志
+    raise_on_strict: true      # 严格模式下抛出异常
+    warn_on_moderate: true     # 适中模式下发出警告
+
+# 嵌入策略配置文件路径
+embedding_strategy_config_file: "config/embedding_strategy_config.yaml"
+
+# Query Planner Configuration
+query_planner:
+  # 基本配置
+  enable_rule_decomposition: true      # 启用基于规则的分解
+  enable_llm_rewriting: false          # 启用基于LLM的改写
+  max_sub_queries: 5                   # 最大子查询数量
+  min_query_length: 3                  # 最小查询长度
+  
+  # 执行策略
+  execution_strategy: "parallel"       # parallel, sequential, adaptive
+  merge_strategy: "weighted"           # weighted, ranked, clustered
+  max_workers: 4                       # 最大并发数
+  
+  # 查询分解器配置文件路径
+  query_decomposer_config_file: "config/query_decomposer_config.yaml"
+
+# Path Aware Ranker Configuration
+path_aware_ranker:
+  # 基本配置
+  k_hop: 2                            # k-hop扩展跳数
+  max_paths_per_candidate: 5          # 每个候选最大路径数
+  min_path_score: 0.1                 # 最小路径分数阈值
+  
+  # 分数融合权重
+  path_weight: 0.3                    # 路径分数权重
+  semantic_weight: 0.5                # 语义分数权重
+  sparse_weight: 0.2                  # 稀疏分数权重
+  
+  # 图提取器配置
+  graph_extractor:
+    # 实体提取配置
+    entity_extraction:
+      min_confidence: 0.7               # 最小置信度
+      max_entities_per_text: 20         # 每个文本最大实体数
+      enable_fuzzy_matching: true       # 启用模糊匹配
+      
+      # 实体模式
+      entity_patterns:
+        - "([A-Z][a-z]+(?:\\s+[A-Z][a-z]+)*)"
+        - "([\u4e00-\u9fff]+(?:公司|集团|大学|学院|研究院|中心))"
+        - "([\u4e00-\u9fff]{2,10})"
+    
+    # 关系提取配置
+    relation_extraction:
+      min_confidence: 0.6               # 最小置信度
+      max_relations_per_text: 15        # 每个文本最大关系数
+      
+      # 谓词映射
+      predicate_mapping:
+        "创立": "founded_by"
+        "成立": "founded_by"
+        "建立": "founded_by"
+        "发布": "released_by"
+        "开发": "developed_by"
+        "研发": "developed_by"
+        "设计": "designed_by"
+        "制造": "manufactured_by"
+        "生产": "produced_by"
+        "销售": "sold_by"
+        "分发": "distributed_by"
+        "位于": "located_in"
+        "在": "located_in"
+        "属于": "member_of"
+        "隶属": "member_of"
+        "拥有": "owns"
+        "持有": "owns"
+        "收购": "acquired_by"
+        "合并": "merged_with"
+        "投资": "invested_by"
+        "资助": "funded_by"
+        "赞助": "sponsored_by"
+        "合作": "collaborated_with"
+        "竞争": "competes_with"
+      
+      # 关系模式
+      relation_patterns:
+        - "(.+?)(?:由|被)(.+?)(?:创立|成立|建立)"
+        - "(.+?)(?:位于|在)(.+?)(?:市|省|县|区|国)"
+        - "(.+?)(?:属于|隶属于)(.+?)(?:公司|集团|组织)"
+        - "(.+?)(?:拥有|持有)(.+?)(?:股份|股权)"
+        - "(.+?)(?:开发|研发)(?:了)?(.+?)"
+        - "(.+?)(?:收购|并购)(?:了)?(.+?)"
+  
+  # 轻量图配置
+  lightweight_graph:
+    max_entities: 10000                 # 最大实体数
+    max_relations: 50000                # 最大关系数
+    enable_caching: true                # 启用缓存
+    cache_size: 1000                    # 缓存大小
+    
+    # 路径查找配置
+    path_finding:
+      max_paths: 10                     # 最大路径数
+      path_timeout: 5.0                 # 路径查找超时（秒）
+      enable_bidirectional: true        # 启用双向搜索
+      
+    # 路径评分配置
+    path_scoring:
+      relation_confidence_weight: 0.4   # 关系置信度权重
+      path_length_penalty: 0.3          # 路径长度惩罚
+      entity_importance_weight: 0.3     # 实体重要性权重
+      
+      # 关系类型权重
+      relation_type_weights:
+        "founded_by": 1.0
+        "developed_by": 0.9
+        "located_in": 0.8
+        "member_of": 0.8
+        "owns": 0.7
+        "collaborated_with": 0.6
+        "competes_with": 0.5
+
+      max_versions: 10
+      cleanup_interval: 3600  # 秒
+    
+  # 性能配置
+  performance:
+    enable_batch_processing: true
+    batch_timeout: 30
+    memory_limit: "2GB"
+    enable_gpu_memory_optimization: true
+
 # Performance
 performance:
   use_gpu: true
   use_cudf: true
   num_workers: 8
   cache_enabled: true
+
+# 模型一致性检查配置
+model_consistency:
+  # 一致性级别: strict, moderate, permissive, disabled
+  consistency_level: "moderate"
+  
+  # 最大违规记录数
+  max_violations: 100
+  
+  # 启用缓存
+  enable_caching: true
+  
+  # 缓存配置
+  cache:
+    max_size: 1000
+    ttl_seconds: 3600
+  
+  # 违规处理
+  violation_handling:
+    log_violations: true
+    raise_on_strict: true
+    warn_on_moderate: true
+  
+  # 模型签名配置
+  signature:
+    include_metadata: true
+    hash_algorithm: "md5"
+    hash_length: 12
+  
+  # 兼容性规则
+  compatibility_rules:
+    # 允许的模型类型组合
+    allowed_combinations:
+      - ["sentence_transformer", "sentence_transformer"]
+      - ["openai", "openai"]
+    
+    # 维度容差
+    dimension_tolerance: 0
+    
+    # 归一化要求
+    require_same_normalization: true
+
+# 检索保障配置文件路径
+retrieval_guardrail_config_file: "config/retrieval_guardrail_config.yaml"
+
+# 多样性调度器配置文件路径
+diversity_scheduler_config_file: "config/diversity_scheduler_config.yaml"
+
+# 实体标准化器配置
+entity_normalizer:
+  # 最小置信度阈值
+  min_confidence: 0.7
+  
+  # 启用模糊匹配
+  enable_fuzzy_matching: true
+  
+  # 缓存大小
+  cache_size: 10000
+  
+  # 别名词典文件路径
+  alias_dict_file: "data/aliases/entity_aliases.json"
+  
+  # 标准化规则配置文件路径
+  normalization_rules_file: "config/normalization_rules.yaml"
+  
+  # 模糊匹配配置
+  fuzzy_matching:
+    similarity_threshold: 80
+    max_candidates: 10
+    enable_phonetic: false
+  
+  # 别名管理
+  alias_management:
+    auto_learn: true
+    min_frequency: 3
+    confidence_decay: 0.95
+    max_aliases_per_entity: 50
+
+# 谓词标准化器配置
+predicate_normalizer:
+  # 最小置信度阈值
+  min_confidence: 0.7
+  
+  # 启用模糊匹配
+  enable_fuzzy_matching: true
+  
+  # 自定义配置文件路径
+  custom_config_file: "config/predicate_config.yaml"
+  
+  # 模糊匹配配置
+  fuzzy_matching:
+    similarity_threshold: 75
+    max_candidates: 5
+    enable_semantic_similarity: true
+  
+  # 谓词权重配置
+  predicate_weights:
+    # 不同类型谓词的重要性权重
+    organizational: 1.0
+    spatial: 0.9
+    temporal: 0.8
+    professional: 0.9
+    publication: 0.7
+  
+  # 动态学习配置
+  dynamic_learning:
+    enable_auto_mapping: true
+    min_occurrence_threshold: 5
+    confidence_threshold: 0.8
+    max_new_mappings_per_session: 100

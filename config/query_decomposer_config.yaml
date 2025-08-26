@@ -1,0 +1,53 @@
+# 查询分解器配置
+# 这个文件包含了查询分解器的各种规则和模式配置
+
+# 基于规则的分解器配置
+rule_based_decomposer:
+  # 连接词模式
+  conjunction_patterns:
+    - "和|与|以及|还有|同时|并且"
+    - "\\s+and\\s+"
+    - "，|；|;"
+  
+  # 问题模式
+  question_patterns:
+    - "什么是|什么叫|如何|怎么|为什么|哪些|哪个|谁是|何时|何地"
+    - "what\\s+is|what\\s+are|how\\s+to|why\\s+|which\\s+|who\\s+is|when\\s+|where\\s+"
+  
+  # 实体模式
+  entity_patterns:
+    - "关于(.+?)的"
+    - "(.+?)相关"
+    - "(.+?)方面"
+  
+  # 谓词模式
+  predicate_patterns:
+    - "(.+?)的(.+?)是什么"
+    - "(.+?)如何(.+?)"
+    - "(.+?)与(.+?)的关系"
+
+# 基于LLM的改写器配置
+llm_based_rewriter:
+  enabled: false
+  model: "gpt-3.5-turbo"
+  max_tokens: 500
+  temperature: 0.3
+  
+  # 提示词模板
+  system_prompt: |
+    你是一个专业的查询分解和改写助手。请将复杂查询分解为多个简单的子查询，
+    每个子查询应该独立且可以并行处理。输出格式为JSON数组。
+  
+  user_prompt_template: |
+    请将以下查询分解为多个子查询：
+    
+    原查询：{query}
+    
+    {context_section}
+    
+    请输出JSON格式的子查询列表，每个子查询包含以下字段：
+    - text: 子查询文本
+    - target_entities: 目标实体类型列表
+    - target_predicates: 目标谓词列表
+    - constraint_keywords: 约束关键词列表
+    - query_type: 查询类型（general, entity, relation, temporal）

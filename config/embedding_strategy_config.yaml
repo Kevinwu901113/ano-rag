@@ -1,0 +1,294 @@
+# 嵌入策略配置
+# 这个文件包含了嵌入策略的完整配置
+
+# 嵌入策略配置
+embedding_strategy:
+  # 基本配置
+  strategy_type: "hybrid"           # 策略类型: single, hybrid, adaptive, ensemble
+  default_model: "sentence-transformers/all-MiniLM-L6-v2" # 默认模型
+  embedding_dimension: 384          # 嵌入维度
+  
+  # 模型配置
+  models:
+    # 主要模型配置
+    primary:
+      name: "sentence-transformers/all-MiniLM-L6-v2"
+      type: "sentence_transformer"   # 模型类型
+      dimension: 384                 # 嵌入维度
+      max_sequence_length: 512       # 最大序列长度
+      batch_size: 32                 # 批处理大小
+      device: "auto"                 # 设备: auto, cpu, cuda
+      trust_remote_code: false       # 信任远程代码
+      
+      # 模型特定配置
+      model_kwargs:
+        normalize_embeddings: true    # 标准化嵌入
+        pooling_mode: "mean"          # 池化模式: mean, max, cls
+        attention_mask: true          # 使用注意力掩码
+      
+      # 性能配置
+      performance:
+        enable_caching: true          # 启用缓存
+        cache_size: 10000             # 缓存大小
+        enable_gpu: true              # 启用GPU
+        mixed_precision: false        # 混合精度
+    
+    # 备用模型配置
+    fallback:
+      name: "sentence-transformers/paraphrase-MiniLM-L6-v2"
+      type: "sentence_transformer"
+      dimension: 384
+      max_sequence_length: 512
+      batch_size: 16
+      device: "cpu"                  # 备用模型使用CPU
+      
+      # 触发条件
+      trigger_conditions:
+        primary_model_failure: true   # 主模型失败时触发
+        high_latency: true            # 高延迟时触发
+        memory_pressure: true         # 内存压力时触发
+        latency_threshold: 5.0        # 延迟阈值(秒)
+        memory_threshold: 0.9         # 内存阈值
+    
+    # 专用模型配置
+    specialized:
+      # 中文模型
+      chinese:
+        name: "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
+        type: "sentence_transformer"
+        dimension: 384
+        languages: ["zh", "zh-cn", "zh-tw"]
+        priority: 1.2                 # 优先级权重
+      
+      # 代码模型
+      code:
+        name: "microsoft/codebert-base"
+        type: "transformer"
+        dimension: 768
+        content_types: ["code", "programming"]
+        priority: 1.5
+      
+      # 长文本模型
+      long_text:
+        name: "sentence-transformers/all-mpnet-base-v2"
+        type: "sentence_transformer"
+        dimension: 768
+        max_sequence_length: 2048
+        min_text_length: 1000         # 最小文本长度触发
+        priority: 1.1
+  
+  # 混合策略配置
+  hybrid_strategy:
+    enabled: true                   # 启用混合策略
+    combination_method: "weighted_average" # 组合方法: weighted_average, concatenation, attention
+    
+    # 权重配置
+    model_weights:
+      primary: 0.7                  # 主模型权重
+      specialized: 0.3              # 专用模型权重
+    
+    # 动态权重调整
+    dynamic_weighting:
+      enabled: true                 # 启用动态权重
+      adjustment_factor: 0.1        # 调整因子
+      performance_window: 100       # 性能窗口大小
+      
+      # 权重调整规则
+      adjustment_rules:
+        high_accuracy: 1.2            # 高准确率时增加权重
+        low_latency: 1.1              # 低延迟时增加权重
+        high_diversity: 0.9           # 高多样性时减少权重
+  
+  # 自适应策略配置
+  adaptive_strategy:
+    enabled: true                   # 启用自适应策略
+    adaptation_interval: 1000       # 适应间隔(请求数)
+    
+    # 内容类型检测
+    content_type_detection:
+      enabled: true                 # 启用内容类型检测
+      detection_methods: ["language", "domain", "length", "format"]
+      confidence_threshold: 0.8     # 置信度阈值
+      
+      # 检测规则
+      detection_rules:
+        language:
+          method: "langdetect"        # 语言检测方法
+          supported_languages: ["en", "zh", "ja", "ko"]
+        
+        domain:
+          method: "keyword_matching"  # 领域检测方法
+          domains: ["technical", "business", "academic", "general"]
+        
+        length:
+          short_threshold: 100        # 短文本阈值
+          long_threshold: 1000        # 长文本阈值
+        
+        format:
+          code_patterns: ["def ", "function", "class ", "import "]
+          math_patterns: ["\\$", "\\(", "\\)", "equation"]
+    
+    # 性能监控
+    performance_monitoring:
+      enabled: true                 # 启用性能监控
+      metrics: ["latency", "accuracy", "memory_usage", "throughput"]
+      monitoring_window: 500        # 监控窗口大小
+      
+      # 性能阈值
+      thresholds:
+        max_latency: 2.0            # 最大延迟(秒)
+        min_accuracy: 0.8           # 最小准确率
+        max_memory_usage: 0.8       # 最大内存使用率
+        min_throughput: 10          # 最小吞吐量(请求/秒)
+  
+  # 预处理配置
+  preprocessing:
+    enabled: true                   # 启用预处理
+    
+    # 文本清理
+    text_cleaning:
+      enabled: true                 # 启用文本清理
+      remove_html: true             # 移除HTML标签
+      remove_urls: true             # 移除URL
+      remove_emails: true           # 移除邮箱
+      normalize_whitespace: true    # 标准化空白字符
+      remove_special_chars: false   # 移除特殊字符
+      
+      # 自定义清理规则
+      custom_rules:
+        - pattern: "\\[.*?\\]"        # 移除方括号内容
+          replacement: ""
+        - pattern: "\\(.*?\\)"        # 移除圆括号内容
+          replacement: ""
+          enabled: false
+    
+    # 文本分割
+    text_splitting:
+      enabled: true                 # 启用文本分割
+      max_chunk_size: 512           # 最大块大小
+      chunk_overlap: 50             # 块重叠大小
+      splitting_strategy: "sentence" # 分割策略: sentence, paragraph, fixed
+      
+      # 句子分割配置
+      sentence_splitting:
+        language: "auto"             # 语言: auto, en, zh
+        min_sentence_length: 10     # 最小句子长度
+        max_sentence_length: 200    # 最大句子长度
+    
+    # 语言检测
+    language_detection:
+      enabled: true                 # 启用语言检测
+      method: "langdetect"          # 检测方法
+      confidence_threshold: 0.9     # 置信度阈值
+      fallback_language: "en"       # 回退语言
+  
+  # 后处理配置
+  postprocessing:
+    enabled: true                   # 启用后处理
+    
+    # 嵌入标准化
+    normalization:
+      enabled: true                 # 启用标准化
+      method: "l2"                  # 标准化方法: l2, l1, max
+      epsilon: 1e-8                 # 数值稳定性参数
+    
+    # 降维配置
+    dimensionality_reduction:
+      enabled: false                # 启用降维
+      method: "pca"                 # 降维方法: pca, umap, tsne
+      target_dimension: 256         # 目标维度
+      preserve_variance: 0.95       # 保留方差比例
+    
+    # 质量控制
+    quality_control:
+      enabled: true                 # 启用质量控制
+      
+      # 异常检测
+      anomaly_detection:
+        enabled: true               # 启用异常检测
+        method: "isolation_forest"  # 异常检测方法
+        contamination: 0.1          # 污染率
+        threshold: 0.5              # 异常阈值
+      
+      # 相似度检查
+      similarity_check:
+        enabled: true               # 启用相似度检查
+        min_similarity: 0.1         # 最小相似度
+        max_similarity: 0.99        # 最大相似度
+        method: "cosine"            # 相似度计算方法
+  
+  # 缓存配置
+  caching:
+    enabled: true                   # 启用缓存
+    cache_type: "memory"            # 缓存类型: memory, redis, file
+    max_cache_size: 50000           # 最大缓存大小
+    ttl: 86400                      # 生存时间(秒)
+    
+    # 缓存策略
+    cache_strategy:
+      eviction_policy: "lru"        # 淘汰策略: lru, lfu, fifo
+      compression: true             # 启用压缩
+      serialization: "pickle"       # 序列化方法: pickle, json, msgpack
+    
+    # Redis配置(如果使用Redis缓存)
+    redis_config:
+      host: "localhost"
+      port: 6379
+      db: 0
+      password: null
+      connection_pool_size: 10
+  
+  # 性能优化配置
+  performance_optimization:
+    # 批处理配置
+    batching:
+      enabled: true                 # 启用批处理
+      batch_size: 32                # 批处理大小
+      max_wait_time: 0.1            # 最大等待时间(秒)
+      adaptive_batching: true       # 自适应批处理
+    
+    # 并行处理配置
+    parallel_processing:
+      enabled: true                 # 启用并行处理
+      num_workers: 4                # 工作线程数
+      max_queue_size: 1000          # 最大队列大小
+      worker_timeout: 30            # 工作线程超时(秒)
+    
+    # 内存管理
+    memory_management:
+      enabled: true                 # 启用内存管理
+      max_memory_usage: "2GB"       # 最大内存使用
+      gc_threshold: 0.8             # 垃圾回收阈值
+      enable_memory_mapping: false  # 启用内存映射
+  
+  # 监控和日志配置
+  monitoring:
+    enabled: true                   # 启用监控
+    
+    # 指标收集
+    metrics:
+      enabled: true                 # 启用指标收集
+      collection_interval: 60       # 收集间隔(秒)
+      metrics_to_collect:
+        - "embedding_latency"
+        - "cache_hit_rate"
+        - "model_accuracy"
+        - "memory_usage"
+        - "throughput"
+        - "error_rate"
+    
+    # 日志配置
+    logging:
+      enabled: true                 # 启用日志
+      log_level: "INFO"             # 日志级别
+      log_embeddings: false         # 记录嵌入向量
+      log_performance: true         # 记录性能指标
+      log_errors: true              # 记录错误
+  
+  # 调试配置
+  debug:
+    enabled: false                  # 启用调试模式
+    save_embeddings: false          # 保存嵌入向量
+    visualize_embeddings: false     # 可视化嵌入向量
+    profile_performance: false      # 性能分析
+    detailed_logging: false         # 详细日志
