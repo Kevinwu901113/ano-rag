@@ -166,6 +166,10 @@ class QueryProcessor:
         self.bm25_k1 = bm25_config.get('k1', 1.2)
         self.bm25_b = bm25_config.get('b', 0.75)
         self.bm25_corpus_field = bm25_config.get('corpus_field', 'title_raw_span')
+        if self.bm25_corpus_field != 'title_raw_span':
+            raise ValueError(
+                f"Unsupported BM25 corpus field: {self.bm25_corpus_field}. Only 'title_raw_span' is supported"
+            )
         
         # 初始化PathAwareRanker
         path_config = config.get('hybrid_search.path_aware', {})
@@ -225,14 +229,8 @@ class QueryProcessor:
         # 预构建 BM25 语料库（强制启用）
         self.bm25_corpus = None
         try:
-            # 根据配置选择语料字段
-            if self.bm25_corpus_field == 'title_raw_span':
-                corpus_func = lambda note: f"{note.get('title', '')} {note.get('raw_span', '')}".strip()
-            elif self.bm25_corpus_field == 'content':
-                corpus_func = lambda note: note.get('content', '')
-            else:  # summary
-                corpus_func = lambda note: note.get('summary', note.get('content', ''))
-            
+            # 仅支持 title_raw_span 字段
+            corpus_func = lambda note: f"{note.get('title', '')} {note.get('raw_span', '')}".strip()
             self.bm25_corpus = build_bm25_corpus(atomic_notes, corpus_func)
             logger.info(f"Built BM25 corpus for hybrid search with {len(atomic_notes)} notes using field: {self.bm25_corpus_field}")
         except Exception as e:
@@ -629,14 +627,9 @@ class QueryProcessor:
             return [0.0] * len(candidates)
         
         try:
-            # 构建候选文档的语料
-            if self.bm25_corpus_field == 'title_raw_span':
-                docs = [f"{c.get('title', '')} {c.get('raw_span', '')}".strip() for c in candidates]
-            elif self.bm25_corpus_field == 'content':
-                docs = [c.get('content', '') for c in candidates]
-            else:  # summary
-                docs = [c.get('summary', c.get('content', '')) for c in candidates]
-            
+            # 仅支持 title_raw_span 字段
+            docs = [f"{c.get('title', '')} {c.get('raw_span', '')}".strip() for c in candidates]
+
             # 计算BM25分数
             scores = bm25_scores(query, docs, k1=self.bm25_k1, b=self.bm25_b)
             return scores
