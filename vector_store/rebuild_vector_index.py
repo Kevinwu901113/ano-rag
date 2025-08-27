@@ -66,7 +66,9 @@ def load_atomic_notes_from_jsonl(jsonl_file: str) -> List[Dict[str, Any]]:
                     'source_info': {
                         'title': para.get('title', ''),
                         'document_id': doc.get('id', ''),
-                        'is_supporting': para.get('is_supporting', False)
+                        'is_supporting': para.get('is_supporting', False),
+                        'dataset': doc.get('dataset', ''),
+                        'qid': doc.get('qid', '')
                     },
                     'paragraph_info': {
                         'title': para.get('title', ''),
