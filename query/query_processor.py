@@ -253,6 +253,9 @@ class QueryProcessor:
         self.target_predicates = two_hop_config.get('target_predicates', ['founded_by', 'located_in', 'member_of', 'works_for', 'part_of', 'instance_of'])
         self.max_second_hop_candidates = two_hop_config.get('max_second_hop_candidates', 15)
         self.merge_strategy = two_hop_config.get('merge_strategy', 'weighted')
+
+        two_hop_rerank_config = config.get('two_hop_rerank', {})
+        self.two_hop_path_weight = two_hop_rerank_config.get('path_weight', 0.3)
         
         # 段域过滤配置
         section_filter_config = config.get('hybrid_search.section_filtering', {})
@@ -948,8 +951,8 @@ class QueryProcessor:
             # 路径分数（暂时设为0，后续在path_aware_reranking中计算）
             path_score = 0.0
             
-            # 最终打分：final = 1.0 * dense + 0.6 * sparse + 0.3 * path_score
-            final_score = 1.0 * dense_score + 0.6 * sparse_score + 0.3 * path_score
+            # 最终打分：final = 1.0 * dense + 0.6 * sparse + path_weight * path_score
+            final_score = 1.0 * dense_score + 0.6 * sparse_score + self.two_hop_path_weight * path_score
             
             candidate['dense_score'] = dense_score
             candidate['sparse_score'] = sparse_score
