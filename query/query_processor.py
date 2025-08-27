@@ -1554,27 +1554,31 @@ class QueryProcessor:
     
     def _retrieve_for_subquestion(self, sub_question: str, index: int, dataset: Optional[str] = None, qid: Optional[str] = None) -> Dict[str, Any]:
         """Retrieve evidence for a single sub-question."""
-        # Vector retrieval
-        vector_results = self.vector_retriever.search([sub_question])
-        vector_notes = vector_results[0] if vector_results else []
-        
+        # 生成检索守卫参数
+        must_have_terms, boost_entities, boost_predicates = self._generate_guardrail_params(sub_question)
+
+        # 向量检索（带守卫参数）
+        vector_notes = self.vector_retriever.retrieve(
+            sub_question,
+            must_have_terms=must_have_terms,
+            boost_entities=boost_entities,
+            boost_predicates=boost_predicates
+        )
+
         logger.info(f"Sub-question {index}: '{sub_question}' initial vector recall: {len(vector_notes)} notes")
-        
+
         # 第一阶段命名空间守卫：子问题向量召回后
         if self.namespace_guard_enabled and dataset and qid:
             vector_notes = filter_notes_by_namespace(vector_notes, dataset, qid)
             logger.info(f"Sub-question {index}: After namespace filtering: {len(vector_notes)} notes")
-        
+
         # Apply hybrid search if enabled
         if self.hybrid_search_enabled and vector_notes:
             try:
-                # 生成检索守卫参数
-                must_have_terms, boost_entities, boost_predicates = self._generate_guardrail_params(sub_question)
-                
-                # 调用增强混合检索
+                # 调用增强混合检索（避免重复降权）
                 vector_notes = self._enhanced_hybrid_search(
-                    sub_question, vector_notes,
-                    must_have_terms=must_have_terms,
+                    sub_question,
+                    vector_notes,
                     boost_entities=boost_entities,
                     boost_predicates=boost_predicates
                 )
