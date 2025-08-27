@@ -214,10 +214,19 @@ class DocumentProcessor:
         for file_path in tqdm(file_paths, desc="Chunking documents"):
             try:
                 # 创建source_info
+                # 尝试从路径提取 dataset 和 qid 信息
+                path_parts = os.path.normpath(file_path).split(os.sep)
+                dataset = path_parts[-3] if len(path_parts) >= 3 else ''
+                qid = path_parts[-2] if len(path_parts) >= 2 else ''
+                if not dataset or not qid:
+                    logger.debug(f"Missing dataset/qid in path: {file_path}")
+
                 source_info = {
                     'file_path': file_path,
                     'file_name': os.path.basename(file_path),
-                    'file_hash': FileUtils.get_file_hash(file_path) if hasattr(FileUtils, 'get_file_hash') else 'unknown'
+                    'file_hash': FileUtils.get_file_hash(file_path) if hasattr(FileUtils, 'get_file_hash') else 'unknown',
+                    'dataset': dataset,
+                    'qid': qid
                 }
                 chunks = self.chunker.chunk_document(file_path, source_info)
                 all_chunks.extend(chunks)

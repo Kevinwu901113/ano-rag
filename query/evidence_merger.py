@@ -119,13 +119,17 @@ class EvidenceMerger:
         """
         evidence_item = note.copy()
         
-        # Add source metadata
-        evidence_item['source_info'] = {
+        # Add source metadata，保留原有的source_info
+        source_info = note.get('source_info', {}).copy()
+        source_info.setdefault('dataset', '')
+        source_info.setdefault('qid', '')
+        source_info.update({
             'source_type': source_type,
             'sub_question': sub_question,
             'sub_question_index': sub_question_index,
             'original_score': note.get('score', 0.0)
-        }
+        })
+        evidence_item['source_info'] = source_info
         
         # Initialize aggregation fields
         evidence_item['retrieval_count'] = 1

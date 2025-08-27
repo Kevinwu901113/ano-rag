@@ -173,8 +173,14 @@ class DocumentChunker:
             source_info = {
                 'file_path': file_path,
                 'file_name': os.path.basename(file_path),
-                'file_hash': FileUtils.get_file_hash(file_path) if hasattr(FileUtils, 'get_file_hash') else 'unknown'
+                'file_hash': FileUtils.get_file_hash(file_path) if hasattr(FileUtils, 'get_file_hash') else 'unknown',
+                'dataset': '',
+                'qid': ''
             }
+        else:
+            # 确保存在dataset/qid字段
+            source_info.setdefault('dataset', '')
+            source_info.setdefault('qid', '')
         
         # 使用TextUtils进行分块
         text_chunks = TextUtils.chunk_text(

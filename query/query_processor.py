@@ -783,7 +783,9 @@ class QueryProcessor:
         
         return entities
     
-    def _perform_second_hop_retrieval(self, entities: List[str], query: str, dataset: Optional[str] = None) -> List[Dict[str, Any]]:
+    def _perform_second_hop_retrieval(self, entities: List[str], query: str,
+                                      dataset: Optional[str] = None,
+                                      qid: Optional[str] = None) -> List[Dict[str, Any]]:
         """执行二跳检索 - 图优先策略。"""
         second_hop_notes = []
         bridge_entities = entities[:10]  # 限制桥接实体数量
@@ -806,9 +808,11 @@ class QueryProcessor:
                 return []
             
             # 3. 命名空间过滤
-            if dataset and self.namespace_filtering_enabled:
-                filtered_pool = filter_notes_by_namespace(candidate_pool, dataset)
-                logger.info(f"After namespace filtering: {len(filtered_pool)} candidates (dropped: {len(candidate_pool) - len(filtered_pool)})")
+            if dataset and qid and self.namespace_filtering_enabled:
+                filtered_pool = filter_notes_by_namespace(candidate_pool, dataset, qid)
+                logger.info(
+                    f"After namespace filtering: {len(filtered_pool)} candidates (dropped: {len(candidate_pool) - len(filtered_pool)})"
+                )
                 candidate_pool = filtered_pool
             
             # 4. 对候选池进行重排
@@ -1266,7 +1270,9 @@ class QueryProcessor:
                     
                     if extracted_entities:
                         # 使用抽取的实体发起二跳检索
-                        second_hop_notes = self._perform_second_hop_retrieval(extracted_entities, query, dataset)
+                        second_hop_notes = self._perform_second_hop_retrieval(
+                            extracted_entities, query, dataset, qid
+                        )
                         logger.info(f"Second hop retrieval: extracted {len(extracted_entities)} entities, retrieved {len(second_hop_notes)} notes")
                 except Exception as e:
                     logger.error(f"Two-hop expansion failed: {e}")

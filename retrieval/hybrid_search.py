@@ -187,11 +187,18 @@ class HybridSearcher:
             if idx < len(self.corpus_metadata):
                 metadata = self.corpus_metadata[idx]
                 source_info = metadata.get('source_info', {})
-                
+                info_dataset = source_info.get('dataset', '')
+                info_qid = source_info.get('qid', '')
+
+                if dataset and not info_dataset:
+                    logger.debug(f"Metadata index {idx} missing dataset field")
+                if qid and not info_qid:
+                    logger.debug(f"Metadata index {idx} missing qid field")
+
                 # 检查命名空间匹配
-                dataset_match = not dataset or source_info.get('dataset') == dataset
-                qid_match = not qid or source_info.get('qid') == qid
-                
+                dataset_match = not dataset or info_dataset == dataset
+                qid_match = not qid or info_qid == qid
+
                 if dataset_match and qid_match:
                     filtered_candidates.append((idx, score))
         

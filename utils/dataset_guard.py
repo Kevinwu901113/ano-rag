@@ -45,25 +45,41 @@ class DatasetGuard:
         try:
             # 获取笔记的源信息
             source_info = note.get('source_info', {})
-            
+
+            info_dataset = source_info.get('dataset', '') or ''
+            info_qid = source_info.get('qid', '') or ''
+            if not info_dataset or not info_qid:
+                self.logger.debug(
+                    f"Note {note.get('note_id', 'unknown')} missing dataset/qid field, fallback to path"
+                )
+            else:
+                match = info_dataset == dataset and info_qid == qid
+                if not match:
+                    self.logger.debug(
+                        f"Note {note.get('note_id', 'unknown')} namespace mismatch: {info_dataset}/{info_qid} vs {dataset}/{qid}"
+                    )
+                return match
+
             # 检查 file_path
             file_path = source_info.get('file_path', '')
             if file_path:
                 return self._validate_file_path(file_path, dataset, qid)
-            
+
             # 检查 file_name
             file_name = source_info.get('file_name', '')
             if file_name:
                 return self._validate_file_name(file_name, dataset, qid)
-            
+
             # 检查其他可能的路径字段
             for path_field in ['source_file', 'document_path', 'origin_file']:
                 path_value = source_info.get(path_field, '')
                 if path_value:
                     return self._validate_file_path(path_value, dataset, qid)
-            
+
             # 如果没有找到任何路径信息，记录警告
-            self.logger.warning(f"Note {note.get('note_id', 'unknown')} has no source path information")
+            self.logger.warning(
+                f"Note {note.get('note_id', 'unknown')} has no source path information"
+            )
             return False
             
         except Exception as e:
