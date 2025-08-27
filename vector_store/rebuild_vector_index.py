@@ -178,9 +178,39 @@ def rebuild_vector_index(atomic_notes: List[Dict[str, Any]],
                 logger.info(f"索引统计信息: {stats}")
             except Exception as e:
                 logger.warning(f"获取索引统计失败: {e}")
-            
+
             # 测试检索功能
             _test_retrieval(retriever)
+
+            # 保存带时间戳的索引文件并更新符号链接
+            if save_index:
+                try:
+                    source_info = atomic_notes[0].get('source_info', {}) if atomic_notes else {}
+                    dataset = source_info.get('dataset', 'unknown').replace('/', '_').replace(' ', '_')
+                    qid = source_info.get('qid', 'unknown').replace('/', '_').replace(' ', '_')
+                    model = retriever.embedding_manager.model_name.replace('/', '_').replace(' ', '_')
+                    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                    filename = f"{dataset}_{qid}_{model}_{timestamp}.index"
+
+                    index_dir = os.path.abspath(retriever.vector_index.index_dir)
+                    default_file = f"index_{retriever.vector_index.index_type}_{retriever.vector_index.embedding_dim}d.faiss"
+                    temp_path = os.path.join(index_dir, default_file)
+                    if not os.path.exists(temp_path):
+                        temp_path = retriever.vector_index.save_index()
+                    target_path = os.path.join(index_dir, filename)
+                    os.replace(temp_path, target_path)
+
+                    temp_meta = temp_path.replace('.faiss', '_metadata.json')
+                    if os.path.exists(temp_meta):
+                        os.replace(temp_meta, target_path + '_metadata.json')
+
+                    symlink_path = os.path.join(index_dir, 'current.index')
+                    if os.path.islink(symlink_path) or os.path.exists(symlink_path):
+                        os.remove(symlink_path)
+                    os.symlink(target_path, symlink_path)
+                    logger.info(f"索引文件已保存为 {target_path}，并更新符号链接")
+                except Exception as e:
+                    logger.warning(f"更新索引文件失败: {e}")
         else:
             logger.error("向量索引重建失败")
         
