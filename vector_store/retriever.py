@@ -282,35 +282,47 @@ class VectorRetriever:
         
         try:
             logger.info(f"Performing hybrid search for {len(queries)} queries")
-            
-            # 使用混合检索器
-            results = self.hybrid_searcher.search(
-                queries=queries,
-                documents=self.atomic_notes,
-                top_k=top_k or self.top_k,
-                similarity_threshold=similarity_threshold or self.similarity_threshold,
-                **kwargs
-            )
-            
-            # 格式化结果
-            formatted_results = []
-            for query_idx, query_results in enumerate(results):
+
+            final_results = []
+            for query in queries:
+                # 先进行向量检索获取稠密结果
+                query_emb = self.embedding_manager.encode_queries([query])
+                dense_results = self.vector_index.search(
+                    query_emb,
+                    top_k=top_k or self.top_k
+                )
+
+                # 根据相似度阈值过滤
+                threshold = similarity_threshold or self.similarity_threshold
+                dense_results = [r for r in dense_results if r.get('similarity', 0) >= threshold]
+
+                # 调用混合检索器
+                hybrid_results = self.hybrid_searcher.hybrid_search(
+                    query=query,
+                    dense_results=dense_results,
+                    top_k=top_k or self.top_k,
+                    **kwargs
+                )
+
                 formatted_query_results = []
-                for result in query_results:
+                for result in hybrid_results:
                     if include_metadata:
                         formatted_query_results.append(result)
                     else:
-                        # 只保留核心信息
                         core_result = {
-                            'note_id': result.get('note_id'),
+                            'note_id': result.get('metadata', {}).get('note_id'),
                             'content': result.get('content'),
-                            'retrieval_info': result.get('retrieval_info')
+                            'retrieval_info': {
+                                'fused_score': result.get('fused_score'),
+                                'fusion_strategy': result.get('fusion_strategy'),
+                                'scores': result.get('scores')
+                            }
                         }
                         formatted_query_results.append(core_result)
-                formatted_results.append(formatted_query_results)
-            
-            logger.info(f"Hybrid search completed: {sum(len(r) for r in formatted_results)} total results")
-            return formatted_results
+                final_results.append(formatted_query_results)
+
+            logger.info(f"Hybrid search completed: {sum(len(r) for r in final_results)} total results")
+            return final_results
             
         except Exception as e:
             logger.error(f"Hybrid search failed: {e}")

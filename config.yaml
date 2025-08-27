@@ -117,7 +117,7 @@ hybrid_search:
   # BM25参数
   bm25_k1: 1.2                       # BM25 k1参数
   bm25_b: 0.75                       # BM25 b参数
-  corpus_field: "title_raw_span"     # BM25语料字段
+  corpus_field: "title_raw_span"     # BM25语料字段（固定）
   
   # 路径感知排序
   path_aware_enabled: true           # 启用路径感知排序
