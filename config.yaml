@@ -679,3 +679,9 @@ external_configs:
   normalization_rules: "config/normalization_rules.yaml"
   predicate_config: "config/predicate_config.yaml"
   validation_config: "config/validation_config.yaml"
+
+# ===================================================================
+# 22. 二跳重排配置 (Two-hop Rerank)
+# ===================================================================
+two_hop_rerank:
+  path_weight: 0.3                    # 路径分数权重
