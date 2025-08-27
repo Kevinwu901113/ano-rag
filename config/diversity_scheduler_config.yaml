@@ -1,44 +1,27 @@
-# 多样性调度器配置
-# 这个文件包含了多样性调度器的完整配置
+# 多样性调度器特定配置
+# 此文件仅包含多样性调度器的特定配置，基础配置请参考主配置文件
 
-# 多样性调度器配置
+# 多样性调度器扩展配置
 diversity_scheduler:
-  # 基本配置
-  strategy: "balanced"              # 多样性策略: balanced, aggressive, conservative
-  max_candidates: 50                # 最大候选数量
-  diversity_threshold: 0.7          # 多样性阈值
+  # 高级调度策略
+  advanced_scheduling:
+    time_based_weighting: true      # 基于时间的权重调整
+    context_aware_diversity: true   # 上下文感知多样性
+    adaptive_threshold: true        # 自适应阈值调整
   
-  # 去重配置
-  deduplication:
-    method: "semantic"              # 去重方法: exact, fuzzy, semantic, hybrid
-    similarity_threshold: 0.85      # 相似度阈值
+  # 特定去重优化
+  deduplication_optimizations:
+    # 增量去重
+    incremental_dedup:
+      enabled: true
+      window_size: 100
+      overlap_ratio: 0.1
     
-    # 聚类去重配置
-    clustering:
-      enabled: true                 # 是否启用聚类去重
-      threshold: 0.8                # 聚类阈值
-      min_cluster_size: 2           # 最小聚类大小
-      max_clusters: 10              # 最大聚类数量
-    
-    # 覆盖度权重
-    coverage_weight: 0.3            # 覆盖度权重
-    
-    # 去重配置详细参数
-    exact_match:
-      enabled: true                 # 启用精确匹配去重
-      case_sensitive: false         # 是否区分大小写
-      ignore_punctuation: true      # 是否忽略标点符号
-    
-    fuzzy_match:
-      enabled: true                 # 启用模糊匹配去重
-      edit_distance_threshold: 3    # 编辑距离阈值
-      jaccard_threshold: 0.8        # Jaccard相似度阈值
-    
-    semantic_match:
-      enabled: true                 # 启用语义匹配去重
-      embedding_model: "sentence-transformers/all-MiniLM-L6-v2"
-      cosine_threshold: 0.85        # 余弦相似度阈值
-      batch_size: 32                # 批处理大小
+    # 多级去重
+    multi_level_dedup:
+      enabled: true
+      levels: ["exact", "fuzzy", "semantic"]
+      cascade_threshold: 0.9
   
   # 语义多样性配置
   semantic_diversity:
@@ -115,19 +98,15 @@ diversity_scheduler:
   performance:
     batch_size: 100                 # 批处理大小
     max_processing_time: 30         # 最大处理时间(秒)
-    enable_parallel: true           # 启用并行处理
-    num_workers: 4                  # 工作线程数
     
-    # 缓存配置
+    # 多样性调度器特定缓存配置（通用缓存配置请参考主配置文件）
     cache:
-      enabled: true                 # 启用缓存
       max_size: 1000                # 最大缓存大小
       ttl: 3600                     # 缓存生存时间(秒)
       
-    # 内存管理
+    # 多样性调度器特定内存管理（通用内存管理请参考主配置文件）
     memory_management:
       max_memory_usage: "1GB"       # 最大内存使用量
-      gc_threshold: 0.8             # 垃圾回收阈值
       enable_memory_monitoring: true # 启用内存监控
   
   # 质量控制配置

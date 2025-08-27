@@ -68,6 +68,18 @@ class ModelSignature:
             signature_str = json.dumps(signature_data, sort_keys=True)
             self.signature_hash = hashlib.md5(signature_str.encode()).hexdigest()[:12]
     
+    def to_dict(self) -> Dict[str, Any]:
+        """转换为字典格式"""
+        return {
+            'model_name': self.model_name,
+            'model_type': self.model_type,
+            'dimension': self.dimension,
+            'max_length': self.max_length,
+            'normalize': self.normalize,
+            'signature_hash': self.signature_hash,
+            'metadata': self.metadata
+        }
+    
     def is_compatible_with(self, other: 'ModelSignature') -> ModelCompatibility:
         """检查与另一个模型签名的兼容性"""
         if self.signature_hash == other.signature_hash:

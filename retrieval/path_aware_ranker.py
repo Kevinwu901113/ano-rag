@@ -19,6 +19,9 @@ from collections import defaultdict, deque
 import json
 import math
 
+# 导入增强日志功能
+from utils.logging_utils import StructuredLogger, log_performance, log_path_aware_metrics
+
 logger = logging.getLogger(__name__)
 
 @dataclass
@@ -431,6 +434,18 @@ class PathAwareRanker:
         self.entity_cache = {}
         self.path_cache = {}
         
+        # 初始化结构化日志记录器
+        self.structured_logger = StructuredLogger("PathAwareRanker")
+        
+        # 记录初始化完成
+        self.structured_logger.info("PathAwareRanker initialized successfully",
+                                   k_hop=self.k_hop,
+                                   path_weight=self.path_weight,
+                                   semantic_weight=self.semantic_weight,
+                                   sparse_weight=self.sparse_weight,
+                                   max_paths_per_candidate=self.max_paths_per_candidate,
+                                   min_path_score=self.min_path_score)
+        
         logger.info(f"PathAwareRanker initialized: k_hop={self.k_hop}, "
                    f"weights=({self.path_weight}, {self.semantic_weight}, {self.sparse_weight})")
     
@@ -491,6 +506,7 @@ class PathAwareRanker:
         
         return list(key_entities)
     
+    @log_performance
     def rerank_candidates(self, query: str, candidates: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """
         重排序候选结果
@@ -504,6 +520,13 @@ class PathAwareRanker:
         """
         if not candidates:
             return candidates
+        
+        # 记录重排序开始
+        self.structured_logger.debug("Starting path-aware reranking",
+                                   candidates_count=len(candidates),
+                                   query_length=len(query),
+                                   k_hop=self.k_hop,
+                                   path_weight=self.path_weight)
         
         logger.info(f"Reranking {len(candidates)} candidates")
         
@@ -549,7 +572,27 @@ class PathAwareRanker:
         # 5. 按最终分数排序
         reranked_candidates.sort(key=lambda x: x['final_score'], reverse=True)
         
-        logger.info(f"Reranking completed: avg path score = {sum(c['path_score'] for c in reranked_candidates) / len(reranked_candidates):.3f}")
+        # 计算统计信息
+        avg_path_score = sum(c['path_score'] for c in reranked_candidates) / len(reranked_candidates)
+        enhanced_count = sum(1 for c in reranked_candidates if c['path_score'] > 0)
+        
+        # 记录路径感知指标
+        log_path_aware_metrics(
+            candidates_count=len(candidates),
+            enhanced_count=enhanced_count,
+            avg_path_score=avg_path_score,
+            path_weight=self.path_weight
+        )
+        
+        # 记录重排序完成
+        self.structured_logger.info("Path-aware reranking completed",
+                                  candidates_count=len(candidates),
+                                  enhanced_count=enhanced_count,
+                                  avg_path_score=f"{avg_path_score:.3f}",
+                                  key_entities_count=len(key_entities),
+                                  expanded_entities_count=len(expanded_entities))
+        
+        logger.info(f"Reranking completed: avg path score = {avg_path_score:.3f}")
         return reranked_candidates
     
     def _calculate_path_score_for_candidate(self, candidate: Dict[str, Any], 

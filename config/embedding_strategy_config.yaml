@@ -1,53 +1,28 @@
-# 嵌入策略配置
-# 这个文件包含了嵌入策略的完整配置
+# 嵌入策略特定配置
+# 此文件仅包含嵌入策略的特定配置，基础配置请参考主配置文件
 
-# 嵌入策略配置
+# 嵌入策略扩展配置
 embedding_strategy:
-  # 基本配置
-  strategy_type: "hybrid"           # 策略类型: single, hybrid, adaptive, ensemble
-  default_model: "sentence-transformers/all-MiniLM-L6-v2" # 默认模型
-  embedding_dimension: 384          # 嵌入维度
+  # 高级策略配置
+  advanced_strategies:
+    adaptive_threshold: 0.75        # 自适应阈值
+    ensemble_weights: [0.4, 0.3, 0.3]  # 集成权重
+    fallback_enabled: true          # 启用备用策略
   
-  # 模型配置
-  models:
-    # 主要模型配置
-    primary:
-      name: "sentence-transformers/all-MiniLM-L6-v2"
-      type: "sentence_transformer"   # 模型类型
-      dimension: 384                 # 嵌入维度
-      max_sequence_length: 512       # 最大序列长度
-      batch_size: 32                 # 批处理大小
-      device: "auto"                 # 设备: auto, cpu, cuda
-      trust_remote_code: false       # 信任远程代码
-      
-      # 模型特定配置
-      model_kwargs:
-        normalize_embeddings: true    # 标准化嵌入
-        pooling_mode: "mean"          # 池化模式: mean, max, cls
-        attention_mask: true          # 使用注意力掩码
-      
-      # 性能配置
-      performance:
-        enable_caching: true          # 启用缓存
-        cache_size: 10000             # 缓存大小
-        enable_gpu: true              # 启用GPU
-        mixed_precision: false        # 混合精度
+  # 特定模型优化配置
+  model_optimizations:
+    # 动态批处理
+    dynamic_batching:
+      enabled: true
+      min_batch_size: 8
+      max_batch_size: 64
+      timeout_ms: 100
     
-    # 备用模型配置
-    fallback:
-      name: "sentence-transformers/paraphrase-MiniLM-L6-v2"
-      type: "sentence_transformer"
-      dimension: 384
-      max_sequence_length: 512
-      batch_size: 16
-      device: "cpu"                  # 备用模型使用CPU
-      
-      # 触发条件
-      trigger_conditions:
-        primary_model_failure: true   # 主模型失败时触发
-        high_latency: true            # 高延迟时触发
-        memory_pressure: true         # 内存压力时触发
-        latency_threshold: 5.0        # 延迟阈值(秒)
+    # 模型预热
+    model_warmup:
+      enabled: true
+      warmup_samples: 10
+      warmup_iterations: 3
         memory_threshold: 0.9         # 内存阈值
     
     # 专用模型配置
@@ -238,27 +213,21 @@ embedding_strategy:
       password: null
       connection_pool_size: 10
   
-  # 性能优化配置
+  # 嵌入策略特定性能配置（通用性能配置请参考主配置文件）
   performance_optimization:
-    # 批处理配置
+    # 嵌入特定批处理配置
     batching:
-      enabled: true                 # 启用批处理
-      batch_size: 32                # 批处理大小
       max_wait_time: 0.1            # 最大等待时间(秒)
       adaptive_batching: true       # 自适应批处理
     
-    # 并行处理配置
+    # 嵌入特定并行处理配置
     parallel_processing:
-      enabled: true                 # 启用并行处理
-      num_workers: 4                # 工作线程数
       max_queue_size: 1000          # 最大队列大小
       worker_timeout: 30            # 工作线程超时(秒)
     
-    # 内存管理
+    # 嵌入特定内存管理
     memory_management:
-      enabled: true                 # 启用内存管理
       max_memory_usage: "2GB"       # 最大内存使用
-      gc_threshold: 0.8             # 垃圾回收阈值
       enable_memory_mapping: false  # 启用内存映射
   
   # 监控和日志配置

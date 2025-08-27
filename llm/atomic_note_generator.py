@@ -308,6 +308,13 @@ class AtomicNoteGenerator:
         title = self._extract_title_from_chunk(chunk_data)
         raw_span = text  # raw_span就是原始文本内容
         
+        # 提取实体和关系信息
+        entities = self._clean_list(note_data.get('entities', []))
+        relations = note_data.get('relations', [])
+        
+        # 生成raw_span_evidence
+        raw_span_evidence = self._generate_raw_span_evidence(entities, relations, text)
+        
         # 验证和清理数据
         atomic_note = {
             'original_text': text,
@@ -315,9 +322,11 @@ class AtomicNoteGenerator:
             'summary': note_data.get('summary', note_data.get('content', text)),  # 保留summary字段用于前端显示
             'title': title,
             'raw_span': raw_span,
+            'raw_span_evidence': raw_span_evidence,  # 新增字段
             'keywords': self._clean_list(note_data.get('keywords', [])),
-            'entities': self._clean_list(note_data.get('entities', [])),
+            'entities': entities,
             'concepts': self._clean_list(note_data.get('concepts', [])),
+            'relations': relations if isinstance(relations, list) else [],  # 确保relations字段存在
             'normalized_entities': self._clean_list(note_data.get('normalized_entities', [])),
             'normalized_predicates': self._clean_list(note_data.get('normalized_predicates', [])),
             'importance_score': float(note_data.get('importance_score', 0.5)),
@@ -338,6 +347,107 @@ class AtomicNoteGenerator:
             atomic_note['entities'].insert(0, primary_entity)
         
         return atomic_note
+    
+    def _generate_raw_span_evidence(self, entities: List[str], relations: List[Any], text: str) -> str:
+        """生成raw_span_evidence，由实体与关系抽取器拼接成简单证据句
+        
+        例如: "A co founded B", "X located in Y"
+        """
+        evidence_sentences = []
+        
+        # 从relations字段生成证据句
+        if isinstance(relations, list):
+            for relation in relations:
+                if isinstance(relation, dict):
+                    subject = relation.get('subject', '')
+                    predicate = relation.get('predicate', relation.get('relation', ''))
+                    obj = relation.get('object', relation.get('target', ''))
+                    
+                    if subject and predicate and obj:
+                        # 标准化谓词
+                        normalized_predicate = self._normalize_predicate(predicate)
+                        evidence_sentence = f"{subject} {normalized_predicate} {obj}"
+                        evidence_sentences.append(evidence_sentence)
+        
+        # 如果没有从relations生成证据句，尝试从实体生成简单的存在性证据
+        if not evidence_sentences and entities:
+            # 为前几个重要实体生成简单的存在性证据
+            for entity in entities[:3]:  # 限制数量
+                if entity:
+                    evidence_sentences.append(f"{entity} mentioned")
+        
+        # 如果仍然没有证据句，从文本中提取简单的实体关系
+        if not evidence_sentences:
+            evidence_sentences = self._extract_simple_relations_from_text(text, entities)
+        
+        return '; '.join(evidence_sentences) if evidence_sentences else text[:100]  # 回退到文本前100字符
+    
+    def _normalize_predicate(self, predicate: str) -> str:
+        """标准化谓词为常见的关系表达"""
+        if not predicate:
+            return 'related to'
+        
+        predicate_lower = predicate.lower().strip()
+        
+        # 谓词映射表
+        predicate_mapping = {
+            'founded': 'founded',
+            'co-founded': 'co founded',
+            'cofounded': 'co founded',
+            'established': 'founded',
+            'created': 'founded',
+            'located': 'located in',
+            'based': 'located in',
+            'situated': 'located in',
+            'member': 'member of',
+            'belongs': 'member of',
+            'works': 'works for',
+            'employed': 'works for',
+            'part': 'part of',
+            'component': 'part of',
+            'instance': 'instance of',
+            'type': 'instance of',
+            'example': 'instance of'
+        }
+        
+        # 查找匹配的标准谓词
+        for key, standard_predicate in predicate_mapping.items():
+            if key in predicate_lower:
+                return standard_predicate
+        
+        return predicate_lower
+    
+    def _extract_simple_relations_from_text(self, text: str, entities: List[str]) -> List[str]:
+        """从文本中提取简单的实体关系"""
+        import re
+        
+        evidence_sentences = []
+        
+        if len(entities) < 2:
+            return evidence_sentences
+        
+        # 简单的关系模式匹配
+        relation_patterns = [
+            (r'(\w+)\s+(founded|established|created)\s+(\w+)', 'founded'),
+            (r'(\w+)\s+(co-?founded)\s+(\w+)', 'co founded'),
+            (r'(\w+)\s+(located|based|situated)\s+in\s+(\w+)', 'located in'),
+            (r'(\w+)\s+(works?\s+for|employed\s+by)\s+(\w+)', 'works for'),
+            (r'(\w+)\s+(member\s+of|belongs\s+to)\s+(\w+)', 'member of'),
+            (r'(\w+)\s+(part\s+of|component\s+of)\s+(\w+)', 'part of')
+        ]
+        
+        for pattern, relation in relation_patterns:
+            matches = re.findall(pattern, text, re.IGNORECASE)
+            for match in matches:
+                if len(match) >= 3:
+                    subject = match[0].strip()
+                    obj = match[2].strip()
+                    
+                    # 检查是否是已知实体
+                    if subject in entities or obj in entities:
+                        evidence_sentences.append(f"{subject} {relation} {obj}")
+        
+        return evidence_sentences
     
     def _extract_title_from_chunk(self, chunk_data: Dict[str, Any]) -> str:
         """从chunk_data中提取title信息"""

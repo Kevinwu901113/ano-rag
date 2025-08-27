@@ -21,6 +21,9 @@ from collections import defaultdict
 import threading
 from abc import ABC, abstractmethod
 
+# 导入增强日志功能
+from utils.logging_utils import StructuredLogger, log_performance, log_diversity_metrics
+
 try:
     import numpy as np
     NUMPY_AVAILABLE = True
@@ -73,6 +76,18 @@ class DiversityConfig:
     )
     enable_clustering: bool = True              # 启用聚类
     cluster_threshold: float = 0.6              # 聚类阈值
+    # 证据类型配额管理
+    evidence_type_quotas: Dict[str, int] = field(
+        default_factory=lambda: {
+            'vector': 15,      # 向量检索证据配额
+            'graph': 10,       # 图检索证据配额
+            'path_aware': 8,   # 路径感知证据配额
+            'semantic': 12,    # 语义相似证据配额
+            'entity_rich': 6   # 实体丰富证据配额
+        }
+    )
+    enable_evidence_quota: bool = True          # 启用证据类型配额
+    quota_balance_factor: float = 0.8           # 配额平衡因子
 
 @dataclass
 class CandidateItem:
@@ -87,11 +102,43 @@ class CandidateItem:
     source: Optional[str] = None
     embedding: Optional[List[float]] = None
     content_hash: Optional[str] = None
+    # 证据类型相关字段
+    evidence_types: Set[str] = field(default_factory=set)  # 证据类型集合
+    path_score: float = 0.0                               # 路径分数
+    entity_density: float = 0.0                           # 实体密度
+    source_types: Set[str] = field(default_factory=set)   # 来源类型集合
     
     def __post_init__(self):
-        """计算内容哈希"""
+        """计算内容哈希和推断证据类型"""
         if not self.content_hash:
             self.content_hash = hashlib.md5(self.content.encode()).hexdigest()[:12]
+        
+        # 自动推断证据类型
+        self._infer_evidence_types()
+    
+    def _infer_evidence_types(self):
+        """推断证据类型"""
+        # 基于来源类型推断
+        if 'vector' in self.source_types:
+            self.evidence_types.add('vector')
+        if 'graph' in self.source_types:
+            self.evidence_types.add('graph')
+        
+        # 基于路径分数推断
+        if self.path_score > 0.3:
+            self.evidence_types.add('path_aware')
+        
+        # 基于实体密度推断
+        if self.entity_density > 0.5:
+            self.evidence_types.add('entity_rich')
+        
+        # 基于语义分数推断
+        if self.score > 0.7:
+            self.evidence_types.add('semantic')
+        
+        # 默认类型
+        if not self.evidence_types:
+            self.evidence_types.add('general')
 
 @dataclass
 class DiversityResult:
@@ -447,6 +494,17 @@ class DiversityScheduler:
         # 线程锁
         self._lock = threading.Lock()
         
+        # 初始化结构化日志记录器
+        self.structured_logger = StructuredLogger("DiversityScheduler")
+        
+        # 记录初始化完成
+        self.structured_logger.info("DiversityScheduler initialized",
+                                  strategy=self.diversity_config.strategy.value,
+                                  max_candidates=self.diversity_config.max_candidates,
+                                  diversity_threshold=self.diversity_config.diversity_threshold,
+                                  deduplication_method=self.diversity_config.deduplication_method.value,
+                                  evidence_quota_enabled=self.config.get('enable_evidence_quota', False))
+        
         logger.info(f"DiversityScheduler initialized with strategy: {self.diversity_config.strategy.value}")
     
     def _initialize_evaluators(self) -> Dict[str, DiversityEvaluator]:
@@ -461,6 +519,7 @@ class DiversityScheduler:
         
         return evaluators
     
+    @log_performance("DiversityScheduler.schedule_candidates")
     def schedule_candidates(self, candidates: List[Dict[str, Any]], 
                           query: Optional[str] = None,
                           context: Optional[Dict[str, Any]] = None) -> DiversityResult:
@@ -477,6 +536,13 @@ class DiversityScheduler:
         """
         start_time = time.time()
         context = context or {}
+        
+        # 记录调度开始
+        self.structured_logger.debug("Starting candidate scheduling",
+                                   candidates_count=len(candidates),
+                                   query_length=len(query) if query else 0,
+                                   strategy=self.diversity_config.strategy.value,
+                                   evidence_quota_enabled=self.config.get('enable_evidence_quota', False))
         
         with self._lock:
             self.stats['total_requests'] += 1
@@ -511,6 +577,22 @@ class DiversityScheduler:
                 (current_avg * (total_requests - 1) + diversity_score) / total_requests
             )
         
+        # 记录多样性调度指标
+        log_diversity_metrics(
+            candidates_count=len(candidates),
+            selected_count=len(selected_items),
+            diversity_score=diversity_score,
+            evidence_quota_enabled=self.config.get('enable_evidence_quota', False),
+            scheduler_strategy=self.diversity_config.strategy.value
+        )
+        
+        # 记录调度完成
+        self.structured_logger.info("Candidate scheduling completed",
+                                   selected_count=len(selected_items),
+                                   diversity_score=f"{diversity_score:.3f}",
+                                   duplicates_removed=dedup_stats['removed'],
+                                   execution_time_ms=f"{execution_time*1000:.2f}")
+        
         return DiversityResult(
             selected_candidates=selected_items,
             diversity_score=diversity_score,
@@ -529,16 +611,34 @@ class DiversityScheduler:
         items = []
         
         for i, candidate in enumerate(candidates):
+            # 提取证据类型相关信息
+            source_types = set()
+            if 'source_info' in candidate:
+                source_type = candidate['source_info'].get('source_type', '')
+                if source_type:
+                    source_types.add(source_type)
+            if 'source_types' in candidate:
+                source_types.update(candidate['source_types'])
+            
+            # 计算实体密度
+            entities = candidate.get('entities', [])
+            content = candidate.get('content', '')
+            entity_density = len(entities) / max(len(content.split()), 1) if content else 0.0
+            
             item = CandidateItem(
                 id=candidate.get('id', f'candidate_{i}'),
-                content=candidate.get('content', ''),
+                content=content,
                 score=candidate.get('score', 0.0),
                 metadata=candidate.get('metadata', {}),
-                entities=candidate.get('entities', []),
+                entities=entities,
                 topics=candidate.get('topics', []),
                 timestamp=candidate.get('timestamp'),
                 source=candidate.get('source'),
-                embedding=candidate.get('embedding')
+                embedding=candidate.get('embedding'),
+                # 证据类型相关字段
+                path_score=candidate.get('path_score', 0.0),
+                entity_density=entity_density,
+                source_types=source_types
             )
             items.append(item)
         
@@ -554,7 +654,11 @@ class DiversityScheduler:
         # 按分数排序
         candidates.sort(key=lambda x: x.score, reverse=True)
         
-        # 贪心选择多样化候选项
+        # 如果启用证据类型配额管理
+        if self.diversity_config.enable_evidence_quota:
+            return self._select_with_evidence_quota(candidates, query, context)
+        
+        # 传统贪心选择多样化候选项
         selected = [candidates[0]]  # 选择分数最高的
         remaining = candidates[1:]
         
@@ -564,7 +668,6 @@ class DiversityScheduler:
             
             for candidate in remaining:
                 # 计算添加该候选项后的多样性增益
-                temp_selected = selected + [candidate]
                 diversity_gain = self._calculate_diversity_gain(selected, candidate)
                 
                 if diversity_gain > best_diversity_gain:
@@ -578,6 +681,98 @@ class DiversityScheduler:
                 break
         
         return selected
+    
+    def _select_with_evidence_quota(self, candidates: List[CandidateItem],
+                                   query: Optional[str],
+                                   context: Dict[str, Any]) -> List[CandidateItem]:
+        """基于证据类型配额选择候选项"""
+        selected = []
+        evidence_type_counts = defaultdict(int)
+        quotas = self.diversity_config.evidence_type_quotas.copy()
+        
+        # 第一轮：按配额分配高质量候选
+        for candidate in candidates:
+            if len(selected) >= self.diversity_config.max_candidates:
+                break
+            
+            # 检查候选的证据类型
+            candidate_types = candidate.evidence_types
+            
+            # 找到未满配额的证据类型
+            available_types = []
+            for evidence_type in candidate_types:
+                if evidence_type_counts[evidence_type] < quotas.get(evidence_type, 0):
+                    available_types.append(evidence_type)
+            
+            # 如果有可用类型，选择该候选
+            if available_types:
+                selected.append(candidate)
+                # 更新计数
+                for evidence_type in candidate_types:
+                    evidence_type_counts[evidence_type] += 1
+                
+                logger.debug(f"Selected candidate with types {candidate_types}, "
+                           f"current counts: {dict(evidence_type_counts)}")
+        
+        # 第二轮：填充剩余位置，考虑多样性
+        remaining_candidates = [c for c in candidates if c not in selected]
+        
+        while (len(selected) < self.diversity_config.max_candidates and 
+               remaining_candidates):
+            
+            best_candidate = None
+            best_score = -1.0
+            
+            for candidate in remaining_candidates:
+                # 计算综合分数：原始分数 + 多样性增益 + 配额平衡奖励
+                diversity_gain = self._calculate_diversity_gain(selected, candidate)
+                quota_bonus = self._calculate_quota_balance_bonus(
+                    candidate, evidence_type_counts, quotas
+                )
+                
+                combined_score = (
+                    candidate.score * 0.5 + 
+                    diversity_gain * 0.3 + 
+                    quota_bonus * 0.2
+                )
+                
+                if combined_score > best_score:
+                    best_score = combined_score
+                    best_candidate = candidate
+            
+            if best_candidate:
+                selected.append(best_candidate)
+                remaining_candidates.remove(best_candidate)
+                # 更新计数
+                for evidence_type in best_candidate.evidence_types:
+                    evidence_type_counts[evidence_type] += 1
+            else:
+                break
+        
+        logger.info(f"Evidence quota selection completed: {len(selected)} candidates, "
+                   f"type distribution: {dict(evidence_type_counts)}")
+        
+        return selected
+    
+    def _calculate_quota_balance_bonus(self, candidate: CandidateItem,
+                                     current_counts: Dict[str, int],
+                                     quotas: Dict[str, int]) -> float:
+        """计算配额平衡奖励分数"""
+        bonus = 0.0
+        balance_factor = self.diversity_config.quota_balance_factor
+        
+        for evidence_type in candidate.evidence_types:
+            quota = quotas.get(evidence_type, 0)
+            current_count = current_counts.get(evidence_type, 0)
+            
+            if quota > 0:
+                # 计算该类型的填充率
+                fill_rate = current_count / quota
+                # 奖励未充分填充的类型
+                if fill_rate < balance_factor:
+                    bonus += (balance_factor - fill_rate) * 0.5
+        
+        return bonus
     
     def _calculate_diversity_gain(self, current_selected: List[CandidateItem],
                                  new_candidate: CandidateItem) -> float:

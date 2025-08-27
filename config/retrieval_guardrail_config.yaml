@@ -1,13 +1,93 @@
-# 检索保障配置
-# 这个文件包含了检索保障系统的完整配置
+# 检索保障特定配置
+# 此文件仅包含检索保障的特定配置，基础配置请参考主配置文件
 
-# 检索保障配置
+# 检索保障扩展配置
 retrieval_guardrail:
-  # 基本配置
-  guardrail_level: "standard"       # 保障级别: strict, standard, relaxed
-  min_results: 3                    # 最少结果数
-  max_results: 100                  # 最大结果数
-  timeout_seconds: 30               # 超时时间(秒)
+  # 高级保障策略
+  advanced_guardrails:
+    quality_gates:
+      enabled: true
+      min_quality_score: 0.6
+      quality_metrics: ["relevance", "completeness", "accuracy"]
+    
+    fallback_strategies:
+      enabled: true
+      fallback_order: ["semantic", "keyword", "fuzzy"]
+      max_fallback_attempts: 3
+  
+  # 检索增强模板配置
+  enhancement_templates:
+    # 必需词汇模板
+    must_have_terms:
+      enabled: true                 # 启用必需词汇检查
+      extraction_sources: ["entities", "predicates", "keywords"]  # 词汇提取源
+      min_match_ratio: 0.3          # 最小匹配比例
+      
+      # 词汇提取模板
+      templates:
+        entity_based: "实体 {entity} 相关的"
+        predicate_based: "关于 {predicate} 的"
+        keyword_based: "包含 {keyword} 的"
+        combined: "关于 {entity} {predicate} {keyword} 的"
+      
+      # 权重配置
+      source_weights:
+        entities: 1.0               # 实体权重
+        predicates: 0.8             # 谓词权重
+        keywords: 0.6               # 关键词权重
+    
+    # 实体提升模板
+    boost_entities:
+      enabled: true                 # 启用实体提升
+      boost_factor: 1.2             # 实体匹配提升倍数
+      normalization_enabled: true   # 启用实体标准化
+      
+      # 实体类型权重
+      entity_type_weights:
+        person: 1.2                 # 人物实体权重
+        organization: 1.1           # 组织实体权重
+        location: 1.0               # 地点实体权重
+        event: 0.9                  # 事件实体权重
+        concept: 0.8                # 概念实体权重
+      
+      # 提升模板
+      boost_templates:
+        exact_match: "完全匹配实体 {entity}"
+        partial_match: "部分匹配实体 {entity}"
+        synonym_match: "同义词匹配实体 {entity}"
+        fuzzy_match: "模糊匹配实体 {entity}"
+    
+    # 谓词提升模板
+    boost_predicates:
+      enabled: true                 # 启用谓词提升
+      boost_factor: 1.15            # 谓词匹配提升倍数
+      normalization_enabled: true   # 启用谓词标准化
+      
+      # 谓词类型权重
+      predicate_type_weights:
+        causal: 1.3                 # 因果关系权重
+        temporal: 1.1               # 时间关系权重
+        spatial: 1.0                # 空间关系权重
+        organizational: 1.2         # 组织关系权重
+        definitional: 1.4           # 定义关系权重
+      
+      # 提升模板
+      boost_templates:
+        direct_relation: "直接关系 {predicate}"
+        indirect_relation: "间接关系 {predicate}"
+        inverse_relation: "逆向关系 {predicate}"
+        contextual_relation: "上下文关系 {predicate}"
+      
+      # 标准谓词映射模板
+      predicate_mappings:
+        distribution: ["distributed", "release", "published", "issued"]
+        foundation: ["founded", "established", "created", "started"]
+        ownership: ["owned", "belongs", "subsidiary", "parent"]
+        location: ["located", "based", "situated", "headquarters"]
+        employment: ["works", "employed", "hired", "position"]
+        education: ["graduated", "studied", "degree", "alumni"]
+        collaboration: ["partnered", "collaborated", "cooperated", "joint"]
+        competition: ["competed", "rival", "opponent", "versus"]
   
   # 质量保障配置
   quality_assurance:
@@ -194,18 +274,15 @@ retrieval_guardrail:
         high_filter_rate: 0.8       # 高过滤率阈值
         high_fallback_rate: 0.5     # 高回退率阈值
     
-    # 日志配置
+    # 检索保障特定日志配置（通用日志配置请参考主配置文件）
     logging:
-      enabled: true                 # 启用日志
-      log_level: "INFO"             # 日志级别
       log_format: "json"            # 日志格式: text, json
       include_request_details: true # 包含请求详情
       include_performance_metrics: true # 包含性能指标
       log_filtered_content: false   # 记录被过滤的内容
   
-  # 调试配置
+  # 检索保障特定调试配置（通用调试配置请参考主配置文件）
   debug:
-    enabled: false                  # 启用调试模式
     verbose_logging: false          # 详细日志
     save_intermediate_results: false # 保存中间结果
     performance_profiling: false    # 性能分析

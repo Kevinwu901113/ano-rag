@@ -28,7 +28,7 @@ except ImportError:
     logging.warning("OpenAI not available, LLM-based query rewriting will be disabled")
 
 # 导入配置加载辅助函数
-from ..utils.config_loader_helper import load_external_config, load_config_with_fallback
+from utils.config_loader_helper import load_external_config, load_config_with_fallback
 
 logger = logging.getLogger(__name__)
 

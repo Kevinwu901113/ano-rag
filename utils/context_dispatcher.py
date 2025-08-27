@@ -9,6 +9,9 @@ from loguru import logger
 from collections import defaultdict
 import numpy as np
 
+# 导入增强日志功能
+from utils.logging_utils import StructuredLogger, log_performance, log_retrieval_metrics
+
 from config import config
 from graph.graph_retriever import GraphRetriever
 from llm.prompts import CONTEXT_NOTE_TEMPLATE, build_context_prompt
@@ -47,10 +50,24 @@ class ContextDispatcher:
         self.semantic_threshold = dispatcher_config.get('semantic_threshold', 0.1)
         self.graph_threshold = dispatcher_config.get('graph_threshold', 0.0)
         
+        # 初始化结构化日志记录器
+        self.structured_logger = StructuredLogger("ContextDispatcher")
+        
+        # 记录初始化完成
+        self.structured_logger.info("ContextDispatcher initialized successfully",
+                                   semantic_top_n=self.semantic_top_n,
+                                   graph_expand_top_p=self.graph_expand_top_p,
+                                   k_hop=self.k_hop,
+                                   final_semantic_count=self.final_semantic_count,
+                                   final_graph_count=self.final_graph_count,
+                                   semantic_threshold=self.semantic_threshold,
+                                   graph_threshold=self.graph_threshold)
+        
         logger.info(f"ContextDispatcher initialized with params: "
                    f"n={self.semantic_top_n}, p={self.graph_expand_top_p}, "
                    f"k={self.k_hop}, x={self.final_semantic_count}, y={self.final_graph_count}")
     
+    @log_performance("ContextDispatcher.dispatch")
     def dispatch(self, query: str, rewritten_queries: List[str] = None) -> Dict[str, Any]:
         """执行三阶段上下文调度
         
@@ -63,6 +80,13 @@ class ContextDispatcher:
         """
         if rewritten_queries is None:
             rewritten_queries = [query]
+            
+        # 记录调度开始
+        self.structured_logger.debug("Starting three-stage context dispatch",
+                                   query_length=len(query),
+                                   rewritten_queries_count=len(rewritten_queries),
+                                   semantic_top_n=self.semantic_top_n,
+                                   graph_expand_top_p=self.graph_expand_top_p)
             
         logger.info(f"Starting context dispatch for query: {query}")
         
@@ -82,6 +106,22 @@ class ContextDispatcher:
         )
         final_prompt = build_context_prompt(selected_notes, query)
         logger.info(f"Stage 3 - Context scheduling: {len(selected_notes)} final notes")
+        
+        # 记录检索指标
+        log_retrieval_metrics(
+            query,
+            results_count=len(selected_notes),
+            query_count=len(rewritten_queries),
+            candidates_count=len(semantic_results) + len(graph_results),
+            avg_similarity=sum(n.get('retrieval_info', {}).get('final_similarity', 0) for n in selected_notes) / len(selected_notes) if selected_notes else 0
+        )
+        
+        # 记录调度完成
+        self.structured_logger.info("Context dispatch completed successfully",
+                                   semantic_results_count=len(semantic_results),
+                                   graph_results_count=len(graph_results),
+                                   final_selected_count=len(selected_notes),
+                                   avg_final_similarity=f"{sum(n.get('retrieval_info', {}).get('final_similarity', 0) for n in selected_notes) / len(selected_notes) if selected_notes else 0:.3f}")
 
         return {
             'context': final_context,
