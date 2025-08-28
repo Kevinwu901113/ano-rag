@@ -12,10 +12,7 @@
 """
 
 from .hybrid_search import (
-    HybridSearcher,
-    FusionStrategy,
-    create_hybrid_searcher,
-    hybrid_search_with_fallback
+    HybridSearcher
 )
 
 # 查询规划模块
@@ -68,9 +65,6 @@ from .diversity_scheduler import (
 
 __all__ = [
     'HybridSearcher',
-    'FusionStrategy', 
-    'create_hybrid_searcher',
-    'hybrid_search_with_fallback',
     'QueryPlanner',
     'SubQuery',
     'QueryPlan',

@@ -106,7 +106,7 @@ class QueryProcessor:
         
         if self.use_context_dispatcher:
             # 使用新的结构增强上下文调度器
-            self.context_dispatcher = ContextDispatcher(self.vector_retriever, self.graph_retriever)
+            self.context_dispatcher = ContextDispatcher(config)
             logger.info("Using ContextDispatcher for structure-enhanced retrieval")
         else:
             # 使用原有的调度器
@@ -1143,10 +1143,43 @@ class QueryProcessor:
         
         if self.use_context_dispatcher:
             # 使用新的结构增强上下文调度器
-            dispatch_result = self.context_dispatcher.dispatch(query, queries)
+            # 首先进行向量检索获取候选结果
+            vector_results = self.vector_retriever.search(queries)
             
-            context = dispatch_result['context']
-            selected_notes = dispatch_result['selected_notes']
+            # 合并结果并去重
+            candidate_notes = []
+            seen_note_ids = set()
+            for sub in vector_results:
+                for note in sub:
+                    note_id = note.get('note_id')
+                    if note_id and note_id not in seen_note_ids:
+                        candidate_notes.append(note)
+                        seen_note_ids.add(note_id)
+                    elif not note_id:  # 如果没有note_id，基于内容去重
+                        content = note.get('content', '')
+                        content_hash = hash(content)
+                        if content_hash not in seen_note_ids:
+                            candidate_notes.append(note)
+                            seen_note_ids.add(content_hash)
+            
+            logger.info(f"Initial vector recall for dispatcher: {len(candidate_notes)} unique notes")
+            
+            # 调用 ContextDispatcher 处理候选结果
+            selected_notes = self.context_dispatcher.dispatch(candidate_notes)
+            
+            # 构建上下文
+            context = "\n".join(n.get('content','') for n in selected_notes)
+            
+            # 构建调度结果信息
+            dispatch_result = {
+                'context': context,
+                'selected_notes': selected_notes,
+                'stage_info': {
+                    'semantic_count': len([n for n in selected_notes if n.get('tags', {}).get('source') != 'graph']),
+                    'graph_count': len([n for n in selected_notes if n.get('tags', {}).get('source') == 'graph']),
+                    'final_count': len(selected_notes)
+                }
+            }
             
             # 在向量召回完成但尚未进行融合重排时进行命名空间校验
             if self.namespace_guard_enabled and dataset and qid:
@@ -1609,14 +1642,14 @@ class QueryProcessor:
         # For now, treat merged evidence as semantic results
         dispatch_result = {
             'context': "\n".join(n.get('content', '') for n in merged_evidence),
-            'selected_notes': merged_evidence[:config.get('context_dispatcher.final_semantic_count', 3) + 
-                                           config.get('context_dispatcher.final_graph_count', 5)],
+            'selected_notes': merged_evidence[:config.get('dispatcher.final_semantic_count', 3) + 
+                                           config.get('dispatcher.final_graph_count', 5)],
             'stage_info': {
                 'semantic_count': len([n for n in merged_evidence if 'vector' in n.get('source_types', set())]),
                 'graph_count': len([n for n in merged_evidence if 'graph' in n.get('source_types', set())]),
                 'final_count': min(len(merged_evidence), 
-                                 config.get('context_dispatcher.final_semantic_count', 3) + 
-                                 config.get('context_dispatcher.final_graph_count', 5))
+                                 config.get('dispatcher.final_semantic_count', 3) + 
+                                 config.get('dispatcher.final_graph_count', 5))
             }
         }
         

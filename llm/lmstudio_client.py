@@ -402,8 +402,7 @@ class LMStudioClient:
         total_errors = sum(inst.error_count for inst in self.instances)
         healthy_count = sum(1 for inst in self.instances if inst.is_healthy)
         
-        return {
-            "total_instances": len(self.instances),
+        return {"total_instances": len(self.instances),
             "healthy_instances": healthy_count,
             "total_requests": total_requests,
             "total_errors": total_errors,
@@ -422,6 +421,40 @@ class LMStudioClient:
                 for inst in self.instances
             ]
         }
+    
+    def _quick_health_check(self, instance=None):
+        """Quick health check for LM Studio instances."""
+        if instance is None:
+            # Check all instances
+            all_models = set()
+            for inst in self.instances:
+                try:
+                    # Test connection by listing models
+                    response = inst.client.models.list()
+                    models = [model.id for model in response.data]
+                    all_models.update(models)
+                    inst.is_healthy = True
+                    logger.debug(f"Health check passed for {inst.base_url}")
+                except Exception as e:
+                    inst.is_healthy = False
+                    inst.error_count += 1
+                    logger.error(f"Health check failed for {inst.base_url}: {e}")
+            
+            self.all_models = all_models
+            return len([inst for inst in self.instances if inst.is_healthy]) > 0
+        else:
+            # Check specific instance
+            try:
+                response = instance.client.models.list()
+                models = [model.id for model in response.data]
+                instance.is_healthy = True
+                logger.debug(f"Health check passed for {instance.base_url}")
+                return True
+            except Exception as e:
+                instance.is_healthy = False
+                instance.error_count += 1
+                logger.error(f"Health check failed for {instance.base_url}: {e}")
+                return False
 
 
 # 为了向后兼容，保留原有的类名别名

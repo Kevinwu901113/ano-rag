@@ -54,10 +54,11 @@ class LocalLLM:
             default_model = 'gpt-oss-20b'
         else:  # ollama (默认)
             config_section = 'llm.ollama'
-            default_model = 'llama3.1:8b'
+            default_model = 'gpt-oss:latest'
         
         # 从对应配置段获取参数，local_model的参数可以覆盖
-        self.model_name = model_name or config.get(f'{config_section}.model', default_model)
+        # 优先从 llm.model 读取，然后从特定 provider 配置段读取
+        self.model_name = model_name or config.get('llm.model') or config.get(f'{config_section}.model', default_model)
         self.device = device or config.get('llm.local_model.device', 'auto')
         self.temperature = config.get('llm.local_model.temperature') or config.get(f'{config_section}.temperature', 0.1)
         self.max_tokens = config.get('llm.local_model.max_tokens') or config.get(f'{config_section}.max_tokens', 2048)

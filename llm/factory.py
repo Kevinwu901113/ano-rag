@@ -81,7 +81,7 @@ class LLMFactory:
         """
         # 获取 Ollama 配置
         base_url = kwargs.get('base_url') or config.get('llm.ollama.base_url', 'http://localhost:11434')
-        model = kwargs.get('model') or config.get('llm.ollama.model', 'llama3.1:8b')
+        model = kwargs.get('model') or config.get('llm.ollama.model', 'gpt-oss:latest')
         
         logger.info(f"Creating Ollama provider with model: {model}")
         return OllamaClient(base_url=base_url, model=model)

@@ -31,8 +31,16 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "bridge_boost_epsilon": 0.02,
         "debug_log": True,
     },
-    "llm": {"provider": "openai", "temperature": 0.7, "max_output_tokens": 512},
+    "llm": {"provider": "openai", "model": "gpt-3.5-turbo", "temperature": 0.7, "max_output_tokens": 512},
     "guardrail": {"enabled": True, "min_results": 1, "min_score": 0.0, "timeout_seconds": 30},
+    "vector_store": {
+        "top_k": 20,
+        "similarity_threshold": 0.5,
+        "batch_size": 32,
+        "dimension": 1024,
+        "index_type": "IVFFlat",
+        "similarity_metric": "cosine"
+    },
 }
 
 

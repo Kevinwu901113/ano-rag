@@ -1,57 +1,77 @@
-# Minimal unified configuration
+# ANO-RAG 系统统一配置文件
+# 本配置文件包含了向量检索增强生成系统的所有核心参数
+
+# 系统基础配置
 system:
-  project_name: "ano-rag"  # default project name
-  seed: 42                 # random seed
-  device: "cpu"            # computation device
+  project_name: "ano-rag"  # 项目名称，用于标识和日志记录
+  seed: 42                 # 随机种子，确保实验结果可复现
+  device: "cpu"            # 计算设备：cpu/cuda，影响模型推理速度
 
+# 文档处理配置
 document:
-  chunk_size: 256          # default chunk size
-  overlap: 32              # overlap between chunks
+  chunk_size: 256          # 文档分块大小（字符数），影响检索粒度
+  overlap: 32              # 分块间重叠字符数，保证语义连续性
 
+# 嵌入模型配置
 embedding:
-  model_name: "BAAI/bge-m3"  # embedding model name
-  batch_size: 64             # embedding batch size
-  max_length: 512            # max token length
-  normalize: true            # whether to normalize vectors
+  model_name: "BAAI/bge-m3"  # 嵌入模型名称，支持中英文多语言
+  batch_size: 64             # 批处理大小，影响嵌入生成速度
+  max_length: 512            # 最大token长度，超出部分会被截断
+  normalize: true            # 是否对向量进行归一化，提高相似度计算准确性
 
+# 向量存储配置
+vector_store:
+  top_k: 20                 # 检索候选数量，影响召回率和计算开销
+  similarity_threshold: 0.35 # 相似度阈值，低阈值提高召回率但可能引入噪声
+  batch_size: 64            # 向量检索批处理大小
+  dimension: 1024           # 向量维度，需与嵌入模型匹配
+  index_type: "IVFFlat"     # FAISS索引类型，影响检索速度和精度
+  similarity_metric: "cosine" # 相似度计算方法：cosine/euclidean/dot_product
+
+# 检索策略配置
 retrieval:
-  candidate_pool: 50        # global candidate pool size
-  hybrid:
-    enabled: true
-    fusion_method: "linear"  # linear|rrf|weighted_sum
-    weights:
-      dense: 1.0
-      bm25: 0.5
-      graph: 0.5
-      path: 0.1
-    rrf_k: 60               # only used for rrf
-  bm25:
-    k1: 1.2
-    b: 0.75
-    text_field: "title_raw_span"
-  graph:
-    enabled: true
-    k_hop: 2
-    expand_top_m: 20
+  candidate_pool: 80        # 全局候选池大小，影响最终检索质量
+  hybrid:                   # 混合检索配置
+    enabled: true           # 是否启用混合检索（向量+BM25+图谱）
+    fusion_method: "linear"  # 融合方法：linear线性加权|rrf倒数排名融合|weighted_sum加权求和
+    weights:                # 各检索方法权重配置
+      dense: 1.0            # 密集向量检索权重
+      bm25: 0.5             # BM25关键词检索权重
+      graph: 0.65            # 知识图谱检索权重
+      path: 0.2             # 路径感知检索权重
+    rrf_k: 60               # RRF融合参数，仅在fusion_method为rrf时使用
+  bm25:                     # BM25检索参数
+    k1: 1.2                 # 词频饱和参数，控制词频对得分的影响
+    b: 0.75                 # 文档长度归一化参数
+    text_field: "title_raw_span" # BM25检索的文本字段
+  graph:                    # 图谱检索配置
+    enabled: true           # 是否启用知识图谱检索
+    k_hop: 4                # 图谱遍历跳数，影响关联实体发现范围
+    expand_top_m: 50        # 图谱扩展的top-m候选数量
 
+# 路径感知检索配置
 path_aware:
-  enabled: true
-  min_path_score: 0.3
+  enabled: true             # 是否启用路径感知检索，提高多跳推理能力
+  min_path_score: 0.25       # 最小路径得分阈值
 
+# 结果分发器配置
 dispatcher:
-  final_semantic_count: 8
-  final_graph_count: 5
-  bridge_policy: "keepalive"  # none|keepalive|boost
-  bridge_boost_epsilon: 0.02
-  debug_log: true
+  final_semantic_count: 3   # 最终语义检索结果数量（减少）
+  final_graph_count: 80      # 最终图谱检索结果数量（增加）
+  bridge_policy: "boost"  # 桥接策略：none无|keepalive保活|boost增强
+  bridge_boost_epsilon: 0.03  # 桥接增强的epsilon参数
+  debug_log: true           # 是否输出调试日志
 
+# 大语言模型配置
 llm:
-  provider: "openai"
-  temperature: 0.7
-  max_output_tokens: 512
+  provider: "lmstudio"      # LLM提供商：lmstudio/openai/ollama等
+  model: "openai/gpt-oss-20b"   # 模型名称，需与provider匹配
+  temperature: 0.1          # 生成温度，控制输出随机性（0-1）
+  max_output_tokens: 8192    # 最大输出token数量
 
+# 检索护栏配置
 guardrail:
-  enabled: true
-  min_results: 1
-  min_score: 0.0
-  timeout_seconds: 30
+  enabled: false             # 是否启用检索护栏，防止低质量结果
+  min_results: 1            # 最少检索结果数量
+  min_score: 0.0            # 最低检索得分阈值
+  timeout_seconds: 30       # 检索超时时间（秒）

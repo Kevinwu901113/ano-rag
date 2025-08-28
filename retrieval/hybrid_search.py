@@ -101,3 +101,15 @@ class HybridSearcher:
 
         results.sort(key=lambda x: x["final_similarity"], reverse=True)
         return results[: self.candidate_pool]
+
+
+def create_hybrid_searcher(config: Dict[str, Any]) -> HybridSearcher:
+    """Create a HybridSearcher instance with the given configuration.
+    
+    Args:
+        config: Configuration dictionary or config object
+        
+    Returns:
+        HybridSearcher: Configured hybrid searcher instance
+    """
+    return HybridSearcher(config)

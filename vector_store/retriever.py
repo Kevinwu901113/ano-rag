@@ -13,14 +13,14 @@ from config import config
 
 # 导入混合检索模块
 try:
-    from ..retrieval.hybrid_search import HybridSearcher, create_hybrid_searcher
+    from retrieval.hybrid_search import HybridSearcher, create_hybrid_searcher
     HYBRID_SEARCH_AVAILABLE = True
 except ImportError:
     HYBRID_SEARCH_AVAILABLE = False
     logger.warning("Hybrid search module not available")
 
 try:
-    from ..retrieval.retrieval_guardrail import RetrievalGuardrail, create_retrieval_guardrail
+    from retrieval.retrieval_guardrail import RetrievalGuardrail, create_retrieval_guardrail
     GUARDRAIL_AVAILABLE = True
 except ImportError:
     GUARDRAIL_AVAILABLE = False

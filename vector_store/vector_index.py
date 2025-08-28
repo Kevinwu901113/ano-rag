@@ -136,6 +136,24 @@ class VectorIndex:
         try:
             logger.info(f"Training index with {len(training_vectors)} vectors")
             
+            # 对于IVF类型的索引，检查训练数据是否足够
+            if self.index_type in ['IVFFlat', 'IVFPQ']:
+                min_required = self.nlist * 2  # 每个聚类至少需要2个向量
+                if len(training_vectors) < min_required:
+                    # 动态调整nlist参数
+                    new_nlist = max(1, len(training_vectors) // 2)
+                    logger.warning(f"Training data insufficient for nlist={self.nlist}, adjusting to {new_nlist}")
+                    
+                    # 重新创建索引
+                    old_index_type = self.index_type
+                    old_nlist = self.nlist
+                    self.nlist = new_nlist
+                    
+                    if not self.create_index(old_index_type):
+                        # 恢复原参数
+                        self.nlist = old_nlist
+                        return False
+            
             # 预处理训练向量
             processed_vectors = self._preprocess_vectors(training_vectors)
             
