@@ -330,13 +330,13 @@ context_dispatcher:
   semantic_threshold: 0.35           # 最小相似度阈值
   
   # 第二阶段：图扩展参数
-  graph_expand_top_p: 5              # Top-P图扩展笔记数
+  graph_expand_top_p: 8              # Top-P图扩展笔记数
   k_hop: 2                           # K跳图扩展
   graph_threshold: 0.35              # 最小图分数阈值
   
   # 第三阶段：上下文调度参数
-  final_semantic_count: 5            # 最终语义结果数
-  final_graph_count: 8               # 最终图结果数
+  final_semantic_count: 1            # 最终语义结果数
+  final_graph_count: 2               # 最终图结果数
 
 # ===================================================================
 # 11. 聚类配置 (Clustering)
@@ -479,7 +479,7 @@ model_consistency:
   
   # 缓存配置
   cache:
-    max_size: 1000                   # 最大缓存大小
+    # max_size: 1000                   # 最大缓存大小
     ttl_seconds: 3600                # 缓存生存时间
   
   # 模型签名配置

@@ -31,7 +31,7 @@ from .subquestion_planner import SubQuestionPlanner
 from .evidence_merger import EvidenceMerger
 from retrieval.query_planner import LLMBasedRewriter
 from retrieval.diversity_scheduler import DiversityScheduler
-from retrieval.entity_inverted_index import EntityInvertedIndex
+from graph.entity_inverted_index import EntityInvertedIndex
 
 class QueryProcessor:
     """High level query processing pipeline."""
