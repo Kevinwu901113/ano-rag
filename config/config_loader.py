@@ -1,58 +1,111 @@
 import yaml
-import os
-from typing import Dict, Any
 from pathlib import Path
+from typing import Any, Dict, Tuple
+
+# Default configuration skeleton
+DEFAULT_CONFIG: Dict[str, Any] = {
+    "system": {"project_name": "ano-rag", "seed": 42, "device": "cpu"},
+    "document": {"chunk_size": 256, "overlap": 32},
+    "embedding": {
+        "model_name": "BAAI/bge-m3",
+        "batch_size": 64,
+        "max_length": 512,
+        "normalize": True,
+    },
+    "retrieval": {
+        "candidate_pool": 50,
+        "hybrid": {
+            "enabled": True,
+            "fusion_method": "linear",
+            "weights": {"dense": 1.0, "bm25": 0.5, "graph": 0.5, "path": 0.1},
+            "rrf_k": 60,
+        },
+        "bm25": {"k1": 1.2, "b": 0.75, "text_field": "title_raw_span"},
+        "graph": {"enabled": True, "k_hop": 2, "expand_top_m": 20},
+    },
+    "path_aware": {"enabled": True, "min_path_score": 0.3},
+    "dispatcher": {
+        "final_semantic_count": 8,
+        "final_graph_count": 5,
+        "bridge_policy": "keepalive",
+        "bridge_boost_epsilon": 0.02,
+        "debug_log": True,
+    },
+    "llm": {"provider": "openai", "temperature": 0.7, "max_output_tokens": 512},
+    "guardrail": {"enabled": True, "min_results": 1, "min_score": 0.0, "timeout_seconds": 30},
+}
+
+
+def _merge_with_defaults(data: Dict[str, Any], defaults: Dict[str, Any], path: str = "") -> Tuple[Dict[str, Any], list]:
+    """Merge user config with defaults and collect deprecated keys."""
+    result: Dict[str, Any] = {}
+    deprecated: list = []
+
+    for key, default_value in defaults.items():
+        if isinstance(default_value, dict):
+            sub_data = data.get(key, {}) if isinstance(data, dict) else {}
+            merged, dep = _merge_with_defaults(sub_data, default_value, f"{path}{key}.")
+            result[key] = merged
+            deprecated.extend(dep)
+        else:
+            if isinstance(data, dict) and key in data:
+                result[key] = data[key]
+            else:
+                result[key] = default_value
+
+    if isinstance(data, dict):
+        for extra_key in data.keys():
+            if extra_key not in defaults:
+                deprecated.append(f"{path}{extra_key}".rstrip("."))
+    return result, deprecated
+
 
 class ConfigLoader:
-    """配置加载器，用于加载和管理系统配置"""
-    
+    """Load and access configuration with strict schema."""
+
     def __init__(self, config_path: str = None):
         if config_path is None:
-            # config.yaml is stored at the repository root
             config_path = Path(__file__).resolve().parent.parent / "config.yaml"
         self.config_path = Path(config_path)
-        self._config = None
-        
+        self._config: Dict[str, Any] | None = None
+        self.deprecated_keys: list[str] = []
+
     def load_config(self) -> Dict[str, Any]:
-        """加载配置文件"""
         if self._config is None:
-            with open(self.config_path, 'r', encoding='utf-8') as f:
-                self._config = yaml.safe_load(f)
+            if self.config_path.exists():
+                with open(self.config_path, "r", encoding="utf-8") as f:
+                    raw = yaml.safe_load(f) or {}
+            else:
+                raw = {}
+            merged, deprecated = _merge_with_defaults(raw, DEFAULT_CONFIG)
+            self._config = merged
+            self.deprecated_keys = deprecated
+            for key in deprecated:
+                print(f"[Config] deprecated field ignored: {key}")
         return self._config
-    
-    def get(self, key: str, default=None):
-        """获取配置项，支持点号分隔的嵌套键"""
+
+    def get(self, key: str, default: Any = None) -> Any:
         config = self.load_config()
-        keys = key.split('.')
-        value = config
-        
-        for k in keys:
-            if isinstance(value, dict) and k in value:
-                value = value[k]
+        value: Any = config
+        for part in key.split('.'):
+            if isinstance(value, dict) and part in value:
+                value = value[part]
             else:
                 return default
         return value
-    
-    def update_config(self, updates: Dict[str, Any]):
-        """更新配置"""
-        config = self.load_config()
-        config.update(updates)
-        self._config = config
-        
-    def save_config(self):
-        """保存配置到文件"""
-        if self._config:
-            with open(self.config_path, 'w', encoding='utf-8') as f:
-                yaml.dump(self._config, f, default_flow_style=False, allow_unicode=True)
-    
-    def create_directories(self):
-        """创建配置中指定的目录"""
-        config = self.load_config()
-        storage_paths = config.get('storage', {})
-        
-        for path_key, path_value in storage_paths.items():
-            if path_value and isinstance(path_value, str):
-                Path(path_value).mkdir(parents=True, exist_ok=True)
 
-# 全局配置实例
+    def update_config(self, updates: Dict[str, Any]):
+        config = self.load_config()
+        # shallow update only for existing keys
+        for k, v in updates.items():
+            if k in config:
+                config[k] = v
+        self._config = config
+
+    def save_config(self):
+        if self._config is not None:
+            with open(self.config_path, "w", encoding="utf-8") as f:
+                yaml.dump(self._config, f, default_flow_style=False, allow_unicode=True)
+
+
 config = ConfigLoader()
