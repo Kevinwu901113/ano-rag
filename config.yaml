@@ -22,10 +22,11 @@ embedding:
 # 向量存储配置
 vector_store:
   top_k: 20                 # 检索候选数量，影响召回率和计算开销
-  similarity_threshold: 0.35 # 相似度阈值，低阈值提高召回率但可能引入噪声
+  similarity_threshold: 0.15 # 相似度阈值，低阈值提高召回率但可能引入噪声
   batch_size: 64            # 向量检索批处理大小
   dimension: 1024           # 向量维度，需与嵌入模型匹配
   index_type: "IVFFlat"     # FAISS索引类型，影响检索速度和精度
+  nlist: 20                 # IVF索引聚类数量，避免训练数据不足警告
   similarity_metric: "cosine" # 相似度计算方法：cosine/euclidean/dot_product
 
 # 检索策略配置
@@ -48,15 +49,30 @@ retrieval:
     enabled: true           # 是否启用知识图谱检索
     k_hop: 4                # 图谱遍历跳数，影响关联实体发现范围
     expand_top_m: 50        # 图谱扩展的top-m候选数量
+  multi_hop:                # 多跳检索配置
+    enabled: true           # 是否启用多跳检索（false时使用混合图检索策略）
+    # 图检索策略配置
+    strategy: "hybrid"       # 图检索策略：entity_extraction|top_k_seed|hybrid
+    top_k_seed:             # Top-K种子节点策略配置
+      enabled: false       # 是否启用Top-K种子节点策略
+      seed_count: 5         # 作为种子节点的Top-K数量
+      fallback_to_entity: true  # 当Top-K结果不足时是否回退到实体提取策略
+    entity_extraction:      # 实体提取策略配置（传统方式）
+      enabled: true         # 是否启用实体提取策略
+      max_entities: 10      # 最大提取实体数量
+    hybrid_mode:            # 混合策略配置
+      primary_strategy: "entity_extraction"  # 主策略：entity_extraction|top_k_seed
+      fallback_strategy: "top_k_seed"       # 备用策略
+      switch_threshold: 3   # 主策略结果不足时的切换阈值
 
 # 路径感知检索配置
 path_aware:
-  enabled: true             # 是否启用路径感知检索，提高多跳推理能力
-  min_path_score: 0.25       # 最小路径得分阈值
+  enabled: false            # 是否启用路径感知检索，提高多跳推理能力
+  min_path_score: 0.05       # 最小路径得分阈值
 
 # 结果分发器配置
 dispatcher:
-  final_semantic_count: 3   # 最终语义检索结果数量（减少）
+  final_semantic_count: 5   # 最终语义检索结果数量（减少）
   final_graph_count: 80      # 最终图谱检索结果数量（增加）
   bridge_policy: "boost"  # 桥接策略：none无|keepalive保活|boost增强
   bridge_boost_epsilon: 0.03  # 桥接增强的epsilon参数
@@ -75,3 +91,59 @@ guardrail:
   min_results: 1            # 最少检索结果数量
   min_score: 0.0            # 最低检索得分阈值
   timeout_seconds: 30       # 检索超时时间（秒）
+
+# 新增功能配置开关
+feature_switches:
+  # 稳定note_id生成功能
+  stable_note_id:
+    enabled: true           # 是否启用基于源文档信息的稳定note_id生成
+    use_content_hash: true  # 是否使用内容哈希作为备选方案
+    fallback_to_index: true # 无其他信息时是否回退到索引方式
+
+# 增强关系提取配置
+enhanced_relation_extraction:
+  use_llm_extraction: true     # 是否启用LLM增强的语义关系提取
+  use_fast_model: true          # 是否使用快速模型
+  enable_topic_groups: true     # 是否启用主题组关系提取
+  enable_reasoning_paths: true  # 是否启用推理路径关系提取（这是您询问的开关）
+  
+  # 轻量级关系类型功能
+  lightweight_relations:
+    enabled: true           # 是否启用轻量级商业关系识别
+    relation_types:         # 支持的关系类型配置
+      succession: true      # 继任关系
+      acquisition: true     # 收购关系
+      ownership: true       # 归属关系
+      subsidiary: true      # 子公司关系
+      partnership: true     # 合作关系
+      merger: true          # 合并关系
+    keyword_matching: true  # 是否启用关键词匹配
+    pattern_matching: true  # 是否启用模式匹配
+  
+  # 一致性检查功能
+  consistency_check:
+    enabled: true           # 是否启用数据写入前的一致性检查
+    strict_mode: false      # 严格模式：发现严重错误时停止处理
+    check_note_id: true     # 检查note_id一致性
+    check_entity_alignment: true  # 检查实体对齐
+    check_relation_chains: true   # 检查关系链完整性
+    check_source_binding: true    # 检查源文档绑定稳定性
+    check_graph_structure: true   # 检查图结构完整性
+    entity_alignment_threshold: 0.8  # 实体对齐警告阈值（80%实体缺失才警告）
+    export_report: true     # 是否导出检查报告
+    report_format: "json"   # 报告格式：json/yaml/txt
+  
+  # 事件链感知分块功能
+  # event_aware_chunking:
+  #   enabled: true           # 是否启用事件链感知的文档分块
+  #   optimization_level: "medium"  # 优化级别：low/medium/high
+  #   event_keywords:         # 事件关键词配置
+  #     succession: ["继任", "接任", "担任", "就任", "上任"]
+  #     acquisition: ["收购", "并购", "购买", "买入", "获得"]
+  #     ownership: ["拥有", "持有", "控股", "占股", "股权"]
+  #     bankruptcy: ["破产", "倒闭", "清算", "重组", "债务"]
+  #     merger: ["合并", "整合", "联合", "重组", "合资"]
+  #     partnership: ["合作", "联盟", "伙伴", "协议", "签约"]
+  #   proximity_threshold: 500  # 事件关联距离阈值（字符数）
+  #   max_chunk_expansion: 1.5  # 最大块扩展倍数
+  #   merge_overlap_threshold: 0.7  # 块合并重叠阈值

@@ -13,6 +13,17 @@ class DocumentChunker:
         self.overlap = config.get('document.overlap', 50)
         self.supported_formats = config.get('document.supported_formats', ['json', 'jsonl', 'docx'])
         
+        # 事件链优化配置
+        self.event_chain_optimization = config.get('chunking.event_chain_optimization.enabled', True)
+        self.event_keywords = {
+            'succession': ['继任', '接任', '接替', '继承', '接班', '替代', '取代', 'succeed', 'replace', 'take over'],
+            'acquisition': ['收购', '并购', '兼并', '购买', '买下', 'acquire', 'purchase', 'buy out', 'takeover'],
+            'ownership': ['拥有', '持有', '控制', '所有', '归属', 'own', 'control', 'possess', 'belong to'],
+            'bankruptcy': ['破产', '倒闭', '清算', '解散', 'bankruptcy', 'liquidation', 'dissolution'],
+            'merger': ['合并', '融合', '整合', 'merge', 'consolidate', 'integrate'],
+            'partnership': ['合作', '合伙', '联盟', '伙伴', 'partner', 'collaborate', 'alliance']
+        }
+        
     def chunk_document(self, file_path: str, source_info: Dict[str, Any] = None) -> List[Dict[str, Any]]:
         """对单个文档进行分块"""
         logger.info(f"Chunking document: {file_path}")
@@ -176,12 +187,16 @@ class DocumentChunker:
                 'file_hash': FileUtils.get_file_hash(file_path) if hasattr(FileUtils, 'get_file_hash') else 'unknown'
             }
         
-        # 使用TextUtils进行分块
-        text_chunks = TextUtils.chunk_text(
-            cleaned_text,
-            chunk_size=self.chunk_size,
-            overlap=self.overlap
-        )
+        # 事件链感知的分块处理
+        if self.event_chain_optimization:
+            text_chunks = self._event_aware_chunking(cleaned_text)
+        else:
+            # 使用TextUtils进行分块
+            text_chunks = TextUtils.chunk_text(
+                cleaned_text,
+                chunk_size=self.chunk_size,
+                overlap=self.overlap
+            )
 
         search_pos = 0  # 用于在原文中定位每个块的起始位置
         
@@ -227,6 +242,325 @@ class DocumentChunker:
             chunks.append(chunk)
         
         return chunks
+    
+    def _event_aware_chunking(self, text: str) -> List[Dict[str, Any]]:
+        """事件链感知的文档分块"""
+        import re
+        
+        # 首先进行标准分块
+        standard_chunks = TextUtils.chunk_text(
+            text,
+            chunk_size=self.chunk_size,
+            overlap=self.overlap
+        )
+        
+        # 识别包含事件关键词的句子
+        event_sentences = self._identify_event_sentences(text)
+        
+        if not event_sentences:
+            return standard_chunks
+        
+        # 优化分块边界，确保事件链完整性
+        optimized_chunks = self._optimize_chunk_boundaries(standard_chunks, event_sentences, text)
+        
+        return optimized_chunks
+    
+    def _identify_event_sentences(self, text: str) -> List[Dict[str, Any]]:
+        """识别包含事件关键词的句子"""
+        import re
+        
+        sentences = re.split(r'[。！？.!?]', text)
+        event_sentences = []
+        
+        for i, sentence in enumerate(sentences):
+            if not sentence.strip():
+                continue
+                
+            sentence_events = []
+            for event_type, keywords in self.event_keywords.items():
+                for keyword in keywords:
+                    if keyword in sentence:
+                        sentence_events.append(event_type)
+                        break
+            
+            if sentence_events:
+                # 计算句子在原文中的位置
+                sentence_start = text.find(sentence.strip())
+                event_sentences.append({
+                    'text': sentence.strip(),
+                    'index': i,
+                    'start_pos': sentence_start,
+                    'end_pos': sentence_start + len(sentence.strip()),
+                    'event_types': sentence_events
+                })
+        
+        return event_sentences
+    
+    def _optimize_chunk_boundaries(self, chunks: List[Dict[str, Any]], 
+                                  event_sentences: List[Dict[str, Any]], 
+                                  full_text: str) -> List[Dict[str, Any]]:
+        """优化分块边界以保持事件链完整性"""
+        if not event_sentences:
+            return chunks
+        
+        optimized_chunks = []
+        
+        for chunk in chunks:
+            chunk_text = chunk['text']
+            chunk_start = full_text.find(chunk_text)
+            chunk_end = chunk_start + len(chunk_text)
+            
+            # 检查当前块是否包含事件句子
+            chunk_events = []
+            for event_sent in event_sentences:
+                if (event_sent['start_pos'] >= chunk_start and 
+                    event_sent['end_pos'] <= chunk_end):
+                    chunk_events.append(event_sent)
+            
+            if not chunk_events:
+                # 没有事件句子，保持原样
+                optimized_chunks.append(chunk)
+                continue
+            
+            # 检查是否需要扩展块以包含完整的事件链
+            extended_chunk = self._extend_chunk_for_event_chain(
+                chunk, chunk_events, event_sentences, full_text
+            )
+            
+            # 检查扩展后的块是否过大
+            if len(extended_chunk['text']) > self.chunk_size * 1.5:
+                # 如果过大，尝试分割但保持事件完整性
+                split_chunks = self._split_large_event_chunk(extended_chunk, chunk_events)
+                optimized_chunks.extend(split_chunks)
+            else:
+                optimized_chunks.append(extended_chunk)
+        
+        # 去重和合并相似的块
+        final_chunks = self._merge_overlapping_chunks(optimized_chunks)
+        
+        return final_chunks
+    
+    def _extend_chunk_for_event_chain(self, chunk: Dict[str, Any], 
+                                     chunk_events: List[Dict[str, Any]], 
+                                     all_events: List[Dict[str, Any]], 
+                                     full_text: str) -> Dict[str, Any]:
+        """扩展块以包含完整的事件链"""
+        chunk_text = chunk['text']
+        
+        # 查找相关的事件句子（前后文中的相关事件）
+        related_events = self._find_related_events(chunk_events, all_events)
+        
+        if not related_events:
+            return chunk
+        
+        # 计算需要扩展的范围
+        min_start = min(event['start_pos'] for event in related_events)
+        max_end = max(event['end_pos'] for event in related_events)
+        
+        # 扩展到句子边界
+        extended_start = max(0, min_start - 50)  # 向前扩展50字符
+        extended_end = min(len(full_text), max_end + 50)  # 向后扩展50字符
+        
+        # 调整到句子边界
+        import re
+        sentence_starts = [m.start() for m in re.finditer(r'[。！？.!?]\s*', full_text)]
+        
+        # 找到最近的句子开始位置
+        for start_pos in reversed(sentence_starts):
+            if start_pos <= extended_start:
+                extended_start = start_pos + 1
+                break
+        
+        # 找到最近的句子结束位置
+        for end_pos in sentence_starts:
+            if end_pos >= extended_end:
+                extended_end = end_pos + 1
+                break
+        
+        extended_text = full_text[extended_start:extended_end].strip()
+        
+        # 创建扩展后的块
+        extended_chunk = chunk.copy()
+        extended_chunk['text'] = extended_text
+        extended_chunk['length'] = len(extended_text)
+        extended_chunk['event_chain_optimized'] = True
+        extended_chunk['related_events'] = [event['event_types'] for event in related_events]
+        
+        return extended_chunk
+    
+    def _find_related_events(self, chunk_events: List[Dict[str, Any]], 
+                           all_events: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """查找相关的事件句子"""
+        if not chunk_events:
+            return []
+        
+        related_events = chunk_events.copy()
+        
+        # 查找时间上相近的事件
+        for chunk_event in chunk_events:
+            chunk_pos = chunk_event['start_pos']
+            
+            for other_event in all_events:
+                if other_event in related_events:
+                    continue
+                
+                # 检查距离（在500字符范围内）
+                distance = abs(other_event['start_pos'] - chunk_pos)
+                if distance <= 500:
+                    # 检查事件类型相关性
+                    if self._are_events_related(chunk_event['event_types'], other_event['event_types']):
+                        related_events.append(other_event)
+        
+        return related_events
+    
+    def _are_events_related(self, events1: List[str], events2: List[str]) -> bool:
+        """判断两组事件是否相关"""
+        # 定义事件关联规则
+        related_pairs = {
+            ('acquisition', 'ownership'),
+            ('succession', 'ownership'),
+            ('merger', 'acquisition'),
+            ('bankruptcy', 'acquisition'),
+            ('partnership', 'merger')
+        }
+        
+        for event1 in events1:
+            for event2 in events2:
+                if event1 == event2:  # 同类事件
+                    return True
+                if (event1, event2) in related_pairs or (event2, event1) in related_pairs:
+                    return True
+        
+        return False
+    
+    def _split_large_event_chunk(self, chunk: Dict[str, Any], 
+                                events: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """分割过大的事件块，但保持事件完整性"""
+        chunk_text = chunk['text']
+        
+        if len(chunk_text) <= self.chunk_size * 1.2:
+            return [chunk]
+        
+        # 按事件分组
+        event_groups = self._group_events_by_proximity(events)
+        
+        split_chunks = []
+        current_pos = 0
+        
+        for group in event_groups:
+            group_start = min(event['start_pos'] for event in group) - current_pos
+            group_end = max(event['end_pos'] for event in group) - current_pos
+            
+            # 确保不超出当前块范围
+            group_start = max(0, group_start)
+            group_end = min(len(chunk_text), group_end)
+            
+            if group_end > group_start:
+                group_text = chunk_text[group_start:group_end]
+                
+                split_chunk = chunk.copy()
+                split_chunk['text'] = group_text
+                split_chunk['length'] = len(group_text)
+                split_chunk['event_group'] = [event['event_types'] for event in group]
+                
+                split_chunks.append(split_chunk)
+        
+        return split_chunks if split_chunks else [chunk]
+    
+    def _group_events_by_proximity(self, events: List[Dict[str, Any]]) -> List[List[Dict[str, Any]]]:
+        """按接近程度对事件分组"""
+        if not events:
+            return []
+        
+        # 按位置排序
+        sorted_events = sorted(events, key=lambda x: x['start_pos'])
+        
+        groups = []
+        current_group = [sorted_events[0]]
+        
+        for event in sorted_events[1:]:
+            # 如果与当前组的最后一个事件距离小于200字符，加入当前组
+            if event['start_pos'] - current_group[-1]['end_pos'] <= 200:
+                current_group.append(event)
+            else:
+                # 否则开始新组
+                groups.append(current_group)
+                current_group = [event]
+        
+        if current_group:
+            groups.append(current_group)
+        
+        return groups
+    
+    def _merge_overlapping_chunks(self, chunks: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """合并重叠的块"""
+        if len(chunks) <= 1:
+            return chunks
+        
+        merged_chunks = []
+        current_chunk = chunks[0]
+        
+        for next_chunk in chunks[1:]:
+            # 检查重叠
+            overlap_ratio = self._calculate_text_overlap(current_chunk['text'], next_chunk['text'])
+            
+            if overlap_ratio > 0.7:  # 70%以上重叠则合并
+                # 合并块
+                merged_text = self._merge_chunk_texts(current_chunk['text'], next_chunk['text'])
+                current_chunk['text'] = merged_text
+                current_chunk['length'] = len(merged_text)
+                
+                # 合并事件信息
+                if 'related_events' in current_chunk and 'related_events' in next_chunk:
+                    current_chunk['related_events'].extend(next_chunk['related_events'])
+            else:
+                merged_chunks.append(current_chunk)
+                current_chunk = next_chunk
+        
+        merged_chunks.append(current_chunk)
+        return merged_chunks
+    
+    def _calculate_text_overlap(self, text1: str, text2: str) -> float:
+        """计算两个文本的重叠比例"""
+        if not text1 or not text2:
+            return 0.0
+        
+        # 简单的重叠检测：检查较短文本在较长文本中的出现
+        shorter, longer = (text1, text2) if len(text1) < len(text2) else (text2, text1)
+        
+        if shorter in longer:
+            return len(shorter) / len(longer)
+        
+        # 检查部分重叠
+        max_overlap = 0
+        for i in range(len(shorter)):
+            for j in range(i + 1, len(shorter) + 1):
+                substring = shorter[i:j]
+                if len(substring) > 10 and substring in longer:  # 至少10字符的重叠
+                    max_overlap = max(max_overlap, len(substring))
+        
+        return max_overlap / len(shorter) if len(shorter) > 0 else 0.0
+    
+    def _merge_chunk_texts(self, text1: str, text2: str) -> str:
+        """智能合并两个文本块"""
+        # 找到最佳合并点
+        overlap_start = -1
+        max_overlap_len = 0
+        
+        # 查找text1结尾和text2开头的重叠
+        for i in range(min(100, len(text1))):
+            suffix = text1[-(i+1):]
+            if text2.startswith(suffix):
+                if len(suffix) > max_overlap_len:
+                    max_overlap_len = len(suffix)
+                    overlap_start = len(text1) - len(suffix)
+        
+        if overlap_start >= 0:
+            # 有重叠，去除重复部分
+            return text1[:overlap_start] + text2
+        else:
+            # 无重叠，直接连接
+            return text1 + " " + text2
     
     def _extract_context_info(self, chunk_text: str, full_text: str, chunk_index: int) -> Dict[str, Any]:
         """提取块的上下文信息"""

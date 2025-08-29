@@ -46,7 +46,14 @@ class RelationExtractor:
             'definition': {'weight': 0.7, 'reasoning_value': 0.7},
             'comparison': {'weight': 0.6, 'reasoning_value': 0.6},
             'elaboration': {'weight': 0.5, 'reasoning_value': 0.5},
-            'contradiction': {'weight': 0.8, 'reasoning_value': 0.9}
+            'contradiction': {'weight': 0.8, 'reasoning_value': 0.9},
+            # 新增轻量级关系类型
+            'succession': {'weight': 0.85, 'reasoning_value': 0.9},  # 继任关系
+            'acquisition': {'weight': 0.9, 'reasoning_value': 0.95}, # 收购关系
+            'ownership': {'weight': 0.8, 'reasoning_value': 0.8},    # 归属关系
+            'subsidiary': {'weight': 0.75, 'reasoning_value': 0.7},  # 子公司关系
+            'partnership': {'weight': 0.7, 'reasoning_value': 0.6},  # 合作关系
+            'merger': {'weight': 0.9, 'reasoning_value': 0.95}       # 合并关系
         }
         
         # 向后兼容的权重字典
@@ -131,6 +138,11 @@ class RelationExtractor:
         logger.info("Extracting personal relations")
         personal_relations = self.extract_personal_relations(atomic_notes)
         all_relations.extend(personal_relations)
+        
+        # 7. 轻量级业务关系
+        logger.info("Extracting lightweight business relations")
+        business_relations = self.extract_lightweight_business_relations(atomic_notes)
+        all_relations.extend(business_relations)
         
         return all_relations
     
@@ -931,3 +943,125 @@ class RelationExtractor:
         
         # 最终过滤和去重
         return self._filter_and_deduplicate_relations(all_relations)
+    
+    def extract_lightweight_business_relations(self, atomic_notes: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """提取轻量级业务关系（继任、收购、归属等）"""
+        # 检查是否启用轻量级关系抽取
+        lightweight_config = config.get('relation_extractor.lightweight_relations', {})
+        if not lightweight_config.get('enabled', True):
+            return []
+        
+        # 获取启用的关系类型
+        enabled_types = lightweight_config.get('types', 
+                                 ['succession', 'acquisition', 'ownership', 'subsidiary', 'partnership', 'merger'])
+        
+        relations = []
+        
+        # 定义关系模式和关键词
+        relation_patterns = {
+            'succession': {
+                'keywords': ['继任', '接任', '接替', '继承', '接班', '替代', '取代', 'succeed', 'replace', 'take over'],
+                'patterns': [r'(\w+)\s*继任\s*(\w+)', r'(\w+)\s*接替\s*(\w+)', r'(\w+)\s*succeed\s*(\w+)']
+            },
+            'acquisition': {
+                'keywords': ['收购', '并购', '兼并', '购买', '买下', 'acquire', 'purchase', 'buy out', 'takeover'],
+                'patterns': [r'(\w+)\s*收购\s*(\w+)', r'(\w+)\s*并购\s*(\w+)', r'(\w+)\s*acquire[sd]?\s*(\w+)']
+            },
+            'ownership': {
+                'keywords': ['拥有', '持有', '控制', '所有', '归属', 'own', 'control', 'possess', 'belong to'],
+                'patterns': [r'(\w+)\s*拥有\s*(\w+)', r'(\w+)\s*控制\s*(\w+)', r'(\w+)\s*own[s]?\s*(\w+)']
+            },
+            'subsidiary': {
+                'keywords': ['子公司', '分公司', '附属', '下属', 'subsidiary', 'affiliate', 'branch'],
+                'patterns': [r'(\w+)\s*的?\s*子公司\s*(\w+)', r'(\w+)\s*subsidiary\s*(\w+)']
+            },
+            'partnership': {
+                'keywords': ['合作', '合伙', '联盟', '伙伴', 'partner', 'collaborate', 'alliance', 'cooperation'],
+                'patterns': [r'(\w+)\s*与\s*(\w+)\s*合作', r'(\w+)\s*partner[s]?\s*with\s*(\w+)']
+            },
+            'merger': {
+                'keywords': ['合并', '融合', '整合', 'merge', 'consolidate', 'integrate'],
+                'patterns': [r'(\w+)\s*与\s*(\w+)\s*合并', r'(\w+)\s*merge[sd]?\s*with\s*(\w+)']
+            }
+        }
+        
+        for i, note1 in enumerate(atomic_notes):
+            note1_id = note1.get('note_id')
+            if not note1_id:
+                continue
+                
+            text = note1.get('content', '') + ' ' + note1.get('original_text', '')
+            entities = note1.get('entities', [])
+            
+            # 检查每种关系类型（仅处理启用的类型）
+            for relation_type, pattern_config in relation_patterns.items():
+                if relation_type not in enabled_types:
+                    continue
+                # 关键词匹配
+                if any(keyword in text for keyword in pattern_config['keywords']):
+                    # 模式匹配
+                    for pattern in pattern_config['patterns']:
+                        matches = re.finditer(pattern, text, re.IGNORECASE)
+                        for match in matches:
+                            if len(match.groups()) >= 2:
+                                entity1, entity2 = match.groups()[:2]
+                                if entity1 and entity2 and entity1 != entity2:
+                                    # 查找包含这些实体的其他笔记
+                                    for j, note2 in enumerate(atomic_notes):
+                                        if i == j:
+                                            continue
+                                        note2_id = note2.get('note_id')
+                                        if not note2_id:
+                                            continue
+                                        
+                                        note2_entities = note2.get('entities', [])
+                                        if (entity1 in note2_entities or entity2 in note2_entities or
+                                            entity1 in note2.get('content', '') or entity2 in note2.get('content', '')):
+                                            
+                                            weight = self.relation_types[relation_type]['weight']
+                                            relations.append({
+                                                'source_id': note1_id,
+                                                'target_id': note2_id,
+                                                'relation_type': relation_type,
+                                                'weight': weight,
+                                                'metadata': {
+                                                    'entity1': entity1,
+                                                    'entity2': entity2,
+                                                    'pattern_match': match.group(),
+                                                    'extraction_method': 'lightweight_business_pattern'
+                                                }
+                                            })
+                
+                # 实体对关系检查
+                if len(entities) >= 2:
+                    for k in range(len(entities)):
+                        for l in range(k + 1, len(entities)):
+                            entity1, entity2 = entities[k], entities[l]
+                            
+                            # 检查是否存在关系关键词
+                            if any(keyword in text for keyword in pattern_config['keywords']):
+                                # 查找相关的其他笔记
+                                for j, note2 in enumerate(atomic_notes):
+                                    if i == j:
+                                        continue
+                                    note2_id = note2.get('note_id')
+                                    if not note2_id:
+                                        continue
+                                    
+                                    note2_entities = note2.get('entities', [])
+                                    if entity1 in note2_entities or entity2 in note2_entities:
+                                        weight = self.relation_types[relation_type]['weight'] * 0.8  # 稍微降低权重
+                                        relations.append({
+                                            'source_id': note1_id,
+                                            'target_id': note2_id,
+                                            'relation_type': relation_type,
+                                            'weight': weight,
+                                            'metadata': {
+                                                'entity1': entity1,
+                                                'entity2': entity2,
+                                                'extraction_method': 'lightweight_business_entity_pair'
+                                            }
+                                        })
+        
+        logger.info(f"Extracted {len(relations)} lightweight business relations")
+        return relations

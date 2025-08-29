@@ -22,6 +22,24 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         },
         "bm25": {"k1": 1.2, "b": 0.75, "text_field": "title_raw_span"},
         "graph": {"enabled": True, "k_hop": 2, "expand_top_m": 20},
+        "multi_hop": {
+            "enabled": True,
+            "strategy": "hybrid",
+            "top_k_seed": {
+                "enabled": False,
+                "seed_count": 5,
+                "fallback_to_entity": True
+            },
+            "entity_extraction": {
+                "enabled": True,
+                "max_entities": 10
+            },
+            "hybrid_mode": {
+                "primary_strategy": "entity_extraction",
+                "fallback_strategy": "top_k_seed",
+                "switch_threshold": 3
+            }
+        },
     },
     "path_aware": {"enabled": True, "min_path_score": 0.3},
     "dispatcher": {

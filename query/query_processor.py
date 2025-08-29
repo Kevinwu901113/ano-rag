@@ -78,10 +78,16 @@ class QueryProcessor:
         if graph_file and os.path.exists(graph_file):
             self.graph_index = GraphIndex()
             try:
-                self.graph_index.load_index(graph_file)
-                logger.info(f"Loaded graph from {graph_file}")
+                # 加载图数据
+                from utils import FileUtils
+                from networkx.readwrite import json_graph
+                data = FileUtils.read_json(graph_file)
+                graph = json_graph.node_link_graph(data, edges="links")
+                # 重新构建索引以确保映射正确
+                self.graph_index.build_index(graph, atomic_notes, embeddings)
+                logger.info(f"Loaded and rebuilt graph index from {graph_file}")
             except Exception as e:
-                logger.error(f"Failed to load graph index: {e}, rebuilding")
+                logger.error(f"Failed to load graph from {graph_file}: {e}, rebuilding")
                 graph = builder.build_graph(atomic_notes, embeddings)
                 self.graph_index.build_index(graph, atomic_notes, embeddings)
         else:
@@ -89,7 +95,7 @@ class QueryProcessor:
             self.graph_index = GraphIndex()
             self.graph_index.build_index(graph, atomic_notes, embeddings)
 
-        self.multi_hop_enabled = config.get('multi_hop.enabled', False)
+        self.multi_hop_enabled = config.get('retrieval.multi_hop.enabled', False)
         if self.multi_hop_enabled:
             self.multi_hop_processor = MultiHopQueryProcessor(
                 atomic_notes,
@@ -281,6 +287,33 @@ class QueryProcessor:
         logger.info(f"Section filtering: {'enabled' if self.section_filtering_enabled else 'disabled'}")
         logger.info(f"Lexical fallback: {'enabled' if self.lexical_fallback_enabled else 'disabled'}")
         logger.info(f"Namespace filtering stages: {self.namespace_filter_stages}")
+        
+        # 图检索策略配置
+        graph_config = config.get('retrieval.multi_hop', {})
+        self.graph_strategy = graph_config.get('strategy', 'entity_extraction')
+        
+        # Top-K种子节点策略配置
+        top_k_seed_config = graph_config.get('top_k_seed', {})
+        self.top_k_seed_enabled = top_k_seed_config.get('enabled', False)
+        self.seed_count = top_k_seed_config.get('seed_count', 5)
+        self.fallback_to_entity = top_k_seed_config.get('fallback_to_entity', True)
+        
+        # 实体提取策略配置
+        entity_extraction_config = graph_config.get('entity_extraction', {})
+        self.entity_extraction_enabled = entity_extraction_config.get('enabled', True)
+        self.max_entities = entity_extraction_config.get('max_entities', 10)
+        
+        # 混合策略配置
+        hybrid_mode_config = graph_config.get('hybrid_mode', {})
+        self.primary_strategy = hybrid_mode_config.get('primary_strategy', 'entity_extraction')
+        self.fallback_strategy = hybrid_mode_config.get('fallback_strategy', 'top_k_seed')
+        self.switch_threshold = hybrid_mode_config.get('switch_threshold', 3)
+        
+        logger.info(f"Graph retrieval strategy: {self.graph_strategy}")
+        logger.info(f"Top-K seed: {'enabled' if self.top_k_seed_enabled else 'disabled'} (count: {self.seed_count})")
+        logger.info(f"Entity extraction: {'enabled' if self.entity_extraction_enabled else 'disabled'} (max: {self.max_entities})")
+        if self.graph_strategy == 'hybrid':
+            logger.info(f"Hybrid mode - Primary: {self.primary_strategy}, Fallback: {self.fallback_strategy}, Threshold: {self.switch_threshold}")
         
         # 初始化实体倒排索引
         self.entity_inverted_index = EntityInvertedIndex()
@@ -1164,6 +1197,44 @@ class QueryProcessor:
             
             logger.info(f"Initial vector recall for dispatcher: {len(candidate_notes)} unique notes")
             
+            # 如果启用了多跳检索，添加图检索结果
+            logger.info(f"Multi-hop enabled: {self.multi_hop_enabled}")
+            if self.multi_hop_enabled:
+                try:
+                    # 获取查询的嵌入向量
+                    query_embeddings = self.vector_retriever.embedding_manager.encode_queries([query])
+                    query_emb = query_embeddings[0] if len(query_embeddings) > 0 else None
+                    
+                    if query_emb is not None:
+                        # 调用多跳处理器进行图检索
+                        graph_results = self.multi_hop_processor.retrieve(query_emb)
+                    else:
+                        logger.warning("Failed to generate query embedding for graph retrieval")
+                        graph_results = {'notes': []}
+                    graph_notes = graph_results.get('notes', [])
+                    
+                    # 为图检索结果添加标记
+                    for note in graph_notes:
+                        if 'tags' not in note:
+                            note['tags'] = {}
+                        note['tags']['source'] = 'graph'
+                        
+                        # 确保有final_similarity字段
+                        if 'final_similarity' not in note:
+                            note['final_similarity'] = note.get('retrieval_info', {}).get('score', 0.0)
+                    
+                    # 将图检索结果添加到候选结果中
+                    for note in graph_notes:
+                        note_id = note.get('note_id')
+                        if note_id and note_id not in seen_note_ids:
+                            candidate_notes.append(note)
+                            seen_note_ids.add(note_id)
+                    
+                    logger.info(f"Added {len(graph_notes)} graph retrieval results")
+                    
+                except Exception as e:
+                    logger.error(f"Graph retrieval failed: {e}")
+            
             # 调用 ContextDispatcher 处理候选结果
             selected_notes = self.context_dispatcher.dispatch(candidate_notes)
             
@@ -1344,7 +1415,7 @@ class QueryProcessor:
             if self.recall_optimization_enabled:
                 candidate_notes = self.recall_optimizer.optimize_recall(candidate_notes, query, query_emb)
 
-            # 7. 图扩展（如果启用多跳）
+            # 7. 图扩展（混合策略）
             reasoning_paths: List[Dict[str, Any]] = []
             if self.multi_hop_enabled:
                 mh_result = self.multi_hop_processor.retrieve(query_emb)
@@ -1354,8 +1425,8 @@ class QueryProcessor:
                     reasoning_paths.extend(n.get('reasoning_paths', []))
                 selected_notes = self.scheduler.schedule_for_multi_hop(candidate_notes, reasoning_paths)
             else:
-                seed_ids = [note.get('note_id') for note in candidate_notes]
-                graph_notes = self.graph_retriever.retrieve(seed_ids)
+                # 使用混合图检索策略
+                graph_notes = self._perform_hybrid_graph_retrieval(candidate_notes, query)
                 candidate_notes.extend(graph_notes)
                 selected_notes = self.scheduler.schedule(candidate_notes)
             
@@ -2276,3 +2347,133 @@ class QueryProcessor:
         except Exception as e:
             logger.error(f"Failed to merge fallback results: {e}")
             return primary_results  # 返回主要结果作为兜底
+    
+    def _perform_hybrid_graph_retrieval(self, candidate_notes: List[Dict[str, Any]], query: str) -> List[Dict[str, Any]]:
+        """执行混合图检索策略"""
+        try:
+            if self.graph_strategy == "entity_extraction":
+                return self._perform_entity_extraction_graph_retrieval(candidate_notes)
+            elif self.graph_strategy == "top_k_seed":
+                return self._perform_top_k_seed_graph_retrieval(candidate_notes)
+            elif self.graph_strategy == "hybrid":
+                return self._perform_hybrid_mode_graph_retrieval(candidate_notes, query)
+            else:
+                logger.warning(f"Unknown graph strategy: {self.graph_strategy}, falling back to entity_extraction")
+                return self._perform_entity_extraction_graph_retrieval(candidate_notes)
+        except Exception as e:
+            logger.error(f"Graph retrieval failed: {e}")
+            return []
+    
+    def _perform_entity_extraction_graph_retrieval(self, candidate_notes: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """基于实体提取的图检索"""
+        try:
+            # 从候选笔记中提取实体
+            entities = self._extract_entities_from_candidates(candidate_notes)
+            if self.entity_extraction_max_entities > 0:
+                entities = entities[:self.entity_extraction_max_entities]
+            
+            if not entities:
+                logger.debug("No entities extracted for graph retrieval")
+                return []
+            
+            # 使用实体倒排索引获取种子节点
+            seed_ids = []
+            if self.entity_inverted_index:
+                candidate_note_ids = self.entity_inverted_index.get_candidate_notes(entities)
+                seed_ids = list(candidate_note_ids)
+            
+            # 去重
+            seed_ids = list(set(seed_ids))
+            
+            if not seed_ids:
+                logger.debug("No seed nodes found from entities")
+                return []
+            
+            # 执行图检索
+            graph_notes = self.graph_retriever.retrieve(seed_ids)
+            
+            # 为图检索结果添加retrieval_method标识
+            for note in graph_notes:
+                if 'retrieval_info' not in note:
+                    note['retrieval_info'] = {}
+                note['retrieval_info']['retrieval_method'] = 'graph_search'
+                note['retrieval_info']['graph_strategy'] = 'entity_extraction'
+            
+            logger.debug(f"Entity extraction graph retrieval: {len(entities)} entities -> {len(seed_ids)} seeds -> {len(graph_notes)} results")
+            return graph_notes
+            
+        except Exception as e:
+            logger.error(f"Entity extraction graph retrieval failed: {e}")
+            return []
+    
+    def _perform_top_k_seed_graph_retrieval(self, candidate_notes: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """基于Top-K种子节点的图检索"""
+        try:
+            # 获取Top-K候选作为种子节点
+            top_k_candidates = candidate_notes[:self.top_k_seed_num_seeds]
+            seed_ids = [note.get('note_id') for note in top_k_candidates if note.get('note_id')]
+            
+            if not seed_ids:
+                logger.debug("No valid seed IDs found from top-k candidates")
+                if self.top_k_seed_fallback_to_entity:
+                    logger.debug("Falling back to entity extraction")
+                    return self._perform_entity_extraction_graph_retrieval(candidate_notes)
+                return []
+            
+            # 执行图检索
+            graph_notes = self.graph_retriever.retrieve(seed_ids)
+            
+            # 为图检索结果添加retrieval_method标识
+            for note in graph_notes:
+                if 'retrieval_info' not in note:
+                    note['retrieval_info'] = {}
+                note['retrieval_info']['retrieval_method'] = 'graph_search'
+                note['retrieval_info']['graph_strategy'] = 'top_k_seed'
+            
+            logger.debug(f"Top-K seed graph retrieval: {len(seed_ids)} seeds -> {len(graph_notes)} results")
+            return graph_notes
+            
+        except Exception as e:
+            logger.error(f"Top-K seed graph retrieval failed: {e}")
+            if self.top_k_seed_fallback_to_entity:
+                logger.debug("Falling back to entity extraction due to error")
+                return self._perform_entity_extraction_graph_retrieval(candidate_notes)
+            return []
+    
+    def _perform_hybrid_mode_graph_retrieval(self, candidate_notes: List[Dict[str, Any]], query: str) -> List[Dict[str, Any]]:
+        """混合模式图检索"""
+        try:
+            # 执行主策略
+            if self.hybrid_mode_primary_strategy == "top_k_seed":
+                primary_results = self._perform_top_k_seed_graph_retrieval(candidate_notes)
+            else:
+                primary_results = self._perform_entity_extraction_graph_retrieval(candidate_notes)
+            
+            # 检查是否需要切换到备用策略
+            if len(primary_results) >= self.hybrid_mode_switch_threshold:
+                logger.debug(f"Primary strategy returned {len(primary_results)} results, using primary only")
+                return primary_results
+            
+            # 执行备用策略
+            logger.debug(f"Primary strategy returned {len(primary_results)} results (< {self.hybrid_mode_switch_threshold}), trying fallback")
+            if self.hybrid_mode_fallback_strategy == "top_k_seed":
+                fallback_results = self._perform_top_k_seed_graph_retrieval(candidate_notes)
+            else:
+                fallback_results = self._perform_entity_extraction_graph_retrieval(candidate_notes)
+            
+            # 合并结果
+            merged_results = self._merge_fallback_results(primary_results, fallback_results)
+            
+            # 为混合模式图检索结果添加retrieval_method标识
+            for note in merged_results:
+                if 'retrieval_info' not in note:
+                    note['retrieval_info'] = {}
+                note['retrieval_info']['retrieval_method'] = 'graph_search'
+                note['retrieval_info']['graph_strategy'] = 'hybrid_mode'
+            
+            logger.debug(f"Hybrid mode: {len(primary_results)} + {len(fallback_results)} -> {len(merged_results)} results")
+            return merged_results
+            
+        except Exception as e:
+            logger.error(f"Hybrid mode graph retrieval failed: {e}")
+            return []

@@ -2,6 +2,7 @@ from typing import List, Dict, Any, Union
 from loguru import logger
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import threading
+import re
 from .local_llm import LocalLLM
 from utils.batch_processor import BatchProcessor
 from utils.text_utils import TextUtils
@@ -120,7 +121,7 @@ class AtomicNoteGenerator:
             desc="Generating atomic notes"
         )
         
-        # 后处理：添加ID和元数据
+        # 后处理：添加稳定的ID和元数据
         for i, note in enumerate(atomic_notes):
             # 确保note是字典类型
             if not isinstance(note, dict):
@@ -134,7 +135,8 @@ class AtomicNoteGenerator:
                     note = {'content': str(note), 'error': True}
                     atomic_notes[i] = note
             
-            note['note_id'] = f"note_{i:06d}"
+            # 生成基于源文档信息的稳定note_id
+            note['note_id'] = self._generate_stable_note_id(note, i)
             note['created_at'] = self._get_timestamp()
         
         # 摘要校验：仅在启用时进行
@@ -623,6 +625,51 @@ class AtomicNoteGenerator:
                 relevant_idxs.append(idx)
         
         return sorted(list(set(relevant_idxs)))  # 去重并排序
+    
+    def _generate_stable_note_id(self, note: Dict[str, Any], fallback_index: int) -> str:
+        """生成基于源文档信息的稳定note_id"""
+        # 检查是否启用稳定note_id生成
+        if not config.get('atomic_note_generator.stable_note_id', True):
+            # 使用简单的索引方式
+            return f"note_{fallback_index:06d}"
+        
+        import hashlib
+        
+        # 尝试从源信息构建稳定ID
+        source_info = note.get('source_info', {})
+        file_path = source_info.get('file_path', '')
+        chunk_index = note.get('chunk_index', fallback_index)
+        
+        # 如果有文件路径信息，使用文件名+chunk_index
+        if file_path:
+            import os
+            file_name = os.path.basename(file_path)
+            # 移除文件扩展名
+            file_name_base = os.path.splitext(file_name)[0]
+            # 清理文件名中的特殊字符
+            file_name_clean = re.sub(r'[^a-zA-Z0-9_-]', '_', file_name_base)
+            return f"note_{file_name_clean}_{chunk_index:06d}"
+        
+        # 如果有paragraph_idxs信息，使用它们生成更稳定的ID
+        paragraph_idxs = note.get('paragraph_idxs', [])
+        if paragraph_idxs:
+            # 使用paragraph索引的哈希值
+            idx_str = '_'.join(map(str, sorted(paragraph_idxs)))
+            hash_obj = hashlib.md5(idx_str.encode())
+            hash_short = hash_obj.hexdigest()[:8]
+            return f"note_para_{hash_short}_{chunk_index:06d}"
+        
+        # 如果有内容，使用内容哈希
+        content = note.get('content', note.get('original_text', ''))
+        if content and len(content.strip()) > 0:
+            # 使用内容的前100字符生成哈希
+            content_sample = content.strip()[:100]
+            hash_obj = hashlib.md5(content_sample.encode())
+            hash_short = hash_obj.hexdigest()[:8]
+            return f"note_content_{hash_short}_{chunk_index:06d}"
+        
+        # 最后的回退方案：使用原来的索引方式
+        return f"note_{fallback_index:06d}"
     
     def _get_timestamp(self) -> str:
         """获取当前时间戳"""

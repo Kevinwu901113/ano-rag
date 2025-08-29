@@ -11,6 +11,7 @@ from .incremental_processor import IncrementalProcessor
 from llm import AtomicNoteGenerator, LocalLLM
 from utils import BatchProcessor, FileUtils
 from utils.enhanced_ner import EnhancedNER
+from utils.consistency_checker import ConsistencyChecker
 from config import config
 from vector_store import EmbeddingManager
 from graph import GraphBuilder
@@ -184,12 +185,43 @@ class DocumentProcessor:
             except Exception as e:
                 logger.warning(f"Failed to export GraphML: {e}")
         
+        # 一致性检查（在数据写入前）
+        consistency_result = None
+        if config.get('consistency_check.enabled', True):
+            logger.info("Performing consistency check before data persistence")
+            checker = ConsistencyChecker()
+            consistency_result = checker.check_consistency(
+                clustering_result['clustered_notes'], 
+                graph_data
+            )
+            
+            # 如果有严重错误且启用了严格模式，停止处理
+            if not consistency_result['is_consistent'] and config.get('consistency_check.strict_mode', False):
+                error_msg = f"Consistency check failed with {len(consistency_result['errors'])} errors"
+                logger.error(error_msg)
+                
+                # 导出错误报告
+                error_report_file = os.path.join(self.processed_docs_path, "consistency_errors.json")
+                checker.export_report(error_report_file)
+                
+                raise RuntimeError(f"{error_msg}. See report: {error_report_file}")
+            
+            # 导出一致性报告
+            consistency_report_file = os.path.join(self.processed_docs_path, "consistency_report.json")
+            checker.export_report(consistency_report_file)
+            
+            if consistency_result['errors']:
+                logger.warning(f"Consistency check found {len(consistency_result['errors'])} errors and {len(consistency_result['warnings'])} warnings")
+            else:
+                logger.info(f"Consistency check passed with {len(consistency_result['warnings'])} warnings")
+        
         # 保存处理结果
         result = {
             'atomic_notes': clustering_result['clustered_notes'],
             'topic_pools': clustering_result['topic_pools'],
             'cluster_info': clustering_result['cluster_info'],
             'graph_data': graph_data,
+            'consistency_check': consistency_result,
             'processing_stats': self._calculate_processing_stats(
                 files_to_process,
                 atomic_notes,

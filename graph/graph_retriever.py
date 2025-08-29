@@ -102,15 +102,16 @@ class GraphRetriever:
         reasoning_paths = self._discover_reasoning_paths(initial_candidates)
         
         # 3. 评估和排序路径
-        scored_paths = self._score_reasoning_paths(reasoning_paths, query_embedding)
+        scored_paths = self._score_reasoning_paths(reasoning_paths)
         
         # 4. 选择多样化的路径
         selected_paths = self._select_diverse_paths(scored_paths)
         
         # 5. 从路径中提取最终结果
-        final_results = self._extract_results_from_paths(
-            selected_paths, query_embedding, top_k
-        )
+        final_results = self._extract_results_from_paths(selected_paths)
+        
+        # 6. 应用top_k限制
+        final_results = final_results[:top_k]
         
         logger.info(f"Retrieved {len(final_results)} results from {len(selected_paths)} reasoning paths")
         return final_results
@@ -293,7 +294,7 @@ class GraphRetriever:
                 relation_type = edge_data.get('relation_type', 'unknown')
                 
                 # 根据关系类型权重评分
-                type_weight = self.relation_type_weights.get(relation_type, 0.5)
+                type_weight = self.relation_weights.get(relation_type, 0.5)
                 
                 # 考虑关系强度
                 relation_strength = edge_data.get('weight', 0.5)
@@ -316,7 +317,7 @@ class GraphRetriever:
                 similarity = node_data.get('similarity', 0.0)
                 
                 # 2. 中心性分数
-                centrality = self.centrality_scores.get(node_id, 0.0)
+                centrality = self.index.get_centrality(node_id)
                 
                 # 3. 重要性分数
                 importance = node_data.get('importance', 0.5)
@@ -537,8 +538,14 @@ class GraphRetriever:
                     'graph_score': total_score,  # 保持向后兼容
                     'reasoning_paths': [p['path'] for p in node_paths[node_id]],
                     'path_count': len(node_paths[node_id]),
+                    'retrieval_info': {
+                        'similarity': total_score,
+                        'score': total_score,
+                        'rank': len(results),
+                        'retrieval_method': 'graph_search'
+                    },
                     'metadata': {
-                        'centrality': self.centrality_scores.get(node_id, 0.0),
+                        'centrality': self.index.get_centrality(node_id),
                         'similarity': node_data.get('similarity', 0.0),
                         'keywords': node_data.get('keywords', []),
                         'entities': node_data.get('entities', []),

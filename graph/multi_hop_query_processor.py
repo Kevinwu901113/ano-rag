@@ -60,6 +60,17 @@ class MultiHopQueryProcessor:
             query_entities=query_entities,
         )
 
-        explanation = self.retriever.get_reasoning_explanation(notes)
+        # 从notes中提取推理路径信息用于解释
+        selected_paths = []
+        for note in notes:
+            reasoning_paths = note.get('reasoning_paths', [])
+            for path in reasoning_paths:
+                selected_paths.append({
+                    'path': path,
+                    'score': note.get('score', 0.0),
+                    'relations': note.get('metadata', {}).get('relations', [])
+                })
+        
+        explanation = self.retriever.get_reasoning_explanation(notes, selected_paths)
         return {"notes": notes, "explanation": explanation}
 
