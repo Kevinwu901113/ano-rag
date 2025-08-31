@@ -23,6 +23,9 @@ class DocumentChunker:
             'merger': ['合并', '融合', '整合', 'merge', 'consolidate', 'integrate'],
             'partnership': ['合作', '合伙', '联盟', '伙伴', 'partner', 'collaborate', 'alliance']
         }
+
+        # Store raw paragraph text for diagnostics when building idx mappings
+        self.paragraph_original_texts: Dict[int, str] = {}
         
     def chunk_document(self, file_path: str, source_info: Dict[str, Any] = None) -> List[Dict[str, Any]]:
         """对单个文档进行分块"""
@@ -597,19 +600,24 @@ class DocumentChunker:
     
     def _extract_paragraph_idx_mapping(self, data: Dict[str, Any]) -> Dict[str, int]:
         """从musique数据中提取段落文本到idx的映射"""
-        mapping = {}
+        mapping: Dict[str, int] = {}
         paragraphs = data.get('paragraphs', [])
-        
+
         for para in paragraphs:
             if isinstance(para, dict) and 'paragraph_text' in para and 'idx' in para:
-                paragraph_text = para['paragraph_text']
+                original_text = para['paragraph_text']
+                cleaned_text = TextUtils.clean_text(original_text)
                 idx = para['idx']
-                # 使用段落文本的前100个字符作为key，避免完全匹配的问题
-                key = paragraph_text[:100] if len(paragraph_text) > 100 else paragraph_text
+
+                # 使用清理后的段落文本的前100个字符作为key，避免完全匹配的问题
+                key = cleaned_text[:100] if len(cleaned_text) > 100 else cleaned_text
                 mapping[key] = idx
-                # 同时保存完整文本作为备用
-                mapping[paragraph_text] = idx
-        
+                # 同时保存完整清理后的文本作为备用
+                mapping[cleaned_text] = idx
+
+                # 保留原始文本以便诊断
+                self.paragraph_original_texts[idx] = original_text
+
         return mapping
     
     def _get_timestamp(self) -> str:
