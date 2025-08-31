@@ -403,36 +403,42 @@ class EnhancedAtomicNoteGenerator:
     
     def _extract_relevant_paragraph_idxs(self, text: str, paragraph_idx_mapping: Dict[str, int]) -> List[int]:
         """从文本中提取相关的paragraph idx"""
-        relevant_idxs = []
-        
+        relevant_idxs: List[int] = []
+
         if not paragraph_idx_mapping:
             return relevant_idxs
-        
+
+        # Clean the chunk text once for matching
+        clean_text = TextUtils.clean_text(text)
+
         for paragraph_text, idx in paragraph_idx_mapping.items():
+            # Clean paragraph text before any comparison
+            clean_paragraph_text = TextUtils.clean_text(paragraph_text)
             match_found = False
-            
+
             # 1. 双向文本包含检查
-            if paragraph_text in text or text in paragraph_text:
+            if clean_paragraph_text in clean_text or clean_text in clean_paragraph_text:
                 match_found = True
-            
+
             # 2. 检查段落的前100个字符是否在文本中，或文本是否在段落中
-            elif len(paragraph_text) > 100:
-                prefix = paragraph_text[:100]
-                if prefix in text or text in paragraph_text:
+            elif len(clean_paragraph_text) > 100:
+                prefix = clean_paragraph_text[:100]
+                if prefix in clean_text or clean_text in clean_paragraph_text:
                     match_found = True
-            
+
             # 3. 按句子分割检查（针对长段落）
             if not match_found:
-                sentences = [s.strip() for s in paragraph_text.split('.') if len(s.strip()) > 30]
+                sentences = [s.strip() for s in clean_paragraph_text.split('.') if len(s.strip()) > 30]
                 for sentence in sentences[:3]:  # 只检查前3个句子
-                    if sentence in text or text in sentence:
+                    if sentence in clean_text or clean_text in sentence:
                         match_found = True
                         break
-            
+
             if match_found:
                 relevant_idxs.append(idx)
-        
-        return sorted(list(set(relevant_idxs)))
+
+        # 去重并排序
+        return sorted(set(relevant_idxs))
     
     def _generate_stable_note_id(self, note: Dict[str, Any], fallback_index: int) -> str:
         """生成基于源文档信息的稳定note_id"""
