@@ -532,6 +532,7 @@ class GraphRetriever:
                 
                 result = {
                     'node_id': node_id,
+                    'note_id': node_id,  # 添加 note_id 键
                     'content': node_data.get('content', ''),
                     'title': node_data.get('title', ''),
                     'score': total_score,

@@ -67,7 +67,7 @@ retrieval:
 
 # 路径感知检索配置
 path_aware:
-  enabled: false            # 是否启用路径感知检索，提高多跳推理能力
+  enabled: true            # 是否启用路径感知检索，提高多跳推理能力
   min_path_score: 0.05       # 最小路径得分阈值
 
 # 结果分发器配置
@@ -105,7 +105,7 @@ enhanced_relation_extraction:
   use_llm_extraction: true     # 是否启用LLM增强的语义关系提取
   use_fast_model: true          # 是否使用快速模型
   enable_topic_groups: true     # 是否启用主题组关系提取
-  enable_reasoning_paths: true  # 是否启用推理路径关系提取（这是您询问的开关）
+  enable_reasoning_paths: false  # 是否启用推理路径关系提取（这是您询问的开关）
   
   # 轻量级关系类型功能
   lightweight_relations:
