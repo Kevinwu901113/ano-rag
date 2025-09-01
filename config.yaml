@@ -32,6 +32,22 @@ vector_store:
 # 检索策略配置
 retrieval:
   candidate_pool: 80        # 全局候选池大小，影响最终检索质量
+  # 图感知两阶段rerank配置
+  use_graph_rerank: true    # 是否启用图感知两阶段rerank
+  seeds_semantic: 50        # 语义检索种子节点数量
+  seeds_bm25: 30           # BM25检索种子节点数量
+  subgraph_radius: 2       # 子图截取半径
+  edge_thresh: 0.35        # 边权阈值过滤
+  k_paths: 20              # 生成路径数量上限
+  pick_paths: 4            # 选择路径数量
+  overlap_thresh: 0.5      # 路径重叠阈值
+  token_budget: 1800       # token预算
+  alpha: 0.5               # 终点相似度权重
+  beta: 0.3                # 路径平均权重
+  gamma: 0.2               # 上下文覆盖权重
+  rho: 0.25                # 上下文覆盖上限
+  lambda_len: 0.05         # 路径长度惩罚系数
+  query_mode: auto         # 查询模式：precise/explanatory/auto
   hybrid:                   # 混合检索配置
     enabled: true           # 是否启用混合检索（向量+BM25+图谱）
     fusion_method: "linear"  # 融合方法：linear线性加权|rrf倒数排名融合|weighted_sum加权求和

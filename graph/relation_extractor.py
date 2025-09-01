@@ -89,10 +89,10 @@ class RelationExtractor:
             all_relations.extend(llm_relations)
         
         # 4. 推理路径关系（如果启用）
-        if self.enable_reasoning_paths:
-            logger.info("Extracting reasoning path relations")
-            reasoning_relations = self._extract_reasoning_path_relations(all_relations, atomic_notes)
-            all_relations.extend(reasoning_relations)
+        # if self.enable_reasoning_paths:
+        #     logger.info("Extracting reasoning path relations")
+        #     reasoning_relations = self._extract_reasoning_path_relations(all_relations, atomic_notes)
+        #     all_relations.extend(reasoning_relations)
         
         # 过滤、去重和计算推理价值
         filtered_relations = self._filter_and_deduplicate_relations(all_relations)

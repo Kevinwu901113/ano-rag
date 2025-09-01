@@ -112,7 +112,7 @@ class QueryProcessor:
         
         if self.use_context_dispatcher:
             # 使用新的结构增强上下文调度器
-            self.context_dispatcher = ContextDispatcher(config)
+            self.context_dispatcher = ContextDispatcher(config, graph_index=self.graph_index, vector_retriever=self.vector_retriever)
             logger.info("Using ContextDispatcher for structure-enhanced retrieval")
         else:
             # 使用原有的调度器
@@ -1236,7 +1236,7 @@ class QueryProcessor:
                     logger.error(f"Graph retrieval failed: {e}")
             
             # 调用 ContextDispatcher 处理候选结果
-            selected_notes = self.context_dispatcher.dispatch(candidate_notes)
+            selected_notes = self.context_dispatcher.dispatch(candidate_notes, query=query)
             
             # 构建上下文
             context = "\n".join(n.get('content','') for n in selected_notes)

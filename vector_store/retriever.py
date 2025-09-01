@@ -249,10 +249,11 @@ class VectorRetriever:
                             if include_metadata:
                                 note['retrieval_info'] = retrieval_info
                             else:
-                                # 只保留核心信息
+                                # 只保留核心信息，但保留paragraph_idxs字段
                                 note = {
                                     'note_id': note.get('note_id'),
                                     'content': note.get('content'),
+                                    'paragraph_idxs': note.get('paragraph_idxs', []),
                                     'retrieval_info': retrieval_info
                                 }
                             
@@ -300,10 +301,11 @@ class VectorRetriever:
                     if include_metadata:
                         formatted_query_results.append(result)
                     else:
-                        # 只保留核心信息
+                        # 只保留核心信息，但保留paragraph_idxs字段
                         core_result = {
                             'note_id': result.get('note_id'),
                             'content': result.get('content'),
+                            'paragraph_idxs': result.get('paragraph_idxs', []),
                             'retrieval_info': result.get('retrieval_info')
                         }
                         formatted_query_results.append(core_result)

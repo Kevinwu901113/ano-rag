@@ -6,7 +6,7 @@ from utils.text_utils import TextUtils
 from utils.json_utils import extract_json_from_response, clean_control_characters
 from utils.note_validator import NoteValidator
 from utils.enhanced_ner import EnhancedNER
-# from utils.enhanced_relation_extractor import EnhancedRelationExtractor  # Module not found
+from utils.enhanced_relation_extractor import EnhancedRelationExtractor
 from utils.enhanced_noise_filter import EnhancedNoiseFilter
 from utils.note_similarity import NoteSimilarityCalculator
 from config import config
@@ -39,8 +39,7 @@ class EnhancedAtomicNoteGenerator:
         
         # 增强组件
         self.enhanced_ner = EnhancedNER()
-        # self.relation_extractor = EnhancedRelationExtractor()  # Module not found
-        self.relation_extractor = None
+        self.relation_extractor = EnhancedRelationExtractor(local_llm=llm)
         self.noise_filter = EnhancedNoiseFilter()
         self.similarity_calculator = NoteSimilarityCalculator()
         
@@ -410,10 +409,12 @@ class EnhancedAtomicNoteGenerator:
 
         # Clean the chunk text once for matching
         clean_text = TextUtils.clean_text(text)
+        clean_text_lower = clean_text.lower()
 
         for paragraph_text, idx in paragraph_idx_mapping.items():
             # Clean paragraph text before any comparison
             clean_paragraph_text = TextUtils.clean_text(paragraph_text)
+            clean_paragraph_lower = clean_paragraph_text.lower()
             match_found = False
 
             # 1. 双向文本包含检查
@@ -433,6 +434,41 @@ class EnhancedAtomicNoteGenerator:
                     if sentence in clean_text or clean_text in sentence:
                         match_found = True
                         break
+
+            # 4. 关键词重叠匹配（新增）- 处理LLM重写文本的情况
+            if not match_found and len(clean_paragraph_text) > 50:
+                # 提取关键词（长度大于3的单词，排除常见停用词）
+                stop_words = {'the', 'and', 'for', 'are', 'but', 'not', 'you', 'all', 'can', 'had', 'her', 'was', 'one', 'our', 'out', 'day', 'get', 'has', 'him', 'his', 'how', 'its', 'may', 'new', 'now', 'old', 'see', 'two', 'who', 'boy', 'did', 'man', 'men', 'put', 'say', 'she', 'too', 'use'}
+                
+                # 从段落中提取关键词
+                para_words = [w.strip('.,!?;:"()[]{}').lower() for w in clean_paragraph_lower.split() 
+                             if len(w.strip('.,!?;:"()[]{}')) > 3 and w.strip('.,!?;:"()[]{}').lower() not in stop_words]
+                
+                # 从生成文本中提取关键词
+                text_words = [w.strip('.,!?;:"()[]{}').lower() for w in clean_text_lower.split() 
+                             if len(w.strip('.,!?;:"()[]{}')) > 3 and w.strip('.,!?;:"()[]{}').lower() not in stop_words]
+                
+                if len(para_words) >= 5 and len(text_words) >= 5:
+                    # 计算关键词重叠率
+                    common_words = set(para_words[:15]) & set(text_words[:15])  # 只比较前15个关键词
+                    overlap_ratio = len(common_words) / min(len(para_words[:15]), len(text_words[:15]))
+                    
+                    # 如果重叠率超过50%，认为匹配
+                    if overlap_ratio >= 0.5:
+                        match_found = True
+
+            # 5. 实体名称匹配（新增）- 专门处理包含专有名词的情况
+            if not match_found:
+                # 提取可能的实体名称（大写开头的词组）
+                import re
+                para_entities = re.findall(r'\b[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*\b', clean_paragraph_text)
+                text_entities = re.findall(r'\b[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*\b', clean_text)
+                
+                if para_entities and text_entities:
+                    # 检查是否有共同的实体名称
+                    common_entities = set(para_entities) & set(text_entities)
+                    if len(common_entities) >= 2:  # 至少有2个共同实体
+                        match_found = True
 
             if match_found:
                 relevant_idxs.append(idx)
