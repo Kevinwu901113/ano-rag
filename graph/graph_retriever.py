@@ -77,6 +77,7 @@ class GraphRetriever:
                 data["centrality"] = centrality
                 importance = data.get("importance_score", 1.0)
                 data["graph_score"] = (centrality / (dist + 1e-5)) * importance
+                data["paragraph_idxs"] = G.nodes[node_id].get('paragraph_idxs', [])
                 results.append(data)
         results.sort(key=lambda x: x.get("graph_score", 0), reverse=True)
         logger.info(f"Graph retrieval returned {len(results)} notes")
@@ -539,6 +540,7 @@ class GraphRetriever:
                     'graph_score': total_score,  # 保持向后兼容
                     'reasoning_paths': [p['path'] for p in node_paths[node_id]],
                     'path_count': len(node_paths[node_id]),
+                    'paragraph_idxs': node_data.get('paragraph_idxs', []),
                     'retrieval_info': {
                         'similarity': total_score,
                         'score': total_score,

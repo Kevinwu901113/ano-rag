@@ -12,18 +12,98 @@ class BatchProcessor:
         self.batch_size = batch_size
         self.max_workers = max_workers
         self.use_gpu = use_gpu and GPUUtils.is_cuda_available()
+        self.preprocess_func = None
+        self.postprocess_func = None
+        self.error_handler = None
+        self.logger = logger
+    
+    def _monitor_gpu_memory(self, stage: str):
+        """监控GPU内存使用情况"""
+        if self.use_gpu:
+            try:
+                import torch
+                if torch.cuda.is_available():
+                    allocated = torch.cuda.memory_allocated() / (1024**3)
+                    cached = torch.cuda.memory_reserved() / (1024**3)
+                    self.logger.debug(f"GPU Memory at {stage}: Allocated={allocated:.2f}GB, Cached={cached:.2f}GB")
+            except ImportError:
+                pass
+    
+    def _cleanup_gpu_memory(self, stage: str):
+        """清理GPU内存"""
+        if self.use_gpu:
+            try:
+                import torch
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                    self.logger.debug(f"GPU memory cleaned at {stage}")
+            except ImportError:
+                pass
+    
+    def process_batch(self, batch_data: List[Any], process_func: Callable, **kwargs) -> List[Any]:
+        """处理单个批次的数据"""
+        try:
+            # GPU内存监控
+            if self.use_gpu:
+                self._monitor_gpu_memory("batch_start")
+            
+            # 应用预处理
+            if self.preprocess_func:
+                batch_data = [self.preprocess_func(item) for item in batch_data]
+            
+            # 处理批次
+            results = process_func(batch_data, **kwargs)
+            
+            # 应用后处理
+            if self.postprocess_func:
+                results = [self.postprocess_func(item) for item in results]
+            
+            # GPU内存清理
+            if self.use_gpu:
+                self._cleanup_gpu_memory("batch_end")
+            
+            return results
+        except Exception as e:
+            self.logger.error(f"批次处理失败: {e}")
+            # 出错时也要清理GPU内存
+            if self.use_gpu:
+                self._cleanup_gpu_memory("batch_error")
+            
+            if self.error_handler:
+                return self.error_handler(batch_data, e)
+            else:
+                raise
         
     def process_batches(self, 
                        data: List[Any], 
                        process_func: Callable,
                        desc: str = "Processing",
+                       progress_tracker: Optional[Any] = None,
                        **kwargs) -> List[Any]:
-        """同步批处理"""
+        """同步批处理数据"""
+        if not data:
+            return []
+        
+        # 初始化内存监控
+        if self.use_gpu:
+            self._monitor_gpu_memory("process_start")
+        
+        # 自适应调整批次大小
+        actual_batch_size = self.adaptive_batch_size(len(data))
+        self.logger.info(f"使用批次大小: {actual_batch_size}")
+        
         results = []
         
-        with tqdm(total=len(data), desc=desc) as pbar:
-            for i in range(0, len(data), self.batch_size):
-                batch = data[i:i + self.batch_size]
+        # 如果提供了外部进度跟踪器，使用它；否则创建内部tqdm进度条
+        use_external_tracker = progress_tracker is not None
+        if use_external_tracker:
+            pbar = None
+        else:
+            pbar = tqdm(total=len(data), desc=desc)
+        
+        try:
+            for i in range(0, len(data), actual_batch_size):
+                batch = data[i:i + actual_batch_size]
                 
                 try:
                     if self.use_gpu:
@@ -34,8 +114,17 @@ class BatchProcessor:
                         batch_result = process_func(batch, **kwargs)
                     
                     results.extend(batch_result)
-                    pbar.update(len(batch))
+                    if use_external_tracker:
+                        # 使用外部进度跟踪器更新进度
+                        for _ in range(len(batch)):
+                            progress_tracker.update(1)
+                    else:
+                        pbar.update(len(batch))
                     
+                    # 定期清理内存
+                    if self.use_gpu and (i // actual_batch_size + 1) % 5 == 0:
+                        self._cleanup_gpu_memory(f"batch_{i//actual_batch_size+1}")
+                        
                 except Exception as e:
                     logger.error(f"Batch processing failed: {e}")
                     # 尝试逐个处理
@@ -69,8 +158,23 @@ class BatchProcessor:
                                     'original_data': item
                                 }
                                 results.append(error_result)
-                        pbar.update(1)
+                        
+                        # 更新进度
+                        if use_external_tracker:
+                            progress_tracker.update(1)
+                        else:
+                            pbar.update(1)
         
+        finally:
+            # 最终清理
+            if self.use_gpu:
+                self._cleanup_gpu_memory("process_end")
+                self._monitor_gpu_memory("process_final")
+            
+            # 关闭内部进度条（如果使用的话）
+            if not use_external_tracker and pbar:
+                pbar.close()
+            
         return results
     
     async def process_batches_async(self,
@@ -148,22 +252,57 @@ class BatchProcessor:
         
         return results
     
-    def adaptive_batch_size(self, data_size: int, memory_limit: Optional[int] = None) -> int:
-        """根据数据大小和内存限制自适应调整批次大小"""
-        if memory_limit is None:
-            # 获取GPU内存信息
-            memory_info = GPUUtils.get_memory_info()
-            available_memory = memory_info['total'] - memory_info['allocated']
-            memory_limit = int(available_memory * 0.8)  # 使用80%的可用内存
+    def adaptive_batch_size(self, data_size: int, base_batch_size: int = None) -> int:
+        """根据数据大小和内存限制动态调整批次大小"""
+        if base_batch_size is None:
+            base_batch_size = self.batch_size
         
-        # 估算每个样本的内存使用量（简化估算）
-        estimated_memory_per_sample = 1024 * 1024  # 1MB per sample (rough estimate)
+        # GPU内存估算（优化版本）
+        if self.use_gpu:
+            try:
+                import torch
+                if torch.cuda.is_available():
+                    # 获取GPU内存信息
+                    gpu_memory = torch.cuda.get_device_properties(0).total_memory
+                    gpu_memory_allocated = torch.cuda.memory_allocated()
+                    gpu_memory_cached = torch.cuda.memory_reserved()
+                    gpu_memory_free = gpu_memory - gpu_memory_cached
+                    
+                    # 更精确的内存使用率计算
+                    memory_usage_ratio = gpu_memory_allocated / gpu_memory
+                    
+                    # 根据内存使用情况动态调整
+                    if memory_usage_ratio > 0.8:  # 高内存使用
+                        adjusted_batch_size = max(1, base_batch_size // 4)
+                    elif memory_usage_ratio > 0.6:  # 中等内存使用
+                        adjusted_batch_size = max(1, base_batch_size // 2)
+                    else:  # 低内存使用
+                        memory_factor = min(gpu_memory_free / (1024**3), 8.0)  # GB为单位
+                        adjusted_batch_size = int(base_batch_size * min(memory_factor / 2.0, 1.5))
+                    
+                    # 清理GPU缓存以释放内存
+                    if memory_usage_ratio > 0.7:
+                        torch.cuda.empty_cache()
+                    
+                    return max(1, min(adjusted_batch_size, data_size))
+            except ImportError:
+                pass
         
-        # 计算最大批次大小
-        max_batch_size = max(1, memory_limit // estimated_memory_per_sample)
+        # CPU内存估算（优化版本）
+        import psutil
+        memory_info = psutil.virtual_memory()
+        available_memory = memory_info.available / (1024**3)  # GB
+        memory_usage_ratio = memory_info.percent / 100.0
         
-        # 返回较小的值
-        return min(self.batch_size, max_batch_size, data_size)
+        # 根据内存使用率动态调整
+        if memory_usage_ratio > 0.85 or available_memory < 1:
+            return max(1, base_batch_size // 8)
+        elif memory_usage_ratio > 0.7 or available_memory < 2:
+            return max(1, base_batch_size // 4)
+        elif memory_usage_ratio > 0.5 or available_memory < 4:
+            return max(1, base_batch_size // 2)
+        else:
+            return min(base_batch_size, data_size)
     
     def chunk_large_data(self, data: List[Any], max_chunk_size: int = 10000) -> List[List[Any]]:
         """将大数据集分块处理"""

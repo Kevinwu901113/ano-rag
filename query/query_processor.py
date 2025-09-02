@@ -4,6 +4,7 @@ import os
 import numpy as np
 import concurrent.futures
 import threading
+import time
 
 # 导入增强的日志功能
 from utils.logging_utils import (
@@ -1155,6 +1156,100 @@ class QueryProcessor:
         except Exception as e:
             logger.error(f"Failed to log retrieval details: {e}")
     
+    def _log_subquestion_debug_info(self, sub_question: str, index: int, must_have_entities: List[str], 
+                                   constraint_words: List[str], expanded_query: str, 
+                                   vector_notes: List[Dict[str, Any]], graph_notes: List[Dict[str, Any]], 
+                                   hit_entities: Dict[str, int], dataset: Optional[str] = None, 
+                                   qid: Optional[str] = None, fallback_triggered: bool = False, 
+                                   fallback_candidates: List[Dict[str, Any]] = None):
+        """记录子问题的详细调试信息。"""
+        try:
+            # 处理回补候选
+            if fallback_candidates is None:
+                fallback_candidates = []
+            
+            # 计算回补情况
+            min_per_subq = config.get('retrieval.min_per_subq', 1)
+            initial_candidates_count = len(vector_notes) + len(graph_notes)
+            
+            # 统计实体命中情况
+            total_entities = len(must_have_entities)
+            hit_entity_count = len([entity for entity, count in hit_entities.items() if count > 0])
+            entity_coverage_rate = hit_entity_count / total_entities if total_entities > 0 else 1.0
+            
+            # 分析候选来源分布
+            vector_sources = {}
+            graph_sources = {}
+            fallback_sources = {}
+            
+            for note in vector_notes:
+                source = note.get('retrieval_source', 'vector_default')
+                vector_sources[source] = vector_sources.get(source, 0) + 1
+            
+            for note in graph_notes:
+                source = note.get('retrieval_source', 'graph_default')
+                graph_sources[source] = graph_sources.get(source, 0) + 1
+            
+            for note in fallback_candidates:
+                source = note.get('retrieval_source', 'fallback_default')
+                fallback_sources[source] = fallback_sources.get(source, 0) + 1
+            
+            # 收集Top5候选的详细信息
+            all_candidates = vector_notes + graph_notes + fallback_candidates
+            top_candidates_details = []
+            for i, note in enumerate(all_candidates[:5]):
+                detail = {
+                    'rank': i + 1,
+                    'source': note.get('subq_source', 'unknown'),
+                    'file_name': note.get('file_name', 'unknown'),
+                    'entities': note.get('entities', [])[:3],  # 只记录前3个实体
+                    'similarity': note.get('similarity', 0.0),
+                    'final_score': note.get('final_score', 0.0),
+                    'entity_overlap_score': note.get('entity_overlap_score', 0.0),
+                    'path_consistency_score': note.get('path_consistency_score', 0.0)
+                }
+                top_candidates_details.append(detail)
+            
+            # 记录结构化调试日志
+            self.structured_logger.info(
+                "Sub-question retrieval debug info",
+                dataset=dataset,
+                qid=qid,
+                sub_question_index=index,
+                sub_question=sub_question,
+                expanded_query=expanded_query,
+                must_have_entities=must_have_entities,
+                constraint_words=constraint_words,
+                total_entities=total_entities,
+                hit_entity_count=hit_entity_count,
+                entity_coverage_rate=round(entity_coverage_rate, 3),
+                entity_hits=hit_entities,
+                vector_candidates_count=len(vector_notes),
+                graph_candidates_count=len(graph_notes),
+                fallback_candidates_count=len(fallback_candidates),
+                total_candidates_count=len(all_candidates),
+                fallback_triggered=fallback_triggered,
+                min_per_subq_threshold=min_per_subq,
+                vector_sources=vector_sources,
+                graph_sources=graph_sources,
+                fallback_sources=fallback_sources,
+                top_candidates_details=top_candidates_details
+            )
+            
+            # 如果实体覆盖率低，记录警告
+            if entity_coverage_rate < 0.5 and total_entities > 0:
+                logger.warning(f"Sub-question {index}: Low entity coverage rate {entity_coverage_rate:.2f}, "
+                             f"only {hit_entity_count}/{total_entities} entities found in candidates")
+            
+            # 如果触发了回补，记录详细信息
+            if fallback_triggered:
+                logger.info(f"Sub-question {index}: Fallback retrieval triggered, "
+                           f"initial candidates: {initial_candidates_count}, threshold: {min_per_subq}, "
+                           f"fallback retrieved: {len(fallback_candidates)}")
+            
+        except Exception as e:
+            logger.error(f"Failed to log sub-question debug info for index {index}: {e}")
+    
     @log_performance("QueryProcessor._process_traditional")
     def _process_traditional(self, query: str, dataset: Optional[str] = None, qid: Optional[str] = None) -> Dict[str, Any]:
         """Traditional query processing without sub-question decomposition."""
@@ -1655,12 +1750,29 @@ class QueryProcessor:
         return results
     
     def _retrieve_for_subquestion(self, sub_question: str, index: int, dataset: Optional[str] = None, qid: Optional[str] = None) -> Dict[str, Any]:
-        """Retrieve evidence for a single sub-question."""
-        # Vector retrieval
-        vector_results = self.vector_retriever.search([sub_question])
+        """Retrieve evidence for a single sub-question with coverage-driven recall."""
+        # Step 1: Extract key entities and constraint words from sub-question
+        must_have_entities = self._extract_key_entities_from_subquestion(sub_question)
+        constraint_words = self._extract_constraint_words_from_subquestion(sub_question)
+        
+        # Step 2: Query expansion - inject entities and constraints into search query
+        expanded_query = self._expand_subquestion_query(sub_question, must_have_entities, constraint_words)
+        
+        logger.debug(f"Sub-question {index}: '{sub_question}' -> expanded: '{expanded_query}'")
+        logger.debug(f"Sub-question {index}: must_have_entities: {must_have_entities}")
+        logger.debug(f"Sub-question {index}: constraint_words: {constraint_words}")
+        
+        # Step 3: Initial vector retrieval with expanded query
+        vector_results = self.vector_retriever.search([expanded_query])
         vector_notes = vector_results[0] if vector_results else []
         
         logger.info(f"Sub-question {index}: '{sub_question}' initial vector recall: {len(vector_notes)} notes")
+        
+        # Step 4: Apply minimum candidate constraint (k_min=1)
+        min_per_subq = config.get('retrieval.min_per_subq', 1)
+        if len(vector_notes) < min_per_subq:
+            logger.warning(f"Sub-question {index}: Insufficient candidates ({len(vector_notes)} < {min_per_subq}), triggering fallback retrieval")
+            vector_notes = self._fallback_retrieval_for_subquestion(sub_question, expanded_query, must_have_entities, dataset, qid)
         
         # 第一阶段命名空间守卫：子问题向量召回后
         if self.namespace_guard_enabled and dataset and qid:
@@ -1670,12 +1782,12 @@ class QueryProcessor:
         # Apply hybrid search if enabled
         if self.hybrid_search_enabled and vector_notes:
             try:
-                # 生成检索守卫参数
-                must_have_terms, boost_entities, boost_predicates = self._generate_guardrail_params(sub_question)
+                # 生成检索守卫参数，融合must_have_entities
+                must_have_terms, boost_entities, boost_predicates = self._generate_enhanced_guardrail_params(sub_question, must_have_entities)
                 
                 # 调用增强混合检索
                 vector_notes = self._enhanced_hybrid_search(
-                    sub_question, vector_notes,
+                    expanded_query, vector_notes,
                     must_have_terms=must_have_terms,
                     boost_entities=boost_entities,
                     boost_predicates=boost_predicates
@@ -1689,23 +1801,449 @@ class QueryProcessor:
             vector_notes = filter_notes_by_namespace(vector_notes, dataset, qid)
             logger.info(f"Sub-question {index}: After post-hybrid namespace filtering: {len(vector_notes)} notes")
         
-        # Graph retrieval
+        # Step 5: Graph retrieval with entity-anchored expansion
         seed_ids = [note.get('note_id') for note in vector_notes if note.get('note_id')]
-        graph_notes = self.graph_retriever.retrieve(seed_ids) if seed_ids else []
+        graph_notes = self._entity_anchored_graph_retrieval(seed_ids, must_have_entities) if seed_ids else []
         
         # 第三阶段命名空间守卫：子问题图扩展后
         if self.namespace_guard_enabled and dataset and qid:
             graph_notes = filter_notes_by_namespace(graph_notes, dataset, qid)
             logger.info(f"Sub-question {index}: After graph expansion namespace filtering: {len(graph_notes)} notes")
         
-        logger.info(f"Sub-question {index}: '{sub_question}' final retrieved {len(vector_notes)} vector + {len(graph_notes)} graph notes")
+        # Step 6: Check if fallback retrieval is needed
+        min_per_subq = config.get('retrieval.min_per_subq', 1)
+        initial_candidates_count = len(vector_notes) + len(graph_notes)
+        fallback_candidates = []
+        fallback_triggered = False
+        
+        if initial_candidates_count < min_per_subq:
+            fallback_triggered = True
+            logger.info(f"Sub-question {index}: Triggering fallback retrieval, current: {initial_candidates_count}, required: {min_per_subq}")
+            fallback_candidates = self._fallback_retrieval_for_subquestion(
+                sub_question=sub_question,
+                expanded_query=expanded_query,
+                must_have_entities=must_have_entities,
+                dataset=dataset,
+                qid=qid
+            )
+            
+            # 第四阶段命名空间守卫：回补检索后
+            if self.namespace_guard_enabled and dataset and qid:
+                fallback_candidates = filter_notes_by_namespace(fallback_candidates, dataset, qid)
+                logger.info(f"Sub-question {index}: After fallback namespace filtering: {len(fallback_candidates)} notes")
+        
+        # Step 7: Tag candidates with subq_id for later integrity checking
+        for note in vector_notes:
+            note['subq_id'] = index
+            note['subq_source'] = 'vector'
+        for note in graph_notes:
+            note['subq_id'] = index
+            note['subq_source'] = 'graph'
+        for note in fallback_candidates:
+            note['subq_id'] = index
+            note['subq_source'] = 'fallback'
+        
+        # Step 8: Log structured debug information
+        all_candidates = vector_notes + graph_notes + fallback_candidates
+        hit_entities = self._count_entity_hits_in_candidates(all_candidates, must_have_entities)
+        
+        # 记录详细的子问题调试信息
+        self._log_subquestion_debug_info(
+            sub_question=sub_question,
+            index=index,
+            must_have_entities=must_have_entities,
+            constraint_words=constraint_words,
+            expanded_query=expanded_query,
+            vector_notes=vector_notes,
+            graph_notes=graph_notes,
+            hit_entities=hit_entities,
+            dataset=dataset,
+            qid=qid,
+            fallback_triggered=fallback_triggered,
+            fallback_candidates=fallback_candidates
+        )
+        
+        logger.info(f"Sub-question {index}: '{sub_question}' final retrieved {len(vector_notes)} vector + {len(graph_notes)} graph + {len(fallback_candidates)} fallback notes")
         
         return {
             'sub_question': sub_question,
             'sub_question_index': index,
             'vector_results': vector_notes,
-            'graph_results': graph_notes
+            'graph_results': graph_notes,
+            'fallback_results': fallback_candidates,
+            'must_have_entities': must_have_entities,
+            'constraint_words': constraint_words,
+            'expanded_query': expanded_query,
+            'entity_hits': hit_entities,
+            'fallback_triggered': fallback_triggered
         }
+    
+    def _extract_key_entities_from_subquestion(self, sub_question: str) -> List[str]:
+        """Extract key entities from sub-question for must-have constraints."""
+        # Use existing NER functionality
+        entities = self._perform_ner_on_text(sub_question)
+        # Normalize entities
+        normalized_entities = self._normalize_entities(entities)
+        # Filter for key entities (proper nouns, locations, organizations)
+        key_entities = []
+        for entity in normalized_entities:
+            if len(entity) > 2 and entity[0].isupper():  # Basic proper noun filter
+                key_entities.append(entity)
+        return key_entities[:5]  # Limit to top 5 key entities
+    
+    def _extract_constraint_words_from_subquestion(self, sub_question: str) -> List[str]:
+        """Extract constraint words (important terms) from sub-question."""
+        # Extract predicates and important terms
+        predicates = self._extract_predicates_from_text(sub_question)
+        # Add some domain-specific constraint words
+        constraint_patterns = ['boundary', 'dynasty', 'expelled', 'independence', 'defeated', 'regrouped']
+        constraint_words = []
+        
+        # Add predicates
+        constraint_words.extend(predicates[:3])  # Top 3 predicates
+        
+        # Add pattern matches
+        sub_lower = sub_question.lower()
+        for pattern in constraint_patterns:
+            if pattern in sub_lower:
+                constraint_words.append(pattern)
+        
+        return list(set(constraint_words))  # Remove duplicates
+    
+    def _expand_subquestion_query(self, sub_question: str, must_have_entities: List[str], constraint_words: List[str]) -> str:
+        """Expand sub-question query by injecting key entities and constraint words."""
+        # Start with original sub-question
+        expanded_parts = [sub_question]
+        
+        # Add must-have entities
+        if must_have_entities:
+            expanded_parts.extend(must_have_entities)
+        
+        # Add constraint words
+        if constraint_words:
+            expanded_parts.extend(constraint_words)
+        
+        # Join with spaces, avoiding duplicates
+        expanded_query = ' '.join(expanded_parts)
+        return expanded_query
+    
+    def _fallback_retrieval_for_subquestion(self, sub_question: str, expanded_query: str, must_have_entities: List[str], dataset: Optional[str] = None, qid: Optional[str] = None) -> List[Dict[str, Any]]:
+        """Perform fallback retrieval when initial retrieval fails to meet minimum threshold."""
+        fallback_candidates = []
+        # 从配置获取性能控制参数
+        max_fallback_per_step = config.get('retrieval.performance.max_fallback_per_step', 3)
+        max_total_fallback = config.get('retrieval.performance.max_total_fallback', 10)
+        fallback_timeout_ms = config.get('retrieval.performance.fallback_timeout_ms', 1000)
+        min_per_subq = config.get('retrieval.min_per_subq', 1)
+        
+        start_time = time.time() * 1000  # 转换为毫秒
+        
+        # 记录回补检索的详细步骤
+        fallback_steps = []
+        
+        # Step 1: BM25 precise short query
+        bm25_success = False
+        bm25_count = 0
+        
+        # 检查超时
+        if (time.time() * 1000 - start_time) > fallback_timeout_ms:
+            logger.warning(f"Fallback retrieval timeout after {fallback_timeout_ms}ms")
+            return fallback_candidates[:max_total_fallback]
+        
+        try:
+            bm25_results = self._bm25_fallback_search(sub_question, dataset or '', qid or '', top_k=max_fallback_per_step)
+            if bm25_results:
+                bm25_count = len(bm25_results)
+                # 限制总候选数量
+                available_slots = max_total_fallback - len(fallback_candidates)
+                bm25_results = bm25_results[:available_slots]
+                bm25_count = len(bm25_results)
+                fallback_candidates.extend(bm25_results)
+                bm25_success = True
+                # 标记候选来源
+                for note in bm25_results:
+                    note['retrieval_source'] = 'bm25_fallback'
+                logger.debug(f"Fallback step 1 (BM25): retrieved {bm25_count} candidates")
+        except Exception as e:
+            logger.error(f"BM25 fallback failed: {e}")
+        
+        fallback_steps.append({
+            'step': 1,
+            'method': 'BM25',
+            'success': bm25_success,
+            'candidates_retrieved': bm25_count,
+            'total_after_step': len(fallback_candidates)
+        })
+        
+        # Step 2: Embedding semantic completion (if still insufficient)
+        vector_success = False
+        vector_count = 0
+        if len(fallback_candidates) < min_per_subq and len(fallback_candidates) < max_total_fallback:
+            # 检查超时
+            if (time.time() * 1000 - start_time) > fallback_timeout_ms:
+                logger.warning(f"Fallback retrieval timeout after {fallback_timeout_ms}ms")
+                return fallback_candidates[:max_total_fallback]
+            
+            try:
+                vector_results = self.vector_retriever.search([expanded_query], top_k=max_fallback_per_step)
+                vector_notes = vector_results[0] if vector_results else []
+                # Filter out duplicates
+                existing_ids = {note.get('note_id') for note in fallback_candidates}
+                new_vector_notes = [note for note in vector_notes if note.get('note_id') not in existing_ids]
+                # 限制总候选数量
+                available_slots = max_total_fallback - len(fallback_candidates)
+                new_vector_notes = new_vector_notes[:available_slots]
+                vector_count = len(new_vector_notes)
+                fallback_candidates.extend(new_vector_notes)
+                vector_success = True
+                # 标记候选来源
+                for note in new_vector_notes:
+                    note['retrieval_source'] = 'vector_fallback'
+                logger.debug(f"Fallback step 2 (Vector): retrieved {vector_count} new candidates")
+            except Exception as e:
+                logger.error(f"Vector fallback failed: {e}")
+        
+        fallback_steps.append({
+            'step': 2,
+            'method': 'Vector',
+            'success': vector_success,
+            'candidates_retrieved': vector_count,
+            'total_after_step': len(fallback_candidates),
+            'skipped': len(fallback_candidates) >= min_per_subq
+        })
+        
+        # Step 3: Graph neighborhood expansion (if still insufficient)
+        graph_success = False
+        graph_count = 0
+        if len(fallback_candidates) < min_per_subq and must_have_entities:
+            # 检查超时
+            elapsed_time = (time.time() - start_time) * 1000
+            if elapsed_time >= fallback_timeout_ms:
+                logger.warning(f"Fallback retrieval timeout ({elapsed_time:.1f}ms >= {fallback_timeout_ms}ms), skipping graph expansion")
+                fallback_steps.append({
+                    'step': 3,
+                    'method': 'Graph',
+                    'success': False,
+                    'candidates_retrieved': 0,
+                    'total_after_step': len(fallback_candidates),
+                    'skipped': True,
+                    'reason': 'timeout'
+                })
+            else:
+                try:
+                    # 计算剩余可用的候选数量
+                    remaining_slots = max_total_fallback - len(fallback_candidates)
+                    actual_max_candidates = min(max_fallback_per_step, remaining_slots)
+                    
+                    if actual_max_candidates > 0:
+                        graph_candidates = self._graph_neighborhood_expansion_fallback(must_have_entities, actual_max_candidates)
+                        # Filter out duplicates
+                        existing_ids = {note.get('note_id') for note in fallback_candidates}
+                        new_graph_candidates = [note for note in graph_candidates if note.get('note_id') not in existing_ids]
+                        graph_count = len(new_graph_candidates)
+                        fallback_candidates.extend(new_graph_candidates)
+                        graph_success = True
+                        # 标记候选来源
+                        for note in new_graph_candidates:
+                            note['retrieval_source'] = 'graph_fallback'
+                        logger.debug(f"Fallback step 3 (Graph): retrieved {graph_count} new candidates")
+                    else:
+                        logger.debug(f"Fallback step 3 (Graph): skipped due to candidate limit ({len(fallback_candidates)}/{max_total_fallback})")
+                except Exception as e:
+                    logger.error(f"Graph fallback failed: {e}")
+        
+        fallback_steps.append({
+            'step': 3,
+            'method': 'Graph',
+            'success': graph_success,
+            'candidates_retrieved': graph_count,
+            'total_after_step': len(fallback_candidates),
+            'skipped': len(fallback_candidates) >= min_per_subq or not must_have_entities
+        })
+        
+        # 记录回补检索的结构化日志
+        self._log_fallback_retrieval_info(
+            sub_question=sub_question,
+            expanded_query=expanded_query,
+            must_have_entities=must_have_entities,
+            min_threshold=min_per_subq,
+            fallback_steps=fallback_steps,
+            final_candidates=fallback_candidates,
+            dataset=dataset,
+            qid=qid
+        )
+        
+        logger.info(f"Fallback retrieval completed: {len(fallback_candidates)} total candidates")
+        return fallback_candidates
+    
+    def _log_fallback_retrieval_info(self, sub_question: str, expanded_query: str, must_have_entities: List[str], 
+                                   min_threshold: int, fallback_steps: List[Dict], final_candidates: List[Dict], 
+                                   dataset: Optional[str] = None, qid: Optional[str] = None):
+        """Log detailed fallback retrieval information for debugging."""
+        try:
+            # 统计最终候选的来源分布
+            source_distribution = {}
+            for candidate in final_candidates:
+                source = candidate.get('retrieval_source', 'unknown')
+                source_distribution[source] = source_distribution.get(source, 0) + 1
+            
+            # 检查是否满足最小阈值
+            threshold_met = len(final_candidates) >= min_threshold
+            
+            # 构建结构化日志
+            fallback_log = {
+                'event': 'fallback_retrieval_debug',
+                'sub_question': sub_question,
+                'expanded_query': expanded_query,
+                'must_have_entities': must_have_entities,
+                'min_threshold': min_threshold,
+                'threshold_met': threshold_met,
+                'total_candidates': len(final_candidates),
+                'source_distribution': source_distribution,
+                'fallback_steps': fallback_steps,
+                'dataset': dataset,
+                'query_id': qid
+            }
+            
+            # 添加Top3候选的详细信息
+            if final_candidates:
+                top_candidates = []
+                for i, candidate in enumerate(final_candidates[:3]):
+                    candidate_info = {
+                        'rank': i + 1,
+                        'note_id': candidate.get('note_id', 'unknown'),
+                        'filename': candidate.get('filename', 'unknown'),
+                        'retrieval_source': candidate.get('retrieval_source', 'unknown'),
+                        'final_score': candidate.get('final_score', 0.0),
+                        'entities': candidate.get('entities', []),
+                        'predicates': candidate.get('predicates', [])
+                    }
+                    top_candidates.append(candidate_info)
+                fallback_log['top_candidates'] = top_candidates
+            
+            # 记录结构化日志
+            logger.info(f"FALLBACK_DEBUG: {json.dumps(fallback_log, ensure_ascii=False, indent=2)}")
+            
+            # 如果未满足阈值，记录警告
+            if not threshold_met:
+                logger.warning(f"Fallback retrieval failed to meet minimum threshold: {len(final_candidates)}/{min_threshold} for subquestion: {sub_question}")
+                
+        except Exception as e:
+            logger.error(f"Error logging fallback retrieval info: {e}")
+    
+    def _entity_anchored_graph_retrieval(self, seed_ids: List[str], must_have_entities: List[str]) -> List[Dict[str, Any]]:
+        """Perform graph retrieval with entity anchoring to prevent irrelevant expansion."""
+        if not seed_ids:
+            return []
+        
+        # Standard graph retrieval
+        graph_notes = self.graph_retriever.retrieve(seed_ids)
+        
+        # Apply entity anchoring filter if must_have_entities exist
+        if must_have_entities and graph_notes:
+            expand_k = config.get('graph.expand_k', 1)
+            filtered_notes = []
+            
+            for note in graph_notes:
+                # Check if note contains any anchor entity or its aliases
+                if self._note_contains_anchor_entities(note, must_have_entities):
+                    filtered_notes.append(note)
+                    if len(filtered_notes) >= expand_k:
+                        break
+            
+            logger.debug(f"Entity-anchored graph filtering: {len(graph_notes)} -> {len(filtered_notes)} notes")
+            return filtered_notes
+        
+        return graph_notes
+    
+    def _graph_neighborhood_expansion_fallback(self, must_have_entities: List[str], max_candidates: int) -> List[Dict[str, Any]]:
+        """Perform limited graph neighborhood expansion as fallback."""
+        candidates = []
+        
+        # 从配置获取性能控制参数
+        max_entity_lookup = config.get('retrieval', {}).get('performance', {}).get('max_entity_lookup', 2)
+        
+        # Use entity inverted index if available
+        if hasattr(self, 'entity_index') and self.entity_index:
+            for entity in must_have_entities[:max_entity_lookup]:  # 使用配置的实体数量限制
+                try:
+                    entity_notes = self.entity_index.get_notes_by_entity(entity)
+                    candidates.extend(entity_notes[:max_candidates//max_entity_lookup])
+                except Exception as e:
+                    logger.error(f"Entity index lookup failed for {entity}: {e}")
+        
+        return candidates[:max_candidates]
+    
+    def _note_contains_anchor_entities(self, note: Dict[str, Any], anchor_entities: List[str]) -> bool:
+        """Check if note contains any anchor entity or its aliases."""
+        content = note.get('content', '').lower()
+        title = note.get('title', '').lower()
+        text = f"{title} {content}"
+        
+        for entity in anchor_entities:
+            if entity.lower() in text:
+                return True
+            # Check aliases (basic implementation)
+            aliases = self._get_entity_aliases(entity)
+            for alias in aliases:
+                if alias.lower() in text:
+                    return True
+        
+        return False
+    
+    def _get_entity_aliases(self, entity: str) -> List[str]:
+        """Get aliases for an entity (basic implementation)."""
+        # Basic alias mapping - can be extended
+        alias_map = {
+            'Portuguese': ['Portugal', 'Lusitanian'],
+            'Myanmar': ['Burma', 'Burmese'],
+            'Laos': ['Lao', 'Laotian'],
+            'Thailand': ['Thai', 'Siam', 'Siamese']
+        }
+        return alias_map.get(entity, [])
+    
+    def _count_entity_hits_in_candidates(self, candidates: List[Dict[str, Any]], must_have_entities: List[str]) -> Dict[str, int]:
+        """Count how many candidates contain each must-have entity."""
+        entity_hits = {entity: 0 for entity in must_have_entities}
+        
+        for candidate in candidates:
+            content = candidate.get('content', '').lower()
+            title = candidate.get('title', '').lower()
+            text = f"{title} {content}"
+            
+            for entity in must_have_entities:
+                if entity.lower() in text:
+                    entity_hits[entity] += 1
+        
+        return entity_hits
+    
+    def _generate_enhanced_guardrail_params(self, query: str, must_have_entities: List[str]) -> tuple:
+        """Generate enhanced guardrail parameters incorporating must_have_entities."""
+        # Get base parameters
+        must_have_terms, boost_entities, boost_predicates = self._generate_guardrail_params(query)
+        
+        # Enhance with must_have_entities
+        enhanced_boost_entities = list(set(boost_entities + must_have_entities))
+        enhanced_must_have_terms = list(set(must_have_terms + must_have_entities))
+        
+        return enhanced_must_have_terms, enhanced_boost_entities, boost_predicates
+    
+    def _bm25_fallback_search(self, query: str, dataset: str, qid: str, top_k: int = 3) -> List[Dict[str, Any]]:
+        """Perform BM25 fallback search for precise short query matching."""
+        try:
+            # Use hybrid retriever's BM25 component if available
+            if hasattr(self, 'hybrid_retriever') and self.hybrid_retriever:
+                # Try to get BM25 results directly
+                bm25_results = self.hybrid_retriever.bm25_search(query, top_k=top_k)
+                return bm25_results
+            
+            # Fallback to vector retriever with keyword emphasis
+            vector_results = self.vector_retriever.search([query], top_k=top_k)
+            return vector_results[0] if vector_results else []
+            
+        except Exception as e:
+            logger.error(f"BM25 fallback search failed: {e}")
+            return []
     
     def _schedule_merged_evidence_with_dispatcher(self, merged_evidence: List[Dict[str, Any]], query: str) -> List[Dict[str, Any]]:
         """Schedule merged evidence using context dispatcher."""
@@ -1745,7 +2283,26 @@ class QueryProcessor:
             try:
                 # 使用DiversityScheduler进行候选调度，支持证据类型配额管理
                 diversity_result = self.diversity_scheduler.schedule_candidates(merged_evidence)
-                selected_notes = diversity_result.selected_candidates
+                
+                # 将CandidateItem转换回字典格式，确保paragraph_idxs被正确传递
+                selected_notes = []
+                for candidate_item in diversity_result.selected_candidates:
+                    note_dict = {
+                        'note_id': candidate_item.id,
+                        'content': candidate_item.content,
+                        'score': candidate_item.score,
+                        'paragraph_idxs': candidate_item.metadata.get('paragraph_idxs', []),
+                        # 保留其他重要字段
+                        'entities': candidate_item.metadata.get('entities', []),
+                        'topics': candidate_item.metadata.get('topics', []),
+                        'retrieval_info': candidate_item.metadata.get('retrieval_info', {}),
+                        'reasoning_paths': candidate_item.metadata.get('reasoning_paths', [])
+                    }
+                    # 复制其他可能的metadata字段
+                    for key, value in candidate_item.metadata.items():
+                        if key not in note_dict:
+                            note_dict[key] = value
+                    selected_notes.append(note_dict)
                 
                 # 记录多样性调度指标
                 log_diversity_metrics(

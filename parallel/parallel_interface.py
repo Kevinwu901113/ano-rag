@@ -321,7 +321,8 @@ class MusiqueTaskProcessor(TaskProcessor):
         paragraphs = item.get('paragraphs', [])
         
         # 创建任务工作目录
-        task_work_dir = os.path.join(self.base_work_dir, f"task_{item_id}")
+        debug_dir = os.path.join(self.base_work_dir, "debug")
+        task_work_dir = os.path.join(debug_dir, f"task_{item_id}")
         os.makedirs(task_work_dir, exist_ok=True)
         
         try:

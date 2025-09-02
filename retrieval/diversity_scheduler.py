@@ -625,11 +625,15 @@ class DiversityScheduler:
             content = candidate.get('content', '')
             entity_density = len(entities) / max(len(content.split()), 1) if content else 0.0
             
+            # 处理 metadata，将 paragraph_idxs 放入其中
+            meta = dict(candidate.get('metadata', {}))
+            meta['paragraph_idxs'] = candidate.get('paragraph_idxs', [])
+            
             item = CandidateItem(
                 id=candidate.get('id', f'candidate_{i}'),
                 content=content,
                 score=candidate.get('score', 0.0),
-                metadata=candidate.get('metadata', {}),
+                metadata=meta,
                 entities=entities,
                 topics=candidate.get('topics', []),
                 timestamp=candidate.get('timestamp'),

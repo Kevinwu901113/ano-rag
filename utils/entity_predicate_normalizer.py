@@ -347,6 +347,81 @@ class EntityNormalizer:
             default_rules.append(rule)
         
         self.normalization_rules.extend(default_rules)
+        
+        # 添加多语言实体别名映射
+        self._load_multilingual_aliases()
+    
+    def _load_multilingual_aliases(self) -> None:
+        """加载多语言实体别名映射"""
+        # Portuguese/葡萄牙相关实体别名
+        portuguese_aliases = {
+            "Portugal": ["葡萄牙", "Portuguese Republic", "República Portuguesa", "葡萄牙共和国"],
+            "Lisbon": ["里斯本", "Lisboa", "葡萄牙首都"],
+            "Porto": ["波尔图", "波图", "Oporto"],
+            "Portuguese": ["葡萄牙语", "葡语", "Português"],
+            "Macau": ["澳门", "Macao", "澳门特别行政区", "Região Administrativa Especial de Macau"],
+            "Brazil": ["巴西", "Brasil", "巴西联邦共和国", "República Federativa do Brasil"],
+            "Angola": ["安哥拉", "安哥拉共和国", "República de Angola"],
+            "Mozambique": ["莫桑比克", "莫桑比克共和国", "República de Moçambique"]
+        }
+        
+        # Myanmar/缅甸相关实体别名
+        myanmar_aliases = {
+            "Myanmar": ["缅甸", "Burma", "缅甸联邦共和国", "Republic of the Union of Myanmar", "မြန်မာ"],
+            "Yangon": ["仰光", "Rangoon", "ရန်ကုန်"],
+            "Naypyidaw": ["内比都", "奈比多", "နေပြည်တော်", "缅甸首都"],
+            "Mandalay": ["曼德勒", "မန္တလေး"],
+            "Burmese": ["缅甸语", "缅语", "မြန်မာဘာသာ"],
+            "Rohingya": ["罗兴亚", "罗兴亚人", "Rohingya people"],
+            "Shan State": ["掸邦", "ရှမ်းပြည်နယ်"],
+            "Kachin State": ["克钦邦", "ကချင်ပြည်နယ်"]
+        }
+        
+        # Laos/老挝相关实体别名
+        laos_aliases = {
+            "Laos": ["老挝", "Lao PDR", "老挝人民民主共和国", "Lao People's Democratic Republic", "ລາວ"],
+            "Vientiane": ["万象", "永珍", "ວຽງຈັນ", "老挝首都"],
+            "Luang Prabang": ["琅勃拉邦", "ຫຼວງພະບາງ"],
+            "Lao": ["老挝语", "老语", "ພາສາລາວ"],
+            "Mekong": ["湄公河", "澜沧江", "ແມ່ນ້ຳຂອງ"],
+            "Champasak": ["占巴塞", "ຈຳປາສັກ"],
+            "Savannakhet": ["沙湾拿吉", "ສະຫວັນນະເຂດ"]
+        }
+        
+        # 其他东南亚国家别名
+        other_sea_aliases = {
+            "Thailand": ["泰国", "泰王国", "Kingdom of Thailand", "ประเทศไทย", "สยาม"],
+            "Bangkok": ["曼谷", "กรุงเทพฯ", "泰国首都"],
+            "Vietnam": ["越南", "Việt Nam", "越南社会主义共和国"],
+            "Hanoi": ["河内", "Hà Nội", "越南首都"],
+            "Ho Chi Minh City": ["胡志明市", "西贡", "Thành phố Hồ Chí Minh"],
+            "Cambodia": ["柬埔寨", "Kampuchea", "柬埔寨王国", "ព្រះរាជាណាចក្រកម្ពុជា"],
+            "Phnom Penh": ["金边", "ភ្នំពេញ", "柬埔寨首都"],
+            "Singapore": ["新加坡", "新加坡共和国", "Republic of Singapore"],
+            "Malaysia": ["马来西亚", "Malaysia", "马来西亚联邦"],
+            "Kuala Lumpur": ["吉隆坡", "马来西亚首都"],
+            "Indonesia": ["印度尼西亚", "印尼", "Indonesia", "印度尼西亚共和国"],
+            "Jakarta": ["雅加达", "Jakarta", "印尼首都"],
+            "Philippines": ["菲律宾", "Philippines", "菲律宾共和国"],
+            "Manila": ["马尼拉", "Manila", "菲律宾首都"]
+        }
+        
+        # 合并所有别名映射
+        all_aliases = {}
+        all_aliases.update(portuguese_aliases)
+        all_aliases.update(myanmar_aliases)
+        all_aliases.update(laos_aliases)
+        all_aliases.update(other_sea_aliases)
+        
+        # 添加到别名词典
+        for canonical_name, aliases in all_aliases.items():
+            if canonical_name not in self.alias_dict:
+                self.alias_dict[canonical_name] = AliasEntry(canonical_name=canonical_name)
+            
+            for alias in aliases:
+                self.alias_dict[canonical_name].add_alias(alias, 0.95)
+        
+        logger.info(f"Loaded {len(all_aliases)} multilingual entity aliases covering Portuguese, Myanmar, Laos and other SEA countries")
     
     def _load_alias_dict(self) -> None:
         """加载别名词典"""

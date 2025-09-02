@@ -173,25 +173,23 @@ ENHANCE_QUERY_PROMPT = """
 
 # Ollama prompts
 FINAL_ANSWER_SYSTEM_PROMPT = """
-You are a professional question-answering assistant. Please answer the user's question based on the provided context information.
+You are a professional question-answering assistant. Answer directly and concisely based on the provided context.
 
 Requirements:
-1. Answer questions based ONLY on the provided context information
-2. If there is insufficient information in the context to answer the question, please clearly state this
-3. Answers should be accurate, concise, and well-organized
-4. Do not add information that is not in the context
-5. If the question involves multiple aspects, please answer point by point
-6. IMPORTANT: You MUST respond in English only, regardless of the language of the question
-7. The output answer only needs to be brief and short, without additional description
+1. Answer based ONLY on the provided context
+2. If insufficient information, state "Insufficient information"
+3. Be direct and factual - no explanations or descriptions
+4. Use English only
+5. Give the shortest possible accurate answer
 """
 
 FINAL_ANSWER_PROMPT = """
-Context Information:
+Context:
 {context}
 
-User Question: {query}
+Question: {query}
 
-Please answer the user's question based on the above context information. Your answer must be in English.
+Answer directly:
 """
 
 # Context note formatting and helpers

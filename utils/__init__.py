@@ -26,6 +26,7 @@ from .model_consistency import (
     create_model_signature,
     check_models_compatibility
 )
+from .progress_tracker import ProgressTracker, JSONLProgressTracker
 
 __all__ = [
     'FileUtils',
@@ -53,4 +54,6 @@ __all__ = [
     'create_model_consistency_checker',
     'create_model_signature',
     'check_models_compatibility',
+    'ProgressTracker',
+    'JSONLProgressTracker',
 ]

@@ -13,6 +13,28 @@ class EvidenceMerger:
     and applies different merging strategies to produce a final evidence set.
     """
     
+    # 字段白名单：需要透传和合并的字段
+    PASSTHROUGH_FIELDS = {
+        'paragraph_idxs',  # 段落下标
+        'entities',        # 实体列表
+        'topics',          # 主题列表
+        'reasoning_paths', # 推理路径
+        'keywords',        # 关键词
+        'metadata',        # 元数据
+        'annotations',     # 注释
+        'references'       # 引用
+    }
+    
+    # 集合类型字段：需要进行并集合并
+    SET_MERGE_FIELDS = {
+        'paragraph_idxs', 'entities', 'topics', 'keywords', 'references'
+    }
+    
+    # 列表类型字段：需要进行列表合并
+    LIST_MERGE_FIELDS = {
+        'reasoning_paths', 'annotations'
+    }
+    
     def __init__(self):
         """Initialize the EvidenceMerger."""
         self.merge_strategy = config.get('query.subquestion.merge_strategy', 'weighted')
@@ -132,6 +154,17 @@ class EvidenceMerger:
         evidence_item['source_types'] = {source_type}
         evidence_item['sub_questions'] = {sub_question}
         
+        # 使用白名单机制透传字段
+        for field in self.PASSTHROUGH_FIELDS:
+            if field in note:
+                if field in self.SET_MERGE_FIELDS:
+                    # 集合类型字段，确保是列表格式
+                    value = note[field]
+                    evidence_item[field] = list(value) if isinstance(value, (set, tuple)) else value
+                else:
+                    # 其他字段直接复制
+                    evidence_item[field] = note[field]
+        
         return evidence_item
     
     def _deduplicate_evidence(self, all_evidence: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -160,6 +193,27 @@ class EvidenceMerger:
                 existing['retrieval_count'] += 1
                 existing['source_types'].update(evidence['source_types'])
                 existing['sub_questions'].update(evidence['sub_questions'])
+                
+                # 使用白名单机制合并字段
+                for field in self.PASSTHROUGH_FIELDS:
+                    if field in evidence:
+                        if field in self.SET_MERGE_FIELDS:
+                            # 集合类型字段：做并集合并
+                            existing_values = set(existing.get(field, []))
+                            new_values = set(evidence.get(field, []))
+                            existing[field] = list(existing_values.union(new_values))
+                        elif field in self.LIST_MERGE_FIELDS:
+                            # 列表类型字段：追加合并
+                            existing_list = existing.get(field, [])
+                            new_list = evidence.get(field, [])
+                            existing[field] = existing_list + new_list
+                        elif field == 'metadata':
+                            # 字典类型字段：深度合并
+                            existing_meta = existing.get(field, {})
+                            new_meta = evidence.get(field, {})
+                            existing_meta.update(new_meta)
+                            existing[field] = existing_meta
+                        # 其他字段保持现有值不变
                 
                 # Keep the higher score
                 if evidence.get('score', 0) > existing.get('score', 0):

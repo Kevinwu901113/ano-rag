@@ -17,6 +17,7 @@ import json
 import os
 import shutil
 from typing import List, Dict, Any, Optional
+import concurrent.futures
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from tqdm import tqdm
 from loguru import logger
@@ -60,7 +61,8 @@ def create_new_workdir() -> str:
 
 def create_item_workdir(base_work_dir: str, item_id: str) -> str:
     """为单个item创建工作目录"""
-    item_work_dir = os.path.join(base_work_dir, f"item_{item_id}")
+    debug_dir = os.path.join(base_work_dir, "debug")
+    item_work_dir = os.path.join(debug_dir, f"item_{item_id}")
     os.makedirs(item_work_dir, exist_ok=True)
     return item_work_dir
 
@@ -75,7 +77,21 @@ class MusiqueProcessor:
         if llm is None:
             raise ValueError("MusiqueProcessor requires a LocalLLM instance to be passed")
         self.llm = llm
+        
+        # 预初始化共享资源以避免并行处理时的竞争
+        self._shared_embedding_manager = None
+        self._init_shared_resources()
+        
         logger.info(f"Using base work directory: {self.base_work_dir}")
+    
+    def _init_shared_resources(self):
+        """预初始化共享资源，避免并行处理时的资源竞争"""
+        try:
+            from vector_store.embedding_manager import EmbeddingManager
+            self._shared_embedding_manager = EmbeddingManager()
+            logger.info("Shared EmbeddingManager initialized successfully")
+        except Exception as e:
+            logger.warning(f"Failed to pre-initialize shared resources: {e}")
 
     def _create_paragraph_files(self, item: Dict[str, Any], work_dir: str) -> List[str]:
         """将item的每个段落保存为独立的JSON文件并返回文件路径列表
@@ -113,8 +129,12 @@ class MusiqueProcessor:
             # 1. 为每个段落创建独立的文件
             paragraph_files = self._create_paragraph_files(item, work_dir)
 
-            # 2. 处理文档（构建知识库）
+            # 2. 处理文档（构建知识库）- 使用共享LLM实例
             processor = DocumentProcessor(output_dir=work_dir, llm=self.llm)
+            # 如果有共享的EmbeddingManager，传递给processor以避免重复初始化
+            if self._shared_embedding_manager:
+                processor.embedding_manager = self._shared_embedding_manager
+            
             process_result = processor.process_documents(paragraph_files, force_reprocess=True, output_dir=work_dir)
             
             if not process_result.get('atomic_notes'):
@@ -215,12 +235,9 @@ class MusiqueProcessor:
         """批量处理musique数据集"""
         logger.info(f"Starting batch processing of {input_file}")
         
-        # 预先初始化EmbeddingManager以避免并行处理时的模型加载冲突
+        # 共享资源已在初始化时预加载，无需重复初始化
         if parallel and not use_engine_parallel:
-            logger.info("Pre-initializing EmbeddingManager for parallel processing...")
-            from vector_store.embedding_manager import EmbeddingManager
-            embedding_manager = EmbeddingManager()
-            logger.info("EmbeddingManager pre-initialization completed")
+            logger.info("Using pre-initialized shared resources for parallel processing")
         
         # 读取输入数据
         if input_file.endswith('.jsonl'):
@@ -233,6 +250,24 @@ class MusiqueProcessor:
         
         logger.info(f"Loaded {len(items)} items from {input_file}")
         
+        # 确保输出文件路径是绝对路径
+        if not os.path.isabs(output_file):
+            output_file = os.path.abspath(output_file)
+        if atomic_notes_file and not os.path.isabs(atomic_notes_file):
+            atomic_notes_file = os.path.abspath(atomic_notes_file)
+        
+        # 确保输出目录存在
+        os.makedirs(os.path.dirname(output_file), exist_ok=True)
+        if atomic_notes_file:
+            os.makedirs(os.path.dirname(atomic_notes_file), exist_ok=True)
+        
+        # 初始化输出文件（清空或创建）
+        with open(output_file, 'w', encoding='utf-8') as f:
+            pass  # 清空文件
+        if atomic_notes_file:
+            with open(atomic_notes_file, 'w', encoding='utf-8') as f:
+                pass  # 清空文件
+        
         results = []
         atomic_notes_records = []  # 用于保存召回的原子文档信息
         
@@ -243,7 +278,9 @@ class MusiqueProcessor:
              )
              atomic_notes_records = []  # 并行引擎暂不支持原子笔记记录
         elif parallel and len(items) > 1:
-            # 并行处理
+            # 优化的并行处理：使用批处理减少资源竞争
+            batch_size = min(self.max_workers * 2, len(items))  # 动态批次大小
+            
             with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
                 # 为每个item创建独立的工作目录
                 futures = []
@@ -253,35 +290,80 @@ class MusiqueProcessor:
                     future = executor.submit(self.process_single_item, item, work_dir)
                     futures.append((future, work_dir, item_id))
                 
-                # 收集结果
-                for future, work_dir, item_id in tqdm(futures, desc="Processing items"):
-                    try:
-                        result, atomic_notes_info = future.result()
-                        results.append(result)
-                        atomic_notes_records.append(atomic_notes_info)
-                    except Exception as e:
-                        logger.error(f"Failed to get result for item {item_id}: {e}")
-                        results.append({
-                            'id': item_id,
-                            'predicted_answer': 'Processing failed',
-                            'predicted_support_idxs': [],
-                            'predicted_answerable': True
-                        })
-                        atomic_notes_records.append({
-                            'id': item_id,
-                            'question': '',
-                            'recalled_atomic_notes': [],
-                            'error': str(e)
-                        })
-                    finally:
-                        # 调试模式下保留工作目录
-                        if not self.debug:
-                            try:
-                                shutil.rmtree(work_dir)
-                            except:
-                                pass
-                        else:
-                            logger.info(f"Debug mode: keeping work directory {work_dir}")
+                # 优化的结果收集：使用as_completed提高响应性
+                completed_count = 0
+                with tqdm(total=len(futures), desc="Processing items") as pbar:
+                    for future, work_dir, item_id in futures:
+                        try:
+                            # 设置超时以避免长时间阻塞
+                            result, atomic_notes_info = future.result(timeout=300)  # 5分钟超时
+                            results.append(result)
+                            atomic_notes_records.append(atomic_notes_info)
+                            
+                            # 实时写入结果
+                            with open(output_file, 'a', encoding='utf-8') as f:
+                                f.write(json.dumps(result, ensure_ascii=False) + '\n')
+                            if atomic_notes_file:
+                                with open(atomic_notes_file, 'a', encoding='utf-8') as f:
+                                    f.write(json.dumps(atomic_notes_info, ensure_ascii=False) + '\n')
+                            
+                            completed_count += 1
+                        except concurrent.futures.TimeoutError:
+                            logger.error(f"Processing timeout for item {item_id}")
+                            timeout_result = {
+                                'id': item_id,
+                                'predicted_answer': 'Processing timeout',
+                                'predicted_support_idxs': [],
+                                'predicted_answerable': True
+                            }
+                            timeout_atomic_notes = {
+                                'id': item_id,
+                                'question': item.get('question', ''),
+                                'recalled_atomic_notes': [],
+                                'error': 'Processing timeout'
+                            }
+                            results.append(timeout_result)
+                            atomic_notes_records.append(timeout_atomic_notes)
+                            
+                            # 实时写入超时结果
+                            with open(output_file, 'a', encoding='utf-8') as f:
+                                f.write(json.dumps(timeout_result, ensure_ascii=False) + '\n')
+                            if atomic_notes_file:
+                                with open(atomic_notes_file, 'a', encoding='utf-8') as f:
+                                    f.write(json.dumps(timeout_atomic_notes, ensure_ascii=False) + '\n')
+                        except Exception as e:
+                            logger.error(f"Failed to get result for item {item_id}: {e}")
+                            error_result = {
+                                'id': item_id,
+                                'predicted_answer': 'Processing failed',
+                                'predicted_support_idxs': [],
+                                'predicted_answerable': True
+                            }
+                            error_atomic_notes = {
+                                'id': item_id,
+                                'question': item.get('question', ''),
+                                'recalled_atomic_notes': [],
+                                'error': str(e)
+                            }
+                            results.append(error_result)
+                            atomic_notes_records.append(error_atomic_notes)
+                            
+                            # 实时写入错误结果
+                            with open(output_file, 'a', encoding='utf-8') as f:
+                                f.write(json.dumps(error_result, ensure_ascii=False) + '\n')
+                            if atomic_notes_file:
+                                with open(atomic_notes_file, 'a', encoding='utf-8') as f:
+                                    f.write(json.dumps(error_atomic_notes, ensure_ascii=False) + '\n')
+                        finally:
+                            # 调试模式下保留工作目录
+                            if not self.debug:
+                                try:
+                                    shutil.rmtree(work_dir)
+                                except:
+                                    pass
+                            else:
+                                logger.info(f"Debug mode: keeping work directory {work_dir}")
+                            pbar.update(1)
         else:
             # 串行处理
             for i, item in enumerate(tqdm(items, desc="Processing items")):
@@ -291,20 +373,36 @@ class MusiqueProcessor:
                     result, atomic_notes_info = self.process_single_item(item, work_dir)
                     results.append(result)
                     atomic_notes_records.append(atomic_notes_info)
+                    
+                    # 实时写入结果
+                    with open(output_file, 'a', encoding='utf-8') as f:
+                        f.write(json.dumps(result, ensure_ascii=False) + '\n')
+                    if atomic_notes_file:
+                        with open(atomic_notes_file, 'a', encoding='utf-8') as f:
+                            f.write(json.dumps(atomic_notes_info, ensure_ascii=False) + '\n')
                 except Exception as e:
                     logger.error(f"Failed to process item {item_id}: {e}")
-                    results.append({
+                    error_result = {
                         'id': item_id,
                         'predicted_answer': 'Processing failed',
                         'predicted_support_idxs': [],
                         'predicted_answerable': True
-                    })
-                    atomic_notes_records.append({
+                    }
+                    error_atomic_notes = {
                         'id': item_id,
                         'question': item.get('question', ''),
                         'recalled_atomic_notes': [],
                         'error': str(e)
-                    })
+                    }
+                    results.append(error_result)
+                    atomic_notes_records.append(error_atomic_notes)
+                    
+                    # 实时写入错误结果
+                    with open(output_file, 'a', encoding='utf-8') as f:
+                        f.write(json.dumps(error_result, ensure_ascii=False) + '\n')
+                    if atomic_notes_file:
+                        with open(atomic_notes_file, 'a', encoding='utf-8') as f:
+                            f.write(json.dumps(error_atomic_notes, ensure_ascii=False) + '\n')
                 finally:
                     # 调试模式下保留工作目录
                     if not self.debug:
@@ -315,33 +413,31 @@ class MusiqueProcessor:
                     else:
                         logger.info(f"Debug mode: keeping work directory {work_dir}")
         
-        # 保存结果
-        with open(output_file, 'w', encoding='utf-8') as f:
-            for result in results:
-                f.write(json.dumps(result, ensure_ascii=False) + '\n')
-        
+        # 结果已实时写入，无需再次保存
         logger.info(f"Batch processing completed. Results saved to {output_file}")
         
-        # 保存召回的原子文档信息
         if atomic_notes_file:
-            with open(atomic_notes_file, 'w', encoding='utf-8') as f:
-                for atomic_notes_info in atomic_notes_records:
-                    f.write(json.dumps(atomic_notes_info, ensure_ascii=False) + '\n')
             logger.info(f"Atomic notes recall information saved to {atomic_notes_file}")
         
         # 打印统计信息
         total_items = len(results)
-        answered_items = sum(1 for r in results if r['predicted_answer'] != 'No answer found' and 'Error' not in r['predicted_answer'])
+        answered_items = sum(1 for r in results if r['predicted_answer'] not in ['No answer found', 'Processing failed', 'Processing timeout'] and 'Error' not in r['predicted_answer'])
+        failed_items = sum(1 for r in results if r['predicted_answer'] in ['Processing failed', 'Processing timeout'])
         avg_support_idxs = sum(len(r['predicted_support_idxs']) for r in results) / total_items if total_items > 0 else 0
         
-        logger.info(f"Statistics:")
+        logger.info(f"Processing Statistics:")
         logger.info(f"  Total items: {total_items}")
         logger.info(f"  Successfully answered: {answered_items} ({answered_items/total_items*100:.1f}%)")
+        logger.info(f"  Failed/Timeout: {failed_items} ({failed_items/total_items*100:.1f}%)")
         logger.info(f"  Average support paragraphs: {avg_support_idxs:.1f}")
+        
+        # 性能统计
+        if parallel and not use_engine_parallel:
+            logger.info(f"Parallel processing with {self.max_workers} workers completed")
         
         if self.debug:
             logger.info(f"Debug mode: All intermediate files preserved in {self.base_work_dir}")
-            logger.info(f"  - Item work directories: {self.base_work_dir}/item_<id>/")
+            logger.info(f"  - Item work directories: {self.base_work_dir}/debug/item_<id>/")
             logger.info(f"  - Each item directory contains: atomic_notes.json, graph.json, embeddings.npy, etc.")
     
     def _process_with_parallel_engine(self, items: List[Dict[str, Any]], 

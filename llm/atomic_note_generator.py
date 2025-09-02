@@ -1,4 +1,4 @@
-from typing import List, Dict, Any, Union
+from typing import List, Dict, Any, Union, Optional
 from loguru import logger
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import threading
@@ -59,7 +59,7 @@ class AtomicNoteGenerator:
             logger.warning(f"Failed to check concurrent support: {e}")
             return False
         
-    def generate_atomic_notes(self, text_chunks: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    def generate_atomic_notes(self, text_chunks: List[Dict[str, Any]], progress_tracker: Optional[Any] = None) -> List[Dict[str, Any]]:
         """从文本块生成原子笔记"""
         logger.info(f"Generating atomic notes for {len(text_chunks)} text chunks")
         
@@ -68,12 +68,12 @@ class AtomicNoteGenerator:
             client = getattr(self.llm, 'lmstudio_client', None) or getattr(self.llm, 'client', None)
             instance_count = len(getattr(client, 'model_instances', getattr(client, 'instances', []))) if client else 1
             logger.info(f"Using concurrent processing with {instance_count} instances")
-            return self._generate_atomic_notes_concurrent(text_chunks)
+            return self._generate_atomic_notes_concurrent(text_chunks, progress_tracker)
         else:
             logger.info("Using sequential processing")
-            return self._generate_atomic_notes_sequential(text_chunks)
+            return self._generate_atomic_notes_sequential(text_chunks, progress_tracker)
     
-    def _generate_atomic_notes_sequential(self, text_chunks: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    def _generate_atomic_notes_sequential(self, text_chunks: List[Dict[str, Any]], progress_tracker: Optional[Any] = None) -> List[Dict[str, Any]]:
         """顺序生成原子笔记（原有逻辑）"""
         # 准备提示词模板
         system_prompt = self._get_atomic_note_system_prompt()
@@ -118,7 +118,8 @@ class AtomicNoteGenerator:
         atomic_notes = self.batch_processor.process_batches(
             text_chunks,
             process_batch,
-            desc="Generating atomic notes"
+            desc="Generating atomic notes",
+            progress_tracker=progress_tracker
         )
         
         # 后处理：添加稳定的ID和元数据
@@ -155,7 +156,7 @@ class AtomicNoteGenerator:
         logger.info(f"Generated {len(atomic_notes)} atomic notes")
         return atomic_notes
     
-    def _generate_atomic_notes_concurrent(self, text_chunks: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    def _generate_atomic_notes_concurrent(self, text_chunks: List[Dict[str, Any]], progress_tracker: Optional[Any] = None) -> List[Dict[str, Any]]:
         """并发生成原子笔记，利用多个LM Studio实例"""
         system_prompt = self._get_atomic_note_system_prompt()
         atomic_notes = [None] * len(text_chunks)  # 预分配结果列表
@@ -200,6 +201,11 @@ class AtomicNoteGenerator:
                         error_count += 1
                     
                     completed_count += 1
+                    
+                    # 更新进度跟踪器
+                    if progress_tracker:
+                        progress_tracker.update(1)
+                    
                     if completed_count % 10 == 0:  # 每10个任务记录一次进度
                         logger.info(f"Completed {completed_count}/{len(text_chunks)} atomic notes")
                         
@@ -210,6 +216,10 @@ class AtomicNoteGenerator:
                     if original_index < len(text_chunks):
                         atomic_notes[original_index] = self._create_fallback_note(text_chunks[original_index])
                     error_count += 1
+                    
+                    # 更新进度跟踪器（即使出错也要更新）
+                    if progress_tracker:
+                        progress_tracker.update(1)
         
         logger.info(f"Concurrent processing completed: {len(text_chunks)} notes generated, {error_count} errors")
         

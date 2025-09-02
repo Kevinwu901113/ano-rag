@@ -32,6 +32,14 @@ vector_store:
 # 检索策略配置
 retrieval:
   candidate_pool: 80        # 全局候选池大小，影响最终检索质量
+  min_per_subq: 1          # 每个子问题最小召回数量，硬约束
+  # 性能控制配置
+  performance:
+    max_fallback_per_step: 3      # 每个回补步骤的最大候选数量
+    max_graph_expansion: 5        # 图扩展的最大候选数量
+    max_entity_lookup: 2          # 实体查找的最大实体数量
+    fallback_timeout_ms: 1000     # 回补检索超时时间（毫秒）
+    max_total_fallback: 10        # 总回补候选数量上限
   # 图感知两阶段rerank配置
   use_graph_rerank: true    # 是否启用图感知两阶段rerank
   seeds_semantic: 50        # 语义检索种子节点数量
@@ -55,7 +63,12 @@ retrieval:
       dense: 1.0            # 密集向量检索权重
       bm25: 0.5             # BM25关键词检索权重
       graph: 0.65            # 知识图谱检索权重
-      path: 0.2             # 路径感知检索权重
+  # 重排权重配置
+  rerank:
+    entity_overlap_weight: 0.4     # 实体重叠打分权重
+    path_consistency_weight: 0.3   # 链路一致性打分权重
+    semantic_weight: 0.3           # 语义相似度权重
+    soft_penalty_no_entity: 0.7    # 无实体命中时的软惩罚系数
     rrf_k: 60               # RRF融合参数，仅在fusion_method为rrf时使用
   bm25:                     # BM25检索参数
     k1: 1.2                 # 词频饱和参数，控制词频对得分的影响
@@ -65,6 +78,11 @@ retrieval:
     enabled: true           # 是否启用知识图谱检索
     k_hop: 4                # 图谱遍历跳数，影响关联实体发现范围
     expand_top_m: 50        # 图谱扩展的top-m候选数量
+    expand_k: 1             # 图扩展时的一跳扩展限制
+    db_path: "data/graph.db"  # 图数据库路径
+    max_depth: 2            # 图遍历最大深度
+    min_score: 0.3          # 最小相关性分数阈值
+    max_nodes: 50           # 单次查询最大节点数
   multi_hop:                # 多跳检索配置
     enabled: true           # 是否启用多跳检索（false时使用混合图检索策略）
     # 图检索策略配置
@@ -89,10 +107,14 @@ path_aware:
 # 结果分发器配置
 dispatcher:
   final_semantic_count: 5   # 最终语义检索结果数量（减少）
-  final_graph_count: 80      # 最终图谱检索结果数量（增加）
+  final_graph_count: 30      # 最终图谱检索结果数量（增加）
   bridge_policy: "boost"  # 桥接策略：none无|keepalive保活|boost增强
   bridge_boost_epsilon: 0.03  # 桥接增强的epsilon参数
   debug_log: true           # 是否输出调试日志
+
+# 调度器配置
+scheduler:
+  coverage_guard: true      # 是否启用覆盖守卫，确保每个子问题至少有一条证据
 
 # 大语言模型配置
 llm:

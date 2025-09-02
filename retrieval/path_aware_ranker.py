@@ -541,30 +541,58 @@ class PathAwareRanker:
         expanded_entities = self.graph.k_hop_expansion(key_entities, self.k_hop)
         logger.debug(f"Expanded to {len(expanded_entities)} entities")
         
-        # 4. 计算路径分数
+        # 4. 计算各种分数
         reranked_candidates = []
         for candidate in candidates:
+            # 原有路径分数
             path_score = self._calculate_path_score_for_candidate(
                 candidate, key_entities, expanded_entities
             )
             
-            # 融合分数
+            # 新增：实体重叠分数
+            entity_overlap_score = self._calculate_entity_overlap_score(
+                candidate, candidate.get('must_have_entities', [])
+            )
+            
+            # 新增：链路一致性分数
+            path_consistency_score = self._calculate_path_consistency_score(
+                candidate, candidates, key_entities
+            )
+            
+            # 获取基础分数
             semantic_score = candidate.get('similarity', 0.0)
             sparse_score = candidate.get('sparse_score', 0.0)
             
+            # 从配置获取权重
+            entity_overlap_weight = self.config.get('rerank', {}).get('entity_overlap_weight', 0.4)
+            path_consistency_weight = self.config.get('rerank', {}).get('path_consistency_weight', 0.3)
+            semantic_weight = self.config.get('rerank', {}).get('semantic_weight', 0.3)
+            soft_penalty_no_entity = self.config.get('rerank', {}).get('soft_penalty_no_entity', 0.7)
+            
+            # 应用软惩罚：如果没有实体命中则降权
+            if entity_overlap_score == 0.0:
+                semantic_score *= soft_penalty_no_entity
+                sparse_score *= soft_penalty_no_entity
+            
+            # 融合分数（调整权重分配）
             final_score = (
-                self.semantic_weight * semantic_score +
-                self.sparse_weight * sparse_score +
+                semantic_weight * semantic_score +
+                entity_overlap_weight * entity_overlap_score +
+                path_consistency_weight * path_consistency_score +
                 self.path_weight * path_score
             )
             
             candidate_copy = candidate.copy()
             candidate_copy['path_score'] = path_score
+            candidate_copy['entity_overlap_score'] = entity_overlap_score
+            candidate_copy['path_consistency_score'] = path_consistency_score
             candidate_copy['final_score'] = final_score
             candidate_copy['score_breakdown'] = {
                 'semantic': semantic_score,
                 'sparse': sparse_score,
-                'path': path_score
+                'path': path_score,
+                'entity_overlap': entity_overlap_score,
+                'path_consistency': path_consistency_score
             }
             
             reranked_candidates.append(candidate_copy)
@@ -594,6 +622,92 @@ class PathAwareRanker:
         
         logger.info(f"Reranking completed: avg path score = {avg_path_score:.3f}")
         return reranked_candidates
+    
+    def _calculate_entity_overlap_score(self, candidate: Dict[str, Any], must_have_entities: List[str]) -> float:
+        """计算候选与must_have_entities的实体重叠分数"""
+        if not must_have_entities:
+            return 1.0  # 如果没有必需实体，给满分
+        
+        content = candidate.get('content', '').lower()
+        title = candidate.get('title', '').lower()
+        text = f"{title} {content}"
+        
+        matched_entities = 0
+        for entity in must_have_entities:
+            if entity.lower() in text:
+                matched_entities += 1
+            else:
+                # 检查别名
+                aliases = self._get_entity_aliases(entity)
+                for alias in aliases:
+                    if alias.lower() in text:
+                        matched_entities += 1
+                        break
+        
+        # 计算重叠比例
+        overlap_ratio = matched_entities / len(must_have_entities)
+        return overlap_ratio
+    
+    def _calculate_path_consistency_score(self, candidate: Dict[str, Any], 
+                                        all_candidates: List[Dict[str, Any]], 
+                                        key_entities: List[str]) -> float:
+        """计算链路一致性分数"""
+        if not key_entities:
+            return 0.0
+        
+        content = candidate.get('content', '').lower()
+        title = candidate.get('title', '').lower()
+        text = f"{title} {content}"
+        
+        # 检查当前候选包含的关键实体
+        candidate_entities = []
+        for entity in key_entities:
+            if entity.lower() in text:
+                candidate_entities.append(entity)
+        
+        if not candidate_entities:
+            return 0.0
+        
+        # 检查是否与其他子问题的候选共享锚实体
+        subq_id = candidate.get('subq_id')
+        consistency_score = 0.0
+        
+        for other_candidate in all_candidates:
+            other_subq_id = other_candidate.get('subq_id')
+            # 只考虑来自不同子问题的候选
+            if other_subq_id and other_subq_id != subq_id:
+                other_content = other_candidate.get('content', '').lower()
+                other_title = other_candidate.get('title', '').lower()
+                other_text = f"{other_title} {other_content}"
+                
+                # 检查共同的锚实体
+                shared_entities = 0
+                for entity in candidate_entities:
+                    if entity.lower() in other_text:
+                        shared_entities += 1
+                
+                if shared_entities > 0:
+                    consistency_score += 0.5  # 每个共享实体加分
+        
+        # 归一化分数
+        max_possible_score = len(key_entities) * 0.5
+        if max_possible_score > 0:
+            consistency_score = min(consistency_score / max_possible_score, 1.0)
+        
+        return consistency_score
+    
+    def _get_entity_aliases(self, entity: str) -> List[str]:
+        """获取实体别名（基础实现）"""
+        # 基础别名映射
+        alias_map = {
+            'Portuguese': ['Portugal', 'Lusitanian'],
+            'Myanmar': ['Burma', 'Burmese'],
+            'Laos': ['Lao', 'Laotian'],
+            'Thailand': ['Thai', 'Siam', 'Siamese'],
+            'dynasty': ['dynasties', 'royal', 'kingdom'],
+            'boundary': ['border', 'frontier', 'demarcation']
+        }
+        return alias_map.get(entity, [])
     
     def _calculate_path_score_for_candidate(self, candidate: Dict[str, Any], 
                                           key_entities: List[str], 

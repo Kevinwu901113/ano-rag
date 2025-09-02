@@ -9,7 +9,7 @@ from .chunker import DocumentChunker
 from .clustering import TopicClustering
 from .incremental_processor import IncrementalProcessor
 from llm import AtomicNoteGenerator, LocalLLM
-from utils import BatchProcessor, FileUtils
+from utils import BatchProcessor, FileUtils, JSONLProgressTracker
 from utils.enhanced_ner import EnhancedNER
 from utils.consistency_checker import ConsistencyChecker
 from config import config
@@ -53,6 +53,14 @@ class DocumentProcessor:
     def process_documents(self, file_paths: List[str], force_reprocess: bool = False, output_dir: Optional[str] = None) -> Dict[str, Any]:
         """处理文档的主要入口点"""
         logger.info(f"Starting document processing for {len(file_paths)} files")
+        
+        # 检查是否有JSONL文件，如果有则创建进度跟踪器
+        jsonl_files = [f for f in file_paths if f.endswith('.jsonl')]
+        progress_tracker = None
+        if jsonl_files:
+            # 使用第一个JSONL文件创建进度跟踪器
+            progress_tracker = JSONLProgressTracker(jsonl_files[0], "Processing JSONL data")
+            progress_tracker.start()
 
         if output_dir:
             self.processed_docs_path = output_dir
@@ -122,7 +130,7 @@ class DocumentProcessor:
             atomic_notes = FileUtils.read_json(atomic_file)
         else:
             logger.info("Step 2: Generating atomic notes")
-            atomic_notes = self._generate_atomic_notes(all_chunks)
+            atomic_notes = self._generate_atomic_notes(all_chunks, progress_tracker)
             FileUtils.write_json(atomic_notes, atomic_file)
             
             # 保存被标记为需要重写的摘要（如果启用了摘要校验器）
@@ -237,6 +245,10 @@ class DocumentProcessor:
         result_file = os.path.join(self.processed_docs_path, "result.json")
         FileUtils.write_json(result, result_file)
 
+        # 关闭进度跟踪器
+        if progress_tracker:
+            progress_tracker.close()
+            
         logger.info("Document processing completed successfully")
         return result
     
@@ -263,11 +275,11 @@ class DocumentProcessor:
         
         return valid_chunks
     
-    def _generate_atomic_notes(self, chunks: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    def _generate_atomic_notes(self, chunks: List[Dict[str, Any]], progress_tracker: Optional[JSONLProgressTracker] = None) -> List[Dict[str, Any]]:
         """生成原子笔记"""
         try:
             # 使用批处理生成原子笔记
-            atomic_notes = self.atomic_note_generator.generate_atomic_notes(chunks)
+            atomic_notes = self.atomic_note_generator.generate_atomic_notes(chunks, progress_tracker)
             
             # 验证原子笔记质量
             valid_notes = self.atomic_note_generator.validate_atomic_notes(atomic_notes)

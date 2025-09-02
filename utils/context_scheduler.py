@@ -13,10 +13,15 @@ class ContextScheduler:
         self.t5 = cs.get('redundancy_penalty', 0.1)
         self.top_n = cs.get('top_n_notes', 10)
 
-    def schedule(self, candidate_notes: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    def schedule(self, candidate_notes: List[Dict[str, Any]], query_processor=None) -> List[Dict[str, Any]]:
         if not candidate_notes:
             logger.warning("No candidate notes provided to scheduler")
             return []
+        
+        # 执行coverage_guard检查
+        coverage_guard_enabled = config.get('dispatcher', {}).get('scheduler', {}).get('coverage_guard', False)
+        if coverage_guard_enabled:
+            candidate_notes = self._apply_coverage_guard(candidate_notes, query_processor)
         
         # 先进行去重，保留相似度最高的版本
         unique_notes = []
@@ -69,6 +74,71 @@ class ContextScheduler:
         
         logger.info(f"Context scheduler selected {len(selected)} notes from {len(candidate_notes)} candidates")
         return selected
+    
+    def _apply_coverage_guard(self, candidate_notes: List[Dict[str, Any]], query_processor=None) -> List[Dict[str, Any]]:
+        """执行覆盖守卫检查，确保每个子问题至少有一条证据"""
+        if not candidate_notes:
+            return candidate_notes
+        
+        # 统计每个子问题的候选数量
+        subq_coverage = {}
+        for note in candidate_notes:
+            subq_id = note.get('subq_id')
+            if subq_id is not None:
+                if subq_id not in subq_coverage:
+                    subq_coverage[subq_id] = []
+                subq_coverage[subq_id].append(note)
+        
+        if not subq_coverage:
+            logger.warning("No subq_id found in candidates, skipping coverage guard")
+            return candidate_notes
+        
+        # 检查缺失的子问题
+        missing_subqs = []
+        for subq_id, notes in subq_coverage.items():
+            if len(notes) == 0:
+                missing_subqs.append(subq_id)
+        
+        if missing_subqs:
+            logger.warning(f"Coverage guard detected missing evidence for subquestions: {missing_subqs}")
+            
+            # 如果有query_processor，尝试回补检索
+            if query_processor and hasattr(query_processor, '_fallback_retrieval_for_subquestion'):
+                logger.info(f"Attempting fallback retrieval for {len(missing_subqs)} missing subquestions")
+                
+                for subq_id in missing_subqs:
+                    try:
+                        # 这里需要从某处获取原始子问题文本，暂时跳过具体实现
+                        logger.debug(f"Would perform fallback retrieval for subq_id: {subq_id}")
+                        # fallback_notes = query_processor._fallback_retrieval_for_subquestion(...)
+                        # candidate_notes.extend(fallback_notes)
+                    except Exception as e:
+                        logger.error(f"Fallback retrieval failed for subq_id {subq_id}: {e}")
+            
+            # 记录缺失信息用于调试
+            logger.error(f"Coverage guard report - Missing subquestions: {missing_subqs}")
+            for subq_id in missing_subqs:
+                logger.error(f"Missing subq_id: {subq_id}, expected entities: [to be implemented]")
+        
+        # 确保每个子问题至少有一条证据
+        final_notes = []
+        for subq_id, notes in subq_coverage.items():
+            if notes:
+                # 至少选择一条最好的证据
+                best_note = max(notes, key=lambda x: x.get('similarity', 0))
+                final_notes.append(best_note)
+                # 添加其他候选（如果有的话）
+                for note in notes:
+                    if note != best_note:
+                        final_notes.append(note)
+        
+        # 添加没有subq_id的候选
+        for note in candidate_notes:
+            if note.get('subq_id') is None:
+                final_notes.append(note)
+        
+        logger.info(f"Coverage guard processed: {len(candidate_notes)} -> {len(final_notes)} notes")
+        return final_notes
 
 
 class MultiHopContextScheduler(ContextScheduler):
@@ -78,10 +148,16 @@ class MultiHopContextScheduler(ContextScheduler):
         self,
         candidate_notes: List[Dict[str, Any]],
         reasoning_paths: List[Dict[str, Any]],
+        query_processor=None,
     ) -> List[Dict[str, Any]]:
         if not candidate_notes:
             logger.warning("No candidate notes provided to multi-hop scheduler")
             return []
+        
+        # 执行coverage_guard检查
+        coverage_guard_enabled = config.get('dispatcher', {}).get('scheduler', {}).get('coverage_guard', False)
+        if coverage_guard_enabled:
+            candidate_notes = self._apply_coverage_guard(candidate_notes, query_processor)
         
         path_scores = self._calculate_path_scores(candidate_notes, reasoning_paths)
 
