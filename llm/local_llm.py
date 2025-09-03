@@ -43,7 +43,23 @@ class LocalLLM:
         self.openai_client = None
         self.lmstudio_client = None
         self.multi_model_client = None
+        self.hybrid_dispatcher = None  # 用于缓存HybridLLMDispatcher实例
         self.batch_processor = BatchProcessor()
+        
+        # 如果是混合LLM模式，不需要在LocalLLM中加载模型
+        if self.provider == 'hybrid_llm':
+            logger.info("Hybrid LLM mode detected, skipping LocalLLM model loading")
+            self.is_hybrid_mode = True
+            self.is_openai_model = False
+            self.is_ollama_model = False
+            self.is_lmstudio_model = False
+            self.model_name = "hybrid_llm_dispatcher"
+            self.device = "auto"
+            self.temperature = 0.1
+            self.max_tokens = 2048
+            return
+        
+        self.is_hybrid_mode = False
         
         # 根据provider选择配置段和默认值
         if self.provider == 'openai':
@@ -75,6 +91,11 @@ class LocalLLM:
         
     def load_model(self):
         """加载模型"""
+        # 如果是混合模式，跳过模型加载
+        if hasattr(self, 'is_hybrid_mode') and self.is_hybrid_mode:
+            logger.info("Skipping model loading in hybrid LLM mode")
+            return
+            
         try:
             logger.info(f"Loading model: {self.model_name}")
             
@@ -159,6 +180,13 @@ class LocalLLM:
     
     def generate(self, prompt: str, system_prompt: str = None, **kwargs) -> str:
         """生成文本"""
+        
+        # 如果是混合模式，抛出异常提示使用HybridLLMDispatcher
+        if hasattr(self, 'is_hybrid_mode') and self.is_hybrid_mode:
+            raise RuntimeError(
+                "LocalLLM is in hybrid mode. Please use HybridLLMDispatcher for text generation. "
+                "This LocalLLM instance should not be used directly for generation."
+            )
         
         try:
             if self.is_ollama_model and self.ollama_client:
@@ -291,6 +319,10 @@ class LocalLLM:
     def is_available(self) -> bool:
         """检查模型是否可用"""
         try:
+            # 如果是混合模式，返回True（实际可用性由HybridLLMDispatcher检查）
+            if hasattr(self, 'is_hybrid_mode') and self.is_hybrid_mode:
+                return True
+                
             if self.is_ollama_model:
                 # 避免递归调用load_model，直接创建临时客户端检查
                 if self.ollama_client is None:

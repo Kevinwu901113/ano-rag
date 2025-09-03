@@ -136,10 +136,9 @@ class OllamaClient:
                 logger.error(f"Chat failed: {e}")
             return ""
 
-    def generate_final_answer(self, context: str, query: str) -> str:
-        system_prompt = FINAL_ANSWER_SYSTEM_PROMPT
-        prompt = FINAL_ANSWER_PROMPT.format(context=context, query=query)
-        return self.generate(prompt, system_prompt)
+    def generate_final_answer(self, prompt: str, **kwargs) -> str:
+        """Generate final answer from a combined prompt"""
+        return self.generate(prompt, FINAL_ANSWER_SYSTEM_PROMPT, **kwargs)
 
     def evaluate_answer(self, query: str, context: str, answer: str) -> Dict[str, float]:
         system_prompt = EVALUATE_ANSWER_SYSTEM_PROMPT

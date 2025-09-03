@@ -505,6 +505,41 @@ class MultiModelClient:
         
         return self._execute_with_retry(_generate, prompt, system_prompt, stream, **kwargs)
     
+    def generate_final_answer(self, prompt: str, **kwargs) -> str:
+        """Generate final answer using the multi-model system"""
+        return self.generate(prompt, FINAL_ANSWER_SYSTEM_PROMPT, **kwargs)
+    
+    def evaluate_answer(self, question: str, answer: str, context: str = "") -> dict:
+        """Evaluate answer quality using the multi-model system"""
+        try:
+            eval_prompt = EVALUATE_ANSWER_PROMPT.format(
+                question=question,
+                answer=answer,
+                context=context
+            )
+            
+            response = self.generate(eval_prompt, EVALUATE_ANSWER_SYSTEM_PROMPT)
+            
+            # Parse the response (assuming it returns JSON format)
+            try:
+                import json
+                return json.loads(response)
+            except json.JSONDecodeError:
+                # If not JSON, return a basic structure
+                return {
+                    "score": 0.7,
+                    "reasoning": response,
+                    "confidence": 0.5
+                }
+                
+        except Exception as e:
+            logger.error(f"Answer evaluation failed: {e}")
+            return {
+                "score": 0.0,
+                "reasoning": f"Evaluation failed: {str(e)}",
+                "confidence": 0.0
+            }
+    
     def chat(
         self,
         messages: list[dict[str, str]],
@@ -793,6 +828,431 @@ class MultiModelClient:
                 logger.error(f"Error shutting down instance {instance.model_name}: {e}")
         
         logger.info("MultiModelClient shutdown complete")
+
+
+class TaskClassifier:
+    """任务分类器，用于智能判断查询类型"""
+    
+    def __init__(self):
+        # 重量级任务关键词
+        self.heavy_keywords = {
+            "分析", "分析一下", "详细分析", "深入分析", "综合分析",
+            "总结", "总结一下", "详细总结", "全面总结",
+            "解释", "详细解释", "解释一下", "说明", "阐述",
+            "比较", "对比", "比较分析", "对比分析",
+            "评价", "评估", "评论", "点评",
+            "推理", "推断", "判断", "预测",
+            "复杂", "困难", "深层", "高级",
+            "多方面", "全方位", "系统性", "综合性",
+            "创作", "写作", "编写", "翻译", "转换", "改写", "润色"
+        }
+        
+        # 轻量级任务关键词
+        self.light_keywords = {
+            "是什么", "什么是", "定义", "含义",
+            "简单", "快速", "直接", "简要",
+            "列出", "列举", "枚举",
+            "查找", "搜索", "找到", "获取",
+            "确认", "验证", "检查",
+            "是否", "有没有", "能否", "可以吗",
+            "多少", "几个", "数量",
+            "时间", "日期", "年份",
+            "地点", "位置", "在哪",
+            # 添加原子笔记生成相关关键词
+            "原子笔记", "atomic note", "知识点", "提取", "extract",
+            "实体", "entity", "关键词", "keyword", "概念", "concept"
+        }
+        
+        # 原子笔记生成任务的特征模式
+        self.atomic_note_patterns = {
+            "请将以下文本转换为原子笔记",
+            "转换为原子笔记",
+            "atomic note",
+            "knowledge point",
+            "extract entities",
+            "extract keywords",
+            "提取实体",
+            "提取关键词",
+            "知识提取"
+        }
+        
+        # 任务分类阈值
+        self.length_threshold = 100  # 字符长度阈值
+        self.complexity_indicators = {
+            "因为", "由于", "所以", "因此", "然而", "但是", "不过",
+            "首先", "其次", "最后", "另外", "此外", "而且",
+            "如果", "假如", "当", "在", "通过", "根据"
+        }
+    
+    def classify_task(self, query: str, context: str = "") -> str:
+        """分类任务类型
+        
+        Args:
+            query: 查询文本
+            context: 上下文信息
+            
+        Returns:
+            'heavy' 或 'light'
+        """
+        if not query:
+            return "light"
+        
+        query_lower = query.lower()
+        full_text = f"{query} {context}".strip()
+        
+        # 特殊检测：原子笔记生成任务
+        for pattern in self.atomic_note_patterns:
+            if pattern.lower() in query_lower or pattern.lower() in context.lower():
+                logger.debug(f"Detected atomic note generation task, classifying as light: {pattern}")
+                return "light"
+        
+        # 检测是否包含JSON格式要求（原子笔记生成的特征）
+        if ("json" in query_lower and ("content" in query_lower or "keywords" in query_lower or "entities" in query_lower)) or \
+           ("JSON格式" in query or "json格式" in query_lower):
+            logger.debug("Detected JSON format requirement for structured extraction, classifying as light")
+            return "light"
+        
+        # 1. 关键词匹配
+        heavy_score = sum(1 for keyword in self.heavy_keywords if keyword in query)
+        light_score = sum(1 for keyword in self.light_keywords if keyword in query)
+        
+        # 2. 长度判断
+        length_score = 1 if len(full_text) > self.length_threshold else 0
+        
+        # 3. 复杂度指标
+        complexity_score = sum(1 for indicator in self.complexity_indicators if indicator in query)
+        
+        # 4. 中文字符比例（中文查询通常更复杂）
+        chinese_chars = sum(1 for char in query if '\u4e00' <= char <= '\u9fff')
+        chinese_ratio = chinese_chars / len(query) if query else 0
+        chinese_score = 1 if chinese_ratio > 0.5 and len(query) > 50 else 0
+        
+        # 综合评分
+        total_heavy_score = heavy_score + length_score + complexity_score + chinese_score
+        
+        # 决策逻辑
+        if light_score > heavy_score and total_heavy_score <= 1:
+            return "light"
+        elif total_heavy_score >= 2:
+            return "heavy"
+        elif len(full_text) > 200:  # 长文本倾向于重量级
+            return "heavy"
+        else:
+            return "light"
+
+
+class HybridLLMDispatcher:
+    """混合LLM调度器，智能路由查询到合适的模型"""
+    
+    _instance = None
+    _initialized = False
+    
+    def __new__(cls):
+        if cls._instance is None:
+            cls._instance = super(HybridLLMDispatcher, cls).__new__(cls)
+        return cls._instance
+    
+    def __init__(self):
+        # 避免重复初始化
+        if HybridLLMDispatcher._initialized:
+            return
+            
+        self.classifier = TaskClassifier()
+        self.ollama_client = None
+        self.multi_model_client = None
+        
+        # 从配置中获取混合LLM设置
+        self.mode = config.get("llm.hybrid_llm.mode", "task_division")
+        
+        # 初始化轻量级任务客户端（Ollama）
+        light_config = config.get("llm.hybrid_llm.light_tasks", {})
+        if light_config:
+            from .ollama_client import OllamaClient
+            self.ollama_client = OllamaClient(
+                base_url=light_config.get("base_url", "http://localhost:11434"),
+                model=light_config.get("model", "qwen2.5:latest")
+            )
+        
+        # 初始化重量级任务客户端（LM Studio）
+        heavy_config = config.get("llm.hybrid_llm.heavy_tasks", {})
+        if heavy_config:
+            # 临时修改配置以初始化MultiModelClient
+            original_config = {
+                "llm.multi_model.instance_count": config.get("llm.multi_model.instance_count"),
+                "llm.multi_model.model_name": config.get("llm.multi_model.model_name"),
+                "llm.multi_model.base_port": config.get("llm.multi_model.base_port")
+            }
+            
+            # 设置重量级任务的配置
+            config.set("llm.multi_model.instance_count", heavy_config.get("instances", 2))
+            config.set("llm.multi_model.model_name", heavy_config.get("model", "openai/gpt-oss-20b"))
+            config.set("llm.multi_model.base_port", 1234)  # LM Studio默认端口
+            
+            self.multi_model_client = MultiModelClient()
+            
+            # 恢复原始配置
+            for key, value in original_config.items():
+                if value is not None:
+                    config.set(key, value)
+        
+        HybridLLMDispatcher._initialized = True
+        logger.info(f"HybridLLMDispatcher initialized with mode: {self.mode}")
+        logger.info(f"Ollama client: {'✓' if self.ollama_client else '✗'}")
+        logger.info(f"MultiModel client: {'✓' if self.multi_model_client else '✗'}")
+    
+    def is_available(self) -> bool:
+        """检查HybridLLMDispatcher是否可用"""
+        ollama_available = False
+        multi_model_available = False
+        
+        # 检查Ollama客户端可用性
+        if self.ollama_client:
+            try:
+                ollama_available = self.ollama_client.is_available()
+            except Exception as e:
+                logger.warning(f"Ollama client availability check failed: {e}")
+                ollama_available = False
+        
+        # 检查MultiModel客户端可用性
+        if self.multi_model_client:
+            try:
+                multi_model_available = self.multi_model_client.is_available()
+            except Exception as e:
+                logger.warning(f"MultiModel client availability check failed: {e}")
+                multi_model_available = False
+        
+        # 至少有一个客户端可用即认为HybridLLMDispatcher可用
+        is_available = ollama_available or multi_model_available
+        
+        if not is_available:
+            logger.error("HybridLLMDispatcher: No available clients")
+        
+        return is_available
+    
+    def generate(self, query: str, system_prompt: str = None, **kwargs) -> str:
+        """生成文本（主要接口）"""
+        return self.process_single(query, system_prompt, **kwargs)
+    
+    def process_single(self, query: str, system_prompt: str = None, **kwargs) -> str:
+        """处理单个查询"""
+        if self.mode == "task_division":
+            return self._process_task_division(query, system_prompt, **kwargs)
+        elif self.mode == "competitive":
+            return self._process_competitive(query, system_prompt, **kwargs)
+        else:
+            raise ValueError(f"Unsupported hybrid mode: {self.mode}")
+    
+    def process_batch(self, queries: List[str], system_prompt: str = None, **kwargs) -> List[str]:
+        """批量处理查询"""
+        if not queries:
+            return []
+        
+        # 分类所有查询
+        light_queries = []
+        heavy_queries = []
+        query_mapping = {}  # 记录原始索引
+        
+        for i, query in enumerate(queries):
+            task_type = self.classifier.classify_task(query)
+            if task_type == "light":
+                light_queries.append((i, query))
+            else:
+                heavy_queries.append((i, query))
+            query_mapping[i] = task_type
+        
+        logger.info(f"Batch processing: {len(light_queries)} light tasks, {len(heavy_queries)} heavy tasks")
+        
+        # 并行处理
+        results = [None] * len(queries)
+        
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            futures = []
+            
+            # 提交轻量级任务
+            if light_queries and self.ollama_client:
+                light_prompts = [q[1] for q in light_queries]
+                future_light = executor.submit(
+                    self.ollama_client.batch_generate,
+                    light_prompts,
+                    system_prompt,
+                    **kwargs
+                )
+                futures.append(("light", future_light, light_queries))
+            
+            # 提交重量级任务
+            if heavy_queries and self.multi_model_client:
+                heavy_prompts = [q[1] for q in heavy_queries]
+                future_heavy = executor.submit(
+                    self.multi_model_client.generate_parallel,
+                    heavy_prompts,
+                    system_prompt,
+                    **kwargs
+                )
+                futures.append(("heavy", future_heavy, heavy_queries))
+            
+            # 收集结果
+            for task_type, future, query_list in futures:
+                try:
+                    task_results = future.result()
+                    for (original_idx, _), result in zip(query_list, task_results):
+                        results[original_idx] = result
+                except Exception as e:
+                    logger.error(f"Batch {task_type} processing failed: {e}")
+                    for original_idx, _ in query_list:
+                        results[original_idx] = f"Error: {str(e)}"
+        
+        return results
+    
+    def _process_task_division(self, query: str, system_prompt: str = None, **kwargs) -> str:
+        """任务划分模式处理"""
+        task_type = self.classifier.classify_task(query)
+        
+        try:
+            if task_type == "light" and self.ollama_client:
+                logger.debug(f"Routing to Ollama (light): {query[:50]}...")
+                return self.ollama_client.generate(query, system_prompt, **kwargs)
+            elif task_type == "heavy" and self.multi_model_client:
+                logger.debug(f"Routing to LM Studio (heavy): {query[:50]}...")
+                return self.multi_model_client.generate(query, system_prompt, **kwargs)
+            else:
+                # 回退机制
+                return self._fallback_generate(query, system_prompt, **kwargs)
+        except Exception as e:
+            logger.error(f"Task division processing failed: {e}")
+            return self._fallback_generate(query, system_prompt, **kwargs)
+    
+    def _process_competitive(self, query: str, system_prompt: str = None, **kwargs) -> str:
+        """竞争模式处理（返回最快的结果）"""
+        if not (self.ollama_client and self.multi_model_client):
+            return self._fallback_generate(query, system_prompt, **kwargs)
+        
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            # 同时提交到两个客户端
+            future_ollama = executor.submit(self.ollama_client.generate, query, system_prompt, **kwargs)
+            future_multi = executor.submit(self.multi_model_client.generate, query, system_prompt, **kwargs)
+            
+            # 返回最先完成的结果
+            for future in as_completed([future_ollama, future_multi]):
+                try:
+                    result = future.result()
+                    if result and result.strip():  # 确保结果非空
+                        return result
+                except Exception as e:
+                    logger.warning(f"Competitive processing error: {e}")
+                    continue
+        
+        # 如果都失败，使用回退机制
+        return self._fallback_generate(query, system_prompt, **kwargs)
+    
+    def _fallback_generate(self, query: str, system_prompt: str = None, **kwargs) -> str:
+        """回退生成机制"""
+        # 优先尝试Ollama（更稳定）
+        if self.ollama_client:
+            try:
+                return self.ollama_client.generate(query, system_prompt, **kwargs)
+            except Exception as e:
+                logger.warning(f"Ollama fallback failed: {e}")
+        
+        # 然后尝试MultiModel
+        if self.multi_model_client:
+            try:
+                return self.multi_model_client.generate(query, system_prompt, **kwargs)
+            except Exception as e:
+                logger.warning(f"MultiModel fallback failed: {e}")
+        
+        # 最后的回退
+        logger.error("All LLM clients failed")
+        return "Error: No available LLM client"
+    
+    def generate_final_answer(self, prompt: str, **kwargs) -> str:
+        """Generate final answer using appropriate model based on task classification"""
+        try:
+            # Classify the task to determine which model to use
+            task_type = self.classifier.classify_task(prompt)
+            
+            if task_type == "light" and self.ollama_client:
+                logger.info(f"Routing final answer generation to light model (Ollama): {prompt[:100]}...")
+                return self.ollama_client.generate(prompt, FINAL_ANSWER_SYSTEM_PROMPT, **kwargs)
+            elif task_type == "heavy" and self.multi_model_client:
+                logger.info(f"Routing final answer generation to heavy model (LM Studio): {prompt[:100]}...")
+                return self.multi_model_client.generate(prompt, FINAL_ANSWER_SYSTEM_PROMPT, **kwargs)
+            else:
+                return self._fallback_generate(prompt, FINAL_ANSWER_SYSTEM_PROMPT, **kwargs)
+        except Exception as e:
+            logger.error(f"Final answer generation failed: {e}")
+            return self._fallback_generate(prompt, FINAL_ANSWER_SYSTEM_PROMPT, **kwargs)
+    
+    def evaluate_answer(self, question: str, answer: str, context: str = "") -> dict:
+        """Evaluate answer quality using the heavy model for comprehensive analysis"""
+        try:
+            # Always use heavy model for evaluation as it requires sophisticated reasoning
+            logger.info(f"Using heavy model for answer evaluation: {question[:100]}...")
+            
+            # Prepare evaluation prompt
+            eval_prompt = EVALUATE_ANSWER_PROMPT.format(
+                question=question,
+                answer=answer,
+                context=context
+            )
+            
+            if self.multi_model_client:
+                response = self.multi_model_client.generate(eval_prompt, EVALUATE_ANSWER_SYSTEM_PROMPT)
+            elif self.ollama_client:
+                response = self.ollama_client.generate(eval_prompt, EVALUATE_ANSWER_SYSTEM_PROMPT)
+            else:
+                raise Exception("No available LLM client")
+            
+            # Parse the response (assuming it returns JSON format)
+            try:
+                import json
+                return json.loads(response)
+            except json.JSONDecodeError:
+                # If not JSON, return a basic structure
+                return {
+                    "score": 0.7,
+                    "reasoning": response,
+                    "confidence": 0.5
+                }
+                
+        except Exception as e:
+            logger.error(f"Answer evaluation failed: {e}")
+            # Return a basic evaluation structure on failure
+            return {
+                "score": 0.0,
+                "reasoning": f"Evaluation failed: {str(e)}",
+                "confidence": 0.0
+            }
+    
+    def get_model_info(self) -> Dict[str, Any]:
+        """获取混合模型信息"""
+        info = {
+            'provider': 'hybrid_llm',
+            'mode': self.mode,
+            'light_client': 'available' if self.ollama_client else 'unavailable',
+            'heavy_client': 'available' if self.multi_model_client else 'unavailable'
+        }
+        
+        if self.ollama_client:
+            info['light_model'] = getattr(self.ollama_client, 'model', 'unknown')
+        
+        if self.multi_model_client:
+            multi_info = self.multi_model_client.get_model_info()
+            info['heavy_model_info'] = multi_info
+        
+        return info
+    
+    def shutdown(self):
+        """关闭混合LLM调度器"""
+        logger.info("Shutting down HybridLLMDispatcher...")
+        
+        if self.multi_model_client:
+            try:
+                self.multi_model_client.shutdown()
+            except Exception as e:
+                logger.error(f"Error shutting down multi_model_client: {e}")
+        
+        # Ollama client通常不需要特殊的关闭操作
+        logger.info("HybridLLMDispatcher shutdown complete")
 
 
 # 为了向后兼容，保留原有的类名别名

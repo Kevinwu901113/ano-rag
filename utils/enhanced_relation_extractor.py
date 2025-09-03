@@ -74,6 +74,11 @@ class EnhancedRelationExtractor:
         content = note.get('content', '')
         entities = note.get('entities', [])
         
+        # 确保entities是列表
+        if not isinstance(entities, list):
+            logger.warning(f"entities is not a list, got {type(entities)}: {entities}")
+            return relations
+        
         # 实体间关系
         for i, entity1 in enumerate(entities):
             for j, entity2 in enumerate(entities[i+1:], i+1):

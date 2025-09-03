@@ -13,6 +13,7 @@ from utils.logging_utils import (
 )
 
 from llm import OllamaClient, LocalLLM
+from llm.multi_model_client import HybridLLMDispatcher
 from vector_store import VectorRetriever, EnhancedRecallOptimizer
 from graph.graph_builder import GraphBuilder
 from graph.graph_index import GraphIndex
@@ -129,13 +130,23 @@ class QueryProcessor:
         else:
             self.recall_optimizer = EnhancedRecallOptimizer(self.vector_retriever, self.graph_retriever)
 
-        self.ollama = OllamaClient()
+        # 初始化LLM客户端 - 支持混合模式
+        llm_provider = config.get('llm.provider', 'ollama')
+        if llm_provider == 'hybrid_llm':
+            self.llm_client = HybridLLMDispatcher()
+            logger.info("Using HybridLLMDispatcher for intelligent task routing")
+        else:
+            self.llm_client = OllamaClient()
+            logger.info(f"Using single LLM provider: {llm_provider}")
+        
+        # 保持向后兼容性
+        self.ollama = self.llm_client
         self.atomic_notes = atomic_notes
         
         # 初始化子问题分解组件
         self.use_subquestion_decomposition = config.get('query.use_subquestion_decomposition', False)
         if self.use_subquestion_decomposition:
-            self.subquestion_planner = SubQuestionPlanner(llm_client=self.ollama)
+            self.subquestion_planner = SubQuestionPlanner(llm_client=self.llm_client)
             self.evidence_merger = EvidenceMerger()
             self.parallel_retrieval = config.get('query.subquestion.parallel_retrieval', True)
             logger.info("Sub-question decomposition enabled")
@@ -1567,7 +1578,9 @@ class QueryProcessor:
             context = "\n".join(n.get('content','') for n in selected_notes)
         
         # 生成答案和评分
-        answer = self.ollama.generate_final_answer(context, query)
+        # 将context和query合并为一个prompt以兼容HybridLLMDispatcher
+        prompt = f"Context: {context}\n\nQuestion: {query}"
+        answer = self.ollama.generate_final_answer(prompt)
         scores = self.ollama.evaluate_answer(query, context, answer)
 
         # 收集所有相关的paragraph idx信息
@@ -1658,7 +1671,8 @@ class QueryProcessor:
             
             # Step 5: Generate final answer using original query
             context = "\n".join(n.get('content', '') for n in selected_notes)
-            answer = self.ollama.generate_final_answer(context, query)
+            prompt = f"Context: {context}\n\nQuery: {query}"
+            answer = self.ollama.generate_final_answer(prompt)
             scores = self.ollama.evaluate_answer(query, context, answer)
             
             # Step 6: Collect paragraph indices

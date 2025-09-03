@@ -4,8 +4,8 @@
 # 系统基础配置
 system:
   project_name: "ano-rag"  # 项目名称，用于标识和日志记录
-  seed: 42                 # 随机种子，确保实验结果可复现
-  device: "cpu"            # 计算设备：cpu/cuda，影响模型推理速度
+  # seed: 42                 # 随机种子，确保实验结果可复现
+  device: "cuda"            # 计算设备：cpu/cuda，影响模型推理速度
 
 # 文档处理配置
 document:
@@ -35,9 +35,9 @@ retrieval:
   min_per_subq: 1          # 每个子问题最小召回数量，硬约束
   # 性能控制配置
   performance:
-    max_fallback_per_step: 3      # 每个回补步骤的最大候选数量
-    max_graph_expansion: 5        # 图扩展的最大候选数量
-    max_entity_lookup: 2          # 实体查找的最大实体数量
+    max_fallback_per_step: 8      # 每个回补步骤的最大候选数量
+    max_graph_expansion: 15        # 图扩展的最大候选数量
+    max_entity_lookup: 12          # 实体查找的最大实体数量
     fallback_timeout_ms: 1000     # 回补检索超时时间（毫秒）
     max_total_fallback: 10        # 总回补候选数量上限
   # 图感知两阶段rerank配置
@@ -67,7 +67,7 @@ retrieval:
   rerank:
     entity_overlap_weight: 0.4     # 实体重叠打分权重
     path_consistency_weight: 0.3   # 链路一致性打分权重
-    semantic_weight: 0.3           # 语义相似度权重
+    semantic_weight: 0.35           # 语义相似度权重
     soft_penalty_no_entity: 0.7    # 无实体命中时的软惩罚系数
     rrf_k: 60               # RRF融合参数，仅在fusion_method为rrf时使用
   bm25:                     # BM25检索参数
@@ -106,7 +106,7 @@ path_aware:
 
 # 结果分发器配置
 dispatcher:
-  final_semantic_count: 5   # 最终语义检索结果数量（减少）
+  final_semantic_count: 7   # 最终语义检索结果数量（减少）
   final_graph_count: 30      # 最终图谱检索结果数量（增加）
   bridge_policy: "boost"  # 桥接策略：none无|keepalive保活|boost增强
   bridge_boost_epsilon: 0.03  # 桥接增强的epsilon参数
@@ -118,10 +118,32 @@ scheduler:
 
 # 大语言模型配置
 llm:
-  provider: "lmstudio"      # LLM提供商：lmstudio/openai/ollama等
+  provider: "hybrid_llm"      # LLM提供商：lmstudio/openai/ollama/hybrid_llm等
   model: "openai/gpt-oss-20b"   # 模型名称，需与provider匹配
   temperature: 0.1          # 生成温度，控制输出随机性（0-1）
   max_output_tokens: 8192    # 最大输出token数量
+  
+  # 混合LLM配置（当provider为hybrid_llm时生效）
+  hybrid_llm:
+    mode: "task_division"    # 混合模式：task_division任务划分|competitive竞争模式
+    
+    # 轻量级任务配置（使用Ollama）
+    light_tasks:
+      model: "qwen2.5:latest" # 轻量级任务模型
+      base_url: "http://localhost:11434"  # Ollama服务地址
+      timeout: 30             # 请求超时时间（秒）
+      max_async: 16            # 最大异步请求数
+      # max_tokens: 1024        # 最大输出token数
+      num_ctx: 32768           # 上下文窗口大小
+      temperature: 0.1        # 生成温度
+    
+    # 重量级任务配置（使用LM Studio）
+    heavy_tasks:
+      provider: "lmstudio"    # 重量级任务提供商
+      model: "openai/gpt-oss-20b"  # 重量级任务模型
+      base_url: "http://localhost:1234/v1"  # LM Studio服务地址
+      instances: 2            # LM Studio实例数量
+      timeout: 60             # 请求超时时间（秒）
 
 # 检索护栏配置
 guardrail:
@@ -143,7 +165,7 @@ enhanced_relation_extraction:
   use_llm_extraction: true     # 是否启用LLM增强的语义关系提取
   use_fast_model: true          # 是否使用快速模型
   enable_topic_groups: true     # 是否启用主题组关系提取
-  enable_reasoning_paths: false  # 是否启用推理路径关系提取（这是您询问的开关）
+  enable_reasoning_paths: false  # 是否启用推理路径关系提取
   
   # 轻量级关系类型功能
   lightweight_relations:
@@ -170,18 +192,3 @@ enhanced_relation_extraction:
     entity_alignment_threshold: 0.8  # 实体对齐警告阈值（80%实体缺失才警告）
     export_report: true     # 是否导出检查报告
     report_format: "json"   # 报告格式：json/yaml/txt
-  
-  # 事件链感知分块功能
-  # event_aware_chunking:
-  #   enabled: true           # 是否启用事件链感知的文档分块
-  #   optimization_level: "medium"  # 优化级别：low/medium/high
-  #   event_keywords:         # 事件关键词配置
-  #     succession: ["继任", "接任", "担任", "就任", "上任"]
-  #     acquisition: ["收购", "并购", "购买", "买入", "获得"]
-  #     ownership: ["拥有", "持有", "控股", "占股", "股权"]
-  #     bankruptcy: ["破产", "倒闭", "清算", "重组", "债务"]
-  #     merger: ["合并", "整合", "联合", "重组", "合资"]
-  #     partnership: ["合作", "联盟", "伙伴", "协议", "签约"]
-  #   proximity_threshold: 500  # 事件关联距离阈值（字符数）
-  #   max_chunk_expansion: 1.5  # 最大块扩展倍数
-  #   merge_overlap_threshold: 0.7  # 块合并重叠阈值

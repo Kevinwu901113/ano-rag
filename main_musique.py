@@ -231,7 +231,8 @@ class MusiqueProcessor:
     
     def process_dataset(self, input_file: str, output_file: str, atomic_notes_file: str = None, 
                        parallel: bool = True, use_engine_parallel: bool = False, 
-                       parallel_workers: int = 4, parallel_strategy: str = 'hybrid') -> None:
+                       parallel_workers: int = 4, parallel_strategy: str = 'hybrid',
+                       continue_from_existing: bool = False) -> None:
         """批量处理musique数据集"""
         logger.info(f"Starting batch processing of {input_file}")
         
@@ -261,12 +262,39 @@ class MusiqueProcessor:
         if atomic_notes_file:
             os.makedirs(os.path.dirname(atomic_notes_file), exist_ok=True)
         
-        # 初始化输出文件（清空或创建）
-        with open(output_file, 'w', encoding='utf-8') as f:
-            pass  # 清空文件
-        if atomic_notes_file:
-            with open(atomic_notes_file, 'w', encoding='utf-8') as f:
+        # 处理已完成的项目（继续模式）
+        processed_ids = set()
+        if continue_from_existing and os.path.exists(output_file):
+            logger.info(f"Continue mode: checking existing results in {output_file}")
+            try:
+                with open(output_file, 'r', encoding='utf-8') as f:
+                    for line in f:
+                        if line.strip():
+                            result = json.loads(line.strip())
+                            processed_ids.add(result.get('id'))
+                logger.info(f"Found {len(processed_ids)} already processed items")
+            except Exception as e:
+                logger.warning(f"Failed to read existing results: {e}")
+                processed_ids = set()
+        
+        # 过滤出未处理的项目
+        if continue_from_existing and processed_ids:
+            original_count = len(items)
+            items = [item for item in items if item.get('id') not in processed_ids]
+            logger.info(f"Filtered items: {original_count} -> {len(items)} (skipped {len(processed_ids)} already processed)")
+        
+        # 如果不是继续模式，初始化输出文件（清空或创建）
+        if not continue_from_existing:
+            with open(output_file, 'w', encoding='utf-8') as f:
                 pass  # 清空文件
+            if atomic_notes_file:
+                with open(atomic_notes_file, 'w', encoding='utf-8') as f:
+                    pass  # 清空文件
+        
+        # 如果所有项目都已处理完成
+        if not items:
+            logger.info("All items have been processed. Nothing to do.")
+            return
         
         results = []
         atomic_notes_records = []  # 用于保存召回的原子文档信息
@@ -595,6 +623,12 @@ def main():
         work_dir=work_dir,
         llm=shared_llm
     )
+    
+    # 确定是否为继续模式（非new且工作目录已存在且输出文件已存在）
+    continue_from_existing = not args.new and os.path.exists(work_dir) and os.path.exists(output_file)
+    if continue_from_existing:
+        logger.info(f"Continue mode enabled: will resume from existing results in {output_file}")
+    
     processor.process_dataset(
         args.input_file, 
         output_file, 
@@ -602,7 +636,8 @@ def main():
         parallel=not args.serial,
         use_engine_parallel=args.use_engine_parallel,
         parallel_workers=args.parallel_workers,
-        parallel_strategy=args.parallel_strategy
+        parallel_strategy=args.parallel_strategy,
+        continue_from_existing=continue_from_existing
     )
 
 

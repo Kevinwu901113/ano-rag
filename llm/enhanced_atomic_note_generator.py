@@ -25,6 +25,15 @@ class EnhancedAtomicNoteGenerator:
         if llm is None:
             raise ValueError("EnhancedAtomicNoteGenerator requires a LocalLLM instance to be passed")
         self.llm = llm
+        
+        # 检查是否为hybrid模式并初始化HybridLLMDispatcher
+        self.is_hybrid_mode = getattr(llm, 'is_hybrid_mode', False)
+        self.hybrid_dispatcher = None
+        if self.is_hybrid_mode:
+            from .multi_model_client import HybridLLMDispatcher
+            self.hybrid_dispatcher = HybridLLMDispatcher()
+            logger.info("EnhancedAtomicNoteGenerator initialized in hybrid_llm mode")
+        
         self.batch_processor = BatchProcessor(
             batch_size=config.get('document.batch_size', 32),
             use_gpu=config.get('performance.use_gpu', True)
@@ -244,7 +253,11 @@ class EnhancedAtomicNoteGenerator:
         
         prompt = ATOMIC_NOTEGEN_PROMPT.format(text=text)
         
-        response = self.llm.generate(prompt, system_prompt)
+        # 根据模式选择生成器
+        if self.is_hybrid_mode and self.hybrid_dispatcher:
+            response = self.hybrid_dispatcher.process_single(prompt, system_prompt)
+        else:
+            response = self.llm.generate(prompt, system_prompt)
         
         try:
             # 清理响应，提取JSON部分

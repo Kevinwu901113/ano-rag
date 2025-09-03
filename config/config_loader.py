@@ -49,7 +49,28 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "bridge_boost_epsilon": 0.02,
         "debug_log": True,
     },
-    "llm": {"provider": "openai", "model": "gpt-3.5-turbo", "temperature": 0.7, "max_output_tokens": 512},
+    "llm": {
+        "provider": "openai", 
+        "model": "gpt-3.5-turbo", 
+        "temperature": 0.7, 
+        "max_output_tokens": 512,
+        "hybrid_llm": {
+            "mode": "task_division",
+            "light_tasks": {
+                "provider": "ollama",
+                "model": "qwen2.5:latest",
+                "base_url": "http://localhost:11434",
+                "timeout": 30
+            },
+            "heavy_tasks": {
+                "provider": "lmstudio",
+                "model": "openai/gpt-oss-20b",
+                "base_url": "http://localhost:1234/v1",
+                "instances": 2,
+                "timeout": 60
+            }
+        }
+    },
     "guardrail": {"enabled": True, "min_results": 1, "min_score": 0.0, "timeout_seconds": 30},
     "vector_store": {
         "top_k": 20,
@@ -120,6 +141,22 @@ class ConfigLoader:
                 return default
         return value
 
+    def set(self, key: str, value: Any):
+        """Set a configuration value using dot notation."""
+        config = self.load_config()
+        keys = key.split('.')
+        current = config
+        
+        # Navigate to the parent of the target key
+        for k in keys[:-1]:
+            if k not in current:
+                current[k] = {}
+            current = current[k]
+        
+        # Set the final key
+        current[keys[-1]] = value
+        self._config = config
+    
     def update_config(self, updates: Dict[str, Any]):
         config = self.load_config()
         # shallow update only for existing keys

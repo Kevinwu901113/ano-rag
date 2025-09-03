@@ -6,7 +6,7 @@ from config import config
 from .ollama_client import OllamaClient
 from .openai_client import OpenAIClient
 from .lmstudio_client import LMStudioClient
-from .multi_model_client import MultiModelClient
+from .multi_model_client import MultiModelClient, HybridLLMDispatcher
 
 
 class LLMFactory:
@@ -22,6 +22,7 @@ class LLMFactory:
         'openai': OpenAIClient,
         'lmstudio': LMStudioClient,  # 使用统一的 LM Studio 客户端（支持单实例和并发）
         'multi_model': MultiModelClient,  # 多模型并行客户端
+        'hybrid_llm': HybridLLMDispatcher,  # 混合LLM智能调度器
     }
     
     @classmethod
@@ -57,6 +58,8 @@ class LLMFactory:
                 return cls._create_lmstudio_provider(**kwargs)
             elif provider_type == 'multi_model':
                 return cls._create_multi_model_provider(**kwargs)
+            elif provider_type == 'hybrid_llm':
+                return cls._create_hybrid_llm_provider(**kwargs)
             else:
                 raise ValueError(f"Unknown provider type: {provider_type}")
                 
@@ -128,6 +131,19 @@ class LLMFactory:
         
         logger.info(f"Creating LM Studio provider in {mode} mode with model: {model} on port: {port}")
         return LMStudioClient(base_url=base_url, model=model, port=port)
+    
+    @classmethod
+    def _create_hybrid_llm_provider(cls, **kwargs) -> HybridLLMDispatcher:
+        """创建混合LLM调度器
+        
+        Args:
+            **kwargs: 额外参数
+            
+        Returns:
+            HybridLLMDispatcher 实例
+        """
+        logger.info("Creating Hybrid LLM Dispatcher for intelligent task routing")
+        return HybridLLMDispatcher()
     
     @classmethod
     def _create_multi_model_provider(cls, **kwargs) -> MultiModelClient:
