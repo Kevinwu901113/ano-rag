@@ -72,6 +72,33 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         }
     },
     "guardrail": {"enabled": True, "min_results": 1, "min_score": 0.0, "timeout_seconds": 30},
+    "atomic_note_generation": {
+        "parallel_enabled": False,
+        "parallel_strategy": "task_division",
+        "task_division": {
+            "enabled": True,
+            "allocation_method": "round_robin",
+            "enable_fallback": True,
+            "fallback_timeout": 10
+        },
+        "ollama": {
+            "model": "qwen2.5:latest",
+            "base_url": "http://localhost:11434",
+            "timeout": 30,
+            "temperature": 0.1
+        },
+        "lmstudio": {
+            "model": "qwen2.5-7b-instruct",
+            "base_url": "http://localhost:1234/v1",
+            "timeout": 60,
+            "temperature": 0.1
+        },
+        "monitoring": {
+            "enabled": True,
+            "log_stats": True,
+            "export_metrics": False
+        }
+    },
     "vector_store": {
         "top_k": 20,
         "similarity_threshold": 0.5,

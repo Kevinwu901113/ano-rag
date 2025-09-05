@@ -873,7 +873,15 @@ class TaskClassifier:
             "extract keywords",
             "提取实体",
             "提取关键词",
-            "知识提取"
+            "知识提取",
+            "知识点",
+            "转换为知识点",
+            "文档内容转换",
+            "结构化提取",
+            "信息提取",
+            "content", "keywords", "entities",  # JSON字段名
+            "生成结构化",
+            "输出为JSON"
         }
         
         # 任务分类阈值
@@ -900,17 +908,17 @@ class TaskClassifier:
         query_lower = query.lower()
         full_text = f"{query} {context}".strip()
         
-        # 特殊检测：原子笔记生成任务
+        # 特殊检测：原子笔记生成任务 - 修改为heavy任务以使用LM Studio
         for pattern in self.atomic_note_patterns:
             if pattern.lower() in query_lower or pattern.lower() in context.lower():
-                logger.debug(f"Detected atomic note generation task, classifying as light: {pattern}")
-                return "light"
+                logger.debug(f"Detected atomic note generation task, classifying as heavy to use LM Studio: {pattern}")
+                return "heavy"
         
-        # 检测是否包含JSON格式要求（原子笔记生成的特征）
+        # 检测是否包含JSON格式要求（原子笔记生成的特征）- 修改为heavy任务
         if ("json" in query_lower and ("content" in query_lower or "keywords" in query_lower or "entities" in query_lower)) or \
            ("JSON格式" in query or "json格式" in query_lower):
-            logger.debug("Detected JSON format requirement for structured extraction, classifying as light")
-            return "light"
+            logger.debug("Detected JSON format requirement for structured extraction, classifying as heavy to use LM Studio")
+            return "heavy"
         
         # 1. 关键词匹配
         heavy_score = sum(1 for keyword in self.heavy_keywords if keyword in query)

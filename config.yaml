@@ -142,7 +142,7 @@ llm:
       provider: "lmstudio"    # 重量级任务提供商
       model: "openai/gpt-oss-20b"  # 重量级任务模型
       base_url: "http://localhost:1234/v1"  # LM Studio服务地址
-      instances: 2            # LM Studio实例数量
+      instances: 1            # LM Studio实例数量
       timeout: 60             # 请求超时时间（秒）
 
 # 检索护栏配置
@@ -159,6 +159,40 @@ feature_switches:
     enabled: true           # 是否启用基于源文档信息的稳定note_id生成
     use_content_hash: true  # 是否使用内容哈希作为备选方案
     fallback_to_index: true # 无其他信息时是否回退到索引方式
+
+# 原子笔记生成并行处理配置
+atomic_note_generation:
+  # 并行处理策略
+  parallel_enabled: true        # 是否启用并行处理
+  parallel_strategy: "task_division"  # 并行策略：task_division任务分配|competitive竞争模式|quality_selection质量选择
+  
+  # 任务分配配置（task_division策略）
+  task_division:
+    enabled: true               # 是否启用任务分配策略
+    allocation_method: "round_robin"  # 分配方法：round_robin轮询|batch_split批次分割
+    enable_fallback: true       # 是否启用失败回退机制
+    fallback_timeout: 60        # 回退超时时间（秒）- 增加到60秒以避免超时错误
+    
+  # Ollama配置（用于原子笔记生成）
+  ollama:
+    model: "qwen2.5:latest"     # Ollama模型名称
+    base_url: "http://localhost:11434"  # Ollama服务地址
+    timeout: 30                 # 请求超时时间（秒）
+    max_async: 16               # 最大异步请求数
+    temperature: 0.1            # 生成温度
+    
+  # LM Studio配置（用于原子笔记生成）
+  lmstudio:
+    model: "qwen2.5-7b-instruct"     # LM Studio模型名称
+    base_url: "http://localhost:1234/v1"  # LM Studio服务地址
+    timeout: 60                 # 请求超时时间（秒）
+    temperature: 0.1            # 生成温度
+    
+  # 性能监控配置
+  monitoring:
+    enabled: true               # 是否启用性能监控
+    log_stats: true             # 是否记录统计信息
+    export_metrics: false       # 是否导出性能指标
 
 # 增强关系提取配置
 enhanced_relation_extraction:

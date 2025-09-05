@@ -44,6 +44,7 @@ class OllamaClient:
         system_prompt: str | None = None,
         *,
         stream: bool = False,
+        timeout: int | None = None,
         **kwargs: Any,
     ) -> str:
         """Generate text from a prompt with improved error handling."""
@@ -55,19 +56,34 @@ class OllamaClient:
             "num_ctx": kwargs.get("num_ctx", self.num_ctx),
         })
         
+        # Use provided timeout or default
+        request_timeout = timeout or self.timeout
+        
         # Prepare the full prompt
         full_prompt = prompt
         if system_prompt:
             full_prompt = f"{system_prompt}\n\n{prompt}"
         
         try:
-            # Use the original generate API
-            response = self.client.generate(
-                model=self.model,
-                prompt=full_prompt,
-                stream=stream,
-                options=options,
-            )
+            # Use thread-safe timeout mechanism
+            import concurrent.futures
+            import threading
+            
+            def generate_with_timeout():
+                return self.client.generate(
+                    model=self.model,
+                    prompt=full_prompt,
+                    stream=stream,
+                    options=options,
+                )
+            
+            # Use ThreadPoolExecutor for timeout control
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+                future = executor.submit(generate_with_timeout)
+                try:
+                    response = future.result(timeout=request_timeout)
+                except concurrent.futures.TimeoutError:
+                    raise TimeoutError(f"Ollama request timed out after {request_timeout} seconds")
 
             text: str = ""
             if stream:
@@ -80,8 +96,14 @@ class OllamaClient:
                 else:
                     text = str(response)
 
+            if not text or text.strip() == "":
+                raise ValueError("Ollama returned empty response")
+
             return self._clean_response(text)
             
+        except TimeoutError as e:
+            logger.error(f"Timeout error: {e}")
+            raise e
         except Exception as e:
             # Log the specific error for debugging
             error_msg = str(e)
@@ -89,9 +111,11 @@ class OllamaClient:
                 logger.error(f"Connection error: Ollama service is not responding - {e}")
             elif "model" in error_msg.lower() and "not found" in error_msg.lower():
                 logger.error(f"Model error: Model '{self.model}' not found - {e}")
+            elif "timeout" in error_msg.lower():
+                logger.error(f"Timeout error: Request exceeded {request_timeout}s - {e}")
             else:
                 logger.error(f"Generation failed: {e} (status code: {getattr(e, 'status_code', 'unknown')})")
-            return ""
+            raise e
 
     def chat(
         self,

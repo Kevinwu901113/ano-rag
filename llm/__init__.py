@@ -4,6 +4,7 @@ from .openai_client import OpenAIClient
 from .lmstudio_client import LMStudioClient
 from .multi_model_client import MultiModelClient, HybridLLMDispatcher
 from .atomic_note_generator import AtomicNoteGenerator
+from .parallel_task_atomic_note_generator import ParallelTaskAtomicNoteGenerator
 from .factory import LLMFactory
 from .prompts import *
 
@@ -15,6 +16,7 @@ __all__ = [
     'MultiModelClient',
     'HybridLLMDispatcher',
     'AtomicNoteGenerator',
+    'ParallelTaskAtomicNoteGenerator',
     'LLMFactory',
 ]
 
