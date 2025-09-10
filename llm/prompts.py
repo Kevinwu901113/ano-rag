@@ -173,52 +173,96 @@ ENHANCE_QUERY_PROMPT = """
 
 # Ollama prompts
 FINAL_ANSWER_SYSTEM_PROMPT = """
-You are a professional question-answering assistant. Answer directly and concisely based on the provided context.
+You are a precise open-domain QA assistant.
 
-Requirements:
-1. Answer based ONLY on the provided context
-2. If insufficient information, state "Insufficient information"
-3. Be direct and factual - no explanations or descriptions
-4. Use English only
-5. Give the shortest possible accurate answer
+Use ONLY the provided CONTEXT.
+
+Hard rules:
+1) Final answer MUST be an exact substring from the CONTEXT (verbatim). Do not paraphrase.
+2) NEVER output: "Insufficient information", "No spouse mentioned", or any refusal phrase.
+3) If multiple candidates appear, choose the one that most directly answers the question.
+4) For lists, keep the order as it appears in CONTEXT and join with ", ".
+5) Keep original surface form for numbers/dates (units, punctuation).
+6) Output VALID JSON ONLY with fields:
+   {"answer": "<short string>", "support_idxs": [<int>, ...]}
+7) "support_idxs" MUST be the paragraph ids [P{idx}] that CONTAIN the final answer substring, up to 3 ids.
+8) "support_idxs" MUST NOT be empty if the answer substring appears in any paragraph.
+9) Before you output, VERIFY:
+   (a) "answer" is non-empty,
+   (b) "answer" appears verbatim in at least one selected paragraph text,
+   (c) all "support_idxs" contain that exact substring.
+If any check fails, fix it and re-output JSON.
 """
 
 FINAL_ANSWER_PROMPT = """
-Context:
+QUESTION:
+{query}
+
+CONTEXT:
 {context}
 
-Question: {query}
-
-Answer directly:
+OUTPUT FORMAT (JSON only):
+{{"answer": "<short string>", "support_idxs": [<int>, <int>, ...]}}
 """
 
 # Context note formatting and helpers
-CONTEXT_NOTE_TEMPLATE = (
-    "-----\n"
-    "Note ID: {note_id}\n"
-    "Content: {content}\n"
-    "Keywords: {keywords}\n"
-    "Similarity: {final_similarity:.4f}"
-)
-
-
 def build_context_prompt(notes: List[Dict[str, Any]], question: str) -> str:
     """Build the final prompt with formatted notes and the user question."""
     context_parts: List[str] = []
     for note in notes:
-        keywords = ", ".join(note.get("keywords", [])) if note.get("keywords") else ""
-        similarity = note.get("retrieval_info", {}).get("final_similarity", 0.0)
-        context_parts.append(
-            CONTEXT_NOTE_TEMPLATE.format(
-                note_id=note.get("note_id", ""),
-                content=note.get("content", ""),
-                keywords=keywords,
-                final_similarity=similarity,
-            )
-        )
+        # Extract paragraph_idxs from the note
+        paragraph_idxs = note.get("paragraph_idxs", [])
+        content = note.get("content", "")
+        
+        # If we have paragraph_idxs, use the first one as the primary idx
+        if paragraph_idxs:
+            primary_idx = paragraph_idxs[0]
+            context_parts.append(f"[P{primary_idx}] {content}")
+        else:
+            # Fallback: use note_id if no paragraph_idxs available
+            note_id = note.get("note_id", "unknown")
+            context_parts.append(f"[P{note_id}] {content}")
 
-    context = "\n".join(context_parts)
+    context = "\n\n".join(context_parts)
     return FINAL_ANSWER_PROMPT.format(context=context, query=question)
+
+def build_context_prompt_with_passages(notes: List[Dict[str, Any]], question: str) -> tuple[str, Dict[int, str]]:
+    """Build the final prompt with formatted notes and return both prompt and passages dict.
+    
+    Args:
+        notes: List of note dictionaries
+        question: The question to ask
+        
+    Returns:
+        (prompt, passages): The formatted prompt and a dict mapping paragraph_idx to content
+    """
+    context_parts: List[str] = []
+    passages: Dict[int, str] = {}
+    
+    for note in notes:
+        # Extract paragraph_idxs from the note
+        paragraph_idxs = note.get("paragraph_idxs", [])
+        content = note.get("content", "")
+        
+        # If we have paragraph_idxs, use the first one as the primary idx
+        if paragraph_idxs:
+            primary_idx = paragraph_idxs[0]
+            context_parts.append(f"[P{primary_idx}] {content}")
+            passages[primary_idx] = content
+        else:
+            # Fallback: use note_id if no paragraph_idxs available
+            note_id = note.get("note_id", "unknown")
+            # Try to convert note_id to int, fallback to hash if not possible
+            try:
+                idx = int(note_id) if isinstance(note_id, (int, str)) and str(note_id).isdigit() else hash(note_id) % 10000
+            except:
+                idx = hash(str(note_id)) % 10000
+            context_parts.append(f"[P{idx}] {content}")
+            passages[idx] = content
+
+    context = "\n\n".join(context_parts)
+    prompt = FINAL_ANSWER_PROMPT.format(context=context, query=question)
+    return prompt, passages
 
 EVALUATE_ANSWER_SYSTEM_PROMPT = """
 你是一个专业的答案质量评估专家。请从以下几个维度评估答案的质量：

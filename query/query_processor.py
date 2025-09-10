@@ -5,6 +5,7 @@ import numpy as np
 import concurrent.futures
 import threading
 import time
+import json
 
 # 导入增强的日志功能
 from utils.logging_utils import (
@@ -14,6 +15,8 @@ from utils.logging_utils import (
 
 from llm import OllamaClient, LocalLLM
 from llm.multi_model_client import HybridLLMDispatcher
+from llm.prompts import build_context_prompt, build_context_prompt_with_passages
+from utils.robust_json_parser import extract_prediction_with_retry
 from vector_store import VectorRetriever, EnhancedRecallOptimizer
 from graph.graph_builder import GraphBuilder
 from graph.graph_index import GraphIndex
@@ -1575,24 +1578,26 @@ class QueryProcessor:
                 f"Final scheduling: {len(candidate_notes)} candidates -> {len(selected_notes)} selected: "
                 f"{[n.get('note_id') for n in selected_notes]}"
             )
-            context = "\n".join(n.get('content','') for n in selected_notes)
-        
         # 生成答案和评分
-        # 将context和query合并为一个prompt以兼容HybridLLMDispatcher
-        prompt = f"Context: {context}\n\nQuestion: {query}"
-        answer = self.ollama.generate_final_answer(prompt)
-        scores = self.ollama.evaluate_answer(query, context, answer)
-
-        # 收集所有相关的paragraph idx信息
-        predicted_support_idxs = []
-        for n in selected_notes:
-            n['feedback_score'] = scores.get('relevance',0)
-            # 从原子笔记中提取paragraph_idxs
-            if 'paragraph_idxs' in n and n['paragraph_idxs']:
-                predicted_support_idxs.extend(n['paragraph_idxs'])
+        # 使用新的 build_context_prompt_with_passages 函数生成带有 [P{idx}] 标签的上下文和passages字典
+        prompt, passages = build_context_prompt_with_passages(selected_notes, query)
+        raw_answer = self.ollama.generate_final_answer(prompt)
         
-        # 去重并排序
-        predicted_support_idxs = sorted(list(set(predicted_support_idxs)))
+        # 使用鲁棒的JSON解析器，带重试机制
+        def retry_generate():
+            return self.ollama.generate_final_answer(prompt)
+        
+        answer, predicted_support_idxs = extract_prediction_with_retry(
+            raw_answer, passages, retry_func=retry_generate, max_retries=1
+        )
+        
+        # 评估答案质量
+        context = "\n".join(n.get('content','') for n in selected_notes)
+        scores = self.ollama.evaluate_answer(query, context, answer)
+        
+        # 为笔记添加反馈分数
+        for n in selected_notes:
+            n['feedback_score'] = scores.get('relevance', 0)
 
         result = {
             'query': query,
@@ -1670,19 +1675,25 @@ class QueryProcessor:
                         raise
             
             # Step 5: Generate final answer using original query
+            # 使用新的 build_context_prompt_with_passages 函数生成带有 [P{idx}] 标签的上下文和passages字典
+            prompt, passages = build_context_prompt_with_passages(selected_notes, query)
+            raw_answer = self.ollama.generate_final_answer(prompt)
+            
+            # 使用鲁棒的JSON解析器，带重试机制
+            def retry_generate():
+                return self.ollama.generate_final_answer(prompt)
+            
+            answer, predicted_support_idxs = extract_prediction_with_retry(
+                raw_answer, passages, retry_func=retry_generate, max_retries=1
+            )
+            
+            # Step 6: Evaluate answer and collect feedback
             context = "\n".join(n.get('content', '') for n in selected_notes)
-            prompt = f"Context: {context}\n\nQuery: {query}"
-            answer = self.ollama.generate_final_answer(prompt)
             scores = self.ollama.evaluate_answer(query, context, answer)
             
-            # Step 6: Collect paragraph indices
-            predicted_support_idxs = []
+            # 为笔记添加反馈分数
             for n in selected_notes:
                 n['feedback_score'] = scores.get('relevance', 0)
-                if 'paragraph_idxs' in n and n['paragraph_idxs']:
-                    predicted_support_idxs.extend(n['paragraph_idxs'])
-            
-            predicted_support_idxs = sorted(list(set(predicted_support_idxs)))
             
             # Step 7: Prepare result with sub-question information
             rewrite = {

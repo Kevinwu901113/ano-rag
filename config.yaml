@@ -31,6 +31,13 @@ vector_store:
 
 # 检索策略配置
 retrieval:
+  bm25_topk_hop1: 40         # 原来若 <=15，建议拉高
+  embed_topk_hop1: 30
+  bm25_topk_hop2: 12
+  embed_topk_hop2: 8
+  query_rewrites_hop1: 2     # 针对桥接实体，生成 2 个改写
+  title_dedup: true          # 同一 title 仅留 1 段
+  entity_norm_dedup: true
   candidate_pool: 80        # 全局候选池大小，影响最终检索质量
   min_per_subq: 1          # 每个子问题最小召回数量，硬约束
   # 性能控制配置
@@ -56,6 +63,31 @@ retrieval:
   rho: 0.25                # 上下文覆盖上限
   lambda_len: 0.05         # 路径长度惩罚系数
   query_mode: auto         # 查询模式：precise/explanatory/auto
+  
+  # 扩展配置
+  expansion:
+    max_neighbors_hop1: 3      # K-hop 扩展扇出
+    max_neighbors_hop2: 2
+    degree_cap: 50             # 图上高频节点的邻居上限（防止百科类节点爆炸）
+  
+  # 重排配置
+  rerank:
+    cross_encoder: "bge-reranker-large"  # 或 monoT5 / E5-reranker
+    final_topk: 10
+    margin_threshold: 0.15     # 低于阈值的直接裁掉
+    diversity_by_title: true
+  
+  # 上下文配置
+  context:
+    max_tokens: 1800           # 控制"准而不泛滥"，避免把无关段落一并带入
+    per_title_max: 1
+    per_entity_sentences: 2    # 从命中的段落摘 2 句"证据句"
+    evidence_first: true       # 证据句放在每段开头
+  
+  # 桥接感知配置
+  bridge_aware:
+    hop2_query: "{bridge_entity} {question_subgoal}"  # 二跳检索必须包含一跳的桥实体
+    require_bridge_hit: true   # hop2 候选中至少要有若干桥实体命中
   hybrid:                   # 混合检索配置
     enabled: true           # 是否启用混合检索（向量+BM25+图谱）
     fusion_method: "linear"  # 融合方法：linear线性加权|rrf倒数排名融合|weighted_sum加权求和
