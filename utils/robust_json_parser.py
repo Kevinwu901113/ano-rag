@@ -121,8 +121,21 @@ def extract_prediction_with_retry(raw_llm_output: str, passages: Dict[int, str],
             else:
                 # 最后一次尝试失败，回退到旧逻辑
                 logger.error(f"All attempts failed, falling back to raw answer: {raw_llm_output}")
-                # 简单的回退逻辑
-                fallback_answer = raw_llm_output.strip() if raw_llm_output.strip() else "No answer found"
+                # 改进的回退逻辑：避免返回空答案
+                from config import config
+                json_parsing_config = config.get('retrieval.json_parsing', {})
+                default_fallback = json_parsing_config.get('fallback_message', "Unable to extract a meaningful answer from the provided context")
+                
+                fallback_answer = raw_llm_output.strip() if raw_llm_output.strip() else "Unable to generate a valid answer"
+                
+                # 如果原始输出包含空的JSON答案，使用配置的回退消息
+                try:
+                    parsed_data = parse_llm_json(raw_llm_output)
+                    if not parsed_data.get("answer", "").strip():
+                        fallback_answer = default_fallback
+                except:
+                    pass
+                
                 fallback_idxs = list(passages.keys())[:3] if passages else []
                 return fallback_answer, fallback_idxs
     

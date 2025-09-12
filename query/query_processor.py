@@ -1587,8 +1587,12 @@ class QueryProcessor:
         def retry_generate():
             return self.ollama.generate_final_answer(prompt)
         
+        # 从配置获取重试参数
+        json_parsing_config = config.get('retrieval.json_parsing', {})
+        max_retries = json_parsing_config.get('max_retries', 3)
+        
         answer, predicted_support_idxs = extract_prediction_with_retry(
-            raw_answer, passages, retry_func=retry_generate, max_retries=1
+            raw_answer, passages, retry_func=retry_generate, max_retries=max_retries
         )
         
         # 评估答案质量
@@ -1684,8 +1688,8 @@ class QueryProcessor:
                 return self.ollama.generate_final_answer(prompt)
             
             answer, predicted_support_idxs = extract_prediction_with_retry(
-                raw_answer, passages, retry_func=retry_generate, max_retries=1
-            )
+            raw_answer, passages, retry_func=retry_generate, max_retries=3
+        )
             
             # Step 6: Evaluate answer and collect feedback
             context = "\n".join(n.get('content', '') for n in selected_notes)

@@ -513,7 +513,7 @@ class MultiModelClient:
         """Evaluate answer quality using the multi-model system"""
         try:
             eval_prompt = EVALUATE_ANSWER_PROMPT.format(
-                question=question,
+                query=question,
                 answer=answer,
                 context=context
             )
@@ -1198,7 +1198,7 @@ class HybridLLMDispatcher:
             
             # Prepare evaluation prompt
             eval_prompt = EVALUATE_ANSWER_PROMPT.format(
-                question=question,
+                query=question,
                 answer=answer,
                 context=context
             )

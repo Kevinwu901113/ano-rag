@@ -40,6 +40,12 @@ retrieval:
   entity_norm_dedup: true
   candidate_pool: 80        # 全局候选池大小，影响最终检索质量
   min_per_subq: 1          # 每个子问题最小召回数量，硬约束
+  
+  # JSON解析重试配置
+  json_parsing:
+    max_retries: 3           # 最大重试次数，增加重试次数可减少空答案
+    enable_smart_fallback: true  # 启用智能回退逻辑，避免返回空答案
+    fallback_message: "Unable to extract a meaningful answer from the provided context"  # 自定义回退消息
   # 性能控制配置
   performance:
     max_fallback_per_step: 8      # 每个回补步骤的最大候选数量
