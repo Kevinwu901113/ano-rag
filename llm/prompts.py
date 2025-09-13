@@ -185,13 +185,20 @@ Hard rules:
 5) Keep original surface form for numbers/dates (units, punctuation).
 6) Output VALID JSON ONLY with fields:
    {"answer": "<short string>", "support_idxs": [<int>, ...]}
-7) "support_idxs" MUST be the paragraph ids [P{idx}] that CONTAIN the final answer substring, up to 3 ids.
+7) In support_idxs, output 2-4 paragraph ids:
+   - The FIRST id MUST be the paragraph that contains the final answer substring
+   - The remaining ids are bridging paragraphs (may not contain the answer substring)
+   - Do not repeat ids; prioritize paragraphs with high entity overlap with the question or answer paragraph
 8) "support_idxs" MUST NOT be empty if the answer substring appears in any paragraph.
-9) Before you output, VERIFY:
+9) support_idxs 只能来自上文 CONTEXT 中出现的 [P{idx}]。
+10) 禁止发明新的 id；如果不确定，请减少到已出现的 id。
+11) Before you output, VERIFY:
    (a) "answer" is non-empty,
-   (b) "answer" appears verbatim in at least one selected paragraph text,
-   (c) all "support_idxs" contain that exact substring.
+   (b) "answer" appears verbatim in at least one paragraph text,
+   (c) the first "support_idxs" contains that exact substring.
 If any check fails, fix it and re-output JSON.
+
+Only output JSON.
 """
 
 FINAL_ANSWER_PROMPT = """
@@ -226,18 +233,19 @@ def build_context_prompt(notes: List[Dict[str, Any]], question: str) -> str:
     context = "\n\n".join(context_parts)
     return FINAL_ANSWER_PROMPT.format(context=context, query=question)
 
-def build_context_prompt_with_passages(notes: List[Dict[str, Any]], question: str) -> tuple[str, Dict[int, str]]:
-    """Build the final prompt with formatted notes and return both prompt and passages dict.
+def build_context_prompt_with_passages(notes: List[Dict[str, Any]], question: str) -> tuple[str, Dict[int, str], List[int]]:
+    """Build the final prompt with formatted notes and return prompt, passages dict, and packed order.
     
     Args:
         notes: List of note dictionaries
         question: The question to ask
         
     Returns:
-        (prompt, passages): The formatted prompt and a dict mapping paragraph_idx to content
+        (packed_text, passages_by_idx, packed_order): The formatted prompt, a dict mapping paragraph_idx to content, and the order of paragraphs in prompt
     """
     context_parts: List[str] = []
-    passages: Dict[int, str] = {}
+    passages_by_idx: Dict[int, str] = {}
+    packed_order: List[int] = []
     
     for note in notes:
         # Extract paragraph_idxs from the note
@@ -248,7 +256,8 @@ def build_context_prompt_with_passages(notes: List[Dict[str, Any]], question: st
         if paragraph_idxs:
             primary_idx = paragraph_idxs[0]
             context_parts.append(f"[P{primary_idx}] {content}")
-            passages[primary_idx] = content
+            passages_by_idx[primary_idx] = content
+            packed_order.append(primary_idx)
         else:
             # Fallback: use note_id if no paragraph_idxs available
             note_id = note.get("note_id", "unknown")
@@ -258,11 +267,12 @@ def build_context_prompt_with_passages(notes: List[Dict[str, Any]], question: st
             except:
                 idx = hash(str(note_id)) % 10000
             context_parts.append(f"[P{idx}] {content}")
-            passages[idx] = content
+            passages_by_idx[idx] = content
+            packed_order.append(idx)
 
-    context = "\n\n".join(context_parts)
-    prompt = FINAL_ANSWER_PROMPT.format(context=context, query=question)
-    return prompt, passages
+    packed_text = "\n\n".join(context_parts)
+    prompt = FINAL_ANSWER_PROMPT.format(context=packed_text, query=question)
+    return prompt, passages_by_idx, packed_order
 
 EVALUATE_ANSWER_SYSTEM_PROMPT = """
 你是一个专业的答案质量评估专家。请从以下几个维度评估答案的质量：

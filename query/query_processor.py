@@ -38,6 +38,13 @@ from retrieval.query_planner import LLMBasedRewriter
 from retrieval.diversity_scheduler import DiversityScheduler
 from graph.entity_inverted_index import EntityInvertedIndex
 
+# 导入新的无硬编码模块
+from retrieval.learned_fusion import create_learned_fusion
+from reasoning.qa_coverage import create_qa_coverage_scorer
+from answer.span_picker import create_span_picker
+from answer.verify_shell import create_answer_verifier
+from context.packer import ContextPacker
+
 class QueryProcessor:
     """High level query processing pipeline."""
 
@@ -198,9 +205,66 @@ class QueryProcessor:
                 logger.info("PathAwareRanker initialized successfully")
             except Exception as e:
                 logger.error(f"Failed to initialize PathAwareRanker: {e}")
-                self.path_aware_enabled = False
-                self.path_aware_ranker = None
+        
+        # 初始化新的无硬编码模块
+        calibration_path = config.get('calibration.path', 'calibration.json')
+        
+        # 初始化可学习融合器
+        try:
+            fusion_model_type = config.get('learned_fusion.model_type', 'linear')
+            self.learned_fusion = create_learned_fusion(
+                model_type=fusion_model_type,
+                calibration_path=calibration_path
+            )
+            self.use_learned_fusion = config.get('learned_fusion.enabled', False)
+            logger.info(f"Learned fusion initialized: {fusion_model_type} model")
+        except Exception as e:
+            logger.warning(f"Failed to initialize learned fusion: {e}")
+            self.learned_fusion = None
+            self.use_learned_fusion = False
+        
+        # 初始化QA覆盖度评估器
+        try:
+            self.qa_coverage_scorer = create_qa_coverage_scorer(calibration_path=calibration_path)
+            logger.info("QA coverage scorer initialized")
+        except Exception as e:
+            logger.warning(f"Failed to initialize QA coverage scorer: {e}")
+            self.qa_coverage_scorer = None
+        
+        # 初始化答案定位器
+        try:
+            span_model_type = config.get('span_picker.model_type', 'cross_encoder')
+            self.span_picker = create_span_picker(
+                model_type=span_model_type,
+                calibration_path=calibration_path
+            )
+            logger.info(f"Span picker initialized: {span_model_type} model")
+        except Exception as e:
+            logger.warning(f"Failed to initialize span picker: {e}")
+            self.span_picker = None
+        
+        # 初始化答案验证器
+        try:
+            self.answer_verifier = create_answer_verifier(
+                span_picker=self.span_picker,
+                calibration_path=calibration_path
+            )
+            self.use_answer_verification = config.get('answer_verification.enabled', False)
+            logger.info("Answer verifier initialized")
+        except Exception as e:
+            logger.warning(f"Failed to initialize answer verifier: {e}")
+            self.answer_verifier = None
+            self.use_answer_verification = False
+        
+        # 初始化上下文打包器（使用新的结构化打包）
+        try:
+            self.context_packer = ContextPacker(calibration_path=calibration_path)
+            logger.info("Context packer initialized with structure-based packing")
+        except Exception as e:
+            logger.warning(f"Failed to initialize context packer: {e}")
+            self.context_packer = None
         else:
+            self.path_aware_enabled = False
             self.path_aware_ranker = None
         
         # 检索守卫配置
@@ -1580,7 +1644,7 @@ class QueryProcessor:
             )
         # 生成答案和评分
         # 使用新的 build_context_prompt_with_passages 函数生成带有 [P{idx}] 标签的上下文和passages字典
-        prompt, passages = build_context_prompt_with_passages(selected_notes, query)
+        prompt, passages_by_idx, packed_order = build_context_prompt_with_passages(selected_notes, query)
         raw_answer = self.ollama.generate_final_answer(prompt)
         
         # 使用鲁棒的JSON解析器，带重试机制
@@ -1591,8 +1655,29 @@ class QueryProcessor:
         json_parsing_config = config.get('retrieval.json_parsing', {})
         max_retries = json_parsing_config.get('max_retries', 3)
         
-        answer, predicted_support_idxs = extract_prediction_with_retry(
-            raw_answer, passages, retry_func=retry_generate, max_retries=max_retries
+        answer, raw_support_idxs = extract_prediction_with_retry(
+            raw_answer, passages_by_idx, retry_func=retry_generate, max_retries=max_retries
+        )
+        
+        # 写盘前的最终合法性校验：再次过滤幽灵id并补齐
+        # 第二道兜底：确保最终结果没有幽灵id
+        filtered_support_idxs = [i for i in raw_support_idxs if i in passages_by_idx]
+        
+        # 若过滤后为空且上下文中存在任何包含答案子串的段，用其中一个合法id顶上第一位
+        if not filtered_support_idxs and answer:
+            for idx, content in passages_by_idx.items():
+                if answer in content:
+                    filtered_support_idxs = [idx]
+                    break
+        
+        # 使用支持段落补齐模块对LLM输出进行结构化补齐/纠偏
+        from utils.support_fill import fill_support_idxs_noid
+        predicted_support_idxs = fill_support_idxs_noid(
+            question=query,
+            answer=answer, 
+            raw_support_idxs=filtered_support_idxs,  # 使用过滤后的合法id
+            passages_by_idx=passages_by_idx,
+            packed_order=packed_order
         )
         
         # 评估答案质量

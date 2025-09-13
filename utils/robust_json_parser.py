@@ -91,8 +91,20 @@ def extract_prediction(raw_llm_output: str, passages: Dict[int, str]) -> Tuple[s
                 has_substr_somewhere = True
                 break
     
-    # 截断到最多 3 条，且是 int
-    idxs = [int(i) for i in idxs][:3]
+    # 去重并转换为int，只保留合法的id（存在于passages_by_idx中的id）
+    # support的最终长度由fill_support_idxs_noid统一控制
+    seen = set()
+    deduplicated_idxs = []
+    for i in idxs:
+        try:
+            idx = int(i)
+            # 只保留存在于passages中的合法id
+            if idx not in seen and idx in passages:
+                seen.add(idx)
+                deduplicated_idxs.append(idx)
+        except (ValueError, TypeError):
+            continue
+    idxs = deduplicated_idxs
     
     return ans, idxs
 
