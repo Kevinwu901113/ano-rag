@@ -30,13 +30,14 @@ class ContextPacker:
         self.use_legacy_packing = False
     
     def pack_context(self, notes: List[Dict[str, Any]], question: str, 
-                    token_budget: int = 2000) -> Tuple[str, Dict[str, Dict], List[str]]:
+                    token_budget: int = 2000, min_passages: int = 6) -> Tuple[str, Dict[str, Dict], List[str]]:
         """Pack context notes into a formatted prompt with passage tracking.
         
         Args:
             notes: List of note dictionaries containing content and paragraph_idxs
             question: The question to ask
             token_budget: Maximum token budget for context
+            min_passages: Minimum number of passages to include (default: 6 for multi-hop)
             
         Returns:
             Tuple of (packed_prompt, passages_by_idx, packed_order):
@@ -55,6 +56,40 @@ class ContextPacker:
             packed_text, passages_by_idx, packed_order = self.structure_packer.pack_evidence(
                 question, ranked_paragraphs, token_budget
             )
+            
+            # Ensure minimum passage count for multi-hop reasoning
+            if len(packed_order) < min_passages and len(ranked_paragraphs) >= min_passages:
+                logger.info(f"Expanding passages from {len(packed_order)} to {min_passages} for better multi-hop coverage")
+                
+                # Add more passages up to min_passages, prioritizing top-1 gets 2 sentences, others get 1
+                additional_needed = min_passages - len(packed_order)
+                available_paragraphs = [p for p in ranked_paragraphs if p['note_id'] not in packed_order]
+                
+                for i, paragraph in enumerate(available_paragraphs[:additional_needed]):
+                    idx = paragraph['note_id']
+                    content = paragraph['content']
+                    
+                    # Apply sentence selection: top-1 gets 2 sentences, others get 1
+                    sentences = content.split('. ')
+                    if i == 0 and len(packed_order) == 0:  # This is the new top-1
+                        selected_content = '. '.join(sentences[:2]) if len(sentences) >= 2 else content
+                    else:
+                        selected_content = sentences[0] if sentences else content
+                    
+                    packed_order.append(idx)
+                    passages_by_idx[idx] = {
+                        'id': idx,
+                        'content': selected_content,
+                        'title': paragraph.get('title', ''),
+                        'original_note': paragraph.get('original_note', paragraph)
+                    }
+                
+                # Rebuild packed text with expanded passages
+                context_parts = []
+                for idx in packed_order:
+                    passage = passages_by_idx[idx]
+                    context_parts.append(f"[P{idx}] {passage['content']}")
+                packed_text = "\n\n".join(context_parts)
             
             # Format the final prompt
             from llm.prompts import FINAL_ANSWER_PROMPT

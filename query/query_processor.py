@@ -44,6 +44,7 @@ from reasoning.qa_coverage import create_qa_coverage_scorer
 from answer.span_picker import create_span_picker
 from answer.verify_shell import create_answer_verifier
 from context.packer import ContextPacker
+from retrieval.listt5_reranker import ListT5Reranker, create_listt5_reranker, fuse_scores, sort_desc
 
 class QueryProcessor:
     """High level query processing pipeline."""
@@ -263,9 +264,17 @@ class QueryProcessor:
         except Exception as e:
             logger.warning(f"Failed to initialize context packer: {e}")
             self.context_packer = None
-        else:
-            self.path_aware_enabled = False
-            self.path_aware_ranker = None
+        
+        # 初始化ListT5重排序器
+        try:
+            self.listt5 = create_listt5_reranker(config) if config.get('rerank.use_listt5', False) else None
+            if self.listt5:
+                logger.info(f"ListT5 reranker initialized: {config.get('rerank.listt5_model', 'default')}")
+            else:
+                logger.info("ListT5 reranker disabled")
+        except Exception as e:
+            logger.warning(f"Failed to initialize ListT5 reranker: {e}")
+            self.listt5 = None
         
         # 检索守卫配置
         guardrail_config = config.get('hybrid_search.retrieval_guardrail', {})
@@ -727,6 +736,67 @@ class QueryProcessor:
             
             # 按final_base_score排序
             candidates.sort(key=lambda x: x.get('final_base_score', 0), reverse=True)
+            
+            # 应用ListT5重排序（如果启用）
+            if self.listt5 and len(candidates) > 0:
+                try:
+                    # 记录ListT5前的状态
+                    pre_listt5_topk = min(len(candidates), config.get('rerank.listt5_input_topk', 24))
+                    pre_listt5_candidates = candidates[:pre_listt5_topk]
+                    
+                    # 计算ListT5前的多样性指标
+                    pre_listt5_titles = set(c.get('title', '') for c in pre_listt5_candidates)
+                    pre_listt5_diversity = len(pre_listt5_titles) / max(len(pre_listt5_candidates), 1)
+                    
+                    logger.debug(f"Applying ListT5 reranking to top {pre_listt5_topk} candidates (diversity: {pre_listt5_diversity:.3f})")
+                    
+                    # 获取ListT5分数
+                    list_scores = self.listt5.score(query, pre_listt5_candidates)
+                    
+                    # 融合分数
+                    calibration_config = config.get('calibration', {})
+                    fused_candidates = fuse_scores(
+                        pre_listt5_candidates, 
+                        list_scores, 
+                        weights={'listt5_weight': calibration_config.get('listt5_weight', 0.35)}
+                    )
+                    
+                    # 重新排序
+                    fused_candidates = sort_desc(fused_candidates, 'fused_score')
+                    
+                    # 保留指定数量的候选
+                    keep_after_listt5 = config.get('rerank.keep_after_listt5', 16)
+                    final_candidates = fused_candidates[:keep_after_listt5]
+                    
+                    # 添加剩余的候选（如果有）
+                    if len(candidates) > pre_listt5_topk:
+                        final_candidates.extend(candidates[pre_listt5_topk:])
+                    
+                    candidates = final_candidates
+                    
+                    # 记录ListT5后的状态和性能指标
+                    post_listt5_topk = len(final_candidates)
+                    post_listt5_titles = set(c.get('title', '') for c in final_candidates[:keep_after_listt5])
+                    post_listt5_diversity = len(post_listt5_titles) / max(keep_after_listt5, 1)
+                    
+                    # 计算排序变化
+                    pre_order = [c.get('note_id', i) for i, c in enumerate(pre_listt5_candidates)]
+                    post_order = [c.get('note_id', i) for i, c in enumerate(final_candidates[:keep_after_listt5])]
+                    reorder_ratio = len(set(pre_order[:keep_after_listt5]) - set(post_order)) / max(keep_after_listt5, 1)
+                    
+                    logger.info(f"ListT5 reranking metrics - Input: {pre_listt5_topk}, Output: {post_listt5_topk}, "
+                              f"Pre-diversity: {pre_listt5_diversity:.3f}, Post-diversity: {post_listt5_diversity:.3f}, "
+                              f"Reorder ratio: {reorder_ratio:.3f}")
+                    
+                    # 记录分数分布
+                    if list_scores:
+                        avg_listt5_score = sum(list_scores) / len(list_scores)
+                        max_listt5_score = max(list_scores)
+                        min_listt5_score = min(list_scores)
+                        logger.debug(f"ListT5 scores - Avg: {avg_listt5_score:.4f}, Max: {max_listt5_score:.4f}, Min: {min_listt5_score:.4f}")
+                    
+                except Exception as e:
+                    logger.error(f"ListT5 reranking failed: {e}")
             
             logger.debug(f"Enhanced hybrid search v2 completed: {len(candidates)} candidates after filtering and ranking")
             

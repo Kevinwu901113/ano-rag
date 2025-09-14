@@ -82,6 +82,14 @@ retrieval:
     final_topk: 10
     margin_threshold: 0.15     # 低于阈值的直接裁掉
     diversity_by_title: true
+    
+    # ListT5重排序配置
+    use_listt5: true           # 是否启用ListT5重排序
+    listt5_model: "castorini/doc2query-t5-large-list"  # ListT5模型名称
+    listt5_input_topk: 24      # 进入ListT5的候选数量
+    keep_after_listt5: 16      # ListT5重排后保留的候选数量
+    max_seq_len: 2048          # ListT5最大序列长度
+    batch_size: 4              # ListT5批处理大小
   
   # 上下文配置
   context:
@@ -108,6 +116,12 @@ retrieval:
     semantic_weight: 0.35           # 语义相似度权重
     soft_penalty_no_entity: 0.7    # 无实体命中时的软惩罚系数
     rrf_k: 60               # RRF融合参数，仅在fusion_method为rrf时使用
+
+# 校准配置
+calibration:
+  path: "calibration.json"    # 校准文件路径
+  listt5_weight: 0.35         # ListT5与现有融合器的融合权重
+  listt5_temperature: 1.0     # ListT5温度缩放参数
   bm25:                     # BM25检索参数
     k1: 1.2                 # 词频饱和参数，控制词频对得分的影响
     b: 0.75                 # 文档长度归一化参数

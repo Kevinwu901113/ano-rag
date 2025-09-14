@@ -63,6 +63,14 @@ from .diversity_scheduler import (
     create_diversity_config
 )
 
+# ListT5重排序模块
+from .listt5_reranker import (
+    ListT5Reranker,
+    create_listt5_reranker,
+    fuse_scores,
+    sort_desc
+)
+
 __all__ = [
     'HybridSearcher',
     'QueryPlanner',
@@ -96,7 +104,11 @@ __all__ = [
     'DiversityEvaluator',
     'DeduplicationProcessor',
     'create_diversity_scheduler',
-    'create_diversity_config'
+    'create_diversity_config',
+    'ListT5Reranker',
+    'create_listt5_reranker',
+    'fuse_scores',
+    'sort_desc'
 ]
 
 __version__ = '1.0.0'
