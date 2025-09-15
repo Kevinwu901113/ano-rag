@@ -141,6 +141,30 @@ atomic_note_generator:
     per_entity_sentences: 2    # 从命中的段落摘 2 句"证据句"
     evidence_first: true       # 证据句放在每段开头
     
+    # 双视图拼接策略配置
+    dual_view_packing:
+      enabled: false           # 是否启用双视图拼接策略
+      facts_ratio: 0.7         # 事实清单占比（70%）
+      original_ratio: 0.3      # 原文片段占比（30%）
+      
+      # 事实筛选配置
+      fact_selection:
+        min_score: 0.5         # 最小事实分数阈值
+        min_coverage: 0.3      # 最小覆盖度阈值
+        max_facts: 20          # 最大事实数量
+        diversity_weight: 0.4  # 多样化权重（实体/谓词/时间）
+        entity_diversity: true # 是否考虑实体多样性
+        predicate_diversity: true # 是否考虑谓词多样性
+        temporal_diversity: true  # 是否考虑时间多样性
+      
+      # 原文片段配置
+      span_alignment:
+        max_spans: 10          # 最大原文片段数量
+        min_span_length: 20    # 最小片段长度（字符数）
+        max_span_length: 200   # 最大片段长度（字符数）
+        overlap_threshold: 0.8 # span对齐重叠阈值
+        verification_priority: true # 优先选择可验证性高的片段
+    
     # 笔记视图配置
     note_view:
       max_tokens: 1200         # 笔记视图最高token数
@@ -182,6 +206,42 @@ atomic_note_generator:
     rrf_k: 60               # RRF融合参数，仅在fusion_method为rrf时使用
 
 # 图构建配置
+graph:
+  # 基础图构建配置
+  enable_atomic_nodes: true         # 是否启用原子笔记节点
+  enable_entity_nodes: true         # 是否启用实体节点
+  enable_structural_edges: true     # 是否启用结构化边
+  max_edges_per_node: 50           # 每个节点的最大边数
+  hub_degree_threshold: 20         # hub节点度数阈值
+  
+  # 时间衰减权重配置（老化因子）
+  time_decay:
+    enabled: true                  # 是否启用时间衰减权重
+    lambda: 0.1                    # 衰减参数λ，控制衰减速度
+    reference_time: "current"       # 参考时间：current(当前时间)或ISO格式时间戳
+    time_unit: "days"              # 时间单位：seconds/minutes/hours/days/weeks
+  
+  # 反hub惩罚配置（度归一化）
+  hub_penalty:
+    enabled: true                  # 是否启用反hub惩罚
+    strength: 0.5                  # 惩罚强度，0-1之间
+    threshold: 10                  # hub节点阈值，度数超过此值的节点被视为hub
+    method: "log_normalization"     # 惩罚方法：log_normalization/sqrt_normalization/linear_normalization
+  
+  # metapath白名单和路径偏好配置
+  metapaths:
+    enabled: true                  # 是否启用metapath过滤
+    max_path_length: 3             # 最大路径长度
+    # 关系类型白名单，只保留列表中的关系类型（空列表表示不过滤）
+    whitelist: []
+    # 路径偏好权重，为特定关系类型设置权重倍数
+    path_preferences:
+      semantic_relation: 1.2       # 语义关系权重倍数
+      entity_cooccurrence: 1.0     # 实体共现权重倍数
+      temporal_relation: 1.1       # 时序关系权重倍数
+      causal_relation: 1.3         # 因果关系权重倍数
+      hierarchical_relation: 1.1   # 层次关系权重倍数
+
 graph_construction:
   # 原子笔记边配置
   atomic_note_edges:
@@ -216,6 +276,17 @@ calibration:
   path: "calibration.json"    # 校准文件路径
   listt5_weight: 0.35         # ListT5与现有融合器的融合权重
   listt5_temperature: 1.0     # ListT5温度缩放参数
+  learned_fusion_weight: 0.2  # Learned Fusion权重
+  
+  # 原子笔记特征权重配置
+  atomic_features:
+    enabled: true             # 是否启用原子笔记特征
+    weight: 0.15              # 原子笔记特征总权重
+    fact_hit_weight: 0.3      # 命中事实数权重
+    avg_importance_weight: 0.25 # 平均重要性权重
+    predicate_coverage_weight: 0.2  # 谓词覆盖度权重
+    temporal_coverage_weight: 0.15  # 时间覆盖度权重
+    diversity_weight: 0.1     # 跨句多样性权重
   bm25:                     # BM25检索参数
     k1: 1.2                 # 词频饱和参数，控制词频对得分的影响
     b: 0.75                 # 文档长度归一化参数
@@ -397,3 +468,23 @@ context_packer:
   # 优化参数
   enable_optimization: true    # 是否启用token分配优化
   optimization_iterations: 3   # 优化迭代次数
+
+# 校准配置 - 融合权重和特征权重
+calibration:
+  # ListT5重排序权重
+  listt5_weight: 0.35
+  
+  # Learned Fusion权重
+  learned_fusion_weight: 0.2
+  
+  # 原子笔记特征配置
+  atomic_features:
+    enabled: true
+    weight: 0.1  # 原子特征在融合中的总权重
+    
+    # 各个子特征的权重（用于计算原子特征综合分数）
+    hit_fact_count_weight: 0.3        # 命中事实数权重
+    avg_importance_weight: 0.25       # 平均重要性权重
+    predicate_coverage_weight: 0.2    # 谓词覆盖度权重
+    temporal_coverage_weight: 0.15    # 时间覆盖度权重
+    cross_sentence_diversity_weight: 0.1  # 跨句多样性权重

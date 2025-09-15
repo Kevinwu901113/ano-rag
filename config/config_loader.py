@@ -115,6 +115,18 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "index_type": "IVFFlat",
         "similarity_metric": "cosine"
     },
+    "calibration": {
+        "listt5_reranker_weight": 0.7,
+        "learned_fusion_weight": 0.3,
+        "atomic_features": {
+            "enabled": True,
+            "total_weight": 0.2,
+            "fact_count_weight": 0.3,
+            "avg_importance_weight": 0.25,
+            "coverage_weight": 0.25,
+            "diversity_weight": 0.2
+        }
+    },
 }
 
 

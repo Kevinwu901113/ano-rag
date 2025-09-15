@@ -3,6 +3,9 @@ from typing import List, Dict, Any
 from loguru import logger
 from tqdm import tqdm
 from collections import defaultdict
+import math
+import time
+from datetime import datetime, timedelta
 from .relation_extractor import RelationExtractor
 from config import config
 
@@ -23,6 +26,30 @@ class GraphBuilder:
             'enable_structural_edges': config.get('graph.enable_structural_edges', True),
             'max_edges_per_node': config.get('graph.max_edges_per_node', 50),
             'hub_degree_threshold': config.get('graph.hub_degree_threshold', 20)
+        }
+        
+        # 时间衰减权重配置
+        self.time_decay_config = {
+            'enabled': config.get('graph.time_decay.enabled', True),
+            'lambda': config.get('graph.time_decay.lambda', 0.1),
+            'reference_time': config.get('graph.time_decay.reference_time', 'current'),
+            'time_unit': config.get('graph.time_decay.time_unit', 'days')
+        }
+        
+        # 反hub惩罚配置
+        self.hub_penalty_config = {
+            'enabled': config.get('graph.hub_penalty.enabled', True),
+            'strength': config.get('graph.hub_penalty.strength', 0.5),
+            'threshold': config.get('graph.hub_penalty.threshold', 10),
+            'method': config.get('graph.hub_penalty.method', 'log_normalization')
+        }
+        
+        # metapath配置
+        self.metapath_config = {
+            'enabled': config.get('graph.metapaths.enabled', True),
+            'whitelist': config.get('graph.metapaths.whitelist', []),
+            'path_preferences': config.get('graph.metapaths.path_preferences', {}),
+            'max_path_length': config.get('graph.metapaths.max_path_length', 3)
         }
 
     def build_graph(self, atomic_notes: List[Dict[str, Any]], embeddings=None) -> nx.Graph:
@@ -60,9 +87,21 @@ class GraphBuilder:
         if self.atomic_note_config['enable_structural_edges']:
             self._add_structural_edges(G, atomic_notes)
         
+        # 应用时间衰减权重
+        if self.time_decay_config['enabled']:
+            G = self._apply_time_decay_weights(G)
+        
         # 应用边去噪和hub处理
         G = self._apply_edge_denoising(G)
         G = self._apply_hub_normalization(G)
+        
+        # 应用增强的反hub惩罚
+        if self.hub_penalty_config['enabled']:
+            G = self._apply_enhanced_hub_penalty(G)
+        
+        # 应用metapath过滤
+        if self.metapath_config['enabled']:
+            G = self._apply_metapath_filtering(G)
         
         logger.info(f"Graph built with {G.number_of_nodes()} nodes and {G.number_of_edges()} edges")
         return G
@@ -362,6 +401,157 @@ class GraphBuilder:
         normalized_edges = sum(1 for _, _, data in G.edges(data=True) if data.get('hub_normalized', False))
         
         logger.info(f"Hub normalization applied to {len(hub_nodes)} nodes, {normalized_edges} edges normalized")
+        return G
+    
+    def _apply_time_decay_weights(self, G: nx.Graph) -> nx.Graph:
+        """应用时间衰减权重（老化因子）"""
+        if G.number_of_edges() == 0:
+            return G
+        
+        lambda_decay = self.time_decay_config['lambda']
+        reference_time = self.time_decay_config['reference_time']
+        time_unit = self.time_decay_config['time_unit']
+        
+        # 确定参考时间
+        if reference_time == 'current':
+            ref_time = datetime.now()
+        else:
+            try:
+                ref_time = datetime.fromisoformat(reference_time)
+            except (ValueError, TypeError):
+                logger.warning(f"Invalid reference_time format: {reference_time}, using current time")
+                ref_time = datetime.now()
+        
+        # 时间单位转换为秒的映射
+        time_unit_seconds = {
+            'seconds': 1, 'minutes': 60, 'hours': 3600, 'days': 86400, 'weeks': 604800
+        }
+        unit_multiplier = time_unit_seconds.get(time_unit, 86400)
+        
+        edges_processed = 0
+        for u, v, data in G.edges(data=True):
+            edge_time = None
+            if 'timestamp' in data:
+                try:
+                    edge_time = datetime.fromisoformat(str(data['timestamp']))
+                except (ValueError, TypeError):
+                    pass
+            
+            if edge_time is None:
+                for node_id in [u, v]:
+                    if G.has_node(node_id):
+                        node_data = G.nodes[node_id]
+                        if 'timestamp' in node_data:
+                            try:
+                                edge_time = datetime.fromisoformat(str(node_data['timestamp']))
+                                break
+                            except (ValueError, TypeError):
+                                continue
+            
+            if edge_time is None:
+                data['time_decay_applied'] = False
+                data['time_decay_factor'] = 1.0
+                continue
+            
+            time_diff = ref_time - edge_time
+            time_diff_units = time_diff.total_seconds() / unit_multiplier
+            decay_factor = math.exp(-lambda_decay * max(0, time_diff_units))
+            
+            original_weight = data.get('weight', 1.0)
+            data['weight'] = original_weight * decay_factor
+            data['original_weight'] = original_weight
+            data['time_decay_applied'] = True
+            data['time_decay_factor'] = decay_factor
+            edges_processed += 1
+        
+        logger.info(f"Time decay applied to {edges_processed} edges with lambda={lambda_decay}")
+        return G
+    
+    def _apply_enhanced_hub_penalty(self, G: nx.Graph) -> nx.Graph:
+        """应用增强的反hub惩罚（度归一化）"""
+        if G.number_of_nodes() == 0:
+            return G
+        
+        strength = self.hub_penalty_config['strength']
+        threshold = self.hub_penalty_config['threshold']
+        method = self.hub_penalty_config['method']
+        
+        node_degrees = dict(G.degree())
+        hub_nodes = [node for node, degree in node_degrees.items() if degree >= threshold]
+        
+        if not hub_nodes:
+            logger.info("No hub nodes found for enhanced penalty")
+            return G
+        
+        logger.info(f"Applying enhanced hub penalty to {len(hub_nodes)} nodes")
+        
+        for hub_node in hub_nodes:
+            hub_degree = node_degrees[hub_node]
+            
+            if method == 'log_normalization':
+                penalty_factor = strength * math.log(hub_degree / threshold + 1)
+            elif method == 'sqrt_normalization':
+                penalty_factor = strength * math.sqrt(hub_degree / threshold)
+            elif method == 'linear_normalization':
+                penalty_factor = strength * (hub_degree / threshold)
+            else:
+                penalty_factor = strength * math.log(hub_degree / threshold + 1)
+            
+            normalization = 1.0 / (1.0 + penalty_factor)
+            
+            for u, v, data in G.edges(hub_node, data=True):
+                original_weight = data.get('weight', 1.0)
+                data['weight'] = original_weight * normalization
+                data['enhanced_hub_penalty_applied'] = True
+                data['penalty_factor'] = penalty_factor
+                data['hub_normalization'] = normalization
+            
+            if G.has_node(hub_node):
+                G.nodes[hub_node]['enhanced_hub_penalty'] = True
+                G.nodes[hub_node]['penalty_factor'] = penalty_factor
+        
+        return G
+    
+    def _apply_metapath_filtering(self, G: nx.Graph) -> nx.Graph:
+        """应用metapath白名单和路径偏好"""
+        if G.number_of_edges() == 0:
+            return G
+        
+        whitelist = self.metapath_config['whitelist']
+        path_preferences = self.metapath_config['path_preferences']
+        max_path_length = self.metapath_config['max_path_length']
+        
+        if not whitelist and not path_preferences:
+            logger.info("No metapath rules configured, skipping filtering")
+            return G
+        
+        edges_to_remove = []
+        edges_boosted = 0
+        
+        for u, v, data in G.edges(data=True):
+            relation_type = data.get('relation_type', 'unknown')
+            
+            # 检查白名单
+            if whitelist:
+                if relation_type not in whitelist:
+                    edges_to_remove.append((u, v))
+                    continue
+            
+            # 应用路径偏好权重
+            if path_preferences and relation_type in path_preferences:
+                preference_weight = path_preferences[relation_type]
+                original_weight = data.get('weight', 1.0)
+                data['weight'] = original_weight * preference_weight
+                data['metapath_preference_applied'] = True
+                data['preference_weight'] = preference_weight
+                edges_boosted += 1
+        
+        # 移除不在白名单中的边
+        for u, v in edges_to_remove:
+            if G.has_edge(u, v):
+                G.remove_edge(u, v)
+        
+        logger.info(f"Metapath filtering: removed {len(edges_to_remove)} edges, boosted {edges_boosted} edges")
         return G
 
     def build_graph_with_metrics(self, atomic_notes: List[Dict[str, Any]], embeddings=None):

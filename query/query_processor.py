@@ -826,14 +826,17 @@ class QueryProcessor:
                     # 获取ListT5分数
                     list_scores = self.listt5.score(query, learned_fusion_candidates)
                     
-                    # 融合分数（包含 Learned Fusion）
+                    # 融合分数（包含 Learned Fusion 和原子特征）
                     calibration_config = config.get('calibration', {})
                     learned_fusion_weight = calibration_config.get('learned_fusion_weight', 0.2)
+                    atomic_features_config = calibration_config.get('atomic_features', {})
                     
-                    # 修改 fuse_scores 的权重配置以包含 learned_fusion_weight
+                    # 修改 fuse_scores 的权重配置以包含所有权重
                     fusion_weights = {
                         'listt5_weight': calibration_config.get('listt5_weight', 0.35),
-                        'learned_fusion_weight': learned_fusion_weight
+                        'learned_fusion_weight': learned_fusion_weight,
+                        'atomic_features_weight': atomic_features_config.get('weight', 0.1),
+                        'atomic_features': atomic_features_config
                     }
                     
                     fused_candidates = fuse_scores(

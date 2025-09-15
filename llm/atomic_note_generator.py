@@ -204,26 +204,49 @@ class AtomicNoteGenerator:
         return deduplicated_notes
     
     def _generate_dedup_hash(self, note: Dict[str, Any]) -> str:
-        """生成去重hash，优先使用字符跨度+文本，回退到文本hash"""
+        """生成去重hash，根据配置选择去重策略"""
         import hashlib
         
-        # 优先使用字符跨度+文本
+        # 获取去重策略配置
+        dedup_by = config.get('atomic_note_generator.dedup_by', 'span_or_hash')
+        
         char_span = note.get('char_span')
         text = note.get('content', note.get('original_text', ''))
         
-        if char_span and isinstance(char_span, (list, tuple)) and len(char_span) == 2:
-            # 使用字符跨度+文本内容生成hash
-            span_text = f"{char_span[0]}:{char_span[1]}:{text}"
-            return hashlib.md5(span_text.encode('utf-8')).hexdigest()
+        if dedup_by == 'span_only':
+            # 仅使用字符跨度去重
+            if char_span and isinstance(char_span, (list, tuple)) and len(char_span) == 2:
+                span_text = f"{char_span[0]}:{char_span[1]}"
+                return hashlib.md5(span_text.encode('utf-8')).hexdigest()
+            else:
+                # 如果没有span信息，回退到文本hash
+                return self._generate_content_hash(text)
         
-        # 回退到文本内容hash
+        elif dedup_by == 'content_hash':
+            # 仅使用内容hash去重
+            return self._generate_content_hash(text)
+        
+        else:  # dedup_by == 'span_or_hash' (默认)
+            # 优先使用字符跨度+文本，回退到文本hash
+            if char_span and isinstance(char_span, (list, tuple)) and len(char_span) == 2:
+                # 使用字符跨度+文本内容生成hash
+                span_text = f"{char_span[0]}:{char_span[1]}:{text}"
+                return hashlib.md5(span_text.encode('utf-8')).hexdigest()
+            else:
+                # 回退到文本内容hash
+                return self._generate_content_hash(text)
+    
+    def _generate_content_hash(self, text: str) -> str:
+        """生成文本内容的hash"""
+        import hashlib
+        
         if text:
             # 标准化文本（去除多余空白、统一大小写）
             normalized_text = ' '.join(text.strip().lower().split())
             return hashlib.md5(normalized_text.encode('utf-8')).hexdigest()
         
-        # 最后回退到note的字符串表示
-        return hashlib.md5(str(note).encode('utf-8')).hexdigest()
+        # 如果没有文本内容，返回空字符串的hash
+        return hashlib.md5(''.encode('utf-8')).hexdigest()
     
     def _apply_quota_and_threshold(self, notes: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """应用配额与阈值筛选"""
@@ -232,8 +255,8 @@ class AtomicNoteGenerator:
         
         # 获取配置参数
         max_facts_per_sentence = config.get('atomic_note_generator.max_facts_per_sentence', 5)
-        min_fact_length = config.get('atomic_note_generator.min_fact_length', 10)
-        min_importance_score = config.get('atomic_note_generator.min_importance_score', 0.1)
+        min_fact_length = config.get('atomic_note_generator.min_fact_len', 10)
+        min_importance_score = config.get('atomic_note_generator.min_importance', 0.1)
         
         filtered_notes = []
         sentence_fact_counts = {}
@@ -821,8 +844,17 @@ class AtomicNoteGenerator:
         return unique_keywords
     
     def _get_atomic_note_system_prompt(self) -> str:
-        """获取原子笔记生成的系统提示词"""
-        return ATOMIC_NOTEGEN_SYSTEM_PROMPT
+        """获取原子笔记生成的系统提示词，根据include_span配置动态调整"""
+        # 检查是否启用字符跨度功能
+        include_span = config.get('atomic_note_generator.include_span', False)
+        
+        if include_span:
+            # 如果启用字符跨度，使用包含跨度信息的提示词
+            span_instruction = "\n\n请在每个原子笔记中包含char_span字段，格式为[start_pos, end_pos]，表示该笔记内容在原文中的字符位置范围。"
+            return ATOMIC_NOTEGEN_SYSTEM_PROMPT + span_instruction
+        else:
+            # 使用标准提示词
+            return ATOMIC_NOTEGEN_SYSTEM_PROMPT
     
     def _clean_list(self, items: List[str]) -> List[str]:
         """清理列表，去除空值和重复项"""
@@ -1009,3 +1041,16 @@ class AtomicNoteGenerator:
         
         logger.info(f"Validated {len(valid_notes)} out of {len(atomic_notes)} atomic notes")
         return valid_notes
+    
+    def _get_atomic_note_system_prompt(self) -> str:
+        """获取原子笔记生成的系统提示词，根据include_span配置动态调整"""
+        # 检查是否启用字符跨度功能
+        include_span = config.get('atomic_note_generator.include_span', False)
+        
+        if include_span:
+            # 如果启用字符跨度，使用包含跨度信息的提示词
+            span_instruction = "\n\n请在每个原子笔记中包含char_span字段，格式为[start_pos, end_pos]，表示该笔记内容在原文中的字符位置范围。"
+            return ATOMIC_NOTEGEN_SYSTEM_PROMPT + span_instruction
+        else:
+            # 使用标准提示词
+            return ATOMIC_NOTEGEN_SYSTEM_PROMPT

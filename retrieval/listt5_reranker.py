@@ -274,6 +274,14 @@ def fuse_scores(candidates: List[Dict[str, Any]],
     learned_fusion_weight = weights.get('learned_fusion_weight', 0.0)
     atomic_features_weight = weights.get('atomic_features_weight', 0.1)
     
+    # 获取原子特征的详细权重配置
+    atomic_features_config = weights.get('atomic_features', {})
+    fact_count_weight = atomic_features_config.get('hit_fact_count_weight', 0.3)
+    importance_weight = atomic_features_config.get('avg_importance_weight', 0.25)
+    predicate_coverage_weight = atomic_features_config.get('predicate_coverage_weight', 0.2)
+    temporal_coverage_weight = atomic_features_config.get('temporal_coverage_weight', 0.15)
+    diversity_weight = atomic_features_config.get('cross_sentence_diversity_weight', 0.1)
+    
     # 归一化现有分数
     existing_scores = []
     learned_fusion_scores = []
@@ -299,12 +307,12 @@ def fuse_scores(candidates: List[Dict[str, Any]],
         temporal_coverage = candidate.get('temporal_coverage', 0.0)
         cross_sentence_diversity = candidate.get('cross_sentence_diversity', 0.0)
         
-        # 综合原子特征分数 (加权平均)
-        atomic_score = (0.3 * min(hit_fact_count / 5.0, 1.0) +  # 命中事实数归一化
-                       0.25 * avg_importance +  # 平均重要性
-                       0.2 * predicate_coverage +  # 谓词覆盖度
-                       0.15 * temporal_coverage +  # 时间覆盖度
-                       0.1 * cross_sentence_diversity)  # 跨句多样性
+        # 综合原子特征分数 (使用配置的权重)
+        atomic_score = (fact_count_weight * min(hit_fact_count / 5.0, 1.0) +  # 命中事实数归一化
+                       importance_weight * avg_importance +  # 平均重要性
+                       predicate_coverage_weight * predicate_coverage +  # 谓词覆盖度
+                       temporal_coverage_weight * temporal_coverage +  # 时间覆盖度
+                       diversity_weight * cross_sentence_diversity)  # 跨句多样性
         atomic_scores.append(atomic_score)
     
     # Z-score归一化
