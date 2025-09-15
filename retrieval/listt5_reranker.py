@@ -271,11 +271,16 @@ def fuse_scores(candidates: List[Dict[str, Any]],
     
     # 获取融合权重
     listt5_weight = weights.get('listt5_weight', 0.35)
+    learned_fusion_weight = weights.get('learned_fusion_weight', 0.0)
+    atomic_features_weight = weights.get('atomic_features_weight', 0.1)
     
     # 归一化现有分数
     existing_scores = []
+    learned_fusion_scores = []
+    atomic_scores = []
+    
     for candidate in candidates:
-        # 优先使用cross-encoder分数，否则使用learned_fusion分数
+        # 优先使用cross-encoder分数，否则使用fusion_score
         if 'ce_score' in candidate:
             existing_scores.append(candidate['ce_score'])
         elif 'fusion_score' in candidate:
@@ -283,6 +288,24 @@ def fuse_scores(candidates: List[Dict[str, Any]],
         else:
             # fallback到dense分数
             existing_scores.append(candidate.get('dense', 0.0))
+        
+        # 获取 learned_fusion 分数
+        learned_fusion_scores.append(candidate.get('learned_fusion_score', 0.0))
+        
+        # 计算原子笔记特征综合分数（直接从候选对象获取）
+        hit_fact_count = candidate.get('hit_fact_count', 0)
+        avg_importance = candidate.get('avg_importance', 0.0)
+        predicate_coverage = candidate.get('predicate_coverage', 0.0)
+        temporal_coverage = candidate.get('temporal_coverage', 0.0)
+        cross_sentence_diversity = candidate.get('cross_sentence_diversity', 0.0)
+        
+        # 综合原子特征分数 (加权平均)
+        atomic_score = (0.3 * min(hit_fact_count / 5.0, 1.0) +  # 命中事实数归一化
+                       0.25 * avg_importance +  # 平均重要性
+                       0.2 * predicate_coverage +  # 谓词覆盖度
+                       0.15 * temporal_coverage +  # 时间覆盖度
+                       0.1 * cross_sentence_diversity)  # 跨句多样性
+        atomic_scores.append(atomic_score)
     
     # Z-score归一化
     def normalize_scores(scores):
@@ -294,17 +317,32 @@ def fuse_scores(candidates: List[Dict[str, Any]],
     
     norm_existing = normalize_scores(existing_scores)
     norm_listt5 = normalize_scores(list_scores)
+    norm_learned_fusion = normalize_scores(learned_fusion_scores)
+    norm_atomic = normalize_scores(atomic_scores)
     
     # 融合分数
     fused_candidates = []
     for i, candidate in enumerate(candidates):
         fused_candidate = candidate.copy()
         
-        # 计算融合分数
-        fused_score = (listt5_weight * norm_listt5[i] + 
-                      (1 - listt5_weight) * norm_existing[i])
+        # 计算基础融合分数
+        base_fused_score = (listt5_weight * norm_listt5[i] + 
+                           (1 - listt5_weight) * norm_existing[i])
+        
+        # 集成原子笔记特征
+        if atomic_features_weight > 0:
+            base_fused_score = ((1 - atomic_features_weight) * base_fused_score + 
+                               atomic_features_weight * norm_atomic[i])
+        
+        # 如果有 learned_fusion 权重，进一步融合
+        if learned_fusion_weight > 0:
+            fused_score = ((1 - learned_fusion_weight) * base_fused_score + 
+                          learned_fusion_weight * norm_learned_fusion[i])
+        else:
+            fused_score = base_fused_score
         
         fused_candidate['listt5_score'] = list_scores[i]
+        fused_candidate['atomic_score'] = atomic_scores[i]
         fused_candidate['fused_score'] = fused_score
         fused_candidates.append(fused_candidate)
     

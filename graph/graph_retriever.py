@@ -5,14 +5,17 @@ from collections import defaultdict, deque
 from loguru import logger
 import networkx as nx
 from .graph_index import GraphIndex
+from .enhanced_path_planner import EnhancedPathPlanner
+from .dynamic_threshold_adjuster import DynamicThresholdAdjuster
 from config import config
 
 class GraphRetriever:
     """统一的图谱检索器，支持基础k-hop搜索和增强的多跳推理"""
-    def __init__(self, graph_index: GraphIndex, k_hop: int = 2):
+    def __init__(self, graph_index: GraphIndex, k_hop: int = 2, atomic_notes: List[Dict[str, Any]] = None):
         self.index = graph_index
         self.graph = graph_index.graph
         self.k_hop = k_hop
+        self.atomic_notes = atomic_notes or []
         
         # 多跳推理配置
         self.multi_hop_config = config.get('multi_hop', {})
@@ -47,6 +50,24 @@ class GraphRetriever:
             'semantic_similarity': 0.4,
             'contradiction': 0.3
         }
+        
+        # 初始化增强路径规划器
+        self.enhanced_path_planner = None
+        if self.atomic_notes:
+            try:
+                self.enhanced_path_planner = EnhancedPathPlanner(graph_index, self.atomic_notes)
+                logger.info("Enhanced path planner initialized with atomic note features")
+            except Exception as e:
+                logger.warning(f"Failed to initialize enhanced path planner: {e}")
+        
+        # 初始化动态阈值调整器
+        self.dynamic_threshold_adjuster = None
+        if self.atomic_notes:
+            try:
+                self.dynamic_threshold_adjuster = DynamicThresholdAdjuster(self.atomic_notes)
+                logger.info("Dynamic threshold adjuster initialized successfully")
+            except Exception as e:
+                logger.warning(f"Failed to initialize dynamic threshold adjuster: {e}")
         
         logger.info("GraphRetriever initialized with unified k-hop and multi-hop reasoning support")
 
@@ -90,6 +111,20 @@ class GraphRetriever:
         """基于推理路径的检索"""
         logger.info(f"Starting reasoning path retrieval for top-{top_k} results")
         
+        # 使用动态阈值调整器调整参数
+        if self.dynamic_threshold_adjuster:
+            adjusted_params = self.dynamic_threshold_adjuster.adjust_retrieval_params(
+                query_keywords=query_keywords,
+                query_entities=query_entities,
+                current_top_k=top_k
+            )
+            top_k = adjusted_params.get('top_k', top_k)
+            # 动态调整路径评分阈值
+            dynamic_min_path_score = adjusted_params.get('min_path_score', 0.5)
+            logger.info(f"Dynamic threshold adjuster updated top_k to {top_k}, min_path_score to {dynamic_min_path_score}")
+        else:
+            dynamic_min_path_score = 0.5
+        
         # 1. 找到初始候选节点
         initial_candidates = self._find_initial_candidates(
             query_embedding, query_keywords, query_entities
@@ -99,14 +134,27 @@ class GraphRetriever:
             logger.warning("No initial candidates found")
             return []
         
-        # 2. 发现推理路径
-        reasoning_paths = self._discover_reasoning_paths(initial_candidates)
+        # 2. 发现推理路径（优先使用增强路径规划器）
+        if self.enhanced_path_planner and query_entities:
+            # 提取查询中的时间信息
+            query_temporal = self._extract_temporal_from_query(query_keywords or [])
+            
+            # 使用增强路径规划器
+            scored_paths = self.enhanced_path_planner.plan_reasoning_paths(
+                query_entities, query_temporal, initial_candidates
+            )
+            logger.info(f"Enhanced path planner found {len(scored_paths)} paths")
+        else:
+            # 使用传统方法
+            reasoning_paths = self._discover_reasoning_paths(initial_candidates)
+            scored_paths = self._score_reasoning_paths(reasoning_paths, dynamic_min_path_score)
+            logger.info(f"Traditional path discovery found {len(scored_paths)} paths")
         
-        # 3. 评估和排序路径
-        scored_paths = self._score_reasoning_paths(reasoning_paths)
-        
-        # 4. 选择多样化的路径
-        selected_paths = self._select_diverse_paths(scored_paths)
+        # 3. 选择多样化的路径（如果使用增强路径规划器，路径已经评分）
+        if self.enhanced_path_planner and query_entities:
+            selected_paths = scored_paths[:self.max_paths]  # 增强规划器已经选择了最佳路径
+        else:
+            selected_paths = self._select_diverse_paths(scored_paths)
         
         # 5. 从路径中提取最终结果
         final_results = self._extract_results_from_paths(selected_paths)
@@ -209,14 +257,37 @@ class GraphRetriever:
         logger.info(f"Discovered {len(unique_paths)} unique reasoning paths")
         return unique_paths
     
-    def _score_reasoning_paths(self, paths: List[List[str]]) -> List[Dict]:
+    def _extract_temporal_from_query(self, query_keywords: List[str]) -> List[str]:
+        """从查询关键词中提取时间信息"""
+        temporal_keywords = []
+        
+        # 时间相关的关键词模式
+        temporal_patterns = [
+            r'\b\d{4}\b',  # 年份
+            r'\b(January|February|March|April|May|June|July|August|September|October|November|December)\b',
+            r'\b(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\.?\b',
+            r'\b(today|yesterday|tomorrow|now|recently|currently|before|after|during|since|until)\b',
+            r'\b\d+\s+(years?|months?|days?|hours?|minutes?)\s+(ago|later|before|after)\b'
+        ]
+        
+        import re
+        query_text = ' '.join(query_keywords).lower()
+        
+        for pattern in temporal_patterns:
+            matches = re.findall(pattern, query_text, re.IGNORECASE)
+            temporal_keywords.extend(matches)
+        
+        return list(set(temporal_keywords))
+    
+    def _score_reasoning_paths(self, paths: List[List[str]], dynamic_min_path_score: float = None) -> List[Dict]:
         """为推理路径评分"""
         scored_paths = []
         
         for path in paths:
             score = self._calculate_path_score(path)
             
-            if score >= self.min_path_score:
+            min_score_threshold = dynamic_min_path_score if dynamic_min_path_score is not None else self.min_path_score
+            if score >= min_score_threshold:
                 scored_paths.append({
                     'path': path,
                     'score': score,
@@ -230,7 +301,8 @@ class GraphRetriever:
         # 动态调整阈值（如果结果太少）
         if len(scored_paths) < 3 and paths:
             # 降低阈值重新评分
-            lower_threshold = self.min_path_score * 0.7
+            base_threshold = dynamic_min_path_score if dynamic_min_path_score is not None else self.min_path_score
+            lower_threshold = base_threshold * 0.7
             scored_paths = []
             
             for path in paths:

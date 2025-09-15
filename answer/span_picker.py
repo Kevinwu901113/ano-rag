@@ -379,13 +379,14 @@ class SpanPicker:
         logger.info(f"Span picker training completed. Metrics: {metrics}")
         return metrics
     
-    def pick_best_span(self, question: str, evidence_sentences: List[str]) -> Tuple[str, float]:
+    def pick_best_span(self, question: str, evidence_sentences: List[str], atomic_notes: Optional[List[Dict[str, Any]]] = None) -> Tuple[str, float]:
         """
-        Pick the best span from evidence sentences.
+        Pick the best span from evidence sentences, prioritizing atomic note facts.
         
         Args:
             question: The input question
             evidence_sentences: List of evidence sentences
+            atomic_notes: Optional list of atomic notes with fact information
             
         Returns:
             Tuple of (best_span, score)
@@ -393,9 +394,16 @@ class SpanPicker:
         if not evidence_sentences:
             return "", 0.0
         
+        # First, try to find spans from atomic notes if available
+        if atomic_notes:
+            atomic_span, atomic_score = self._pick_span_from_atomic_notes(question, atomic_notes)
+            if atomic_span and atomic_score > 0.3:  # Higher threshold for atomic note spans
+                logger.info(f"Selected atomic note span: '{atomic_span}' with score {atomic_score:.3f}")
+                return atomic_span, atomic_score
+        
         if not self.is_trained:
             logger.warning("Model not trained, using fallback span selection")
-            return self._fallback_span_selection(question, evidence_sentences)
+            return self._fallback_span_selection(question, evidence_sentences, atomic_notes)
         
         best_span = ""
         best_score = 0.0
@@ -414,6 +422,11 @@ class SpanPicker:
                 # Predict probability
                 probability = self.model.predict_proba(features_scaled)[0, 1]
                 
+                # Boost score if span matches atomic note facts
+                if atomic_notes:
+                    atomic_boost = self._get_atomic_note_boost(span_text, atomic_notes)
+                    probability = min(1.0, probability + atomic_boost)
+                
                 if probability > best_score:
                     best_score = probability
                     best_span = span_text
@@ -421,17 +434,92 @@ class SpanPicker:
         logger.info(f"Selected span: '{best_span}' with score {best_score:.3f}")
         return best_span, best_score
     
-    def _fallback_span_selection(self, question: str, evidence_sentences: List[str]) -> Tuple[str, float]:
+    def _pick_span_from_atomic_notes(self, question: str, atomic_notes: List[Dict[str, Any]]) -> Tuple[str, float]:
+        """
+        Pick span from atomic note facts.
+        
+        Args:
+            question: The input question
+            atomic_notes: List of atomic notes with fact information
+            
+        Returns:
+            Tuple of (best_span, score)
+        """
+        best_span = ""
+        best_score = 0.0
+        
+        for note in atomic_notes:
+            # Get atomic facts from note
+            atomic_facts = note.get('atomic_facts', [])
+            content = note.get('content', '')
+            
+            for fact in atomic_facts:
+                fact_text = fact.get('text', '')
+                importance = fact.get('importance', 0.0)
+                
+                # Generate span candidates from fact text
+                candidates = self._generate_span_candidates(fact_text)
+                
+                for span_text, _, _ in candidates:
+                    # Calculate similarity with question
+                    similarity = self._compute_text_similarity(question, span_text)
+                    
+                    # Weight by importance and fact quality
+                    weighted_score = similarity * (0.7 + 0.3 * importance)
+                    
+                    if weighted_score > best_score:
+                        best_score = weighted_score
+                        best_span = span_text
+        
+        return best_span, best_score
+    
+    def _get_atomic_note_boost(self, span_text: str, atomic_notes: List[Dict[str, Any]]) -> float:
+        """
+        Get boost score if span matches atomic note facts.
+        
+        Args:
+            span_text: The candidate span text
+            atomic_notes: List of atomic notes
+            
+        Returns:
+            Boost score (0.0 to 0.3)
+        """
+        max_boost = 0.0
+        
+        for note in atomic_notes:
+            atomic_facts = note.get('atomic_facts', [])
+            
+            for fact in atomic_facts:
+                fact_text = fact.get('text', '')
+                importance = fact.get('importance', 0.0)
+                
+                # Check if span appears in fact text
+                if span_text.lower() in fact_text.lower():
+                    # Boost based on importance and text overlap
+                    overlap_ratio = len(span_text) / max(len(fact_text), 1)
+                    boost = 0.2 * importance * min(overlap_ratio, 1.0)
+                    max_boost = max(max_boost, boost)
+        
+        return min(max_boost, 0.3)  # Cap boost at 0.3
+    
+    def _fallback_span_selection(self, question: str, evidence_sentences: List[str], atomic_notes: Optional[List[Dict[str, Any]]] = None) -> Tuple[str, float]:
         """
         Fallback span selection when model is not trained.
         
         Args:
             question: The input question
             evidence_sentences: List of evidence sentences
+            atomic_notes: Optional atomic notes for boosting
             
         Returns:
             Tuple of (best_span, score)
         """
+        # First try atomic notes if available
+        if atomic_notes:
+            atomic_span, atomic_score = self._pick_span_from_atomic_notes(question, atomic_notes)
+            if atomic_span and atomic_score > 0.2:
+                return atomic_span, atomic_score
+        
         best_span = ""
         best_score = 0.0
         
@@ -441,6 +529,11 @@ class SpanPicker:
             for span_text, _, _ in candidates:
                 # Simple similarity-based scoring
                 similarity = self._compute_text_similarity(question, span_text)
+                
+                # Apply atomic note boost if available
+                if atomic_notes:
+                    atomic_boost = self._get_atomic_note_boost(span_text, atomic_notes)
+                    similarity = min(1.0, similarity + atomic_boost)
                 
                 if similarity > best_score:
                     best_score = similarity

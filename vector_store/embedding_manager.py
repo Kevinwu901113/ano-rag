@@ -380,6 +380,16 @@ class EmbeddingManager:
             return np.array([])
         
         batch_size = batch_size or self.batch_size
+        return self._encode_texts_with_batch_control(texts, batch_size, show_progress, normalize)
+    
+    def _encode_texts_with_batch_control(self, texts: List[str], 
+                                       batch_size: int,
+                                       show_progress: bool = True,
+                                       normalize: Optional[bool] = None) -> np.ndarray:
+        """带批量控制的文本编码，避免OOM"""
+        if not texts:
+            return np.array([])
+        
         normalize = normalize if normalize is not None else self.normalize_embeddings
         
         try:
@@ -388,18 +398,70 @@ class EmbeddingManager:
             # 预处理文本
             processed_texts = self._preprocess_texts(texts)
             
-            # 生成嵌入
-            embeddings = self.model.encode(
-                processed_texts,
-                batch_size=batch_size,
-                show_progress_bar=show_progress,
-                convert_to_numpy=True,
-                normalize_embeddings=normalize,
-                device=self.device
-            )
+            # 检查GPU内存并动态调整批量大小
+            if self.device == 'cuda' and torch.cuda.is_available():
+                available_memory = torch.cuda.get_device_properties(0).total_memory
+                used_memory = torch.cuda.memory_allocated(0)
+                free_memory = available_memory - used_memory
+                
+                # 如果可用内存不足，减小批量大小
+                if free_memory < 2 * 1024**3:  # 小于2GB
+                    batch_size = min(batch_size, 16)
+                    logger.warning(f"GPU内存不足，调整批量大小为: {batch_size}")
             
-            logger.info(f"生成嵌入形状: {embeddings.shape}")
-            return embeddings
+            # 分批处理以避免OOM
+            all_embeddings = []
+            for i in range(0, len(processed_texts), batch_size):
+                batch_texts = processed_texts[i:i+batch_size]
+                
+                try:
+                    batch_embeddings = self.model.encode(
+                        batch_texts,
+                        batch_size=len(batch_texts),
+                        show_progress_bar=show_progress and i == 0,
+                        convert_to_numpy=True,
+                        normalize_embeddings=normalize,
+                        device=self.device
+                    )
+                    all_embeddings.append(batch_embeddings)
+                    
+                except RuntimeError as e:
+                    if "out of memory" in str(e).lower():
+                        logger.warning(f"批次 {i//batch_size + 1} OOM，尝试减小批量大小")
+                        # 清理GPU缓存
+                        if torch.cuda.is_available():
+                            torch.cuda.empty_cache()
+                        
+                        # 逐个处理这个批次
+                        batch_embeddings = []
+                        for text in batch_texts:
+                            try:
+                                emb = self.model.encode(
+                                    [text],
+                                    batch_size=1,
+                                    show_progress_bar=False,
+                                    convert_to_numpy=True,
+                                    normalize_embeddings=normalize,
+                                    device=self.device
+                                )
+                                batch_embeddings.append(emb[0])
+                            except Exception as single_e:
+                                logger.error(f"单个文本编码失败: {single_e}")
+                                # 使用零向量作为回退
+                                batch_embeddings.append(np.zeros(self.embedding_dim))
+                        
+                        all_embeddings.append(np.array(batch_embeddings))
+                    else:
+                        raise e
+            
+            # 合并所有批次的嵌入
+            if all_embeddings:
+                embeddings = np.vstack(all_embeddings)
+                logger.info(f"生成嵌入形状: {embeddings.shape}")
+                return embeddings
+            else:
+                logger.error("没有成功生成任何嵌入")
+                return np.zeros((len(texts), self.embedding_dim))
             
         except Exception as e:
             logger.error(f"编码文本失败: {e}")
@@ -408,9 +470,23 @@ class EmbeddingManager:
     
     def encode_atomic_notes(self, atomic_notes: List[Dict[str, Any]], 
                            content_field: str = 'content',
-                           include_metadata: bool = True) -> np.ndarray:
-        """编码原子笔记为向量嵌入，使用配置化的文本策略"""
+                           include_metadata: bool = True,
+                           return_metadata: bool = False) -> Union[np.ndarray, Tuple[np.ndarray, List[Dict[str, Any]]]]:
+        """编码原子笔记为向量嵌入，逐条处理并支持元数据提取
+        
+        Args:
+            atomic_notes: 原子笔记列表
+            content_field: 内容字段名
+            include_metadata: 是否包含元数据（向后兼容）
+            return_metadata: 是否返回元数据列表
+            
+        Returns:
+            如果return_metadata=False: np.ndarray (向量矩阵)
+            如果return_metadata=True: Tuple[np.ndarray, List[Dict]] (向量矩阵, 元数据列表)
+        """
         if not atomic_notes:
+            if return_metadata:
+                return np.array([]), []
             return np.array([])
         
         # 获取嵌入策略配置
@@ -421,9 +497,15 @@ class EmbeddingManager:
         preprocessing = embedding_config.get('preprocessing', {})
         quality_control = embedding_config.get('quality_control', {})
         
-        # 提取文本内容
-        texts = []
+        # 获取批量处理配置
+        batch_size = config.get('embedding', {}).get('batch_size', 32)
+        max_length = config.get('embedding', {}).get('max_length', 512)
+        
+        # 逐条处理笔记
+        valid_texts = []
+        valid_metadata = []
         skipped_count = 0
+        length_exceeded_count = 0
         
         for i, note in enumerate(atomic_notes):
             try:
@@ -440,29 +522,51 @@ class EmbeddingManager:
                 # 文本预处理
                 text = self._preprocess_embedding_text(text, preprocessing)
                 
+                # 长度检查
+                if len(text) > max_length:
+                    length_exceeded_count += 1
+                    if quality_control.get('truncate_long_text', True):
+                        text = text[:max_length]
+                        logger.debug(f"笔记 {i} 文本长度超限，已截断至 {max_length} 字符")
+                    else:
+                        logger.debug(f"跳过笔记 {i}: 文本长度 {len(text)} 超过限制 {max_length}")
+                        skipped_count += 1
+                        continue
+                
                 # 质量控制
                 if self._should_skip_note(text, quality_control):
                     if quality_control.get('log_skipped_notes', True):
                         logger.debug(f"跳过笔记 {i}: 文本质量不符合要求")
                     skipped_count += 1
-                    text = "Empty note"  # 使用占位符
+                    continue
                 
-                texts.append(text)
+                # 提取元数据
+                metadata = self._extract_note_metadata(note, i) if return_metadata else {}
+                
+                valid_texts.append(text)
+                valid_metadata.append(metadata)
                 
             except Exception as e:
                 logger.warning(f"处理笔记 {i} 时出错: {e}")
-                if quality_control.get('skip_invalid_encoding', True):
-                    skipped_count += 1
-                    texts.append("Empty note")
-                else:
-                    texts.append(note.get(content_field, 'Empty note'))
+                skipped_count += 1
+                continue
         
-        if skipped_count > 0:
-            logger.info(f"编码 {len(atomic_notes)} 个原子笔记，跳过 {skipped_count} 个，使用策略: {text_strategy}")
-        else:
-            logger.info(f"编码 {len(atomic_notes)} 个原子笔记，使用策略: {text_strategy}")
+        # 统计信息
+        logger.info(f"处理 {len(atomic_notes)} 个原子笔记: 有效 {len(valid_texts)} 个, "
+                   f"跳过 {skipped_count} 个, 长度超限 {length_exceeded_count} 个, 策略: {text_strategy}")
         
-        return self.encode_texts(texts)
+        if not valid_texts:
+            logger.warning("没有有效的笔记可以编码")
+            if return_metadata:
+                return np.array([]), []
+            return np.array([])
+        
+        # 批量编码
+        embeddings = self._encode_texts_with_batch_control(valid_texts, batch_size)
+        
+        if return_metadata:
+            return embeddings, valid_metadata
+        return embeddings
     
     def _extract_title_raw_span_text(self, note: Dict[str, Any], field_priority: List[str], 
                                    text_combination: Dict[str, Any]) -> str:
@@ -494,6 +598,70 @@ class EmbeddingManager:
                 combined_text = combined_text[:half] + combined_text[-half:]
         
         return combined_text or "Empty note"
+    
+    def _extract_note_metadata(self, note: Dict[str, Any], note_index: int) -> Dict[str, Any]:
+        """提取笔记的关键元数据信息"""
+        metadata = {
+            'note_index': note_index,
+            'original_note_id': note.get('id', f'note_{note_index}'),
+        }
+        
+        # 提取实体信息
+        entities = note.get('entities', [])
+        if entities:
+            if isinstance(entities, list):
+                metadata['entities'] = [str(e) for e in entities]
+            else:
+                metadata['entities'] = [str(entities)]
+        else:
+            metadata['entities'] = []
+        
+        # 提取谓词/关系信息
+        predicates = note.get('predicates', note.get('relations', []))
+        if predicates:
+            if isinstance(predicates, list):
+                metadata['predicates'] = [str(p) for p in predicates]
+            else:
+                metadata['predicates'] = [str(predicates)]
+        else:
+            metadata['predicates'] = []
+        
+        # 提取时间信息
+        time_info = note.get('time', note.get('timestamp', note.get('date', '')))
+        if time_info:
+            metadata['time'] = str(time_info)
+        else:
+            metadata['time'] = ''
+        
+        # 提取句序号信息
+        sentence_id = note.get('sentence_id', note.get('sid', note.get('sentence_index', '')))
+        if sentence_id is not None:
+            metadata['sentence_id'] = str(sentence_id)
+        else:
+            metadata['sentence_id'] = ''
+        
+        # 提取文档来源信息
+        source = note.get('source', note.get('document_id', note.get('doc_id', '')))
+        if source:
+            metadata['source'] = str(source)
+        else:
+            metadata['source'] = ''
+        
+        # 提取置信度信息
+        confidence = note.get('confidence', note.get('score', ''))
+        if confidence is not None:
+            try:
+                metadata['confidence'] = float(confidence)
+            except (ValueError, TypeError):
+                metadata['confidence'] = 0.0
+        else:
+            metadata['confidence'] = 0.0
+        
+        # 提取原始文本长度
+        text_content = note.get('content', note.get('text', note.get('raw_span', '')))
+        metadata['text_length'] = len(str(text_content))
+        
+        return metadata
     
     def _extract_title_content_text(self, note: Dict[str, Any], content_field: str, 
                                   text_combination: Dict[str, Any]) -> str:

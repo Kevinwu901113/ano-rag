@@ -13,6 +13,13 @@ class DocumentChunker:
         self.overlap = config.get('document.overlap', 50)
         self.supported_formats = config.get('document.supported_formats', ['json', 'jsonl', 'docx'])
         
+        # 句级切分配置
+        self.sentence_chunking_enabled = config.get('document.sentence_chunking.enabled', False)
+        self.strict_sentence_mode = config.get('document.sentence_chunking.strict_sentence_mode', False)
+        self.sentences_per_chunk = config.get('document.sentence_chunking.sentences_per_chunk', 2)
+        self.maintain_sentence_boundaries = config.get('document.sentence_chunking.maintain_sentence_boundaries', True)
+        self.sentence_index_mapping = config.get('document.sentence_chunking.sentence_index_mapping', True)
+        
         # 事件链优化配置
         self.event_chain_optimization = config.get('chunking.event_chain_optimization.enabled', True)
         self.event_keywords = {
@@ -190,8 +197,12 @@ class DocumentChunker:
                 'file_hash': FileUtils.get_file_hash(file_path) if hasattr(FileUtils, 'get_file_hash') else 'unknown'
             }
         
-        # 事件链感知的分块处理
-        if self.event_chain_optimization:
+        # 选择分块策略
+        if self.sentence_chunking_enabled:
+            # 使用句级切分
+            text_chunks = self._sentence_based_chunking(cleaned_text)
+        elif self.event_chain_optimization:
+            # 事件链感知的分块处理
             text_chunks = self._event_aware_chunking(cleaned_text)
         else:
             # 使用TextUtils进行分块
@@ -202,6 +213,12 @@ class DocumentChunker:
             )
 
         search_pos = 0  # 用于在原文中定位每个块的起始位置
+        
+        # 如果启用了句级切分，创建全局句子索引映射
+        global_sentence_mapping = None
+        if self.sentence_chunking_enabled and self.sentence_index_mapping:
+            all_sentences = self._split_into_sentences(cleaned_text)
+            global_sentence_mapping = self._create_sentence_index_mapping(all_sentences)
         
         # 创建分块数据结构
         chunks = []
@@ -236,6 +253,20 @@ class DocumentChunker:
                 'created_at': self._get_timestamp(),
                 'primary_entity': primary_entity
             }
+
+            # 添加句级切分相关信息
+            if self.sentence_chunking_enabled:
+                if self.maintain_sentence_boundaries and 'sentence_boundaries' in chunk_data:
+                    chunk['sentence_boundaries'] = chunk_data['sentence_boundaries']
+                
+                if 'sentence_ids' in chunk_data:
+                    chunk['sentence_ids'] = chunk_data['sentence_ids']
+                    chunk['start_sentence_id'] = chunk_data['start_sentence_id']
+                    chunk['end_sentence_id'] = chunk_data['end_sentence_id']
+                
+                # 添加句子索引映射
+                if global_sentence_mapping:
+                    chunk['sentence_index_mapping'] = global_sentence_mapping
 
             # 添加上下文信息
             chunk['context'] = self._extract_context_info(final_text, cleaned_text, i)
@@ -298,6 +329,120 @@ class DocumentChunker:
                 })
         
         return event_sentences
+    
+    def _split_into_sentences(self, text: str) -> List[Dict[str, Any]]:
+        """将文本分割成句子，并记录每个句子的位置信息"""
+        import re
+        
+        # 使用更精确的句子分割正则表达式
+        sentence_pattern = r'([^。！？.!?]*[。！？.!?]+)'
+        sentences = []
+        sentence_index = 0
+        current_pos = 0
+        
+        # 找到所有句子
+        for match in re.finditer(sentence_pattern, text):
+            sentence_text = match.group(1).strip()
+            if sentence_text:
+                start_pos = match.start()
+                end_pos = match.end()
+                
+                sentences.append({
+                    'text': sentence_text,
+                    'sentence_id': sentence_index,
+                    'start_pos': start_pos,
+                    'end_pos': end_pos,
+                    'length': len(sentence_text)
+                })
+                sentence_index += 1
+        
+        # 处理最后可能没有标点的文本
+        if sentences:
+            last_end = sentences[-1]['end_pos']
+            remaining_text = text[last_end:].strip()
+            if remaining_text:
+                sentences.append({
+                    'text': remaining_text,
+                    'sentence_id': sentence_index,
+                    'start_pos': last_end,
+                    'end_pos': len(text),
+                    'length': len(remaining_text)
+                })
+        else:
+            # 如果没有找到句子分隔符，将整个文本作为一个句子
+            if text.strip():
+                sentences.append({
+                    'text': text.strip(),
+                    'sentence_id': 0,
+                    'start_pos': 0,
+                    'end_pos': len(text),
+                    'length': len(text.strip())
+                })
+        
+        return sentences
+    
+    def _sentence_based_chunking(self, text: str) -> List[Dict[str, Any]]:
+        """基于句子的文档分块"""
+        sentences = self._split_into_sentences(text)
+        
+        if not sentences:
+            return []
+        
+        chunks = []
+        
+        if self.strict_sentence_mode:
+            # 严格按句切分：每个chunk只包含一个句子
+            for sentence in sentences:
+                chunk_data = {
+                    'text': sentence['text'],
+                    'length': sentence['length'],
+                    'sentence_boundaries': [sentence],
+                    'sentence_ids': [sentence['sentence_id']],
+                    'start_sentence_id': sentence['sentence_id'],
+                    'end_sentence_id': sentence['sentence_id']
+                }
+                chunks.append(chunk_data)
+        else:
+            # 按指定句子数量分块
+            current_chunk_sentences = []
+            current_chunk_text = ""
+            
+            for sentence in sentences:
+                current_chunk_sentences.append(sentence)
+                current_chunk_text += sentence['text']
+                
+                # 当达到指定句子数量或者是最后一个句子时，创建chunk
+                if len(current_chunk_sentences) >= self.sentences_per_chunk or sentence == sentences[-1]:
+                    chunk_data = {
+                        'text': current_chunk_text,
+                        'length': len(current_chunk_text),
+                        'sentence_boundaries': current_chunk_sentences.copy(),
+                        'sentence_ids': [s['sentence_id'] for s in current_chunk_sentences],
+                        'start_sentence_id': current_chunk_sentences[0]['sentence_id'],
+                        'end_sentence_id': current_chunk_sentences[-1]['sentence_id']
+                    }
+                    chunks.append(chunk_data)
+                    
+                    # 重置当前chunk
+                    current_chunk_sentences = []
+                    current_chunk_text = ""
+        
+        return chunks
+    
+    def _create_sentence_index_mapping(self, sentences: List[Dict[str, Any]]) -> Dict[int, Dict[str, Any]]:
+        """创建句子索引映射，用于与LLM返回的sid对齐"""
+        mapping = {}
+        
+        for sentence in sentences:
+            sid = sentence['sentence_id']
+            mapping[sid] = {
+                'text': sentence['text'],
+                'start_pos': sentence['start_pos'],
+                'end_pos': sentence['end_pos'],
+                'length': sentence['length']
+            }
+        
+        return mapping
     
     def _optimize_chunk_boundaries(self, chunks: List[Dict[str, Any]], 
                                   event_sentences: List[Dict[str, Any]], 

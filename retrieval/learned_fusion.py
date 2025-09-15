@@ -88,6 +88,28 @@ class LearnedFusion:
             graph_score = candidate.get('graph_score', 0.0)
             feature_vector.append(graph_score)
             
+            # Atomic note features (directly from candidate)
+            # Hit fact count (normalized by log scale)
+            hit_fact_count = candidate.get('hit_fact_count', 0)
+            log_hit_facts = np.log(hit_fact_count + 1) / 5.0  # Rough normalization
+            feature_vector.append(log_hit_facts)
+            
+            # Average importance score
+            avg_importance = candidate.get('avg_importance', 0.0)
+            feature_vector.append(avg_importance)
+            
+            # Predicate coverage
+            predicate_coverage = candidate.get('predicate_coverage', 0.0)
+            feature_vector.append(predicate_coverage)
+            
+            # Temporal coverage
+            temporal_coverage = candidate.get('temporal_coverage', 0.0)
+            feature_vector.append(temporal_coverage)
+            
+            # Cross-sentence diversity
+            cross_sentence_diversity = candidate.get('cross_sentence_diversity', 0.0)
+            feature_vector.append(cross_sentence_diversity)
+            
             features.append(feature_vector)
         
         return np.array(features)

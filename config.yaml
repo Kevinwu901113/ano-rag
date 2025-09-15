@@ -11,6 +11,20 @@ system:
 document:
   chunk_size: 256          # 文档分块大小（字符数），影响检索粒度
   overlap: 32              # 分块间重叠字符数，保证语义连续性
+  batch_size: 32           # 批处理大小，影响处理速度
+  
+  # 句级切分配置
+  sentence_chunking:
+    enabled: false         # 是否启用句级切分模式
+    strict_sentence_mode: false  # 是否启用严格按句切分（true时每个chunk只包含一个句子）
+    sentences_per_chunk: 2 # 非严格模式下每个chunk包含的句子数量
+    maintain_sentence_boundaries: true  # 是否在chunk中维护句子边界信息
+    sentence_index_mapping: true        # 是否生成句子索引映射，用于与LLM返回的sid对齐
+  
+  # 并发处理配置
+  concurrent_processing:
+    enabled: true          # 是否启用并发处理
+    max_workers: 4         # 最大并发工作线程数
 
 # 嵌入模型配置
 embedding:
@@ -48,6 +62,35 @@ retrieval:
     fallback_message: "Unable to extract a meaningful answer from the provided context"  # 自定义回退消息
   # 性能控制配置
   performance:
+
+# 原子笔记生成器配置
+atomic_note_generator:
+  # 原子笔记核心配置
+  sentence_multi_facts: true          # 是否允许单句生成多个事实
+  max_facts_per_sentence: 5           # 每句最大事实数（防过量）
+  min_fact_len: 10                    # 最小事实长度（字符数，质量门槛）
+  min_importance: 0.1                 # 最小重要性分数（质量门槛）
+  dedup_by: "span_or_hash"            # 去重策略：span_or_hash/content_hash/span_only
+  include_span: true                  # 是否强制模型返回跨度信息
+  terse_keys: false                   # 是否使用短键名（如用f代替fact）
+  
+  # 去重策略配置
+  deduplication:
+    enabled: true                    # 是否启用去重
+    use_char_span: true             # 优先使用字符跨度+文本去重
+    similarity_threshold: 0.9       # 文本相似度阈值
+  
+  # 配额与阈值配置（保持向后兼容）
+  quota_threshold:
+    max_facts_per_sentence: 5       # 每句最大事实数
+    min_fact_length: 10             # 最小事实长度（字符数）
+    min_importance_score: 0.1       # 最小重要性分数
+  
+  # 回退笔记配置
+  fallback:
+    importance_score: 0.2           # 回退笔记的重要性分数
+    enable_content_generation: true # 是否生成回退内容
+    max_keywords: 5                 # 最大关键词数量
     max_fallback_per_step: 8      # 每个回补步骤的最大候选数量
     max_graph_expansion: 15        # 图扩展的最大候选数量
     max_entity_lookup: 12          # 实体查找的最大实体数量
@@ -97,6 +140,20 @@ retrieval:
     per_title_max: 1
     per_entity_sentences: 2    # 从命中的段落摘 2 句"证据句"
     evidence_first: true       # 证据句放在每段开头
+    
+    # 笔记视图配置
+    note_view:
+      max_tokens: 1200         # 笔记视图最高token数
+      max_items: 50            # 笔记视图最大项数
+      priority_threshold: 0.6  # 笔记优先级阈值
+      enable_clustering: true  # 是否启用笔记聚类
+    
+    # 段落视图配置
+    paragraph_view:
+      max_tokens: 800          # 段落视图最高token数
+      max_items: 20            # 段落视图最大项数
+      min_paragraph_length: 50 # 最小段落长度
+      enable_summarization: false  # 是否启用段落摘要
   
   # 桥接感知配置
   bridge_aware:
@@ -109,6 +166,13 @@ retrieval:
       dense: 1.0            # 密集向量检索权重
       bm25: 0.5             # BM25关键词检索权重
       graph: 0.65            # 知识图谱检索权重
+  
+  # 检索护栏配置
+  retrieval_guardrail:
+    enabled: false          # 是否启用检索护栏，防止低质量结果
+    min_results: 1          # 最少检索结果数量
+    min_score: 0.0          # 最低检索得分阈值
+    timeout_seconds: 30     # 检索超时时间（秒）
   # 重排权重配置
   rerank:
     entity_overlap_weight: 0.4     # 实体重叠打分权重
@@ -116,6 +180,36 @@ retrieval:
     semantic_weight: 0.35           # 语义相似度权重
     soft_penalty_no_entity: 0.7    # 无实体命中时的软惩罚系数
     rrf_k: 60               # RRF融合参数，仅在fusion_method为rrf时使用
+
+# 图构建配置
+graph_construction:
+  # 原子笔记边配置
+  atomic_note_edges:
+    # 边权阈值配置
+    edge_weight_threshold: 0.3      # 原子笔记边的最小权重阈值
+    semantic_similarity_threshold: 0.7  # 语义相似度阈值
+    entity_overlap_threshold: 0.5   # 实体重叠度阈值
+    
+    # 每种类型边的数量上限（per-type cap）
+    per_type_caps:
+      semantic_relation: 50         # 语义关系边上限
+      entity_cooccurrence: 100      # 实体共现边上限
+      temporal_relation: 30         # 时序关系边上限
+      causal_relation: 40           # 因果关系边上限
+      hierarchical_relation: 60     # 层次关系边上限
+    
+    # 边构建策略
+    construction_strategy:
+      enable_bidirectional: true    # 是否启用双向边
+      weight_normalization: true    # 是否进行权重归一化
+      prune_weak_edges: true        # 是否剪枝弱边
+      min_edge_support: 2           # 边的最小支持度
+    
+    # 质量控制
+    quality_control:
+      max_edges_per_note: 20        # 每个原子笔记的最大边数
+      edge_validation: true         # 是否启用边验证
+      remove_redundant_edges: true  # 是否移除冗余边
 
 # 校准配置
 calibration:
@@ -197,12 +291,7 @@ llm:
       instances: 1            # LM Studio实例数量
       timeout: 60             # 请求超时时间（秒）
 
-# 检索护栏配置
-guardrail:
-  enabled: false             # 是否启用检索护栏，防止低质量结果
-  min_results: 1            # 最少检索结果数量
-  min_score: 0.0            # 最低检索得分阈值
-  timeout_seconds: 30       # 检索超时时间（秒）
+
 
 # 新增功能配置开关
 feature_switches:
@@ -278,3 +367,33 @@ enhanced_relation_extraction:
     entity_alignment_threshold: 0.8  # 实体对齐警告阈值（80%实体缺失才警告）
     export_report: true     # 是否导出检查报告
     report_format: "json"   # 报告格式：json/yaml/txt
+
+# Dataset Guard 配置
+dataset_guard:
+  enabled: true           # 是否启用数据集保护
+  bm25_fallback: true     # 是否启用BM25兜底策略
+  namespace: "musique"    # 数据集命名空间
+
+# Storage 配置
+storage:
+  result_root: "result"   # 结果存储根目录
+
+# Context Packer 配置 - 双视图上下文拼装
+context_packer:
+  token_budget: 2000           # 默认token预算
+  fact_view_ratio: 0.7         # 事实视图占比（70%用于事实）
+  paragraph_view_ratio: 0.3    # 段落视图占比（30%用于原文）
+  
+  # 事实选择参数
+  max_facts_per_entity: 3      # 每个实体最大事实数量
+  min_confidence_threshold: 0.6 # 最小置信度阈值
+  diversity_weight: 0.3        # 多样性权重
+  
+  # 文本片段选择参数
+  max_span_length: 200         # 最大片段长度
+  min_span_length: 50          # 最小片段长度
+  span_overlap_threshold: 0.5  # 片段重叠阈值
+  
+  # 优化参数
+  enable_optimization: true    # 是否启用token分配优化
+  optimization_iterations: 3   # 优化迭代次数

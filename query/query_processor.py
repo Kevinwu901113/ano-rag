@@ -45,6 +45,8 @@ from answer.span_picker import create_span_picker
 from answer.verify_shell import create_answer_verifier
 from context.packer import ContextPacker
 from retrieval.listt5_reranker import ListT5Reranker, create_listt5_reranker, fuse_scores, sort_desc
+from .atomic_note_features import AtomicNoteFeatureExtractor
+from answer.consistency_checker import create_consistency_checker
 
 class QueryProcessor:
     """High level query processing pipeline."""
@@ -118,7 +120,11 @@ class QueryProcessor:
             )
 
         # 初始化图谱检索器（无论是否使用multi_hop都需要）
-        self.graph_retriever = GraphRetriever(self.graph_index, k_hop=config.get('context_dispatcher.k_hop', 2))
+        self.graph_retriever = GraphRetriever(
+            self.graph_index, 
+            k_hop=config.get('context_dispatcher.k_hop', 2),
+            atomic_notes=atomic_notes
+        )
         
         # 初始化调度器
         self.use_context_dispatcher = config.get('context_dispatcher.enabled', True)
@@ -257,6 +263,20 @@ class QueryProcessor:
             self.answer_verifier = None
             self.use_answer_verification = False
         
+        # 初始化答案一致性检查器
+        try:
+            consistency_config = config.get('answer_consistency', {})
+            self.consistency_checker = create_consistency_checker(
+                atomic_notes=atomic_notes,
+                config=consistency_config
+            )
+            self.use_consistency_check = consistency_config.get('enabled', False)
+            logger.info("Answer consistency checker initialized")
+        except Exception as e:
+            logger.warning(f"Failed to initialize consistency checker: {e}")
+            self.consistency_checker = None
+            self.use_consistency_check = False
+        
         # 初始化上下文打包器（使用新的结构化打包）
         try:
             self.context_packer = ContextPacker(calibration_path=calibration_path)
@@ -275,6 +295,14 @@ class QueryProcessor:
         except Exception as e:
             logger.warning(f"Failed to initialize ListT5 reranker: {e}")
             self.listt5 = None
+        
+        # 初始化原子笔记特征提取器
+        try:
+            self.atomic_note_feature_extractor = AtomicNoteFeatureExtractor(atomic_notes)
+            logger.info("Atomic note feature extractor initialized")
+        except Exception as e:
+            logger.warning(f"Failed to initialize atomic note feature extractor: {e}")
+            self.atomic_note_feature_extractor = None
         
         # 检索守卫配置
         guardrail_config = config.get('hybrid_search.retrieval_guardrail', {})
@@ -696,6 +724,16 @@ class QueryProcessor:
             # 计算BM25分数
             bm25_similarities = self._calculate_bm25_similarities(query, candidates)
             
+            # 提取原子笔记特征
+            atomic_features = {}
+            if self.atomic_note_feature_extractor:
+                try:
+                    atomic_features = self.atomic_note_feature_extractor.extract_features(query, candidates)
+                    logger.debug(f"Extracted atomic note features for {len(candidates)} candidates")
+                except Exception as e:
+                    logger.warning(f"Failed to extract atomic note features: {e}")
+                    atomic_features = {}
+            
             # 应用新的融合公式：final_base = 1.0 * dense + 0.6 * sparse
             for i, candidate in enumerate(candidates):
                 dense_score = vector_similarities[i] if i < len(vector_similarities) else 0.0
@@ -730,6 +768,21 @@ class QueryProcessor:
                 candidate['final_base_score'] = final_base
                 candidate['dense_score'] = dense_score
                 candidate['sparse_score'] = sparse_score
+                
+                # 添加原子笔记特征到候选中
+                candidate_id = candidate.get('note_id', candidate.get('id', str(i)))
+                if candidate_id in atomic_features:
+                    candidate.update(atomic_features[candidate_id])
+                    logger.debug(f"Added atomic features to candidate {candidate_id}: {list(atomic_features[candidate_id].keys())}")
+                else:
+                    # 如果没有找到特征，设置默认值
+                    candidate.update({
+                        'hit_fact_count': 0,
+                        'avg_importance': 0.0,
+                        'predicate_coverage': 0.0,
+                        'temporal_coverage': 0.0,
+                        'cross_sentence_diversity': 0.0
+                    })
             
             # 过滤掉分数为0的候选
             candidates = [c for c in candidates if c.get('final_base_score', 0) > 0]
@@ -750,15 +803,43 @@ class QueryProcessor:
                     
                     logger.debug(f"Applying ListT5 reranking to top {pre_listt5_topk} candidates (diversity: {pre_listt5_diversity:.3f})")
                     
-                    # 获取ListT5分数
-                    list_scores = self.listt5.score(query, pre_listt5_candidates)
+                    # 应用 Learned Fusion 到 top M 候选
+                    learned_fusion_candidates = pre_listt5_candidates.copy()
+                    if self.use_learned_fusion and self.learned_fusion:
+                        try:
+                            # 对 top M 候选调用 learned_fusion.predict
+                            learned_fusion_results = self.learned_fusion.rank_paragraphs(query, pre_listt5_candidates)
+                            
+                            # 将 learned fusion 分数添加到候选中
+                            learned_scores_dict = {result[0]: result[1] for result in learned_fusion_results}
+                            for candidate in learned_fusion_candidates:
+                                candidate_id = candidate.get('note_id', candidate.get('id', ''))
+                                candidate['learned_fusion_score'] = learned_scores_dict.get(candidate_id, 0.0)
+                            
+                            logger.debug(f"Applied Learned Fusion to {len(learned_fusion_candidates)} candidates")
+                        except Exception as e:
+                            logger.error(f"Learned Fusion failed: {e}")
+                            # 如果失败，为所有候选设置默认分数
+                            for candidate in learned_fusion_candidates:
+                                candidate['learned_fusion_score'] = 0.0
                     
-                    # 融合分数
+                    # 获取ListT5分数
+                    list_scores = self.listt5.score(query, learned_fusion_candidates)
+                    
+                    # 融合分数（包含 Learned Fusion）
                     calibration_config = config.get('calibration', {})
+                    learned_fusion_weight = calibration_config.get('learned_fusion_weight', 0.2)
+                    
+                    # 修改 fuse_scores 的权重配置以包含 learned_fusion_weight
+                    fusion_weights = {
+                        'listt5_weight': calibration_config.get('listt5_weight', 0.35),
+                        'learned_fusion_weight': learned_fusion_weight
+                    }
+                    
                     fused_candidates = fuse_scores(
-                        pre_listt5_candidates, 
+                        learned_fusion_candidates, 
                         list_scores, 
-                        weights={'listt5_weight': calibration_config.get('listt5_weight', 0.35)}
+                        weights=fusion_weights
                     )
                     
                     # 重新排序
@@ -1713,8 +1794,24 @@ class QueryProcessor:
                 f"{[n.get('note_id') for n in selected_notes]}"
             )
         # 生成答案和评分
-        # 使用新的 build_context_prompt_with_passages 函数生成带有 [P{idx}] 标签的上下文和passages字典
-        prompt, passages_by_idx, packed_order = build_context_prompt_with_passages(selected_notes, query)
+        # 使用 ContextPacker 生成结构化上下文
+        if hasattr(self, 'context_packer') and self.context_packer:
+            try:
+                packed_result = self.context_packer.pack(
+                    passages=selected_notes,
+                    query=query,
+                    max_tokens=config.get('context.max_tokens', 4000)
+                )
+                prompt = packed_result.get('prompt', '')
+                passages_by_idx = packed_result.get('passages_by_idx', {})
+                packed_order = packed_result.get('packed_order', [])
+                logger.info(f"ContextPacker generated prompt with {len(passages_by_idx)} passages")
+            except Exception as e:
+                logger.warning(f"ContextPacker failed, falling back to build_context_prompt_with_passages: {e}")
+                prompt, passages_by_idx, packed_order = build_context_prompt_with_passages(selected_notes, query)
+        else:
+            # 回退到原有的 build_context_prompt_with_passages 函数
+            prompt, passages_by_idx, packed_order = build_context_prompt_with_passages(selected_notes, query)
         raw_answer = self.ollama.generate_final_answer(prompt)
         
         # 使用鲁棒的JSON解析器，带重试机制
@@ -1750,6 +1847,37 @@ class QueryProcessor:
             packed_order=packed_order
         )
         
+        # 使用 Span Picker 抽取高分 span 作为 evidence hints，优先从原子笔记选择
+        evidence_spans = []
+        if self.use_span_picker and self.span_picker:
+            try:
+                # 准备证据句子列表
+                evidence_sentences = []
+                for note in selected_notes:
+                    content = note.get('content', '')
+                    # 简单句子分割
+                    sentences = [s.strip() for s in content.split('.') if s.strip()]
+                    evidence_sentences.extend(sentences)
+                
+                # 使用增强的span picker，传递原子笔记信息
+                best_span, span_score = self.span_picker.pick_best_span(
+                    question=query,
+                    evidence_sentences=evidence_sentences,
+                    atomic_notes=selected_notes  # 传递原子笔记信息
+                )
+                
+                if best_span and span_score > 0.1:
+                    evidence_spans.append({
+                        'text': best_span,
+                        'score': span_score,
+                        'source': 'atomic_notes' if span_score > 0.3 else 'evidence_sentences'
+                    })
+                    logger.info(f"Span Picker selected: '{best_span}' (score: {span_score:.3f})")
+                
+                logger.info(f"Span Picker extracted {len(evidence_spans)} evidence spans")
+            except Exception as e:
+                logger.warning(f"Span Picker failed: {e}")
+        
         # 评估答案质量
         context = "\n".join(n.get('content','') for n in selected_notes)
         scores = self.ollama.evaluate_answer(query, context, answer)
@@ -1758,6 +1886,50 @@ class QueryProcessor:
         for n in selected_notes:
             n['feedback_score'] = scores.get('relevance', 0)
 
+        # 使用 Answer Verifier 进行一致性检查
+        verification_result = None
+        if self.use_answer_verifier and self.answer_verifier:
+            try:
+                verification_result = self.answer_verifier.verify(
+                    query=query,
+                    answer=answer,
+                    context=context,
+                    evidence_spans=evidence_spans
+                )
+                logger.info(f"Answer verification: {verification_result}")
+                
+                # 如果验证不通过，可以标注不确定或触发回补检索
+                if verification_result and not verification_result.get('is_consistent', True):
+                    logger.warning(f"Answer verification failed: {verification_result.get('reason', 'Unknown')}")
+                    # 可以在这里添加回补检索逻辑或标注不确定
+                    
+            except Exception as e:
+                logger.warning(f"Answer Verifier failed: {e}")
+        
+        # 使用一致性检查器进行答案与原子笔记的一致性验证
+        consistency_result = None
+        if self.use_consistency_check and self.consistency_checker:
+            try:
+                # 从selected_notes中提取原子笔记信息
+                atomic_notes_for_check = []
+                for note in selected_notes:
+                    if 'atomic_facts' in note or 'entities' in note or 'relations' in note:
+                        atomic_notes_for_check.append(note)
+                
+                consistency_result = self.consistency_checker.check_consistency(
+                    answer=answer,
+                    atomic_notes=atomic_notes_for_check,
+                    evidence_spans=evidence_spans
+                )
+                logger.info(f"Answer consistency check: confidence={consistency_result.confidence_score:.3f}")
+                
+                # 如果一致性检查置信度过低，记录警告
+                if consistency_result and consistency_result.confidence_score < 0.5:
+                    logger.warning(f"Low consistency confidence: {consistency_result.confidence_score:.3f}, reason: {consistency_result.reason}")
+                    
+            except Exception as e:
+                logger.warning(f"Consistency checker failed: {e}")
+
         result = {
             'query': query,
             'rewrite': rewrite,
@@ -1765,6 +1937,9 @@ class QueryProcessor:
             'scores': scores,
             'notes': selected_notes,
             'predicted_support_idxs': predicted_support_idxs,
+            'evidence_spans': evidence_spans,
+            'verification_result': verification_result,
+            'consistency_result': consistency_result,
         }
         
         # 添加调度器特定的信息
@@ -1854,6 +2029,30 @@ class QueryProcessor:
             for n in selected_notes:
                 n['feedback_score'] = scores.get('relevance', 0)
             
+            # Step 6.5: 使用一致性检查器进行答案与原子笔记的一致性验证
+            consistency_result = None
+            if self.use_consistency_check and self.consistency_checker:
+                try:
+                    # 从selected_notes中提取原子笔记信息
+                    atomic_notes_for_check = []
+                    for note in selected_notes:
+                        if 'atomic_facts' in note or 'entities' in note or 'relations' in note:
+                            atomic_notes_for_check.append(note)
+                    
+                    consistency_result = self.consistency_checker.check_consistency(
+                        answer=answer,
+                        atomic_notes=atomic_notes_for_check,
+                        evidence_spans=None  # 子问题处理中暂时不使用evidence_spans
+                    )
+                    logger.info(f"Answer consistency check (subquestion): confidence={consistency_result.confidence_score:.3f}")
+                    
+                    # 如果一致性检查置信度过低，记录警告
+                    if consistency_result and consistency_result.confidence_score < 0.5:
+                        logger.warning(f"Low consistency confidence in subquestion processing: {consistency_result.confidence_score:.3f}, reason: {consistency_result.reason}")
+                        
+                except Exception as e:
+                    logger.warning(f"Consistency checker failed in subquestion processing: {e}")
+            
             # Step 7: Prepare result with sub-question information
             rewrite = {
                 'original_query': query,
@@ -1869,6 +2068,7 @@ class QueryProcessor:
                 'scores': scores,
                 'notes': selected_notes,
                 'predicted_support_idxs': predicted_support_idxs,
+                'consistency_result': consistency_result,
                 'subquestion_info': {
                     'sub_questions': sub_questions,
                     'subquestion_results': subquestion_results,
@@ -2701,14 +2901,24 @@ class QueryProcessor:
                         path_weight=self.path_weight
                     )
                     
-                    # 融合路径分数与混合分数
+                    # 融合路径分数与混合分数（包含原子笔记特征）
                     for candidate in candidates:
                         hybrid_score = candidate.get('hybrid_score', 0.0)
                         path_score = candidate.get('path_score', 0.0)
                         
-                        # 最终分数：α * dense + β * sparse + γ * path_score
-                        # 这里hybrid_score已经是dense+sparse的融合结果
+                        # 获取原子笔记特征（如果已经计算过）
+                        features = candidate.get('atomic_features', {})
+                        fact_count_score = features.get('fact_count_normalized', 0.0)
+                        importance_score = features.get('avg_importance_normalized', 0.0)
+                        
+                        # 最终分数：α * hybrid + β * path + γ * atomic_features
+                        # hybrid_score已经包含了传统分数和原子笔记特征
                         final_score = (1 - self.path_weight) * hybrid_score + self.path_weight * path_score
+                        
+                        # 如果hybrid_score中没有包含原子笔记特征，则额外添加
+                        if not features:
+                            final_score += 0.05 * (fact_count_score + importance_score)
+                        
                         candidate['final_score'] = final_score
                     
                     # 按最终分数重新排序
@@ -2753,12 +2963,33 @@ class QueryProcessor:
             from utils.bm25_search import bm25_scores
             bm25_scores_list = bm25_scores(self.bm25_corpus, candidates, query)
             
+            # 计算原子笔记特征
+            atomic_features = []
+            if self.atomic_note_feature_extractor:
+                try:
+                    atomic_features = self.atomic_note_feature_extractor.extract_features_for_candidates(
+                        candidates, query
+                    )
+                except Exception as e:
+                    logger.warning(f"Failed to extract atomic note features: {e}")
+                    atomic_features = [{}] * len(candidates)
+            else:
+                atomic_features = [{}] * len(candidates)
+            
             # 融合分数
             if self.fusion_method == 'linear':
                 # 线性融合
                 for i, candidate in enumerate(candidates):
                     vector_score = vector_scores[i] if i < len(vector_scores) else 0.0
                     bm25_score = bm25_scores_list[i] if i < len(bm25_scores_list) else 0.0
+                    
+                    # 获取原子笔记特征
+                    features = atomic_features[i] if i < len(atomic_features) else {}
+                    fact_count_score = features.get('fact_count_normalized', 0.0)
+                    importance_score = features.get('avg_importance_normalized', 0.0)
+                    predicate_coverage = features.get('predicate_coverage_normalized', 0.0)
+                    temporal_coverage = features.get('temporal_coverage_normalized', 0.0)
+                    diversity_score = features.get('cross_sentence_diversity_normalized', 0.0)
                     
                     # 应用检索守卫
                     if must_have_terms:
@@ -2778,9 +3009,17 @@ class QueryProcessor:
                             if predicate.lower() in content:
                                 bm25_score *= 1.3
                     
+                    # 融合所有分数：传统分数 + 原子笔记特征
                     final_score = (self.vector_weight * vector_score + 
-                                 self.bm25_weight * bm25_score)
+                                 self.bm25_weight * bm25_score +
+                                 0.1 * fact_count_score +
+                                 0.1 * importance_score +
+                                 0.05 * predicate_coverage +
+                                 0.05 * temporal_coverage +
+                                 0.05 * diversity_score)
+                    
                     candidate['hybrid_score'] = final_score
+                    candidate['atomic_features'] = features
             
             elif self.fusion_method == 'rrf':
                 # RRF融合
@@ -2789,12 +3028,31 @@ class QueryProcessor:
                 bm25_ranks = {i: rank for rank, i in enumerate(sorted(range(len(candidates)), 
                                                                      key=lambda x: bm25_scores_list[x] if x < len(bm25_scores_list) else 0, reverse=True))}
                 
+                # 为原子笔记特征创建排名
+                fact_count_ranks = {}
+                importance_ranks = {}
+                if atomic_features:
+                    fact_counts = [f.get('fact_count_normalized', 0.0) for f in atomic_features]
+                    importance_scores = [f.get('avg_importance_normalized', 0.0) for f in atomic_features]
+                    
+                    fact_count_ranks = {i: rank for rank, i in enumerate(sorted(range(len(candidates)), 
+                                                                               key=lambda x: fact_counts[x] if x < len(fact_counts) else 0, reverse=True))}
+                    importance_ranks = {i: rank for rank, i in enumerate(sorted(range(len(candidates)), 
+                                                                               key=lambda x: importance_scores[x] if x < len(importance_scores) else 0, reverse=True))}
+                
                 for i, candidate in enumerate(candidates):
                     vector_rank = vector_ranks.get(i, len(candidates))
                     bm25_rank = bm25_ranks.get(i, len(candidates))
+                    fact_rank = fact_count_ranks.get(i, len(candidates))
+                    importance_rank = importance_ranks.get(i, len(candidates))
+                    
+                    # 获取原子笔记特征
+                    features = atomic_features[i] if i < len(atomic_features) else {}
                     
                     rrf_score = (self.vector_weight / (self.rrf_k + vector_rank) + 
-                               self.bm25_weight / (self.rrf_k + bm25_rank))
+                               self.bm25_weight / (self.rrf_k + bm25_rank) +
+                               0.1 / (self.rrf_k + fact_rank) +
+                               0.1 / (self.rrf_k + importance_rank))
                     
                     # 应用检索守卫
                     if must_have_terms:
@@ -2803,6 +3061,7 @@ class QueryProcessor:
                             rrf_score *= 0.1
                     
                     candidate['hybrid_score'] = rrf_score
+                    candidate['atomic_features'] = features
             
             # 按融合分数排序
             candidates.sort(key=lambda x: x.get('hybrid_score', 0), reverse=True)

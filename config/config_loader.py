@@ -20,6 +20,14 @@ DEFAULT_CONFIG: Dict[str, Any] = {
             "weights": {"dense": 1.0, "bm25": 0.5, "graph": 0.5, "path": 0.1},
             "rrf_k": 60,
         },
+        "hybrid_search": {
+            "retrieval_guardrail": {
+                "enabled": True,
+                "min_results": 1,
+                "min_score": 0.0,
+                "timeout_seconds": 30
+            }
+        },
         "bm25": {"k1": 1.2, "b": 0.75, "text_field": "title_raw_span"},
         "graph": {"enabled": True, "k_hop": 2, "expand_top_m": 20},
         "multi_hop": {
@@ -71,7 +79,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
             }
         }
     },
-    "guardrail": {"enabled": True, "min_results": 1, "min_score": 0.0, "timeout_seconds": 30},
+
     "atomic_note_generation": {
         "parallel_enabled": False,
         "parallel_strategy": "task_division",

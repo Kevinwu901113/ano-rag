@@ -41,7 +41,7 @@ class MultiHopQueryProcessor:
             self.graph_index = GraphIndex(graph)
             self.graph_index.build_index(graph, atomic_notes, embeddings)
 
-        self.retriever = GraphRetriever(self.graph_index)
+        self.retriever = GraphRetriever(self.graph_index, atomic_notes=atomic_notes)
 
     def retrieve(
         self,

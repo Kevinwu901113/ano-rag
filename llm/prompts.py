@@ -4,27 +4,68 @@ from typing import Any, Dict, List
 
 # Atomic note generation
 ATOMIC_NOTE_SYSTEM_PROMPT = """
-你是一个专业的知识提取专家。请将给定的文本块转换为原子笔记。
+你是一个专业的知识提取专家。请将给定的文本块逐句处理，提取每句中的原子事实。
 
-原子笔记要求：
-1. 每个笔记包含一个独立的知识点
-2. 内容简洁明了，易于理解
-3. 保留关键信息和上下文
-4. 使用结构化的格式
+处理要求：
+1. 逐句分析输入文本，为每句分配序号
+2. 提取每句中的独立事实，每个事实应简洁完整（≤35词）
+3. 去除冗余信息，合并同义表达
+4. 事实表达需自洽，包含必要上下文
 5. 必须使用英文
 
-请以JSON格式返回，包含以下字段：
-- content: 笔记内容
-- keywords: 关键词列表
-- entities: 实体列表
+输出规范：
+- 返回按句分组的JSON列表
+- 每个对象包含句序号和该句的事实列表
+- 无事实的句子返回空列表（非占位字符串）
+- 字段使用短键名，标明可选字段
+
+字段定义：
+- sent_id: 句序号（必需）
+- facts: 事实列表（必需，可为空[]）
+- text: 事实文本内容（必需）
+- entities: 实体列表（可选）
+- pred: 谓词/关系（可选）
+- time: 时间信息（可选）
+- score: 重要性分数0-1（可选）
+- type: 事实类型（可选）
+- span: 在chunk中的字符跨度[start,end]（可选）
+
+重要：仅返回JSON，去除冗余，确保事实表达自洽。
 """
 
 ATOMIC_NOTE_PROMPT = """
-请将以下文本转换为原子笔记：
+请逐句处理以下文本，提取每句中的原子事实：
 
 {chunk}
 
-请返回JSON格式的原子笔记：
+请严格按照以下JSON格式返回，不要添加任何其他文字或解释：
+[
+    {{
+        "sent_id": 1,
+        "facts": [
+            {{
+                "text": "事实描述，简洁完整≤35词",
+                "entities": ["实体1", "实体2"],
+                "pred": "谓词或关系",
+                "time": "时间信息",
+                "score": 0.8,
+                "type": "fact",
+                "span": [0, 25]
+            }}
+        ]
+    }},
+    {{
+        "sent_id": 2,
+        "facts": []
+    }}
+]
+
+注意：
+- 逐句处理，每句都返回一个对象
+- 无事实的句子facts字段为空列表[]
+- entities, pred, time, score, type, span为可选字段
+- score范围0-1，type可选值：fact/concept/procedure/example
+- 仅返回JSON列表，去除冗余，合并同义表达
 """
 
 EXTRACT_ENTITIES_SYSTEM_PROMPT = """
@@ -45,46 +86,69 @@ EXTRACT_ENTITIES_PROMPT = """
 
 # AtomicNoteGenerator
 ATOMIC_NOTEGEN_SYSTEM_PROMPT = """
-你是一个专业的知识提取和整理专家。你的任务是将给定的文本转换为高质量的原子笔记。
+你是一个专业的知识提取和整理专家。你的任务是将给定的文本逐句处理，提取每句中的原子事实。
 
-原子笔记的特点：
-1. 每个笔记包含一个独立、完整的知识点
-2. 内容简洁明了，避免冗余
-3. 保留关键信息和必要的上下文
-4. 便于后续的检索和组合
+处理要求：
+1. 逐句分析输入文本，为每句分配序号
+2. 提取每句中的独立事实，每个事实应简洁完整（≤35词）
+3. 去除冗余信息，合并同义表达
+4. 事实表达需自洽，包含必要上下文
 5. 必须使用英文
 
-提取要求：
-1. content: 提取核心知识点，保持完整性和准确性，包含所有重要信息
-2. keywords: 提取3-5个关键词，有助于检索
-3. entities: 识别人名、地名、机构名、专业术语等
-4. concepts: 识别重要概念和理论
-5. importance_score: 评估内容重要性（0-1分）
-6. note_type: 分类为fact（事实）、concept（概念）、procedure（流程）、example（示例）
+输出规范：
+- 返回按句分组的JSON列表
+- 每个对象包含句序号和该句的事实列表
+- 无事实的句子返回空列表（非占位字符串）
+- 字段使用短键名，标明可选字段
 
-重要：你必须严格按照JSON格式返回结果，不要添加任何解释文字或markdown标记。只返回纯JSON对象。
+字段定义：
+- sent_id: 句序号（必需）
+- facts: 事实列表（必需，可为空[]）
+- text: 事实文本内容（必需）
+- entities: 实体列表（可选）
+- pred: 谓词/关系（可选）
+- time: 时间信息（可选）
+- score: 重要性分数0-1（可选）
+- type: 事实类型（可选）
+- span: 在chunk中的字符跨度[start,end]（可选）
+
+重要：仅返回JSON，去除冗余，确保事实表达自洽。
 """
 
 ATOMIC_NOTEGEN_PROMPT = """
-请将以下文本转换为原子笔记。每个原子笔记应该包含一个独立的知识点。
+请逐句处理以下文本，提取每句中的原子事实。
 
 文本内容：
 {text}
 
 请严格按照以下JSON格式返回，不要添加任何其他文字或解释：
-{{
-    "content": "原子笔记的完整内容，包含所有重要信息",
-    "keywords": ["关键词1", "关键词2"],
-    "entities": ["实体1", "实体2"],
-    "concepts": ["概念1", "概念2"],
-    "importance_score": 0.8,
-    "note_type": "fact"
-}}
+[
+    {{
+        "sent_id": 1,
+        "facts": [
+            {{
+                "text": "事实描述，简洁完整≤35词",
+                "entities": ["实体1", "实体2"],
+                "pred": "谓词或关系",
+                "time": "时间信息",
+                "score": 0.8,
+                "type": "fact",
+                "span": [0, 25]
+            }}
+        ]
+    }},
+    {{
+        "sent_id": 2,
+        "facts": []
+    }}
+]
 
 注意：
-- importance_score必须是0到1之间的数字
-- note_type必须是以下之一：fact, concept, procedure, example
-- 只返回JSON对象，不要包含markdown代码块标记
+- 逐句处理，每句都返回一个对象
+- 无事实的句子facts字段为空列表[]
+- entities, pred, time, score, type, span为可选字段
+- score范围0-1，type可选值：fact/concept/procedure/example
+- 仅返回JSON列表，去除冗余，合并同义表达
 """
 
 # Query rewriting

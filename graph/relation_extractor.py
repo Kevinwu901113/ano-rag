@@ -144,6 +144,16 @@ class RelationExtractor:
         business_relations = self.extract_lightweight_business_relations(atomic_notes)
         all_relations.extend(business_relations)
         
+        # 8. 同一句或相邻句的共实体/共谓词关系
+        logger.info("Extracting intra-sentence and adjacent-sentence relations")
+        intra_sentence_relations = self.extract_intra_sentence_relations(atomic_notes)
+        all_relations.extend(intra_sentence_relations)
+        
+        # 9. 跨句/跨段的别名/指代归一链关系
+        logger.info("Extracting cross-sentence coreference relations")
+        coreference_relations = self.extract_coreference_relations(atomic_notes)
+        all_relations.extend(coreference_relations)
+        
         return all_relations
     
     def _extract_topic_group_relations(self, atomic_notes: List[Dict[str, Any]], 
@@ -1065,3 +1075,364 @@ class RelationExtractor:
         
         logger.info(f"Extracted {len(relations)} lightweight business relations")
         return relations
+    
+    def extract_intra_sentence_relations(self, atomic_notes: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """提取同一句或相邻句的事实间共实体/共谓词边"""
+        relations = []
+        
+        # 按文档和句子索引组织笔记
+        sentence_groups = defaultdict(lambda: defaultdict(list))
+        
+        for note in atomic_notes:
+            note_id = note.get('note_id')
+            if not note_id:
+                continue
+                
+            source_info = note.get('source_info', {})
+            doc_id = source_info.get('file_path', 'unknown_doc')
+            sentence_index = note.get('sentence_index', 0)
+            
+            sentence_groups[doc_id][sentence_index].append(note)
+        
+        # 处理每个文档的句子组
+        for doc_id, sentences in sentence_groups.items():
+            sentence_indices = sorted(sentences.keys())
+            
+            for i, sentence_idx in enumerate(sentence_indices):
+                current_notes = sentences[sentence_idx]
+                
+                # 同一句内的笔记关系
+                for j, note1 in enumerate(current_notes):
+                    for k, note2 in enumerate(current_notes[j+1:], j+1):
+                        relation = self._extract_intra_sentence_relation(note1, note2, 'same_sentence')
+                        if relation:
+                            relations.append(relation)
+                
+                # 相邻句子的笔记关系
+                if i < len(sentence_indices) - 1:
+                    next_sentence_idx = sentence_indices[i + 1]
+                    next_notes = sentences[next_sentence_idx]
+                    
+                    # 只处理真正相邻的句子（索引差为1）
+                    if next_sentence_idx - sentence_idx == 1:
+                        for note1 in current_notes:
+                            for note2 in next_notes:
+                                relation = self._extract_intra_sentence_relation(note1, note2, 'adjacent_sentence')
+                                if relation:
+                                    relations.append(relation)
+        
+        logger.info(f"Extracted {len(relations)} intra-sentence relations")
+        return relations
+    
+    def _extract_intra_sentence_relation(self, note1: Dict[str, Any], note2: Dict[str, Any], 
+                                       relation_context: str) -> Optional[Dict[str, Any]]:
+        """提取两个笔记间的句内或相邻句关系"""
+        note1_id = note1.get('note_id')
+        note2_id = note2.get('note_id')
+        
+        if not note1_id or not note2_id or note1_id == note2_id:
+            return None
+    
+    def extract_structural_relations(self, atomic_notes: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """提取事实到其原段落/章节结构的结构边，保留层级信息"""
+        relations = []
+        
+        # 按文档组织笔记
+        doc_notes = defaultdict(list)
+        for note in atomic_notes:
+            source_info = note.get('source_info', {})
+            doc_id = source_info.get('file_path', 'unknown_doc')
+            doc_notes[doc_id].append(note)
+        
+        # 为每个文档构建结构关系
+        for doc_id, notes in doc_notes.items():
+            # 构建段落和章节层级
+            paragraph_relations = self._extract_paragraph_relations(notes, doc_id)
+            chapter_relations = self._extract_chapter_relations(notes, doc_id)
+            
+            relations.extend(paragraph_relations)
+            relations.extend(chapter_relations)
+        
+        logger.info(f"Extracted {len(relations)} structural relations")
+        return relations
+    
+    def _extract_paragraph_relations(self, notes: List[Dict[str, Any]], doc_id: str) -> List[Dict[str, Any]]:
+        """提取笔记到段落的结构关系"""
+        relations = []
+        
+        # 按段落组织笔记
+        paragraph_groups = defaultdict(list)
+        
+        for note in notes:
+            note_id = note.get('note_id')
+            if not note_id:
+                continue
+            
+            source_info = note.get('source_info', {})
+            paragraph_id = source_info.get('paragraph_id')
+            
+            if paragraph_id:
+                paragraph_groups[paragraph_id].append(note)
+            else:
+                # 如果没有明确的段落ID，使用句子索引推断段落
+                sentence_index = note.get('sentence_index', 0)
+                # 假设每5个句子为一个段落（可根据实际情况调整）
+                inferred_paragraph_id = f"{doc_id}_para_{sentence_index // 5}"
+                paragraph_groups[inferred_paragraph_id].append(note)
+        
+        # 为每个段落创建结构关系
+        for paragraph_id, paragraph_notes in paragraph_groups.items():
+            if len(paragraph_notes) <= 1:
+                continue
+            
+            # 计算段落内笔记的平均重要性
+            avg_importance = sum(note.get('importance', 0.5) for note in paragraph_notes) / len(paragraph_notes)
+            
+            # 为段落内的每个笔记创建到段落的结构边
+            for note in paragraph_notes:
+                note_id = note.get('note_id')
+                if note_id:
+                    relations.append({
+                        'source_id': note_id,
+                        'target_id': paragraph_id,
+                        'relation_type': 'belongs_to_paragraph',
+                        'weight': 1.0,  # 结构关系权重固定为1.0
+                        'metadata': {
+                            'paragraph_id': paragraph_id,
+                            'paragraph_size': len(paragraph_notes),
+                            'paragraph_avg_importance': avg_importance,
+                            'note_position_in_paragraph': paragraph_notes.index(note),
+                            'structural_level': 'paragraph'
+                        }
+                    })
+            
+            # 段落内笔记间的结构相关性
+            for i, note1 in enumerate(paragraph_notes):
+                for j, note2 in enumerate(paragraph_notes[i+1:], i+1):
+                    note1_id = note1.get('note_id')
+                    note2_id = note2.get('note_id')
+                    
+                    if note1_id and note2_id:
+                        # 计算位置相关性权重
+                        position_distance = abs(j - i)
+                        position_weight = max(0.1, 1.0 / (1 + position_distance * 0.2))
+                        
+                        relations.append({
+                            'source_id': note1_id,
+                            'target_id': note2_id,
+                            'relation_type': 'paragraph_coexistence',
+                            'weight': position_weight,
+                            'metadata': {
+                                'paragraph_id': paragraph_id,
+                                'position_distance': position_distance,
+                                'structural_level': 'paragraph'
+                            }
+                        })
+        
+        return relations
+    
+    def _extract_chapter_relations(self, notes: List[Dict[str, Any]], doc_id: str) -> List[Dict[str, Any]]:
+        """提取笔记到章节的结构关系"""
+        relations = []
+        
+        # 按章节组织笔记
+        chapter_groups = defaultdict(list)
+        
+        for note in notes:
+            note_id = note.get('note_id')
+            if not note_id:
+                continue
+            
+            source_info = note.get('source_info', {})
+            chapter_id = source_info.get('chapter_id')
+            
+            if chapter_id:
+                chapter_groups[chapter_id].append(note)
+            else:
+                # 如果没有明确的章节ID，使用句子索引推断章节
+                sentence_index = note.get('sentence_index', 0)
+                # 假设每20个句子为一个章节（可根据实际情况调整）
+                inferred_chapter_id = f"{doc_id}_chapter_{sentence_index // 20}"
+                chapter_groups[inferred_chapter_id].append(note)
+        
+        # 为每个章节创建结构关系
+        for chapter_id, chapter_notes in chapter_groups.items():
+            if len(chapter_notes) <= 1:
+                continue
+            
+            # 计算章节内笔记的统计信息
+            avg_importance = sum(note.get('importance', 0.5) for note in chapter_notes) / len(chapter_notes)
+            
+            # 收集章节内的主要实体和主题
+            chapter_entities = set()
+            chapter_topics = set()
+            
+            for note in chapter_notes:
+                entities = note.get('entities', [])
+                chapter_entities.update(entities)
+                
+                topics = note.get('topics', [])
+                chapter_topics.update(topics)
+            
+            # 为章节内的每个笔记创建到章节的结构边
+            for note in chapter_notes:
+                note_id = note.get('note_id')
+                if note_id:
+                    relations.append({
+                        'source_id': note_id,
+                        'target_id': chapter_id,
+                        'relation_type': 'belongs_to_chapter',
+                        'weight': 1.0,
+                        'metadata': {
+                            'chapter_id': chapter_id,
+                            'chapter_size': len(chapter_notes),
+                            'chapter_avg_importance': avg_importance,
+                            'note_position_in_chapter': chapter_notes.index(note),
+                            'chapter_entities_count': len(chapter_entities),
+                            'chapter_topics_count': len(chapter_topics),
+                            'structural_level': 'chapter'
+                        }
+                    })
+        
+        return relations
+    
+    def extract_coreference_relations(self, atomic_notes: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """提取跨句/跨段的别名/指代归一链关系"""
+        relations = []
+        
+        # 构建实体别名映射
+        entity_aliases = self._build_entity_alias_mapping(atomic_notes)
+        
+        # 按文档组织笔记
+        doc_notes = defaultdict(list)
+        for note in atomic_notes:
+            source_info = note.get('source_info', {})
+            doc_id = source_info.get('file_path', 'unknown_doc')
+            doc_notes[doc_id].append(note)
+        
+        # 处理每个文档的指代关系
+        for doc_id, notes in doc_notes.items():
+            # 按句子索引排序
+            notes.sort(key=lambda x: x.get('sentence_index', 0))
+            
+            for i, note1 in enumerate(notes):
+                for j, note2 in enumerate(notes[i+1:], i+1):
+                    # 跳过相邻句子（已在intra_sentence_relations中处理）
+                    sentence_distance = abs(note2.get('sentence_index', 0) - note1.get('sentence_index', 0))
+                    if sentence_distance <= 1:
+                        continue
+                    
+                    relation = self._extract_coreference_relation(note1, note2, entity_aliases, sentence_distance)
+                    if relation:
+                        relations.append(relation)
+        
+        logger.info(f"Extracted {len(relations)} coreference relations")
+        return relations
+    
+    def _build_entity_alias_mapping(self, atomic_notes: List[Dict[str, Any]]) -> Dict[str, Set[str]]:
+        """构建实体别名映射"""
+        entity_aliases = defaultdict(set)
+        
+        # 收集所有实体及其变体
+        for note in atomic_notes:
+            entities = note.get('entities', [])
+            normalized_entities = note.get('normalized_entities', [])
+            
+            # 建立原始实体到归一化实体的映射
+            for i, entity in enumerate(entities):
+                if i < len(normalized_entities):
+                    normalized = normalized_entities[i]
+                    entity_aliases[normalized].add(entity)
+                    entity_aliases[normalized].add(normalized)
+                else:
+                    entity_aliases[entity].add(entity)
+        
+        # 基于字符串相似性扩展别名
+        entity_names = list(entity_aliases.keys())
+        for i, entity1 in enumerate(entity_names):
+            for entity2 in entity_names[i+1:]:
+                if self._are_likely_aliases(entity1, entity2):
+                    # 合并别名集合
+                    combined_aliases = entity_aliases[entity1].union(entity_aliases[entity2])
+                    entity_aliases[entity1] = combined_aliases
+                    entity_aliases[entity2] = combined_aliases
+        
+        return entity_aliases
+    
+    def _are_likely_aliases(self, entity1: str, entity2: str) -> bool:
+        """判断两个实体是否可能是别名"""
+        if not entity1 or not entity2:
+            return False
+        
+        entity1_lower = entity1.lower().strip()
+        entity2_lower = entity2.lower().strip()
+        
+        # 完全相同
+        if entity1_lower == entity2_lower:
+            return True
+        
+        # 一个是另一个的子串
+        if entity1_lower in entity2_lower or entity2_lower in entity1_lower:
+            return True
+        
+        # 简单的缩写检查
+        if len(entity1_lower) <= 3 or len(entity2_lower) <= 3:
+            # 检查是否是首字母缩写
+            longer = entity1_lower if len(entity1_lower) > len(entity2_lower) else entity2_lower
+            shorter = entity2_lower if len(entity1_lower) > len(entity2_lower) else entity1_lower
+            
+            words = longer.split()
+            if len(words) >= len(shorter):
+                initials = ''.join([word[0] for word in words if word])
+                if initials == shorter:
+                    return True
+        
+        return False
+    
+    def _extract_coreference_relation(self, note1: Dict[str, Any], note2: Dict[str, Any], 
+                                    entity_aliases: Dict[str, Set[str]], 
+                                    sentence_distance: int) -> Optional[Dict[str, Any]]:
+        """提取两个笔记间的指代关系"""
+        note1_id = note1.get('note_id')
+        note2_id = note2.get('note_id')
+        
+        if not note1_id or not note2_id or note1_id == note2_id:
+            return None
+        
+        # 获取实体
+        entities1 = set(note1.get('normalized_entities', note1.get('entities', [])))
+        entities2 = set(note2.get('normalized_entities', note2.get('entities', [])))
+        
+        # 检查别名关系
+        coreference_score = 0.0
+        matched_aliases = []
+        
+        for entity1 in entities1:
+            for entity2 in entities2:
+                if entity1 in entity_aliases and entity2 in entity_aliases[entity1]:
+                    coreference_score += 1.0
+                    matched_aliases.append((entity1, entity2))
+                elif self._are_likely_aliases(entity1, entity2):
+                    coreference_score += 0.8
+                    matched_aliases.append((entity1, entity2))
+        
+        # 如果有指代关系，创建边
+        if coreference_score > 0:
+            # 根据距离调整权重
+            distance_penalty = min(0.9, 1.0 / (1 + sentence_distance * 0.1))
+            weight = (coreference_score / max(len(entities1), len(entities2), 1)) * distance_penalty
+            
+            return {
+                'source_id': note1_id,
+                'target_id': note2_id,
+                'relation_type': 'coreference',
+                'weight': weight,
+                'metadata': {
+                    'matched_aliases': matched_aliases,
+                    'coreference_score': coreference_score,
+                    'sentence_distance': sentence_distance,
+                    'distance_penalty': distance_penalty
+                }
+            }
+        
+        return None
