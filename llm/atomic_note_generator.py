@@ -463,29 +463,56 @@ class AtomicNoteGenerator:
             return self._create_fallback_note(chunk_data)
     
     def _is_new_structure(self, note_data: Any) -> bool:
-        """检查是否为新结构（按句分组）"""
-        if isinstance(note_data, dict) and 'sentence_groups' in note_data:
-            return True
+        """检查是否为新结构（按句多事实数组）"""
+        # 检查是否为数组，且数组元素包含facts字段
+        if isinstance(note_data, list) and len(note_data) > 0:
+            # 检查第一个元素是否包含facts字段
+            first_item = note_data[0]
+            if isinstance(first_item, dict) and 'facts' in first_item:
+                return True
         return False
     
-    def _parse_new_structure(self, note_data: Dict[str, Any], chunk_data: Dict[str, Any]) -> List[Dict[str, Any]]:
-        """解析新结构（按句分组）"""
-        sentence_groups = note_data.get('sentence_groups', [])
-        if not isinstance(sentence_groups, list):
-            logger.warning("sentence_groups is not a list, falling back to old structure")
-            return self._parse_old_structure(note_data, chunk_data)
+    def _parse_new_structure(self, note_data: List[Dict[str, Any]], chunk_data: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """解析新结构（按句多事实数组）"""
+        if not isinstance(note_data, list):
+            logger.warning("note_data is not a list, falling back to old structure")
+            return [self._parse_old_structure(note_data, chunk_data)]
         
         atomic_notes = []
-        for i, group in enumerate(sentence_groups):
-            if not isinstance(group, dict):
-                continue
-            
-            # 为每个句子组创建一个原子笔记
-            atomic_note = self._create_atomic_note_from_data(group, chunk_data)
-            atomic_note['group_index'] = i
-            atomic_notes.append(atomic_note)
+        total_facts = 0
         
-        logger.info(f"Parsed {len(atomic_notes)} atomic notes from new structure")
+        # 获取配置参数
+        max_facts_per_sentence = config.get('atomic_note_generator.max_facts_per_sentence', 5)
+        
+        for sentence_item in note_data:
+            if not isinstance(sentence_item, dict):
+                continue
+                
+            sent_id = sentence_item.get('sent_id', 0)
+            facts = sentence_item.get('facts', [])
+            
+            if not isinstance(facts, list):
+                continue
+                
+            # 应用每句事实数量限制
+            if len(facts) > max_facts_per_sentence:
+                logger.debug(f"Sentence {sent_id}: limiting facts from {len(facts)} to {max_facts_per_sentence}")
+                facts = facts[:max_facts_per_sentence]
+            
+            # 为每个事实创建一个原子笔记
+            for fact_idx, fact in enumerate(facts):
+                if not isinstance(fact, dict):
+                    continue
+                    
+                # 创建原子笔记，保留所有元数据
+                atomic_note = self._create_atomic_note_from_fact(fact, sentence_item, chunk_data, fact_idx)
+                atomic_notes.append(atomic_note)
+                total_facts += 1
+        
+        sentences_with_facts = len([item for item in note_data if isinstance(item.get('facts'), list) and len(item.get('facts', [])) > 0])
+        avg_facts_per_sentence = total_facts / max(sentences_with_facts, 1)
+        
+        logger.info(f"Parsed {total_facts} atomic notes from {len(note_data)} sentences (avg: {avg_facts_per_sentence:.2f} facts/sentence)")
         return atomic_notes
     
     def _parse_old_structure(self, note_data: Any, chunk_data: Dict[str, Any]) -> Dict[str, Any]:
@@ -511,6 +538,64 @@ class AtomicNoteGenerator:
         
         # 使用统一的方法创建原子笔记
         return self._create_atomic_note_from_data(note_data, chunk_data)
+    
+    def _create_atomic_note_from_fact(self, fact: Dict[str, Any], sentence_item: Dict[str, Any], chunk_data: Dict[str, Any], fact_idx: int) -> Dict[str, Any]:
+        """从单个事实创建原子笔记，保留所有元数据"""
+        text = chunk_data.get('text', '')
+        
+        # 提取相关的paragraph idx信息
+        paragraph_idx_mapping = chunk_data.get('paragraph_idx_mapping', {})
+        
+        # 从事实中提取信息
+        fact_text = fact.get('text', '')
+        entities = fact.get('entities', [])
+        predicate = fact.get('pred', '')
+        time_info = fact.get('time', '')
+        importance_score = fact.get('score', 0.5)
+        fact_type = fact.get('type', 'fact')
+        span = fact.get('span', [])
+        
+        # 从句子项中获取sent_id
+        sent_id = sentence_item.get('sent_id', 0)
+        
+        # 生成原子笔记
+        atomic_note = {
+            'text': fact_text,
+            'entities': entities if isinstance(entities, list) else [],
+            'relations': [],  # 将在后续处理中填充
+            'predicate': predicate,
+            'time': time_info,
+            'importance_score': float(importance_score) if importance_score else 0.5,
+            'fact_type': fact_type,
+            'sent_id': sent_id,
+            'fact_idx': fact_idx,
+            'span': span if isinstance(span, list) and len(span) == 2 else [],
+            
+            # 保留原有字段
+            'chunk_id': chunk_data.get('chunk_id', ''),
+            'doc_id': chunk_data.get('doc_id', ''),
+            'paragraph_idx': chunk_data.get('paragraph_idx', 0),
+            'paragraph_idx_mapping': paragraph_idx_mapping,
+            'chunk_text': text,
+            'source': chunk_data.get('source', ''),
+            'metadata': chunk_data.get('metadata', {})
+        }
+        
+        # 生成关系信息（如果有谓词和实体）
+        if predicate and len(entities) >= 2:
+            atomic_note['relations'] = [{
+                'source': entities[0],
+                'target': entities[1],
+                'relation_type': predicate
+            }]
+        
+        # 生成span evidence
+        if entities:
+            atomic_note['span_evidence'] = self._generate_raw_span_evidence(entities, atomic_note['relations'], text)
+        else:
+            atomic_note['span_evidence'] = fact_text[:100] if fact_text else text[:100]
+        
+        return atomic_note
     
     def _create_atomic_note_from_data(self, note_data: Dict[str, Any], chunk_data: Dict[str, Any]) -> Dict[str, Any]:
         """从note_data和chunk_data创建完整的原子笔记，支持新结构字段"""

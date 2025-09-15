@@ -282,6 +282,14 @@ def fuse_scores(candidates: List[Dict[str, Any]],
     temporal_coverage_weight = atomic_features_config.get('temporal_coverage_weight', 0.15)
     diversity_weight = atomic_features_config.get('cross_sentence_diversity_weight', 0.1)
     
+    # 记录融合权重详情，便于调试和A/B测试
+    logger.debug(f"Score fusion details - ListT5: {listt5_weight:.3f}, "
+                f"Learned Fusion: {learned_fusion_weight:.3f}, "
+                f"Atomic Features: {atomic_features_weight:.3f}")
+    logger.debug(f"Atomic sub-weights - Facts: {fact_count_weight:.2f}, "
+                f"Importance: {importance_weight:.2f}, Predicates: {predicate_coverage_weight:.2f}, "
+                f"Temporal: {temporal_coverage_weight:.2f}, Diversity: {diversity_weight:.2f}")
+    
     # 归一化现有分数
     existing_scores = []
     learned_fusion_scores = []

@@ -279,7 +279,7 @@ class QueryProcessor:
         
         # 初始化上下文打包器（使用新的结构化打包）
         try:
-            self.context_packer = ContextPacker(calibration_path=calibration_path)
+            self.context_packer = ContextPacker(calibration_path=calibration_path, config=config)
             logger.info("Context packer initialized with structure-based packing")
         except Exception as e:
             logger.warning(f"Failed to initialize context packer: {e}")
@@ -305,7 +305,7 @@ class QueryProcessor:
             self.atomic_note_feature_extractor = None
         
         # 检索守卫配置
-        guardrail_config = config.get('hybrid_search.retrieval_guardrail', {})
+        guardrail_config = config.get('retrieval.hybrid_search.retrieval_guardrail', {})
         self.retrieval_guardrail_enabled = guardrail_config.get('enabled', True)
         self.must_have_terms_config = guardrail_config.get('must_have_terms', {})
         self.boost_entities_config = guardrail_config.get('boost_entities', {})
@@ -838,6 +838,22 @@ class QueryProcessor:
                         'atomic_features_weight': atomic_features_config.get('weight', 0.1),
                         'atomic_features': atomic_features_config
                     }
+                    
+                    # 记录最终融合权重配置，便于线上A/B测试分析
+                    logger.info(f"Final fusion weights - ListT5: {fusion_weights['listt5_weight']:.3f}, "
+                              f"Learned Fusion: {fusion_weights['learned_fusion_weight']:.3f}, "
+                              f"Atomic Features: {fusion_weights['atomic_features_weight']:.3f}")
+                    
+                    # 记录原子特征子权重详情
+                    if atomic_features_config.get('enabled', True):
+                        atomic_sub_weights = {
+                            'fact_hit': atomic_features_config.get('fact_hit_weight', 0.3),
+                            'avg_importance': atomic_features_config.get('avg_importance_weight', 0.25),
+                            'predicate_coverage': atomic_features_config.get('predicate_coverage_weight', 0.2),
+                            'temporal_coverage': atomic_features_config.get('temporal_coverage_weight', 0.15),
+                            'diversity': atomic_features_config.get('diversity_weight', 0.1)
+                        }
+                        logger.debug(f"Atomic feature sub-weights: {atomic_sub_weights}")
                     
                     fused_candidates = fuse_scores(
                         learned_fusion_candidates, 
@@ -1800,15 +1816,32 @@ class QueryProcessor:
         # 使用 ContextPacker 生成结构化上下文
         if hasattr(self, 'context_packer') and self.context_packer:
             try:
-                packed_result = self.context_packer.pack(
-                    passages=selected_notes,
-                    query=query,
-                    max_tokens=config.get('context.max_tokens', 4000)
-                )
-                prompt = packed_result.get('prompt', '')
-                passages_by_idx = packed_result.get('passages_by_idx', {})
-                packed_order = packed_result.get('packed_order', [])
-                logger.info(f"ContextPacker generated prompt with {len(passages_by_idx)} passages")
+                # 检查是否启用双视图打包
+                dual_view_config = config.get('context', {}).get('dual_view_packing', {})
+                if dual_view_config.get('enabled', False):
+                    # 使用双视图打包策略
+                    token_budget = config.get('context.max_tokens', 4000)
+                    prompt, passages_by_idx, packed_order = self.context_packer.pack_dual_view_context(
+                        notes=selected_notes,
+                        question=query,
+                        token_budget=token_budget
+                    )
+                    
+                    # 记录双视图打包信息
+                    facts_ratio = dual_view_config.get('facts_ratio', 0.7)
+                    original_ratio = dual_view_config.get('original_ratio', 0.3)
+                    facts_budget = int(token_budget * facts_ratio)
+                    original_budget = int(token_budget * original_ratio)
+                    logger.info(f"Dual view packing: facts_budget={facts_budget}, original_budget={original_budget}")
+                    logger.info(f"ContextPacker generated dual view prompt with {len(passages_by_idx)} passages")
+                else:
+                    # 使用传统的 pack_context 方法
+                    prompt, passages_by_idx, packed_order = self.context_packer.pack_context(
+                        notes=selected_notes,
+                        question=query,
+                        token_budget=config.get('context.max_tokens', 4000)
+                    )
+                    logger.info(f"ContextPacker generated traditional prompt with {len(passages_by_idx)} passages")
             except Exception as e:
                 logger.warning(f"ContextPacker failed, falling back to build_context_prompt_with_passages: {e}")
                 prompt, passages_by_idx, packed_order = build_context_prompt_with_passages(selected_notes, query)

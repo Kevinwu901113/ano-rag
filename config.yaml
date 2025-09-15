@@ -55,6 +55,14 @@ retrieval:
   candidate_pool: 80        # 全局候选池大小，影响最终检索质量
   min_per_subq: 1          # 每个子问题最小召回数量，硬约束
   
+  hybrid_search:
+    # 检索护栏配置
+    retrieval_guardrail:
+      enabled: true            # 是否启用检索护栏
+      min_results: 1           # 最小结果数量
+      min_score: 0.0           # 最小分数阈值
+      timeout_seconds: 30      # 超时时间（秒）
+  
   # JSON解析重试配置
   json_parsing:
     max_retries: 3           # 最大重试次数，增加重试次数可减少空答案
@@ -143,7 +151,7 @@ atomic_note_generator:
     
     # 双视图拼接策略配置
     dual_view_packing:
-      enabled: false           # 是否启用双视图拼接策略
+      enabled: true            # 是否启用双视图拼接策略
       facts_ratio: 0.7         # 事实清单占比（70%）
       original_ratio: 0.3      # 原文片段占比（30%）
       
@@ -217,15 +225,15 @@ graph:
   # 时间衰减权重配置（老化因子）
   time_decay:
     enabled: true                  # 是否启用时间衰减权重
-    lambda: 0.1                    # 衰减参数λ，控制衰减速度
+    lambda: 0.15                   # 衰减参数λ，控制衰减速度，适当提高以增强时间衰减效果
     reference_time: "current"       # 参考时间：current(当前时间)或ISO格式时间戳
     time_unit: "days"              # 时间单位：seconds/minutes/hours/days/weeks
   
   # 反hub惩罚配置（度归一化）
   hub_penalty:
     enabled: true                  # 是否启用反hub惩罚
-    strength: 0.5                  # 惩罚强度，0-1之间
-    threshold: 10                  # hub节点阈值，度数超过此值的节点被视为hub
+    strength: 0.6                  # 惩罚强度，0-1之间，适当提高以减少hub节点影响
+    threshold: 15                  # hub节点阈值，度数超过此值的节点被视为hub，根据数据密度调整
     method: "log_normalization"     # 惩罚方法：log_normalization/sqrt_normalization/linear_normalization
   
   # metapath白名单和路径偏好配置
@@ -233,7 +241,7 @@ graph:
     enabled: true                  # 是否启用metapath过滤
     max_path_length: 3             # 最大路径长度
     # 关系类型白名单，只保留列表中的关系类型（空列表表示不过滤）
-    whitelist: []
+    whitelist: ["E-R-E-Para", "Para-E-Para", "Sec-Para-Para"]  # 优先的元路径
     # 路径偏好权重，为特定关系类型设置权重倍数
     path_preferences:
       semantic_relation: 1.2       # 语义关系权重倍数
@@ -271,22 +279,59 @@ graph_construction:
       edge_validation: true         # 是否启用边验证
       remove_redundant_edges: true  # 是否移除冗余边
 
-# 校准配置
+# 校准配置 - 融合权重和特征权重
+# 本节配置控制 Learned Fusion + 原子特征的融合策略
+# 融合公式: final_score = listt5_weight * listt5_score + (1-listt5_weight) * base_score
+#          base_score = (1-atomic_weight) * existing_score + atomic_weight * atomic_score
+#          如果启用learned_fusion: final_score = (1-learned_fusion_weight) * base_score + learned_fusion_weight * learned_score
 calibration:
   path: "calibration.json"    # 校准文件路径
-  listt5_weight: 0.35         # ListT5与现有融合器的融合权重
-  listt5_temperature: 1.0     # ListT5温度缩放参数
-  learned_fusion_weight: 0.2  # Learned Fusion权重
   
-  # 原子笔记特征权重配置
+  # === 主要融合权重配置 ===
+  # 这些权重控制不同检索和重排方法的融合比例，影响最终排序结果
+  
+  listt5_weight: 0.35         # ListT5重排序权重 (推荐范围: 0.3-0.4)
+                              # 控制ListT5重排序结果与基础分数的融合比例
+                              # 较高值更依赖ListT5的排序能力，较低值保留更多原始检索信号
+  
+  listt5_temperature: 1.0     # ListT5温度缩放参数 (推荐范围: 0.8-1.2)
+                              # 控制ListT5分数的平滑程度，影响排序的置信度分布
+  
+  learned_fusion_weight: 0.2  # Learned Fusion权重 (推荐范围: 0.15-0.25)
+                              # 控制机器学习融合模型的影响力
+                              # 该模型整合BM25、向量、图谱等多种信号进行智能融合
+  
+  # === 原子笔记特征权重配置 ===
+  # 原子特征包括: 事实数量、平均重要性、谓词覆盖、时间覆盖、跨句多样性
   atomic_features:
-    enabled: true             # 是否启用原子笔记特征
-    weight: 0.15              # 原子笔记特征总权重
-    fact_hit_weight: 0.3      # 命中事实数权重
-    avg_importance_weight: 0.25 # 平均重要性权重
-    predicate_coverage_weight: 0.2  # 谓词覆盖度权重
-    temporal_coverage_weight: 0.15  # 时间覆盖度权重
-    diversity_weight: 0.1     # 跨句多样性权重
+    enabled: true             # 是否启用原子笔记特征融合
+    
+    weight: 0.15              # 原子特征总权重 (推荐范围: 0.1-0.2)
+                              # 控制原子笔记特征在最终融合中的影响力
+                              # 较高值更重视知识图谱的结构化信息
+    
+    # === 原子特征子权重配置 ===
+    # 以下权重用于计算原子特征的综合分数，权重和应为1.0
+    
+    fact_hit_weight: 0.3      # 命中事实数权重 (推荐: 0.25-0.35)
+                              # 衡量候选文档包含的相关事实数量
+                              # 更多事实通常意味着更丰富的信息内容
+    
+    avg_importance_weight: 0.25 # 平均重要性权重 (推荐: 0.2-0.3)
+                                # 衡量候选文档中事实的平均重要性分数
+                                # 高重要性事实对回答问题更有价值
+    
+    predicate_coverage_weight: 0.2  # 谓词覆盖度权重 (推荐: 0.15-0.25)
+                                    # 衡量候选文档覆盖的谓词类型多样性
+                                    # 更多谓词类型提供更全面的关系信息
+    
+    temporal_coverage_weight: 0.15  # 时间覆盖度权重 (推荐: 0.1-0.2)
+                                    # 衡量候选文档的时间信息覆盖范围
+                                    # 对时间敏感问题特别重要
+    
+    diversity_weight: 0.1     # 跨句多样性权重 (推荐: 0.05-0.15)
+                              # 衡量候选文档中信息的句间多样性
+                              # 避免重复信息，提高内容丰富度
   bm25:                     # BM25检索参数
     k1: 1.2                 # 词频饱和参数，控制词频对得分的影响
     b: 0.75                 # 文档长度归一化参数
@@ -469,22 +514,4 @@ context_packer:
   enable_optimization: true    # 是否启用token分配优化
   optimization_iterations: 3   # 优化迭代次数
 
-# 校准配置 - 融合权重和特征权重
-calibration:
-  # ListT5重排序权重
-  listt5_weight: 0.35
-  
-  # Learned Fusion权重
-  learned_fusion_weight: 0.2
-  
-  # 原子笔记特征配置
-  atomic_features:
-    enabled: true
-    weight: 0.1  # 原子特征在融合中的总权重
-    
-    # 各个子特征的权重（用于计算原子特征综合分数）
-    hit_fact_count_weight: 0.3        # 命中事实数权重
-    avg_importance_weight: 0.25       # 平均重要性权重
-    predicate_coverage_weight: 0.2    # 谓词覆盖度权重
-    temporal_coverage_weight: 0.15    # 时间覆盖度权重
-    cross_sentence_diversity_weight: 0.1  # 跨句多样性权重
+# 注意: 融合权重配置已移至上方的 calibration 节，避免重复配置

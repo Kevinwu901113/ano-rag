@@ -96,7 +96,7 @@ class VectorRetriever:
         
         # 检索保障器（延迟初始化）
         self.retrieval_guardrail = None
-        self.guardrail_config = config.get('hybrid_search.retrieval_guardrail', {})
+        self.guardrail_config = config.get('retrieval.hybrid_search.retrieval_guardrail', {})
         self.enable_guardrail = self.guardrail_config.get('enabled', True) and GUARDRAIL_AVAILABLE
         
         if self.enable_guardrail:

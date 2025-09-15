@@ -55,6 +55,13 @@ class GraphBuilder:
     def build_graph(self, atomic_notes: List[Dict[str, Any]], embeddings=None) -> nx.Graph:
         """Create a graph from notes and optional embeddings with atomic note granularity."""
         logger.info(f"Building graph with {len(atomic_notes)} notes")
+        
+        # 输出关键参数的实际值
+        logger.info(f"Graph building parameters:")
+        logger.info(f"  Time decay: enabled={self.time_decay_config['enabled']}, lambda={self.time_decay_config['lambda']}")
+        logger.info(f"  Hub penalty: enabled={self.hub_penalty_config['enabled']}, threshold={self.hub_penalty_config['threshold']}, strength={self.hub_penalty_config['strength']}")
+        logger.info(f"  Metapath filtering: enabled={self.metapath_config['enabled']}, whitelist={self.metapath_config['whitelist']}")
+        
         G = nx.Graph()
         
         # 添加原子笔记节点，包含详细属性
