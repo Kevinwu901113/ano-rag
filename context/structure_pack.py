@@ -51,7 +51,9 @@ class StructurePacker:
         Returns:
             Tuple of (packed_text, passages_by_idx, packed_order)
         """
+        # P2-7: 候选为空时强制保留top-1兜底
         if not ranked_paragraphs:
+            logger.warning("No ranked paragraphs provided, returning empty result")
             return "", {}, []
         
         logger.info(f"Packing evidence for question with {len(ranked_paragraphs)} candidates")
@@ -106,6 +108,39 @@ class StructurePacker:
                     
                     packed_order.append(str(i))
                     current_tokens += paragraph_tokens
+        
+        # P2-7: 如果被过滤到0段落，强制保留top-1作为兜底
+        if not packed_content and ranked_paragraphs:
+            logger.warning("All paragraphs were filtered out, forcing top-1 as fallback")
+            top_paragraph = ranked_paragraphs[0]
+            
+            # 选择top-1段落的最佳句子
+            selected_sentences = self._select_sentences_from_paragraph(
+                question, top_paragraph, max_sentences=self.max_sentences_per_paragraph
+            )
+            
+            if selected_sentences:
+                paragraph_text = " ".join(selected_sentences)
+            else:
+                # 如果句子选择也失败，使用原始内容的前部分
+                original_content = top_paragraph.get('content', top_paragraph.get('text', ''))
+                words = original_content.split()
+                paragraph_text = " ".join(words[:min(len(words), token_budget // 2)])
+            
+            paragraph_id = top_paragraph.get('note_id', top_paragraph.get('id', 'p_0'))
+            formatted_text = f"[P0] {paragraph_text}"
+            
+            packed_content = [formatted_text]
+            passages_by_idx = {
+                '0': {
+                    'id': paragraph_id,
+                    'content': paragraph_text,
+                    'title': top_paragraph.get('title', ''),
+                    'original_paragraph': top_paragraph
+                }
+            }
+            packed_order = ['0']
+            current_tokens = len(paragraph_text.split())
         
         packed_text = "\n\n".join(packed_content)
         

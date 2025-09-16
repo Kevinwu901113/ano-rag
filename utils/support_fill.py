@@ -179,6 +179,17 @@ class SupportFiller:
         Returns:
             补齐后的支持段落索引列表
         """
+        # 空值短路处理
+        if not passages_by_idx:
+            logger.warning("Empty passages_by_idx, returning empty support list", 
+                         extra={"empty_input_fallback": True, "reason": "no_passages"})
+            return []
+        
+        if not answer or not isinstance(answer, str) or not answer.strip():
+            logger.warning("Empty or invalid answer, returning first 2 passages", 
+                         extra={"empty_input_fallback": True, "reason": "invalid_answer"})
+            return packed_order[:2] if len(packed_order) >= 2 else packed_order
+        
         try:
             # 1. 估计所需的K值
             target_k = estimate_required_k(question, answer, passages_by_idx, packed_order)
@@ -290,5 +301,16 @@ def fill_support_idxs_noid(question: str, answer: str, raw_support_idxs: List[in
     Returns:
         补齐后的支持段落索引列表
     """
+    # 空值短路处理
+    if not passages_by_idx:
+        logger.warning("Empty passages_by_idx, returning empty support list", 
+                     extra={"empty_input_fallback": True, "reason": "no_passages"})
+        return []
+    
+    if not answer or not isinstance(answer, str) or not answer.strip():
+        logger.warning("Empty or invalid answer, returning first 2 passages", 
+                     extra={"empty_input_fallback": True, "reason": "invalid_answer"})
+        return packed_order[:2] if len(packed_order) >= 2 else packed_order
+    
     filler = SupportFiller()
     return filler.fill_support_idxs_noid(question, answer, raw_support_idxs, passages_by_idx, packed_order)

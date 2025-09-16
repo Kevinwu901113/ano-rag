@@ -101,28 +101,58 @@ class ParallelTaskAtomicNoteGenerator(AtomicNoteGenerator):
         
         logger.info(f"Task allocation: Ollama={len(ollama_tasks)}, LM Studio={len(lmstudio_tasks)}")
         
-        # 并行处理 - 减少并发数量以避免Ollama过载
-        max_workers = min(4, len(text_chunks))  # 最多4个并发任务
+        # 并行处理 - 动态调整并发数量以确保真正并行
+        # 计算合适的并发数：确保ollama和lmstudio的任务都能同时开始
+        ollama_count = len(ollama_tasks)
+        lmstudio_count = len(lmstudio_tasks)
+        
+        # 至少需要能同时运行两种客户端的任务
+        min_workers_needed = min(ollama_count, 1) + min(lmstudio_count, 1)
+        # 但也不要超过总任务数或系统限制
+        max_workers = min(len(text_chunks), max(min_workers_needed, 4))
+        
+        logger.info(f"Using {max_workers} workers for {len(text_chunks)} tasks (Ollama: {ollama_count}, LM Studio: {lmstudio_count})")
+        
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             futures = []
             
-            # 提交Ollama任务
-            for chunk_data, index in ollama_tasks:
-                future = executor.submit(self._process_with_ollama, chunk_data, index, system_prompt)
-                futures.append((future, index, 'ollama'))
+            # 同时提交所有任务，确保真正并行执行
+            # 交替提交Ollama和LM Studio任务，避免顺序执行
+            all_tasks = []
             
-            # 提交LM Studio任务
-            for chunk_data, index in lmstudio_tasks:
-                future = executor.submit(self._process_with_lmstudio, chunk_data, index, system_prompt)
-                futures.append((future, index, 'lmstudio'))
+            # 交替添加任务以确保两种客户端的任务都能尽早开始
+            max_tasks = max(len(ollama_tasks), len(lmstudio_tasks))
+            for i in range(max_tasks):
+                # 优先添加LM Studio任务（通常较快）
+                if i < len(lmstudio_tasks):
+                    chunk_data, index = lmstudio_tasks[i]
+                    all_tasks.append((chunk_data, index, 'lmstudio'))
+                # 然后添加Ollama任务
+                if i < len(ollama_tasks):
+                    chunk_data, index = ollama_tasks[i]
+                    all_tasks.append((chunk_data, index, 'ollama'))
             
-            # 收集结果
+            # 同时提交所有任务
+            for chunk_data, index, client_type in all_tasks:
+                if client_type == 'ollama':
+                    future = executor.submit(self._process_with_ollama, chunk_data, index, system_prompt)
+                else:
+                    future = executor.submit(self._process_with_lmstudio, chunk_data, index, system_prompt)
+                futures.append((future, index, client_type))
+            
+            # 使用as_completed来真正并行等待结果，而不是按顺序等待
             completed_count = 0
-            for future, index, client_type in futures:
+            # 创建future到元数据的映射
+            future_to_meta = {f[0]: (f[1], f[2]) for f in futures}
+            
+            for future in as_completed([f[0] for f in futures]):
                 try:
-                    # 使用更长的超时时间，并添加详细的超时信息
-                    timeout_value = self.fallback_timeout if self.enable_fallback else None
-                    logger.debug(f"Waiting for {client_type} task {index} with timeout {timeout_value}s")
+                    # 从映射中获取index和client_type
+                    index, client_type = future_to_meta[future]
+                    
+                    # 设置超时时间 - 从配置获取，默认120秒
+                    timeout_value = self.parallel_config.get('fallback_timeout', 120)
+                    logger.debug(f"Waiting for {client_type} task {index} with {timeout_value}s timeout")
                     
                     note = future.result(timeout=timeout_value)
                     atomic_notes[index] = note
@@ -138,6 +168,9 @@ class ParallelTaskAtomicNoteGenerator(AtomicNoteGenerator):
                         progress_tracker.update(1)
                         
                 except Exception as e:
+                    # 从映射中获取index和client_type（如果future已经完成但有异常）
+                    index, client_type = future_to_meta.get(future, (None, 'unknown'))
+                    
                     # 获取详细的错误信息
                     error_type = type(e).__name__
                     error_msg = str(e) if str(e) else f"Unknown error in {client_type} processing"
@@ -234,7 +267,9 @@ class ParallelTaskAtomicNoteGenerator(AtomicNoteGenerator):
             logger.debug(f"Ollama processing task {index}, text length: {len(text)}")
             
             # 添加超时控制
-            response = self.ollama_client.generate(prompt, system_prompt, timeout=30)
+            # 从配置获取超时时间，默认90秒
+            timeout = self.parallel_config.get('ollama', {}).get('timeout', 90)
+            response = self.ollama_client.generate(prompt, system_prompt, timeout=timeout)
             
             # 检查响应是否为空
             if not response or response.strip() == "":
@@ -280,6 +315,17 @@ class ParallelTaskAtomicNoteGenerator(AtomicNoteGenerator):
                 logger.error(f"Ollama task {index}: Unknown error after {processing_time:.2f}s - {e}")
             
             raise e
+        except InterruptedError as e:
+            # Handle graceful shutdown
+            processing_time = time.time() - start_time
+            logger.warning(f"Ollama task {index}: Interrupted due to shutdown after {processing_time:.2f}s - {e}")
+            # Return a default result instead of raising to allow graceful shutdown
+            return {
+                'chunk_id': chunk_data.get('chunk_id', f'chunk_{index}'),
+                'atomic_notes': [],
+                'error': 'interrupted_by_shutdown',
+                'processing_time': processing_time
+            }
     
     def _process_with_lmstudio(self, chunk_data: Dict[str, Any], index: int, system_prompt: str) -> Dict[str, Any]:
         """使用LM Studio处理单个任务"""

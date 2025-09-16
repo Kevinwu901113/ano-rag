@@ -359,8 +359,22 @@ class MusiqueProcessor:
                             if atomic_notes_file:
                                 with open(atomic_notes_file, 'a', encoding='utf-8') as f:
                                     f.write(json.dumps(timeout_atomic_notes, ensure_ascii=False) + '\n')
+                        except (InterruptedError, KeyboardInterrupt) as e:
+                            logger.warning(f"Processing interrupted for item {item_id}: {e}")
+                            # Handle graceful shutdown - don't write incomplete results
+                            logger.info("Gracefully shutting down parallel processing...")
+                            # Cancel remaining futures
+                            for remaining_future, _, _ in futures[futures.index((future, work_dir, item_id))+1:]:
+                                remaining_future.cancel()
+                            break
                         except Exception as e:
                             logger.error(f"Failed to get result for item {item_id}: {e}")
+                            # Check if it's a shutdown-related error
+                            error_msg = str(e)
+                            if "shutdown" in error_msg.lower() or "interpreter" in error_msg.lower():
+                                logger.warning(f"Shutdown-related error for item {item_id}, handling gracefully")
+                                break
+                            
                             error_result = {
                                 'id': item_id,
                                 'predicted_answer': 'Processing failed',

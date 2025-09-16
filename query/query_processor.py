@@ -239,6 +239,9 @@ class QueryProcessor:
             self.qa_coverage_scorer = None
         
         # 初始化答案定位器
+        # 设置use_span_picker的默认值
+        self.use_span_picker = config.get('span_picker.enabled', True)
+        
         try:
             span_model_type = config.get('span_picker.model_type', 'cross_encoder')
             self.span_picker = create_span_picker(
@@ -249,6 +252,8 @@ class QueryProcessor:
         except Exception as e:
             logger.warning(f"Failed to initialize span picker: {e}")
             self.span_picker = None
+            # 确保use_span_picker属性存在，即使初始化失败
+            self.use_span_picker = False
         
         # 初始化答案验证器
         try:
@@ -440,6 +445,60 @@ class QueryProcessor:
             logger.error(f"Failed to build entity inverted index: {e}")
             self.entity_inverted_index = None
         
+        # 统一初始化可选组件属性（确保所有属性都存在，即使初始化失败）
+        # Span Picker 属性统一设置
+        if not hasattr(self, 'span_picker'):
+            self.span_picker = None
+        if not hasattr(self, 'use_span_picker'):
+            self.use_span_picker = False
+        
+        # Answer Verifier 属性统一设置
+        if not hasattr(self, 'answer_verifier'):
+            self.answer_verifier = None
+        if not hasattr(self, 'use_answer_verifier'):
+            self.use_answer_verifier = config.get('answer_verification.enabled', False)
+        # 修正属性名称不一致问题
+        if hasattr(self, 'use_answer_verification'):
+            self.use_answer_verifier = self.use_answer_verification
+        
+        # Consistency Checker 属性统一设置
+        if not hasattr(self, 'consistency_checker'):
+            self.consistency_checker = None
+        if not hasattr(self, 'use_consistency_checker'):
+            self.use_consistency_checker = config.get('answer_consistency.enabled', False)
+        # 修正属性名称不一致问题
+        if hasattr(self, 'use_consistency_check'):
+            self.use_consistency_checker = self.use_consistency_check
+        
+        # Atomic Feature Extractor 属性统一设置
+        if not hasattr(self, 'atomic_feature_extractor'):
+            self.atomic_feature_extractor = None
+        if not hasattr(self, 'use_atomic_features'):
+            self.use_atomic_features = config.get('atomic_features.enabled', False)
+        # 根据实际初始化结果设置开关
+        if self.atomic_note_feature_extractor is None:
+            self.use_atomic_features = False
+        else:
+            self.atomic_feature_extractor = self.atomic_note_feature_extractor
+            self.use_atomic_features = True
+        
+        # ListT5 属性统一设置
+        if not hasattr(self, 'listt5'):
+            self.listt5 = None
+        if not hasattr(self, 'use_listt5'):
+            self.use_listt5 = config.get('rerank.use_listt5', False)
+        # 根据实际初始化结果设置开关
+        if self.listt5 is None:
+            self.use_listt5 = False
+        
+        # 确保初始化失败时开关也被正确设置
+        if self.span_picker is None:
+            self.use_span_picker = False
+        if self.answer_verifier is None:
+            self.use_answer_verifier = False
+        if self.consistency_checker is None:
+            self.use_consistency_checker = False
+        
         # 初始化结构化日志记录器
         self.structured_logger = StructuredLogger("QueryProcessor")
         self.structured_logger.info("QueryProcessor initialized successfully", 
@@ -447,7 +506,12 @@ class QueryProcessor:
                                   hybrid_search=self.hybrid_search_enabled,
                                   path_aware=self.path_aware_enabled,
                                   diversity_scheduler=self.diversity_scheduler_enabled,
-                                  multi_hop=self.multi_hop_enabled)
+                                  multi_hop=self.multi_hop_enabled,
+                                  span_picker=self.use_span_picker,
+                                  answer_verifier=self.use_answer_verifier,
+                                  consistency_checker=self.use_consistency_checker,
+                                  atomic_features=self.use_atomic_features,
+                                  listt5=self.use_listt5)
 
     @log_performance("QueryProcessor.process")
     def process(self, query: str, dataset: Optional[str] = None, qid: Optional[str] = None) -> Dict[str, Any]:
@@ -1814,6 +1878,7 @@ class QueryProcessor:
             )
         # 生成答案和评分
         # 使用 ContextPacker 生成结构化上下文
+        empty_passages_fallback_used = False  # P2-7: 记录是否使用了空passages回退机制
         if hasattr(self, 'context_packer') and self.context_packer:
             try:
                 # 检查是否启用双视图打包
@@ -1826,6 +1891,19 @@ class QueryProcessor:
                         question=query,
                         token_budget=token_budget
                     )
+                    
+                    # P2-7: 检查是否触发了空passages回退机制
+                    if not passages_by_idx and selected_notes:
+                        empty_passages_fallback_used = True
+                        logger.info("P2-7: Empty passages fallback was used in dual view context packing", extra={"empty_passages_fallback_used": True})
+                    
+                    # 创建字符串化的passages_by_idx_text映射，供旧工具链使用
+                    passages_by_idx_text = {}
+                    for idx, passage_data in passages_by_idx.items():
+                        if isinstance(passage_data, dict):
+                            passages_by_idx_text[idx] = passage_data.get('content', str(passage_data))
+                        else:
+                            passages_by_idx_text[idx] = str(passage_data)
                     
                     # 记录双视图打包信息
                     facts_ratio = dual_view_config.get('facts_ratio', 0.7)
@@ -1841,13 +1919,43 @@ class QueryProcessor:
                         question=query,
                         token_budget=config.get('context.max_tokens', 4000)
                     )
+                    
+                    # P2-7: 检查是否触发了空passages回退机制
+                    if not passages_by_idx and selected_notes:
+                        empty_passages_fallback_used = True
+                        logger.info("P2-7: Empty passages fallback was used in traditional context packing", extra={"empty_passages_fallback_used": True})
+                    
+                    # 创建字符串化的passages_by_idx_text映射，供旧工具链使用
+                    passages_by_idx_text = {}
+                    for idx, passage_data in passages_by_idx.items():
+                        if isinstance(passage_data, dict):
+                            passages_by_idx_text[idx] = passage_data.get('content', str(passage_data))
+                        else:
+                            passages_by_idx_text[idx] = str(passage_data)
+                    
                     logger.info(f"ContextPacker generated traditional prompt with {len(passages_by_idx)} passages")
             except Exception as e:
                 logger.warning(f"ContextPacker failed, falling back to build_context_prompt_with_passages: {e}")
                 prompt, passages_by_idx, packed_order = build_context_prompt_with_passages(selected_notes, query)
+                
+                # 创建字符串化的passages_by_idx_text映射，供旧工具链使用
+                passages_by_idx_text = {}
+                for idx, passage_data in passages_by_idx.items():
+                    if isinstance(passage_data, dict):
+                        passages_by_idx_text[idx] = passage_data.get('content', str(passage_data))
+                    else:
+                        passages_by_idx_text[idx] = str(passage_data)
         else:
             # 回退到原有的 build_context_prompt_with_passages 函数
             prompt, passages_by_idx, packed_order = build_context_prompt_with_passages(selected_notes, query)
+            
+            # 创建字符串化的passages_by_idx_text映射，供旧工具链使用
+            passages_by_idx_text = {}
+            for idx, passage_data in passages_by_idx.items():
+                if isinstance(passage_data, dict):
+                    passages_by_idx_text[idx] = passage_data.get('content', str(passage_data))
+                else:
+                    passages_by_idx_text[idx] = str(passage_data)
         raw_answer = self.ollama.generate_final_answer(prompt)
         
         # 使用鲁棒的JSON解析器，带重试机制
@@ -1868,7 +1976,7 @@ class QueryProcessor:
         
         # 若过滤后为空且上下文中存在任何包含答案子串的段，用其中一个合法id顶上第一位
         if not filtered_support_idxs and answer:
-            for idx, content in passages_by_idx.items():
+            for idx, content in passages_by_idx_text.items():
                 if answer in content:
                     filtered_support_idxs = [idx]
                     break
@@ -1879,7 +1987,7 @@ class QueryProcessor:
             question=query,
             answer=answer, 
             raw_support_idxs=filtered_support_idxs,  # 使用过滤后的合法id
-            passages_by_idx=passages_by_idx,
+            passages_by_idx=passages_by_idx_text,  # 使用字符串版映射
             packed_order=packed_order
         )
         
@@ -1977,6 +2085,9 @@ class QueryProcessor:
             'verification_result': verification_result,
             'consistency_result': consistency_result,
         }
+        
+        # P2-7: 添加empty_passages_fallback_used标志到结果中
+        result['empty_passages_fallback_used'] = empty_passages_fallback_used
         
         # 添加调度器特定的信息
         if self.use_context_dispatcher:

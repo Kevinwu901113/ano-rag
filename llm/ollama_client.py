@@ -1,5 +1,8 @@
 import json
 from typing import Any, Dict, Iterator, List, Union
+import threading
+import queue
+import time
 
 import ollama
 import requests
@@ -45,6 +48,7 @@ class OllamaClient:
         *,
         stream: bool = False,
         timeout: int | None = None,
+        max_retries: int = 2,
         **kwargs: Any,
     ) -> str:
         """Generate text from a prompt with improved error handling."""
@@ -64,58 +68,93 @@ class OllamaClient:
         if system_prompt:
             full_prompt = f"{system_prompt}\n\n{prompt}"
         
-        try:
-            # Use thread-safe timeout mechanism
-            import concurrent.futures
-            import threading
-            
-            def generate_with_timeout():
-                return self.client.generate(
-                    model=self.model,
-                    prompt=full_prompt,
-                    stream=stream,
-                    options=options,
-                )
-            
-            # Use ThreadPoolExecutor for timeout control
-            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-                future = executor.submit(generate_with_timeout)
-                try:
-                    response = future.result(timeout=request_timeout)
-                except concurrent.futures.TimeoutError:
-                    raise TimeoutError(f"Ollama request timed out after {request_timeout} seconds")
-
-            text: str = ""
-            if stream:
-                for chunk in response:
-                    if hasattr(chunk, "response"):
-                        text += chunk.response
-            else:
-                if hasattr(response, "response"):
-                    text = response.response
+        # 实现重试机制
+        last_exception = None
+        for attempt in range(max_retries + 1):
+            try:
+                if attempt > 0:
+                    wait_time = min(2 ** attempt, 10)  # 指数退避，最大10秒
+                    logger.info(f"Retrying Ollama request (attempt {attempt + 1}/{max_retries + 1}) after {wait_time}s")
+                    time.sleep(wait_time)
+                
+                # Use thread-safe timeout mechanism without nested ThreadPoolExecutor
+                result_queue = queue.Queue()
+                error_queue = queue.Queue()
+                
+                def generate_with_timeout_wrapper():
+                    try:
+                        result = self.client.generate(
+                            model=self.model,
+                            prompt=full_prompt,
+                            stream=stream,
+                            options=options,
+                        )
+                        result_queue.put(result)
+                    except Exception as e:
+                        error_queue.put(e)
+                
+                # Use threading.Thread instead of ThreadPoolExecutor to avoid nesting issues
+                thread = threading.Thread(target=generate_with_timeout_wrapper)
+                thread.daemon = True  # Ensure thread doesn't prevent program shutdown
+                thread.start()
+                thread.join(timeout=request_timeout)
+                
+                # Check if thread is still alive (timeout occurred)
+                if thread.is_alive():
+                    logger.warning(f"Ollama request timed out after {request_timeout} seconds (attempt {attempt + 1})")
+                    last_exception = TimeoutError(f"Ollama request timed out after {request_timeout} seconds")
+                    if attempt < max_retries:
+                        continue
+                    raise last_exception
+                
+                # Check for errors first
+                if not error_queue.empty():
+                    error = error_queue.get()
+                    last_exception = error
+                    if attempt < max_retries and isinstance(error, (TimeoutError, ConnectionError)):
+                        continue
+                    raise error
+                
+                # Get the result
+                if not result_queue.empty():
+                    response = result_queue.get()
                 else:
-                    text = str(response)
+                    last_exception = TimeoutError("No response received from Ollama")
+                    if attempt < max_retries:
+                        continue
+                    raise last_exception
 
-            if not text or text.strip() == "":
-                raise ValueError("Ollama returned empty response")
+                text: str = ""
+                if stream:
+                    for chunk in response:
+                        if hasattr(chunk, "response"):
+                            text += chunk.response
+                else:
+                    if hasattr(response, "response"):
+                        text = response.response
+                    else:
+                        text = str(response)
 
-            return self._clean_response(text)
-            
-        except TimeoutError as e:
-            logger.error(f"Timeout error: {e}")
-            raise e
-        except Exception as e:
-            # Log the specific error for debugging
-            error_msg = str(e)
-            if "connection" in error_msg.lower() or "refused" in error_msg.lower():
-                logger.error(f"Connection error: Ollama service is not responding - {e}")
-            elif "model" in error_msg.lower() and "not found" in error_msg.lower():
-                logger.error(f"Model error: Model '{self.model}' not found - {e}")
-            elif "timeout" in error_msg.lower():
-                logger.error(f"Timeout error: Request exceeded {request_timeout}s - {e}")
-            else:
-                logger.error(f"Generation failed: {e} (status code: {getattr(e, 'status_code', 'unknown')})")
-            raise e
+                if not text or text.strip() == "":
+                    last_exception = ValueError("Ollama returned empty response")
+                    if attempt < max_retries:
+                        continue
+                    raise last_exception
+
+                return self._clean_response(text)
+                
+            except Exception as e:
+                last_exception = e
+                if attempt < max_retries and isinstance(e, (TimeoutError, ConnectionError, ValueError)):
+                    continue
+                raise e
+        
+        # 如果所有重试都失败了，抛出最后一个异常
+        if last_exception:
+            raise last_exception
+        
+        # 如果没有异常但也没有返回结果，抛出错误
+        raise RuntimeError("Unexpected error: no result and no exception")
 
     def chat(
         self,

@@ -210,6 +210,17 @@ class KEstimator:
         Returns:
             估计的K值
         """
+        # 空值短路处理
+        if not passages_by_idx:
+            logger.warning("Empty passages_by_idx, returning default K=2", 
+                         extra={"empty_input_fallback": True, "reason": "no_passages"})
+            return k_min
+        
+        if not answer or not isinstance(answer, str) or not answer.strip():
+            logger.warning("Empty or invalid answer, returning default K=2", 
+                         extra={"empty_input_fallback": True, "reason": "invalid_answer"})
+            return k_min
+        
         try:
             # 1. 构建段落图
             graph = self.build_passage_graph(passages_by_idx)
@@ -267,5 +278,16 @@ def estimate_required_k(question: str, answer: str, passages_by_idx: Dict[int, s
     Returns:
         估计的K值
     """
+    # 空值短路处理
+    if not passages_by_idx:
+        logger.warning("Empty passages_by_idx, returning default K=2", 
+                     extra={"empty_input_fallback": True, "reason": "no_passages"})
+        return k_min
+    
+    if not answer or not isinstance(answer, str) or not answer.strip():
+        logger.warning("Empty or invalid answer, returning default K=2", 
+                     extra={"empty_input_fallback": True, "reason": "invalid_answer"})
+        return k_min
+    
     estimator = KEstimator()
     return estimator.estimate_required_k(question, answer, passages_by_idx, packed_order, k_min, k_max)

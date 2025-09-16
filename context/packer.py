@@ -103,6 +103,25 @@ class ContextPacker:
                     context_parts.append(f"[P{idx}] {passage['content']}")
                 packed_text = "\n\n".join(context_parts)
             
+            # P2-7: 返回前若passages_by_idx为空，回退到传统单视图或直接返回原始top-1段
+            if not passages_by_idx and notes:
+                logger.warning("No passages packed, falling back to top-1 note as context")
+                top_note = notes[0]
+                note_id = top_note.get('note_id', 'note_0')
+                content = top_note.get('content', '')
+                
+                # 构建简单的单段落上下文
+                packed_text = f"[P0] {content}"
+                passages_by_idx = {
+                    '0': {
+                        'id': note_id,
+                        'content': content,
+                        'title': top_note.get('title', top_note.get('file_name', '')),
+                        'original_note': top_note
+                    }
+                }
+                packed_order = ['0']
+            
             # Format the final prompt
             from llm.prompts import FINAL_ANSWER_PROMPT
             prompt = FINAL_ANSWER_PROMPT.format(context=packed_text, query=question)
@@ -517,7 +536,26 @@ class ContextPacker:
                 }
                 packed_order.append(span_id)
         
-        packed_text = "\n\n".join(context_parts)
+        # P2-7: 返回前若passages_by_idx为空，回退到传统单视图或直接返回原始top-1段
+        if not passages_by_idx and notes:
+            logger.warning("Dual view packing resulted in empty passages, falling back to top-1 note")
+            top_note = notes[0]
+            note_id = top_note.get('note_id', 'note_0')
+            content = top_note.get('content', '')
+            
+            # 构建简单的单段落上下文
+            packed_text = f"[P0] {content}"
+            passages_by_idx = {
+                '0': {
+                    'id': note_id,
+                    'content': content,
+                    'title': top_note.get('title', top_note.get('file_name', '')),
+                    'original_note': top_note
+                }
+            }
+            packed_order = ['0']
+        else:
+            packed_text = "\n\n".join(context_parts)
         
         # Format the final prompt
         from llm.prompts import FINAL_ANSWER_PROMPT

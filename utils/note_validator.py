@@ -13,9 +13,16 @@ from sklearn.metrics.pairwise import cosine_similarity
 class NoteValidator:
     """原子笔记验证器，用于实体唯一性校验和源文档实体回溯约束"""
     
-    def __init__(self, config_path: Optional[str] = None):
-        # 加载配置
-        self.config = self._load_config(config_path)
+    def __init__(self, config: Optional[Dict[str, Any]] = None, config_path: Optional[str] = None):
+        # P2-8: 优先从传入的config dict读取配置，而非文件路径
+        if config is not None:
+            # 使用传入的配置字典
+            self.config = config.get('note_validator', {})
+            logger.info("NoteValidator: Using provided config dict")
+        else:
+            # 回退到从文件路径加载配置
+            self.config = self._load_config(config_path)
+            logger.info("NoteValidator: Loaded config from file path")
         
         # 从配置加载人名模式
         self.person_name_patterns = self.config.get('person_name_patterns', [
@@ -46,6 +53,28 @@ class NoteValidator:
         
         # 加载人名指示词
         self.person_indicators = self.config.get('person_indicators', ['actor', 'actress', 'voice', 'performer', 'artist'])
+        
+        # P2-8: 组件初始化后打印结构化日志，公布生效参数
+        self._log_effective_config()
+    
+    def _log_effective_config(self):
+        """打印生效的配置参数"""
+        effective_config = {
+            'entity_uniqueness': {
+                'enabled': self.entity_uniqueness_config.get('enabled', True),
+                'auto_fix': self.entity_uniqueness_config.get('auto_fix', True),
+                'selection_strategy': self.entity_uniqueness_config.get('selection_strategy', 'known_actors')
+            },
+            'source_traceability': {
+                'enabled': self.source_traceability_config.get('enabled', True),
+                'strict_mode': self.source_traceability_config.get('strict_mode', False),
+                'similarity_threshold': self.source_traceability_config.get('similarity_threshold', 0.8)
+            },
+            'person_name_patterns_count': len(self.person_name_patterns),
+            'known_voice_actors_count': len(self.known_voice_actors),
+            'person_indicators_count': len(self.person_indicators)
+        }
+        logger.info(f"NoteValidator effective config: {effective_config}")
     
     # ==================== 内容质量验证辅助方法 ====================
     

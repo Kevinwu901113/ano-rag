@@ -69,7 +69,26 @@ def extract_prediction(raw_llm_output: str, passages: Dict[int, str]) -> Tuple[s
         ValueError: 当解析失败或答案不符合要求时
     """
     data = parse_llm_json(raw_llm_output)
-    ans = str(data.get("answer", "")).strip()
+    
+    # 多键尝试：answer → final_answer → prediction → 任一非空字符串字段
+    ans = ""
+    answer_keys = ["answer", "final_answer", "prediction"]
+    
+    # 首先尝试预定义的键
+    for key in answer_keys:
+        if key in data and data[key]:
+            ans = str(data[key]).strip()
+            if ans:
+                break
+    
+    # 如果预定义键都没有找到答案，尝试任一非空字符串字段
+    if not ans:
+        for key, value in data.items():
+            if isinstance(value, str) and value.strip():
+                ans = value.strip()
+                logger.info(f"Using fallback answer key '{key}': {ans[:50]}...")
+                break
+    
     idxs = data.get("support_idxs", [])
     
     # 非空校验
@@ -131,9 +150,57 @@ def extract_prediction_with_retry(raw_llm_output: str, passages: Dict[int, str],
                 logger.info(f"Retrying with attempt {attempt + 2}")
                 raw_llm_output = retry_func()
             else:
-                # 最后一次尝试失败，回退到旧逻辑
-                logger.error(f"All attempts failed, falling back to raw answer: {raw_llm_output}")
-                # 改进的回退逻辑：避免返回空答案
+                # 最后一次尝试失败，启用兜底机制
+                logger.error(f"All attempts failed, activating fallback mechanism")
+                logger.debug(f"Raw LLM output causing failure: {raw_llm_output[:500]}")
+                
+                # 尝试解析JSON结构，检查是否完全为空
+                try:
+                    parsed_data = parse_llm_json(raw_llm_output)
+                    logger.debug(f"Successfully parsed JSON structure: {parsed_data}")
+                    
+                    # 检查所有可能的答案字段是否都为空
+                    answer_keys = ["answer", "final_answer", "prediction"]
+                    has_any_answer = False
+                    found_answers = {}
+                    
+                    for key in answer_keys:
+                        if key in parsed_data:
+                            value = str(parsed_data[key]).strip()
+                            found_answers[key] = value
+                            if value:
+                                has_any_answer = True
+                                logger.debug(f"Found non-empty answer in key '{key}': {value[:100]}")
+                                break
+                    
+                    # 如果预定义键都为空，检查是否有任何非空字符串字段
+                    if not has_any_answer:
+                        logger.debug(f"All predefined answer keys are empty: {found_answers}")
+                        for key, value in parsed_data.items():
+                            if isinstance(value, str) and value.strip():
+                                has_any_answer = True
+                                logger.debug(f"Found fallback answer in key '{key}': {value[:100]}")
+                                break
+                    
+                    # 如果完全没有有效答案，返回空答案并记录结构化日志
+                    if not has_any_answer:
+                        logger.error("Parser fallback activated: no valid answer found in any field", 
+                                   extra={"parser_fallback_used": True, 
+                                         "raw_output_preview": raw_llm_output[:200],
+                                         "parsed_structure": str(parsed_data)[:200],
+                                         "all_keys": list(parsed_data.keys()),
+                                         "found_answers": found_answers})
+                        return "", []
+                    
+                except Exception as parse_error:
+                    # JSON解析完全失败，记录结构化日志并返回空答案
+                    logger.error("Parser fallback activated: JSON parsing failed completely", 
+                               extra={"parser_fallback_used": True, 
+                                     "parse_error": str(parse_error),
+                                     "raw_output_preview": raw_llm_output[:200]})
+                    return "", []
+                
+                # 如果能解析但提取失败，使用改进的回退逻辑
                 from config import config
                 json_parsing_config = config.get('retrieval.json_parsing', {})
                 default_fallback = json_parsing_config.get('fallback_message', "Unable to extract a meaningful answer from the provided context")
@@ -143,12 +210,16 @@ def extract_prediction_with_retry(raw_llm_output: str, passages: Dict[int, str],
                 # 如果原始输出包含空的JSON答案，使用配置的回退消息
                 try:
                     parsed_data = parse_llm_json(raw_llm_output)
-                    if not parsed_data.get("answer", "").strip():
+                    answer_keys = ["answer", "final_answer", "prediction"]
+                    all_empty = all(not str(parsed_data.get(key, "")).strip() for key in answer_keys)
+                    if all_empty:
                         fallback_answer = default_fallback
                 except:
                     pass
                 
                 fallback_idxs = list(passages.keys())[:3] if passages else []
+                logger.info("Using fallback answer after all extraction attempts failed", 
+                          extra={"fallback_answer_preview": fallback_answer[:100]})
                 return fallback_answer, fallback_idxs
     
     # 这行代码理论上不会执行到

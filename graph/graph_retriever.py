@@ -150,7 +150,13 @@ class GraphRetriever:
             scored_paths = self._score_reasoning_paths(reasoning_paths, dynamic_min_path_score)
             logger.info(f"Traditional path discovery found {len(scored_paths)} paths")
         
-        # 3. 选择多样化的路径（如果使用增强路径规划器，路径已经评分）
+        # 3. 检查是否有有效路径，避免在空集上继续处理
+        if not scored_paths:
+            logger.warning("No valid reasoning paths found after scoring, returning empty results")
+            logger.info("Graph paths result: 0, fallback: semantic_only")
+            return []
+        
+        # 4. 选择多样化的路径（如果使用增强路径规划器，路径已经评分）
         if self.enhanced_path_planner and query_entities:
             selected_paths = scored_paths[:self.max_paths]  # 增强规划器已经选择了最佳路径
         else:
@@ -280,44 +286,57 @@ class GraphRetriever:
         return list(set(temporal_keywords))
     
     def _score_reasoning_paths(self, paths: List[List[str]], dynamic_min_path_score: float = None) -> List[Dict]:
-        """为推理路径评分"""
-        scored_paths = []
+        """为推理路径评分，支持自适应阈值调整"""
+        if not paths:
+            logger.warning("No paths to score")
+            return []
         
+        # 首先计算所有路径的分数
+        all_scored_paths = []
         for path in paths:
             score = self._calculate_path_score(path)
-            
-            min_score_threshold = dynamic_min_path_score if dynamic_min_path_score is not None else self.min_path_score
-            if score >= min_score_threshold:
-                scored_paths.append({
-                    'path': path,
-                    'score': score,
-                    'length': len(path),
-                    'relations': self._get_path_relations(path)
-                })
+            all_scored_paths.append({
+                'path': path,
+                'score': score,
+                'length': len(path),
+                'relations': self._get_path_relations(path)
+            })
         
         # 按分数排序
-        scored_paths.sort(key=lambda x: x['score'], reverse=True)
+        all_scored_paths.sort(key=lambda x: x['score'], reverse=True)
         
-        # 动态调整阈值（如果结果太少）
-        if len(scored_paths) < 3 and paths:
-            # 降低阈值重新评分
-            base_threshold = dynamic_min_path_score if dynamic_min_path_score is not None else self.min_path_score
-            lower_threshold = base_threshold * 0.7
-            scored_paths = []
-            
-            for path in paths:
-                score = self._calculate_path_score(path)
-                if score >= lower_threshold:
-                    scored_paths.append({
-                        'path': path,
-                        'score': score,
-                        'length': len(path),
-                        'relations': self._get_path_relations(path)
-                    })
-            
-            scored_paths.sort(key=lambda x: x['score'], reverse=True)
+        # 确定初始阈值
+        base_threshold = dynamic_min_path_score if dynamic_min_path_score is not None else self.min_path_score
         
-        logger.info(f"Scored {len(scored_paths)} paths above threshold")
+        # 应用初始阈值过滤
+        scored_paths = [p for p in all_scored_paths if p['score'] >= base_threshold]
+        
+        # 自适应阈值调整：当有路径但符合阈值的为0时，逐步降低阈值
+        if len(all_scored_paths) >= 1 and len(scored_paths) == 0:
+            logger.info(f"Found {len(all_scored_paths)} paths but 0 above threshold {base_threshold:.3f}, applying adaptive threshold")
+            
+            # 定义阈值降级序列
+            threshold_steps = [
+                base_threshold * 0.7,  # 第一档：降到70%
+                base_threshold * 0.45, # 第二档：降到45%
+                base_threshold * 0.30  # 第三档：降到30%
+            ]
+            
+            for step_idx, lower_threshold in enumerate(threshold_steps):
+                scored_paths = [p for p in all_scored_paths if p['score'] >= lower_threshold]
+                if len(scored_paths) > 0:
+                    logger.info(f"Adaptive threshold step {step_idx + 1}: lowered to {lower_threshold:.3f}, found {len(scored_paths)} paths")
+                    break
+                else:
+                    logger.info(f"Adaptive threshold step {step_idx + 1}: threshold {lower_threshold:.3f} still yields 0 paths")
+            
+            # 如果所有阈值都无效，返回空集并记录日志
+            if len(scored_paths) == 0:
+                logger.warning(f"Adaptive threshold failed: all {len(all_scored_paths)} paths below minimum threshold {threshold_steps[-1]:.3f}")
+                logger.info(f"Graph paths result: 0, fallback: semantic_only")
+                return []
+        
+        logger.info(f"Scored {len(scored_paths)} paths above threshold (from {len(all_scored_paths)} total paths)")
         return scored_paths
     
     def _calculate_path_score(self, path: List[str]) -> float:

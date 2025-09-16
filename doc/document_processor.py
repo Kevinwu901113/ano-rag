@@ -457,11 +457,20 @@ class DocumentProcessor:
         total_chars = sum(len(chunk.get('content', '')) for chunk in chunks)
         total_sentences = sum(chunk.get('content', '').count('.') + chunk.get('content', '').count('!') + chunk.get('content', '').count('?') for chunk in chunks)
         
-        # 计算每千token产出笔记数
-        notes_per_1k_tokens = (len(final_notes) / max(total_tokens, 1)) * 1000
+        # P2-6: 0分母保护 - 检查关键分母是否为0
+        stats_denominator_zero = (total_tokens == 0 or total_chars == 0 or total_sentences == 0)
         
-        # 计算平均每句事实数
-        avg_facts_per_sentence = len(final_notes) / max(total_sentences, 1)
+        # 计算每千token产出笔记数（0分母保护）
+        if total_tokens == 0:
+            notes_per_1k_tokens = "N/A"
+        else:
+            notes_per_1k_tokens = (len(final_notes) / total_tokens) * 1000
+        
+        # 计算平均每句事实数（0分母保护）
+        if total_sentences == 0:
+            avg_facts_per_sentence = "N/A"
+        else:
+            avg_facts_per_sentence = len(final_notes) / total_sentences
         
         # 计算各阶段过滤统计
         quality_filtered = len(raw_notes) - len(valid_notes)  # 质量验证过滤
@@ -491,12 +500,19 @@ class DocumentProcessor:
         unique_entities = len(set(entity for note in final_notes for entity in note.get('entities', [])))
         unique_keywords = len(set(keyword for note in final_notes for keyword in note.get('keywords', [])))
         
+        # 计算处理效率（0分母保护）
+        if total_chars == 0:
+            processing_efficiency = "N/A"
+        else:
+            processing_efficiency = len(final_notes) / (total_chars / 1000)  # 每千字符产出笔记数
+        
         return {
             # 基础统计
             'total_tokens': total_tokens,
             'total_chars': total_chars,
             'total_sentences': total_sentences,
             'chunk_count': len(chunks),
+            'stats_denominator_zero': stats_denominator_zero,  # P2-6: 0分母保护标志
             
             # 各阶段笔记数量
             'raw_notes_count': len(raw_notes),
@@ -504,9 +520,9 @@ class DocumentProcessor:
             'enhanced_notes_count': len(enhanced_notes),
             'final_notes_count': len(final_notes),
             
-            # 核心指标
-            'notes_per_1k_tokens': round(notes_per_1k_tokens, 2),
-            'avg_facts_per_sentence': round(avg_facts_per_sentence, 3),
+            # 核心指标（可能包含N/A值）
+            'notes_per_1k_tokens': round(notes_per_1k_tokens, 2) if notes_per_1k_tokens != "N/A" else "N/A",
+            'avg_facts_per_sentence': round(avg_facts_per_sentence, 3) if avg_facts_per_sentence != "N/A" else "N/A",
             'avg_note_length': round(avg_note_length, 1),
             
             # 过滤统计
@@ -533,8 +549,8 @@ class DocumentProcessor:
             'avg_entities_per_note': round(total_entities / max(len(final_notes), 1), 2),
             'avg_keywords_per_note': round(total_keywords / max(len(final_notes), 1), 2),
             
-            # 处理效率
-            'processing_efficiency': round(len(final_notes) / max(total_chars / 1000, 1), 2),  # 每千字符产出笔记数
+            # 处理效率（0分母保护）
+            'processing_efficiency': round(processing_efficiency, 2) if processing_efficiency != "N/A" else "N/A",
             'timestamp': self._get_timestamp()
         }
     
@@ -556,12 +572,16 @@ class DocumentProcessor:
         logger.info(f"  - 关系增强: {stats['enhanced_notes_count']} 条")
         logger.info(f"  - 去重后: {stats['final_notes_count']} 条 (去重 {stats['duplicate_filtered']} 条)")
         
-        # 核心效率指标
+        # 核心效率指标（P2-6: 0分母保护）
         logger.info(f"⚡ 核心指标:")
         logger.info(f"  - 每千token产出笔记数: {stats['notes_per_1k_tokens']}")
         logger.info(f"  - 平均每句事实数: {stats['avg_facts_per_sentence']}")
         logger.info(f"  - 处理效率: {stats['processing_efficiency']} 笔记/千字符")
         logger.info(f"  - 平均笔记长度: {stats['avg_note_length']} 字符")
+        
+        # P2-6: 记录0分母保护状态
+        if stats.get('stats_denominator_zero', False):
+            logger.warning(f"📊 统计警告: stats_denominator_zero=true (存在0分母情况，部分指标显示为N/A)")
         
         # 过滤和质量控制
         logger.info(f"🔍 质量控制:")

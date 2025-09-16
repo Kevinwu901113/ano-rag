@@ -244,11 +244,20 @@ class DocumentChunker:
             elif chunk_entities:
                 primary_entity = chunk_entities[0]
 
+            # P2-6加分项: 计算字符数和句子数
+            char_count = len(final_text) if final_text else 0
+            sentence_count = (
+                final_text.count('.') + final_text.count('!') + final_text.count('?')
+                if final_text else 0
+            )
+            
             chunk = {
                 'text': final_text,
                 'chunk_index': i,
                 'chunk_id': f"{source_info.get('file_name', 'unknown')}_{i:04d}",
                 'length': chunk_data['length'],
+                'char_count': char_count,  # P2-6加分项: 字符数统计
+                'sentence_count': sentence_count,  # P2-6加分项: 句子数统计
                 'source_info': source_info.copy(),
                 'created_at': self._get_timestamp(),
                 'primary_entity': primary_entity

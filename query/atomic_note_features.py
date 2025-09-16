@@ -17,7 +17,10 @@ class AtomicNoteFeatureExtractor:
     - 跨句多样性
     """
     
-    def __init__(self):
+    def __init__(self, atomic_notes=None):
+        # 存储原子笔记（可选）
+        self.atomic_notes = atomic_notes
+        
         # 尝试加载spacy模型，如果失败则使用基础方法
         try:
             self.nlp = spacy.load("en_core_web_sm")

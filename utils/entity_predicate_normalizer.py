@@ -800,7 +800,29 @@ class EntityPredicateNormalizer:
         self.entity_normalizer = EntityNormalizer(self.config)
         self.predicate_normalizer = PredicateNormalizer(self.config)
         
+        # P2-8: 组件初始化后打印结构化日志，公布生效参数
+        self._log_effective_config()
+        
         logger.info("EntityPredicateNormalizer initialized")
+    
+    def _log_effective_config(self):
+        """打印生效的配置参数"""
+        effective_config = {
+            'entity_normalizer': {
+                'min_confidence': self.entity_normalizer.min_confidence,
+                'enable_fuzzy_matching': self.entity_normalizer.enable_fuzzy_matching,
+                'cache_size': self.entity_normalizer.cache_size,
+                'rules_count': len(self.entity_normalizer.normalization_rules),
+                'aliases_count': len(self.entity_normalizer.alias_dict)
+            },
+            'predicate_normalizer': {
+                'min_confidence': self.predicate_normalizer.min_confidence,
+                'enable_fuzzy_matching': self.predicate_normalizer.enable_fuzzy_matching,
+                'mappings_count': len(self.predicate_normalizer.predicate_mapping),
+                'categories_count': len(self.predicate_normalizer.predicate_categories)
+            }
+        }
+        logger.info(f"EntityPredicateNormalizer effective config: {effective_config}")
     
     def normalize_entity(self, entity: str) -> Tuple[str, float]:
         """标准化实体"""

@@ -37,6 +37,8 @@ class AnswerConsistencyChecker:
     """
     
     def __init__(self, 
+                 atomic_notes: List[Dict[str, Any]] = None,
+                 config: Dict[str, Any] = None,
                  min_fact_support_ratio: float = 0.6,
                  min_evidence_coverage: float = 0.4,
                  min_confidence_threshold: float = 0.5):
@@ -44,10 +46,15 @@ class AnswerConsistencyChecker:
         初始化一致性检查器
         
         Args:
+            atomic_notes: 原子笔记列表（可选）
+            config: 配置字典（可选）
             min_fact_support_ratio: 最小事实支持比例
             min_evidence_coverage: 最小证据覆盖度
             min_confidence_threshold: 最小置信度阈值
         """
+        # 存储原子笔记和配置
+        self.atomic_notes = atomic_notes or []
+        self.config = config or {}
         self.min_fact_support_ratio = min_fact_support_ratio
         self.min_evidence_coverage = min_evidence_coverage
         self.min_confidence_threshold = min_confidence_threshold

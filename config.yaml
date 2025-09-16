@@ -24,7 +24,7 @@ document:
   # 并发处理配置
   concurrent_processing:
     enabled: true          # 是否启用并发处理
-    max_workers: 4         # 最大并发工作线程数
+    max_workers: 128         # 最大并发工作线程数
 
 # 嵌入模型配置
 embedding:
@@ -61,7 +61,7 @@ retrieval:
       enabled: true            # 是否启用检索护栏
       min_results: 1           # 最小结果数量
       min_score: 0.0           # 最小分数阈值
-      timeout_seconds: 30      # 超时时间（秒）
+      # timeout_seconds: 30      # 超时时间（秒）
   
   # JSON解析重试配置
   json_parsing:
@@ -102,7 +102,7 @@ atomic_note_generator:
     max_fallback_per_step: 8      # 每个回补步骤的最大候选数量
     max_graph_expansion: 15        # 图扩展的最大候选数量
     max_entity_lookup: 12          # 实体查找的最大实体数量
-    fallback_timeout_ms: 1000     # 回补检索超时时间（毫秒）
+    # fallback_timeout_ms: 1000     # 回补检索超时时间（毫秒）
     max_total_fallback: 10        # 总回补候选数量上限
   # 图感知两阶段rerank配置
   use_graph_rerank: true    # 是否启用图感知两阶段rerank
@@ -204,7 +204,7 @@ atomic_note_generator:
     enabled: false          # 是否启用检索护栏，防止低质量结果
     min_results: 1          # 最少检索结果数量
     min_score: 0.0          # 最低检索得分阈值
-    timeout_seconds: 30     # 检索超时时间（秒）
+    # timeout_seconds: 30     # 检索超时时间（秒）
   # 重排权重配置
   rerank:
     entity_overlap_weight: 0.4     # 实体重叠打分权重
@@ -241,7 +241,29 @@ graph:
     enabled: true                  # 是否启用metapath过滤
     max_path_length: 3             # 最大路径长度
     # 关系类型白名单，只保留列表中的关系类型（空列表表示不过滤）
-    whitelist: ["E-R-E-Para", "Para-E-Para", "Sec-Para-Para"]  # 优先的元路径
+    # P2-8加分项: 填入常用路径到元路径白名单
+    whitelist: [
+      # 实体-关系-实体-段落路径（核心推理路径）
+      "E-R-E-Para", 
+      # 段落-实体-段落路径（实体桥接）
+      "Para-E-Para", 
+      # 章节-段落-段落路径（结构化导航）
+      "Sec-Para-Para",
+      # 实体-实体-段落路径（直接关联）
+      "E-E-Para",
+      # 段落-关系-段落路径（关系桥接）
+      "Para-R-Para",
+      # 实体-段落-实体路径（段落中介）
+      "E-Para-E",
+      # 章节-实体-段落路径（结构化实体查找）
+      "Sec-E-Para",
+      # 实体-关系-实体-关系-实体路径（多跳推理）
+      "E-R-E-R-E",
+      # 段落-实体-关系-实体路径（实体关系扩展）
+      "Para-E-R-E",
+      # 实体-关系-实体-段落-实体路径（复合推理）
+      "E-R-E-Para-E"
+    ]  # 优先的元路径
     # 路径偏好权重，为特定关系类型设置权重倍数
     path_preferences:
       semantic_relation: 1.2       # 语义关系权重倍数
@@ -393,7 +415,7 @@ llm:
     light_tasks:
       model: "qwen2.5:latest" # 轻量级任务模型
       base_url: "http://localhost:11434"  # Ollama服务地址
-      timeout: 30             # 请求超时时间（秒）
+      # timeout: 30             # 请求超时时间（秒）
       max_async: 16            # 最大异步请求数
       # max_tokens: 1024        # 最大输出token数
       num_ctx: 32768           # 上下文窗口大小
@@ -405,7 +427,7 @@ llm:
       model: "openai/gpt-oss-20b"  # 重量级任务模型
       base_url: "http://localhost:1234/v1"  # LM Studio服务地址
       instances: 1            # LM Studio实例数量
-      timeout: 60             # 请求超时时间（秒）
+      # timeout: 60             # 请求超时时间（秒）
 
 
 
@@ -428,21 +450,21 @@ atomic_note_generation:
     enabled: true               # 是否启用任务分配策略
     allocation_method: "round_robin"  # 分配方法：round_robin轮询|batch_split批次分割
     enable_fallback: true       # 是否启用失败回退机制
-    fallback_timeout: 60        # 回退超时时间（秒）- 增加到60秒以避免超时错误
+    fallback_timeout: 120        # 回退超时时间（秒）- 增加到120秒以避免超时错误
     
   # Ollama配置（用于原子笔记生成）
   ollama:
     model: "qwen2.5:latest"     # Ollama模型名称
     base_url: "http://localhost:11434"  # Ollama服务地址
-    timeout: 30                 # 请求超时时间（秒）
-    max_async: 16               # 最大异步请求数
+    timeout: 90                 # 请求超时时间（秒）- 增加到90秒
+    max_async: 8                # 最大异步请求数 - 减少并发以避免资源竞争
     temperature: 0.1            # 生成温度
-    
+    num_ctx: 32768
   # LM Studio配置（用于原子笔记生成）
   lmstudio:
     model: "qwen2.5-7b-instruct"     # LM Studio模型名称
     base_url: "http://localhost:1234/v1"  # LM Studio服务地址
-    timeout: 60                 # 请求超时时间（秒）
+    timeout: 90                 # 请求超时时间（秒）- 增加到90秒
     temperature: 0.1            # 生成温度
     
   # 性能监控配置
