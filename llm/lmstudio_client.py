@@ -112,12 +112,17 @@ class LMStudioClient:
         self.concurrent_enabled = config.get("llm.lmstudio.multiple_instances.enabled", False)
         self.multi_instance_enabled = self.concurrent_enabled  # 添加兼容性属性
         if self.concurrent_enabled:
-            self.max_concurrent_requests = config.get("llm.lmstudio.multiple_instances.target_instance_count", 2)
-            self.executor = ThreadPoolExecutor(max_workers=self.max_concurrent_requests)
-            logger.info(f"LM Studio concurrent processing enabled with {self.max_concurrent_requests} max concurrent requests")
+            self.max_concurrent_requests = config.get(
+                "llm.lmstudio.multiple_instances.target_instance_count", 2
+            )
+            logger.info(
+                f"LM Studio concurrent processing enabled with {self.max_concurrent_requests} max concurrent requests"
+            )
         else:
             self.max_concurrent_requests = 1
-            self.executor = None
+
+        self.executor: Optional[ThreadPoolExecutor] = None
+        self._executor_lock = threading.Lock()
         
         logger.info(f"Initialized LM Studio client: {'concurrent' if self.concurrent_enabled else 'single-threaded'} mode")
     
@@ -141,23 +146,48 @@ class LMStudioClient:
             # 单线程处理
             return [self.generate(prompt, **kwargs) for prompt in prompts]
         
-        # 使用线程池并发处理
+        executor = self._ensure_executor()
         futures = []
-        with self.executor as executor:
-            for prompt in prompts:
-                future = executor.submit(self.generate, prompt, **kwargs)
-                futures.append(future)
-            
-            results = []
-            for future in as_completed(futures):
-                try:
-                    result = future.result()
-                    results.append(result)
-                except Exception as e:
-                    logger.error(f"Concurrent generation failed: {e}")
-                    results.append("")
-        
+        for prompt in prompts:
+            future = executor.submit(self.generate, prompt, **kwargs)
+            futures.append(future)
+
+        results = []
+        for future in as_completed(futures):
+            try:
+                result = future.result()
+                results.append(result)
+            except Exception as e:
+                logger.error(f"Concurrent generation failed: {e}")
+                results.append("")
+
         return results
+
+    def _ensure_executor(self) -> ThreadPoolExecutor:
+        if self.executor is None:
+            with self._executor_lock:
+                if self.executor is None:
+                    self.executor = ThreadPoolExecutor(
+                        max_workers=self.max_concurrent_requests
+                    )
+        return self.executor
+
+    def close(self):
+        if not hasattr(self, "_executor_lock"):
+            self._executor_lock = threading.Lock()
+        with self._executor_lock:
+            if self.executor is not None:
+                self.executor.shutdown(wait=False)
+                self.executor = None
+
+    def cleanup(self):
+        self.close()
+
+    def __del__(self):
+        try:
+            self.close()
+        except Exception:
+            pass
     
     def generate(self, prompt: str, system_prompt: str = None, **kwargs) -> str:
         """生成单个响应 - JSON模式作为软约束，失败时不判实例失效"""

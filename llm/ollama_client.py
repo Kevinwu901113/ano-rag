@@ -1,5 +1,5 @@
 import json
-from typing import Any, Dict, Iterator, List, Union
+from typing import Any, Dict, Iterator, List, Union, Optional
 import threading
 import queue
 import time
@@ -46,12 +46,17 @@ class OllamaClient:
         # 并发处理配置 - 更保守的默认设置
         self.concurrent_enabled = config.get("llm.ollama.concurrent.enabled", False)
         if self.concurrent_enabled:
-            self.max_concurrent_requests = config.get("llm.ollama.concurrent.max_workers", min(self.max_async, 4))
-            self.executor = ThreadPoolExecutor(max_workers=self.max_concurrent_requests)
-            logger.info(f"Ollama concurrent processing enabled with {self.max_concurrent_requests} max concurrent requests")
+            self.max_concurrent_requests = config.get(
+                "llm.ollama.concurrent.max_workers", min(self.max_async, 4)
+            )
+            logger.info(
+                f"Ollama concurrent processing enabled with {self.max_concurrent_requests} max concurrent requests"
+            )
         else:
             self.max_concurrent_requests = 1
-            self.executor = None
+
+        self.executor: Optional[ThreadPoolExecutor] = None
+        self._executor_lock = threading.Lock()
         
         logger.info(f"Initialized Ollama client: {'concurrent' if self.concurrent_enabled else 'single-threaded'} mode")
 
@@ -216,23 +221,48 @@ class OllamaClient:
             # 单线程处理
             return [self.generate(prompt, system_prompt, **kwargs) for prompt in prompts]
         
-        # 使用线程池并发处理
+        executor = self._ensure_executor()
         futures = []
-        with self.executor as executor:
-            for prompt in prompts:
-                future = executor.submit(self.generate, prompt, system_prompt, **kwargs)
-                futures.append(future)
-            
-            results = []
-            for future in as_completed(futures):
-                try:
-                    result = future.result()
-                    results.append(result)
-                except Exception as e:
-                    logger.error(f"Concurrent generation failed: {e}")
-                    results.append("")
-        
+        for prompt in prompts:
+            future = executor.submit(self.generate, prompt, system_prompt, **kwargs)
+            futures.append(future)
+
+        results = []
+        for future in as_completed(futures):
+            try:
+                result = future.result()
+                results.append(result)
+            except Exception as e:
+                logger.error(f"Concurrent generation failed: {e}")
+                results.append("")
+
         return results
+
+    def _ensure_executor(self) -> ThreadPoolExecutor:
+        if self.executor is None:
+            with self._executor_lock:
+                if self.executor is None:
+                    self.executor = ThreadPoolExecutor(
+                        max_workers=self.max_concurrent_requests
+                    )
+        return self.executor
+
+    def close(self):
+        if not hasattr(self, "_executor_lock"):
+            self._executor_lock = threading.Lock()
+        with self._executor_lock:
+            if self.executor is not None:
+                self.executor.shutdown(wait=False)
+                self.executor = None
+
+    def cleanup(self):
+        self.close()
+
+    def __del__(self):
+        try:
+            self.close()
+        except Exception:
+            pass
 
     def _quick_health_check(self) -> bool:
         """Quick health check with minimal timeout."""
