@@ -452,7 +452,7 @@ class LMStudioClient:
             instance.last_health_check = current_time
             return is_healthy
         
-        return any(instance.is_healthy and self._quick_health_check(instance) for instance in self.instances)
+        return self._refresh_instances_health()
     
     def list_models(self) -> List[str]:
         """List available models from LM Studio."""
@@ -533,8 +533,8 @@ class LMStudioClient:
             ]
         }
     
-    def _quick_health_check(self, instance=None):
-        """Quick health check for LM Studio instances with retry and backoff."""
+    def _refresh_instances_health(self, instance: Optional[LMStudioInstance] = None) -> bool:
+        """Refresh health information for LM Studio instances with retry and backoff."""
         if instance is None:
             # Check all instances
             all_models = set()
@@ -547,12 +547,12 @@ class LMStudioClient:
                         all_models.update(models)
                     except Exception as e:
                         logger.debug(f"Failed to list models for {inst.base_url}: {e}")
-            
+
             self.all_models = all_models
             return len([inst for inst in self.instances if inst.is_healthy]) > 0
-        else:
-            # Check specific instance
-            return self._quick_health_check_single_instance(instance)
+
+        # Check specific instance
+        return self._quick_health_check_single_instance(instance)
     
     def _quick_health_check_single_instance(self, instance: LMStudioInstance) -> bool:
         """Quick health check for a single instance with retry mechanism."""
