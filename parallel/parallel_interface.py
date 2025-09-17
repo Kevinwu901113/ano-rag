@@ -17,7 +17,6 @@ from .parallel_engine import (
     ParallelStrategy, ProcessingMode
 )
 from llm import LocalLLM
-from llm.multi_model_client import MultiModelClient
 
 
 class ParallelInterface:
@@ -175,7 +174,7 @@ class DocumentTaskProcessor(TaskProcessor):
         self.output_dir = output_dir
         self.debug = debug
     
-    def process_single_task(self, task: ParallelTask, llm: Union[LocalLLM, MultiModelClient], **kwargs) -> Dict[str, Any]:
+    def process_single_task(self, task: ParallelTask, llm: LocalLLM, **kwargs) -> Dict[str, Any]:
         """处理单个文档任务"""
         from doc import DocumentProcessor
         
@@ -240,7 +239,7 @@ class QueryTaskProcessor(TaskProcessor):
         self.knowledge_base = knowledge_base
         self.debug = debug
     
-    def process_single_task(self, task: ParallelTask, llm: Union[LocalLLM, MultiModelClient], **kwargs) -> Dict[str, Any]:
+    def process_single_task(self, task: ParallelTask, llm: LocalLLM, **kwargs) -> Dict[str, Any]:
         """处理单个查询任务"""
         from query import QueryProcessor
         
@@ -310,7 +309,7 @@ class MusiqueTaskProcessor(TaskProcessor):
         self.base_work_dir = base_work_dir
         self.debug = debug
     
-    def process_single_task(self, task: ParallelTask, llm: Union[LocalLLM, MultiModelClient], **kwargs) -> Dict[str, Any]:
+    def process_single_task(self, task: ParallelTask, llm: LocalLLM, **kwargs) -> Dict[str, Any]:
         """处理单个Musique任务"""
         from doc import DocumentProcessor
         from query import QueryProcessor

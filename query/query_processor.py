@@ -14,7 +14,6 @@ from utils.logging_utils import (
 )
 
 from llm import OllamaClient, LocalLLM
-from llm.multi_model_client import HybridLLMDispatcher
 from llm.prompts import build_context_prompt, build_context_prompt_with_passages
 from utils.robust_json_parser import extract_prediction_with_retry
 from vector_store import VectorRetriever, EnhancedRecallOptimizer
@@ -34,7 +33,6 @@ from graph.multi_hop_query_processor import MultiHopQueryProcessor
 # 导入子问题分解组件
 from .subquestion_planner import SubQuestionPlanner
 from .evidence_merger import EvidenceMerger
-from retrieval.query_planner import LLMBasedRewriter
 from retrieval.diversity_scheduler import DiversityScheduler
 from graph.entity_inverted_index import EntityInvertedIndex
 
@@ -321,19 +319,13 @@ class QueryProcessor:
         fallback_config = config.get('hybrid_search.fallback', {})
         self.fallback_enabled = fallback_config.get('enabled', True)
         self.fallback_sparse_boost = fallback_config.get('sparse_boost_factor', 1.5)
-        self.fallback_query_rewrite_enabled = fallback_config.get('query_rewrite_enabled', True)
+        # 禁用LLM查询改写功能
+        self.fallback_query_rewrite_enabled = False
         self.fallback_max_retries = fallback_config.get('max_retries', 2)
         
-        # 初始化LLM查询改写器（用于失败兜底）
-        if self.fallback_query_rewrite_enabled:
-            try:
-                self.llm_rewriter = LLMBasedRewriter(config)
-                logger.info(f"LLM query rewriter initialized for fallback strategy: {'enabled' if self.llm_rewriter.enabled else 'disabled'}")
-            except Exception as e:
-                logger.error(f"Failed to initialize LLM rewriter: {e}")
-                self.llm_rewriter = None
-        else:
-            self.llm_rewriter = None
+        # LLM查询改写器已禁用
+        self.llm_rewriter = None
+        logger.info("LLM query rewriter disabled for fallback strategy")
         
         # 初始化DiversityScheduler（PathAware + Diversity联动）
         diversity_config = config.get('diversity_scheduler', {})
@@ -690,30 +682,33 @@ class QueryProcessor:
         return list(set(normalized))  # 去重
     
     def _apply_noise_threshold_filtering(self, candidates: List[Dict[str, Any]], must_have_terms: List[str] = None) -> List[Dict[str, Any]]:
-        """应用噪声阈值过滤，丢弃相似度小于0.20且不满足must_have_terms的候选。"""
+        """应用噪声阈值过滤 - 已禁用，所有候选都通过"""
         if not candidates:
             return candidates
         
-        filtered_candidates = []
-        noise_threshold = self.noise_threshold  # 0.20
+        # filtered_candidates = []
+        # noise_threshold = self.noise_threshold  # 0.20
         
-        for candidate in candidates:
-            # 获取候选的相似度分数
-            similarity = candidate.get('final_score', candidate.get('final_base_score', candidate.get('similarity', 0.0)))
+        # for candidate in candidates:
+        #     # 获取候选的相似度分数
+        #     similarity = candidate.get('final_score', candidate.get('final_base_score', candidate.get('similarity', 0.0)))
             
-            # 检查是否满足噪声阈值
-            if similarity >= noise_threshold:
-                # 相似度足够高，直接保留
-                filtered_candidates.append(candidate)
-            elif must_have_terms and self._satisfies_must_have_terms(candidate, must_have_terms):
-                # 相似度较低但满足必需词汇要求，也保留
-                filtered_candidates.append(candidate)
-                logger.debug(f"Kept low-similarity candidate due to must_have_terms: {similarity:.3f}")
-            else:
-                # 相似度低且不满足必需词汇，过滤掉
-                logger.debug(f"Filtered out noisy candidate: similarity={similarity:.3f}, noise_threshold={noise_threshold}")
+        #     # 检查是否满足噪声阈值
+        #     if similarity >= noise_threshold:
+        #         # 相似度足够高，直接保留
+        #         filtered_candidates.append(candidate)
+        #     elif must_have_terms and self._satisfies_must_have_terms(candidate, must_have_terms):
+        #         # 相似度较低但满足必需词汇要求，也保留
+        #         filtered_candidates.append(candidate)
+        #         logger.debug(f"Kept low-similarity candidate due to must_have_terms: {similarity:.3f}")
+        #     else:
+        #         # 相似度低且不满足必需词汇，过滤掉
+        #         logger.debug(f"Filtered out noisy candidate: similarity={similarity:.3f}, noise_threshold={noise_threshold}")
         
-        logger.info(f"Noise threshold filtering: {len(candidates)} -> {len(filtered_candidates)} candidates (threshold={noise_threshold})")
+        # 禁用噪声阈值过滤：所有候选都通过
+        filtered_candidates = candidates
+        
+        logger.info(f"Noise threshold filtering DISABLED: {len(candidates)} -> {len(filtered_candidates)} candidates")
         return filtered_candidates
     
     def _generate_enhanced_guardrail_params(self, query: str) -> tuple:
@@ -2022,13 +2017,9 @@ class QueryProcessor:
             except Exception as e:
                 logger.warning(f"Span Picker failed: {e}")
         
-        # 评估答案质量
-        context = "\n".join(n.get('content','') for n in selected_notes)
-        scores = self.ollama.evaluate_answer(query, context, answer)
-        
-        # 为笔记添加反馈分数
+        # 为笔记添加反馈分数（基于检索相似度）
         for n in selected_notes:
-            n['feedback_score'] = scores.get('relevance', 0)
+            n['feedback_score'] = n.get('similarity', 0.0)
 
         # 使用 Answer Verifier 进行一致性检查
         verification_result = None
@@ -2078,7 +2069,6 @@ class QueryProcessor:
             'query': query,
             'rewrite': rewrite,
             'answer': answer,
-            'scores': scores,
             'notes': selected_notes,
             'predicted_support_idxs': predicted_support_idxs,
             'evidence_spans': evidence_spans,
@@ -2168,13 +2158,9 @@ class QueryProcessor:
             raw_answer, passages, retry_func=retry_generate, max_retries=3
         )
             
-            # Step 6: Evaluate answer and collect feedback
-            context = "\n".join(n.get('content', '') for n in selected_notes)
-            scores = self.ollama.evaluate_answer(query, context, answer)
-            
-            # 为笔记添加反馈分数
+            # Step 6: 为笔记添加反馈分数（基于检索相似度）
             for n in selected_notes:
-                n['feedback_score'] = scores.get('relevance', 0)
+                n['feedback_score'] = n.get('similarity', 0.0)
             
             # Step 6.5: 使用一致性检查器进行答案与原子笔记的一致性验证
             consistency_result = None
@@ -3285,42 +3271,9 @@ class QueryProcessor:
             # 首先尝试原始查询的BM25搜索
             fallback_notes = self._bm25_fallback_search(query, dataset, qid, top_k)
             
-            # 如果结果不足且启用了查询改写，尝试改写查询
-            if (len(fallback_notes) < top_k // 2 and 
-                self.fallback_query_rewrite_enabled and 
-                self.llm_rewriter and 
-                self.llm_rewriter.enabled and 
-                retry_count < self.fallback_max_retries):
-                
-                logger.info(f"Insufficient results ({len(fallback_notes)}), attempting query rewriting (retry {retry_count + 1})")
-                
-                try:
-                    # 使用LLM改写查询
-                    rewritten_subqueries = self.llm_rewriter.rewrite_query(query)
-                    
-                    if rewritten_subqueries:
-                        # 尝试改写后的查询
-                        for subquery in rewritten_subqueries[:2]:  # 限制最多2个改写查询
-                            rewritten_query = subquery.text
-                            if rewritten_query != query:  # 确保查询确实被改写了
-                                logger.info(f"Trying rewritten query: {rewritten_query[:50]}...")
-                                
-                                # 使用改写后的查询进行BM25搜索，提升稀疏权重
-                                rewritten_notes = self._bm25_fallback_search_with_boost(
-                                    rewritten_query, dataset, qid, top_k, 
-                                    boost_factor=self.fallback_sparse_boost
-                                )
-                                
-                                # 合并结果，去重
-                                combined_notes = self._merge_fallback_results(fallback_notes, rewritten_notes)
-                                
-                                if len(combined_notes) > len(fallback_notes):
-                                    fallback_notes = combined_notes
-                                    logger.info(f"Query rewriting improved results: {len(combined_notes)} notes")
-                                    break
-                                    
-                except Exception as rewrite_error:
-                    logger.error(f"Query rewriting failed: {rewrite_error}")
+            # 如果结果不足，跳过LLM查询改写（已禁用）
+            if len(fallback_notes) < top_k // 2:
+                logger.info(f"Insufficient results ({len(fallback_notes)}), but LLM query rewriting is disabled")
             
             # 如果仍然结果不足，尝试降低阈值的BM25搜索
             if len(fallback_notes) < top_k // 3:

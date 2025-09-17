@@ -6,7 +6,6 @@ from config import config
 from .ollama_client import OllamaClient
 from .openai_client import OpenAIClient
 from .lmstudio_client import LMStudioClient
-from .multi_model_client import MultiModelClient, HybridLLMDispatcher
 
 
 class LLMFactory:
@@ -21,8 +20,6 @@ class LLMFactory:
         'ollama': OllamaClient,  # 使用单实例 Ollama 客户端
         'openai': OpenAIClient,
         'lmstudio': LMStudioClient,  # 使用统一的 LM Studio 客户端（支持单实例和并发）
-        'multi_model': MultiModelClient,  # 多模型并行客户端
-        'hybrid_llm': HybridLLMDispatcher,  # 混合LLM智能调度器
     }
     
     @classmethod
@@ -131,39 +128,6 @@ class LLMFactory:
         
         logger.info(f"Creating LM Studio provider in {mode} mode with model: {model} on port: {port}")
         return LMStudioClient(base_url=base_url, model=model, port=port)
-    
-    @classmethod
-    def _create_hybrid_llm_provider(cls, **kwargs) -> HybridLLMDispatcher:
-        """创建混合LLM调度器
-        
-        Args:
-            **kwargs: 额外参数
-            
-        Returns:
-            HybridLLMDispatcher 实例
-        """
-        logger.info("Creating Hybrid LLM Dispatcher for intelligent task routing")
-        return HybridLLMDispatcher()
-    
-    @classmethod
-    def _create_multi_model_provider(cls, **kwargs) -> MultiModelClient:
-        """创建多模型并行 Provider
-        
-        Args:
-            **kwargs: 额外参数
-            
-        Returns:
-            MultiModelClient 实例
-        """
-        # 检查是否启用多模型并行模式
-        multi_model_enabled = config.get('llm.multi_model.enabled', False)
-        
-        if not multi_model_enabled:
-            logger.warning("Multi-model mode is not enabled in config, falling back to single LM Studio client")
-            return cls._create_lmstudio_provider(**kwargs)
-        
-        logger.info("Creating Multi-Model provider for parallel model processing")
-        return MultiModelClient()
     
     @classmethod
     def get_available_providers(cls) -> Dict[str, bool]:

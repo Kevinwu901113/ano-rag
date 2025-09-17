@@ -2,11 +2,168 @@
 
 import json
 import re
-from typing import Dict, List, Tuple, Any
+from typing import Dict, List, Tuple, Any, Optional, Union
 from loguru import logger
 
 # 禁用的答案短语
 FORBIDDEN = {"insufficient information", "no spouse mentioned"}
+
+def extract_json_array(text: str, prefer: str = "array") -> Tuple[Optional[List], Optional[str]]:
+    """
+    鲁棒地从文本中提取JSON数组或对象
+    
+    Args:
+        text: 输入文本
+        prefer: 偏好类型，"array" 优先提取数组，"object" 优先提取对象
+        
+    Returns:
+        (parsed_json, error_message): 成功时返回(解析结果, None)，失败时返回(None, 错误信息)
+    """
+    if not text or not text.strip():
+        return None, "Empty input text"
+    
+    text = text.strip()
+    candidates = []
+    
+    # 1. 从代码围栏中提取
+    code_fence_patterns = [
+        r"```(?:json)?\s*(\[.*?\])\s*```",  # JSON数组
+        r"```(?:json)?\s*(\{.*?\})\s*```",  # JSON对象
+    ]
+    
+    for pattern in code_fence_patterns:
+        matches = re.findall(pattern, text, flags=re.DOTALL)
+        for match in matches:
+            candidates.append(match.strip())
+    
+    # 2. 直接扫描平衡的JSON结构
+    # 查找数组 [...]
+    array_pattern = r'\[(?:[^\[\]]*(?:\[[^\[\]]*\])*)*[^\[\]]*\]'
+    array_matches = re.findall(array_pattern, text, flags=re.DOTALL)
+    candidates.extend(array_matches)
+    
+    # 查找对象 {...}
+    # 使用更精确的平衡括号匹配
+    brace_candidates = []
+    brace_stack = []
+    start_pos = -1
+    
+    for i, char in enumerate(text):
+        if char == '{':
+            if not brace_stack:
+                start_pos = i
+            brace_stack.append(char)
+        elif char == '}' and brace_stack:
+            brace_stack.pop()
+            if not brace_stack and start_pos != -1:
+                brace_candidates.append(text[start_pos:i+1])
+                start_pos = -1
+    
+    candidates.extend(brace_candidates)
+    
+    # 3. 根据prefer参数排序候选项
+    def sort_key(candidate):
+        is_array = candidate.strip().startswith('[')
+        is_object = candidate.strip().startswith('{')
+        
+        # 优先级：prefer类型 > 长度
+        if prefer == "array":
+            priority = 0 if is_array else (1 if is_object else 2)
+        else:  # prefer == "object"
+            priority = 0 if is_object else (1 if is_array else 2)
+        
+        return (priority, -len(candidate))
+    
+    candidates.sort(key=sort_key)
+    
+    # 4. 尝试解析候选项，返回第一个成功的
+    errors = []
+    
+    for candidate in candidates:
+        try:
+            parsed = json.loads(candidate)
+            # 验证类型匹配
+            if prefer == "array" and isinstance(parsed, list):
+                return parsed, None
+            elif prefer == "object" and isinstance(parsed, dict):
+                return parsed, None
+            elif prefer == "array" and isinstance(parsed, dict):
+                # 如果偏好数组但得到对象，检查是否有包装的数组
+                for key, value in parsed.items():
+                    if isinstance(value, list):
+                        logger.info(f"Found wrapped array in object key '{key}'")
+                        return value, None
+                return parsed, None  # 返回对象作为备选
+            else:
+                return parsed, None  # 返回任何有效的JSON
+        except json.JSONDecodeError as e:
+            errors.append(f"JSON decode error in candidate '{candidate[:50]}...': {str(e)}")
+            # 尝试修复常见的JSON格式问题
+            fixed_candidate = _try_fix_json(candidate.strip())
+            if fixed_candidate != candidate.strip():
+                try:
+                    parsed = json.loads(fixed_candidate)
+                    logger.info(f"Successfully fixed and parsed JSON after repair")
+                    return parsed, None
+                except json.JSONDecodeError:
+                    pass
+        except Exception as e:
+            errors.append(f"Unexpected error in candidate '{candidate[:50]}...': {str(e)}")
+    
+    # 5. 尝试宽松解析 - 查找任何看起来像JSON的内容
+    loose_patterns = [
+        r'\[.*?\]',  # 任何方括号内容
+        r'\{.*?\}',  # 任何大括号内容
+    ]
+    
+    for pattern in loose_patterns:
+        matches = re.findall(pattern, text, re.DOTALL)
+        for match in matches:
+            if match not in [c.strip() for c in candidates]:  # 避免重复
+                fixed_match = _try_fix_json(match.strip())
+                try:
+                    parsed = json.loads(fixed_match)
+                    logger.info(f"Successfully parsed JSON using loose pattern matching")
+                    return parsed, None
+                except json.JSONDecodeError:
+                    continue
+    
+    # 6. 所有候选项都失败
+    if not candidates:
+        return None, "No JSON structure found in text"
+    
+    error_summary = f"Failed to parse {len(candidates)} candidates. Errors: {'; '.join(errors[:3])}"
+    return None, error_summary
+
+def _try_fix_json(json_str: str) -> str:
+    """
+    尝试修复常见的JSON格式问题
+    
+    Args:
+        json_str: 可能有问题的JSON字符串
+        
+    Returns:
+        修复后的JSON字符串
+    """
+    if not json_str:
+        return json_str
+    
+    # 移除控制字符
+    json_str = re.sub(r'[\x00-\x1f\x7f]', '', json_str)
+    
+    # 修复常见的引号问题
+    json_str = json_str.replace("'", '"')  # 单引号改双引号
+    
+    # 修复尾随逗号
+    json_str = re.sub(r',(\s*[}\]])', r'\1', json_str)
+    
+    # 修复缺失的引号（简单情况）
+    json_str = re.sub(r'(\w+):', r'"\1":', json_str)  # 键没有引号
+    
+    # 修复换行符问题
+    json_str = json_str.replace('\n', '\\n').replace('\r', '\\r').replace('\t', '\\t')
+    
+    return json_str
 
 def parse_llm_json(raw: str) -> Dict[str, Any]:
     """
@@ -22,6 +179,9 @@ def parse_llm_json(raw: str) -> Dict[str, Any]:
     Raises:
         ValueError: 当无法解析出有效的JSON对象时
     """
+    if not raw or not raw.strip():
+        raise ValueError("Empty input text")
+    
     s = raw.strip()
     
     # 1) 去掉```json ... ```包裹
@@ -43,11 +203,38 @@ def parse_llm_json(raw: str) -> Dict[str, Any]:
     
     obj = try_load(s)
     
-    # 3) 处理"字符串化JSON"的情况
+    # 3) 如果直接解析失败，尝试修复
+    if obj is None:
+        fixed_s = _try_fix_json(s)
+        obj = try_load(fixed_s)
+        if obj is not None:
+            logger.info("Successfully parsed JSON after applying fixes")
+    
+    # 4) 处理"字符串化JSON"的情况
     if isinstance(obj, str):
         obj2 = try_load(obj)
         if isinstance(obj2, dict):
             obj = obj2
+    
+    # 5) 如果还是失败，尝试更宽松的解析
+    if not isinstance(obj, dict):
+        # 尝试提取任何看起来像JSON对象的内容
+        json_patterns = [
+            r'\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}',  # 嵌套对象
+            r'\{[^{}]+\}',  # 简单对象
+        ]
+        
+        for pattern in json_patterns:
+            matches = re.findall(pattern, raw, re.DOTALL)
+            for match in matches:
+                fixed_match = _try_fix_json(match.strip())
+                test_obj = try_load(fixed_match)
+                if isinstance(test_obj, dict):
+                    logger.info("Successfully parsed JSON using pattern matching")
+                    obj = test_obj
+                    break
+            if isinstance(obj, dict):
+                break
     
     if not isinstance(obj, dict):
         raise ValueError("LLM did not return a valid JSON object")

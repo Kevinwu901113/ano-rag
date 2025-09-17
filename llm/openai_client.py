@@ -8,8 +8,6 @@ from config import config
 from .prompts import (
     FINAL_ANSWER_SYSTEM_PROMPT,
     FINAL_ANSWER_PROMPT,
-    EVALUATE_ANSWER_SYSTEM_PROMPT,
-    EVALUATE_ANSWER_PROMPT,
 )
 
 
@@ -138,17 +136,6 @@ class OpenAIClient:
         """Generate final answer based on context and query."""
         prompt = FINAL_ANSWER_PROMPT.format(context=context, query=query)
         return self.generate(prompt, FINAL_ANSWER_SYSTEM_PROMPT)
-
-    def evaluate_answer(self, query: str, context: str, answer: str) -> Dict[str, float]:
-        """Evaluate answer quality."""
-        prompt = EVALUATE_ANSWER_PROMPT.format(query=query, context=context, answer=answer)
-        response = self.generate(prompt, EVALUATE_ANSWER_SYSTEM_PROMPT)
-        
-        try:
-            return json.loads(self._clean_json_response(response))
-        except json.JSONDecodeError:
-            logger.warning(f"Failed to parse evaluation response: {response}")
-            return {"relevance": 0.0, "accuracy": 0.0, "completeness": 0.0, "clarity": 0.0}
 
     def batch_generate(
         self,

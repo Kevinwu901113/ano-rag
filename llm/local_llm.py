@@ -8,7 +8,7 @@ from utils.json_utils import extract_json_from_response
 from .ollama_client import OllamaClient
 from .openai_client import OpenAIClient
 from .lmstudio_client import LMStudioClient
-from .multi_model_client import MultiModelClient
+
 from .factory import LLMFactory
 from .prompts import (
     ATOMIC_NOTE_SYSTEM_PROMPT,

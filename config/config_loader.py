@@ -58,26 +58,13 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "debug_log": True,
     },
     "llm": {
-        "provider": "openai", 
-        "model": "gpt-3.5-turbo", 
+        "provider": "lmstudio", 
+        "model": "openai/gpt-oss-20b", 
+        "base_url": "http://localhost:1234/v1",
+        "timeout": 60,
+        "instances": 1,
         "temperature": 0.7, 
-        "max_output_tokens": 512,
-        "hybrid_llm": {
-            "mode": "task_division",
-            "light_tasks": {
-                "provider": "ollama",
-                "model": "qwen2.5:latest",
-                "base_url": "http://localhost:11434",
-                "timeout": 30
-            },
-            "heavy_tasks": {
-                "provider": "lmstudio",
-                "model": "openai/gpt-oss-20b",
-                "base_url": "http://localhost:1234/v1",
-                "instances": 2,
-                "timeout": 60
-            }
-        }
+        "max_output_tokens": 512
     },
 
     "atomic_note_generation": {
@@ -90,12 +77,14 @@ DEFAULT_CONFIG: Dict[str, Any] = {
             "fallback_timeout": 10
         },
         "ollama": {
+            "enabled": True,
             "model": "qwen2.5:latest",
             "base_url": "http://localhost:11434",
             "timeout": 30,
             "temperature": 0.1
         },
         "lmstudio": {
+            "enabled": True,
             "model": "qwen2.5-7b-instruct",
             "base_url": "http://localhost:1234/v1",
             "timeout": 60,

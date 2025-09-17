@@ -139,36 +139,41 @@ class EnhancedNoiseFilter:
             enhanced_note['usefulness_score'] = usefulness_score
             enhanced_note['quality_assessment'] = quality_assessment
             
-            # 判定是否为噪声
-            if is_obvious_noise:
-                enhanced_note['is_noise'] = True
-                enhanced_note['noise_reason'] = 'obvious_noise'
-                noise_stats['noise_notes'] += 1
-                noise_stats['noise_reasons']['obvious_noise'] += 1
-            elif usefulness_score > self.usefulness_threshold:
-                # 强制设为非噪声
-                enhanced_note['is_noise'] = False
-                enhanced_note['noise_reason'] = None
-                noise_stats['quality_notes'] += 1
-                if note.get('is_noise', False):  # 原来被标记为噪声
-                    noise_stats['forced_quality'] += 1
-            else:
-                # 基于质量评估决定
-                overall_quality = quality_assessment['overall_quality']
-                if overall_quality < 0.4:
-                    enhanced_note['is_noise'] = True
-                    enhanced_note['noise_reason'] = 'low_quality'
-                    noise_stats['noise_notes'] += 1
-                    noise_stats['noise_reasons']['low_quality'] += 1
-                else:
-                    enhanced_note['is_noise'] = False
-                    enhanced_note['noise_reason'] = None
-                    noise_stats['quality_notes'] += 1
+            # 判定是否为噪声 - 禁用质量过滤，所有笔记都标记为非噪声
+            # if is_obvious_noise:
+            #     enhanced_note['is_noise'] = True
+            #     enhanced_note['noise_reason'] = 'obvious_noise'
+            #     noise_stats['noise_notes'] += 1
+            #     noise_stats['noise_reasons']['obvious_noise'] += 1
+            # elif usefulness_score > self.usefulness_threshold:
+            #     # 强制设为非噪声
+            #     enhanced_note['is_noise'] = False
+            #     enhanced_note['noise_reason'] = None
+            #     noise_stats['quality_notes'] += 1
+            #     if note.get('is_noise', False):  # 原来被标记为噪声
+            #         noise_stats['forced_quality'] += 1
+            # else:
+            #     # 基于质量评估决定
+            #     overall_quality = quality_assessment['overall_quality']
+            #     if overall_quality < 0.4:
+            #         enhanced_note['is_noise'] = True
+            #         enhanced_note['noise_reason'] = 'low_quality'
+            #         noise_stats['noise_notes'] += 1
+            #         noise_stats['noise_reasons']['low_quality'] += 1
+            #     else:
+            #         enhanced_note['is_noise'] = False
+            #         enhanced_note['noise_reason'] = None
+            #         noise_stats['quality_notes'] += 1
+            
+            # 禁用质量过滤：所有笔记都标记为非噪声
+            enhanced_note['is_noise'] = False
+            enhanced_note['noise_reason'] = None
+            noise_stats['quality_notes'] += 1
             
             filtered_notes.append(enhanced_note)
         
         # 记录统计信息
-        logger.info(f"Noise filtering completed: {noise_stats['quality_notes']} quality notes, "
+        logger.info(f"Noise filtering DISABLED: {noise_stats['quality_notes']} quality notes, "
                    f"{noise_stats['noise_notes']} noise notes, {noise_stats['forced_quality']} forced quality")
         
         return filtered_notes

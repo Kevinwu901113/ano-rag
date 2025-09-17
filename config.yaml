@@ -1,539 +1,134 @@
-# ANO-RAG 系统统一配置文件
-# 本配置文件包含了向量检索增强生成系统的所有核心参数
+# =========================
+# ANO-RAG minimal config
+# =========================
 
-# 系统基础配置
 system:
-  project_name: "ano-rag"  # 项目名称，用于标识和日志记录
-  # seed: 42                 # 随机种子，确保实验结果可复现
-  device: "cuda"            # 计算设备：cpu/cuda，影响模型推理速度
+  project_name: "ano-rag"
+  seed: 42
+  device: "cuda"
 
-# 文档处理配置
 document:
-  chunk_size: 256          # 文档分块大小（字符数），影响检索粒度
-  overlap: 32              # 分块间重叠字符数，保证语义连续性
-  batch_size: 32           # 批处理大小，影响处理速度
-  
-  # 句级切分配置
-  sentence_chunking:
-    enabled: false         # 是否启用句级切分模式
-    strict_sentence_mode: false  # 是否启用严格按句切分（true时每个chunk只包含一个句子）
-    sentences_per_chunk: 2 # 非严格模式下每个chunk包含的句子数量
-    maintain_sentence_boundaries: true  # 是否在chunk中维护句子边界信息
-    sentence_index_mapping: true        # 是否生成句子索引映射，用于与LLM返回的sid对齐
-  
-  # 并发处理配置
-  concurrent_processing:
-    enabled: true          # 是否启用并发处理
-    max_workers: 128         # 最大并发工作线程数
+  chunk_size: 256
+  overlap: 32
 
-# 嵌入模型配置
 embedding:
-  model_name: "BAAI/bge-m3"  # 嵌入模型名称，支持中英文多语言
-  batch_size: 64             # 批处理大小，影响嵌入生成速度
-  max_length: 512            # 最大token长度，超出部分会被截断
-  normalize: true            # 是否对向量进行归一化，提高相似度计算准确性
+  model_name: "/home/wjk/workplace/anorag/models/embedding/BAAI_bge-m3"
+  batch_size: 64
+  max_length: 512
+  normalize: true
 
-# 向量存储配置
 vector_store:
-  top_k: 20                 # 检索候选数量，影响召回率和计算开销
-  similarity_threshold: 0.15 # 相似度阈值，低阈值提高召回率但可能引入噪声
-  batch_size: 64            # 向量检索批处理大小
-  dimension: 1024           # 向量维度，需与嵌入模型匹配
-  index_type: "IVFFlat"     # FAISS索引类型，影响检索速度和精度
-  nlist: 20                 # IVF索引聚类数量，避免训练数据不足警告
-  similarity_metric: "cosine" # 相似度计算方法：cosine/euclidean/dot_product
+  top_k: 20
+  dimension: 1024
+  index_type: "IVFFlat"
+  similarity_metric: "cosine"
+  batch_size: 32
+  similarity_threshold: 0.5
+  retriever_enhancement:
+    topk_multiplier: 3.0
+    entity_boost_factor: 1.2
+    predicate_boost_factor: 1.15
+    must_have_terms_penalty: 0.6
+    enable_filter_logging: true
 
-# 检索策略配置
 retrieval:
-  bm25_topk_hop1: 40         # 原来若 <=15，建议拉高
-  embed_topk_hop1: 30
-  bm25_topk_hop2: 12
-  embed_topk_hop2: 8
-  query_rewrites_hop1: 2     # 针对桥接实体，生成 2 个改写
-  title_dedup: true          # 同一 title 仅留 1 段
-  entity_norm_dedup: true
-  candidate_pool: 80        # 全局候选池大小，影响最终检索质量
-  min_per_subq: 1          # 每个子问题最小召回数量，硬约束
-  
-  hybrid_search:
-    # 检索护栏配置
-    retrieval_guardrail:
-      enabled: true            # 是否启用检索护栏
-      min_results: 1           # 最小结果数量
-      min_score: 0.0           # 最小分数阈值
-      # timeout_seconds: 30      # 超时时间（秒）
-  
-  # JSON解析重试配置
-  json_parsing:
-    max_retries: 3           # 最大重试次数，增加重试次数可减少空答案
-    enable_smart_fallback: true  # 启用智能回退逻辑，避免返回空答案
-    fallback_message: "Unable to extract a meaningful answer from the provided context"  # 自定义回退消息
-  # 性能控制配置
-  performance:
+  candidate_pool: 50
+  hybrid:
+    enable_hybrid_search: true
+    fusion:
+      method: "linear"
+      linear:
+        vector_weight: 0.7
+        bm25_weight: 0.3
+        path_weight: 0.3
+    bm25:
+      corpus_field: "title_raw_span"
+      k1: 1.2
+      b: 0.75
+    path_aware:
+      enabled: true
+      min_path_score: 0.30
+      max_paths_per_candidate: 5
+      min_path_quality: 0.40
+  multi_hop:
+    enabled: true
+    strategy: "hybrid"
+    entity_extraction:
+      enabled: true
+      max_entities: 10
+    hybrid_mode:
+      primary_strategy: "entity_extraction"
+      fallback_strategy: "top_k_seed"
+      switch_threshold: 3
 
-# 原子笔记生成器配置
-atomic_note_generator:
-  # 原子笔记核心配置
-  sentence_multi_facts: true          # 是否允许单句生成多个事实
-  max_facts_per_sentence: 5           # 每句最大事实数（防过量）
-  min_fact_len: 10                    # 最小事实长度（字符数，质量门槛）
-  min_importance: 0.1                 # 最小重要性分数（质量门槛）
-  dedup_by: "span_or_hash"            # 去重策略：span_or_hash/content_hash/span_only
-  include_span: true                  # 是否强制模型返回跨度信息
-  terse_keys: false                   # 是否使用短键名（如用f代替fact）
-  
-  # 去重策略配置
-  deduplication:
-    enabled: true                    # 是否启用去重
-    use_char_span: true             # 优先使用字符跨度+文本去重
-    similarity_threshold: 0.9       # 文本相似度阈值
-  
-  # 配额与阈值配置（保持向后兼容）
-  quota_threshold:
-    max_facts_per_sentence: 5       # 每句最大事实数
-    min_fact_length: 10             # 最小事实长度（字符数）
-    min_importance_score: 0.1       # 最小重要性分数
-  
-  # 回退笔记配置
-  fallback:
-    importance_score: 0.2           # 回退笔记的重要性分数
-    enable_content_generation: true # 是否生成回退内容
-    max_keywords: 5                 # 最大关键词数量
-    max_fallback_per_step: 8      # 每个回补步骤的最大候选数量
-    max_graph_expansion: 15        # 图扩展的最大候选数量
-    max_entity_lookup: 12          # 实体查找的最大实体数量
-    # fallback_timeout_ms: 1000     # 回补检索超时时间（毫秒）
-    max_total_fallback: 10        # 总回补候选数量上限
-  # 图感知两阶段rerank配置
-  use_graph_rerank: true    # 是否启用图感知两阶段rerank
-  seeds_semantic: 50        # 语义检索种子节点数量
-  seeds_bm25: 30           # BM25检索种子节点数量
-  subgraph_radius: 2       # 子图截取半径
-  edge_thresh: 0.35        # 边权阈值过滤
-  k_paths: 20              # 生成路径数量上限
-  pick_paths: 4            # 选择路径数量
-  overlap_thresh: 0.5      # 路径重叠阈值
-  token_budget: 1800       # token预算
-  alpha: 0.5               # 终点相似度权重
-  beta: 0.3                # 路径平均权重
-  gamma: 0.2               # 上下文覆盖权重
-  rho: 0.25                # 上下文覆盖上限
-  lambda_len: 0.05         # 路径长度惩罚系数
-  query_mode: auto         # 查询模式：precise/explanatory/auto
-  
-  # 扩展配置
-  expansion:
-    max_neighbors_hop1: 3      # K-hop 扩展扇出
-    max_neighbors_hop2: 2
-    degree_cap: 50             # 图上高频节点的邻居上限（防止百科类节点爆炸）
-  
-  # 重排配置
-  rerank:
-    cross_encoder: "bge-reranker-large"  # 或 monoT5 / E5-reranker
-    final_topk: 10
-    margin_threshold: 0.15     # 低于阈值的直接裁掉
-    diversity_by_title: true
-    
-    # ListT5重排序配置
-    use_listt5: true           # 是否启用ListT5重排序
-    listt5_model: "castorini/doc2query-t5-large-list"  # ListT5模型名称
-    listt5_input_topk: 24      # 进入ListT5的候选数量
-    keep_after_listt5: 16      # ListT5重排后保留的候选数量
-    max_seq_len: 2048          # ListT5最大序列长度
-    batch_size: 4              # ListT5批处理大小
-  
-  # 上下文配置
-  context:
-    max_tokens: 1800           # 控制"准而不泛滥"，避免把无关段落一并带入
-    per_title_max: 1
-    per_entity_sentences: 2    # 从命中的段落摘 2 句"证据句"
-    evidence_first: true       # 证据句放在每段开头
-    
-    # 双视图拼接策略配置
-    dual_view_packing:
-      enabled: true            # 是否启用双视图拼接策略
-      facts_ratio: 0.7         # 事实清单占比（70%）
-      original_ratio: 0.3      # 原文片段占比（30%）
-      
-      # 事实筛选配置
-      fact_selection:
-        min_score: 0.5         # 最小事实分数阈值
-        min_coverage: 0.3      # 最小覆盖度阈值
-        max_facts: 20          # 最大事实数量
-        diversity_weight: 0.4  # 多样化权重（实体/谓词/时间）
-        entity_diversity: true # 是否考虑实体多样性
-        predicate_diversity: true # 是否考虑谓词多样性
-        temporal_diversity: true  # 是否考虑时间多样性
-      
-      # 原文片段配置
-      span_alignment:
-        max_spans: 10          # 最大原文片段数量
-        min_span_length: 20    # 最小片段长度（字符数）
-        max_span_length: 200   # 最大片段长度（字符数）
-        overlap_threshold: 0.8 # span对齐重叠阈值
-        verification_priority: true # 优先选择可验证性高的片段
-    
-    # 笔记视图配置
-    note_view:
-      max_tokens: 1200         # 笔记视图最高token数
-      max_items: 50            # 笔记视图最大项数
-      priority_threshold: 0.6  # 笔记优先级阈值
-      enable_clustering: true  # 是否启用笔记聚类
-    
-    # 段落视图配置
-    paragraph_view:
-      max_tokens: 800          # 段落视图最高token数
-      max_items: 20            # 段落视图最大项数
-      min_paragraph_length: 50 # 最小段落长度
-      enable_summarization: false  # 是否启用段落摘要
-  
-  # 桥接感知配置
-  bridge_aware:
-    hop2_query: "{bridge_entity} {question_subgoal}"  # 二跳检索必须包含一跳的桥实体
-    require_bridge_hit: true   # hop2 候选中至少要有若干桥实体命中
-  hybrid:                   # 混合检索配置
-    enabled: true           # 是否启用混合检索（向量+BM25+图谱）
-    fusion_method: "linear"  # 融合方法：linear线性加权|rrf倒数排名融合|weighted_sum加权求和
-    weights:                # 各检索方法权重配置
-      dense: 1.0            # 密集向量检索权重
-      bm25: 0.5             # BM25关键词检索权重
-      graph: 0.65            # 知识图谱检索权重
-  
-  # 检索护栏配置
-  retrieval_guardrail:
-    enabled: false          # 是否启用检索护栏，防止低质量结果
-    min_results: 1          # 最少检索结果数量
-    min_score: 0.0          # 最低检索得分阈值
-    # timeout_seconds: 30     # 检索超时时间（秒）
-  # 重排权重配置
-  rerank:
-    entity_overlap_weight: 0.4     # 实体重叠打分权重
-    path_consistency_weight: 0.3   # 链路一致性打分权重
-    semantic_weight: 0.35           # 语义相似度权重
-    soft_penalty_no_entity: 0.7    # 无实体命中时的软惩罚系数
-    rrf_k: 60               # RRF融合参数，仅在fusion_method为rrf时使用
+path_aware_ranker:
+  k_hop: 2
+  path_weight: 0.3
+  semantic_weight: 0.5
+  sparse_weight: 0.2
+  max_paths_per_candidate: 5
+  min_path_score: 0.1
 
-# 图构建配置
-graph:
-  # 基础图构建配置
-  enable_atomic_nodes: true         # 是否启用原子笔记节点
-  enable_entity_nodes: true         # 是否启用实体节点
-  enable_structural_edges: true     # 是否启用结构化边
-  max_edges_per_node: 50           # 每个节点的最大边数
-  hub_degree_threshold: 20         # hub节点度数阈值
-  
-  # 时间衰减权重配置（老化因子）
-  time_decay:
-    enabled: true                  # 是否启用时间衰减权重
-    lambda: 0.15                   # 衰减参数λ，控制衰减速度，适当提高以增强时间衰减效果
-    reference_time: "current"       # 参考时间：current(当前时间)或ISO格式时间戳
-    time_unit: "days"              # 时间单位：seconds/minutes/hours/days/weeks
-  
-  # 反hub惩罚配置（度归一化）
-  hub_penalty:
-    enabled: true                  # 是否启用反hub惩罚
-    strength: 0.6                  # 惩罚强度，0-1之间，适当提高以减少hub节点影响
-    threshold: 15                  # hub节点阈值，度数超过此值的节点被视为hub，根据数据密度调整
-    method: "log_normalization"     # 惩罚方法：log_normalization/sqrt_normalization/linear_normalization
-  
-  # metapath白名单和路径偏好配置
-  metapaths:
-    enabled: true                  # 是否启用metapath过滤
-    max_path_length: 3             # 最大路径长度
-    # 关系类型白名单，只保留列表中的关系类型（空列表表示不过滤）
-    # P2-8加分项: 填入常用路径到元路径白名单
-    whitelist: [
-      # 实体-关系-实体-段落路径（核心推理路径）
-      "E-R-E-Para", 
-      # 段落-实体-段落路径（实体桥接）
-      "Para-E-Para", 
-      # 章节-段落-段落路径（结构化导航）
-      "Sec-Para-Para",
-      # 实体-实体-段落路径（直接关联）
-      "E-E-Para",
-      # 段落-关系-段落路径（关系桥接）
-      "Para-R-Para",
-      # 实体-段落-实体路径（段落中介）
-      "E-Para-E",
-      # 章节-实体-段落路径（结构化实体查找）
-      "Sec-E-Para",
-      # 实体-关系-实体-关系-实体路径（多跳推理）
-      "E-R-E-R-E",
-      # 段落-实体-关系-实体路径（实体关系扩展）
-      "Para-E-R-E",
-      # 实体-关系-实体-段落-实体路径（复合推理）
-      "E-R-E-Para-E"
-    ]  # 优先的元路径
-    # 路径偏好权重，为特定关系类型设置权重倍数
-    path_preferences:
-      semantic_relation: 1.2       # 语义关系权重倍数
-      entity_cooccurrence: 1.0     # 实体共现权重倍数
-      temporal_relation: 1.1       # 时序关系权重倍数
-      causal_relation: 1.3         # 因果关系权重倍数
-      hierarchical_relation: 1.1   # 层次关系权重倍数
-
-graph_construction:
-  # 原子笔记边配置
-  atomic_note_edges:
-    # 边权阈值配置
-    edge_weight_threshold: 0.3      # 原子笔记边的最小权重阈值
-    semantic_similarity_threshold: 0.7  # 语义相似度阈值
-    entity_overlap_threshold: 0.5   # 实体重叠度阈值
-    
-    # 每种类型边的数量上限（per-type cap）
-    per_type_caps:
-      semantic_relation: 50         # 语义关系边上限
-      entity_cooccurrence: 100      # 实体共现边上限
-      temporal_relation: 30         # 时序关系边上限
-      causal_relation: 40           # 因果关系边上限
-      hierarchical_relation: 60     # 层次关系边上限
-    
-    # 边构建策略
-    construction_strategy:
-      enable_bidirectional: true    # 是否启用双向边
-      weight_normalization: true    # 是否进行权重归一化
-      prune_weak_edges: true        # 是否剪枝弱边
-      min_edge_support: 2           # 边的最小支持度
-    
-    # 质量控制
-    quality_control:
-      max_edges_per_note: 20        # 每个原子笔记的最大边数
-      edge_validation: true         # 是否启用边验证
-      remove_redundant_edges: true  # 是否移除冗余边
-
-# 校准配置 - 融合权重和特征权重
-# 本节配置控制 Learned Fusion + 原子特征的融合策略
-# 融合公式: final_score = listt5_weight * listt5_score + (1-listt5_weight) * base_score
-#          base_score = (1-atomic_weight) * existing_score + atomic_weight * atomic_score
-#          如果启用learned_fusion: final_score = (1-learned_fusion_weight) * base_score + learned_fusion_weight * learned_score
-calibration:
-  path: "calibration.json"    # 校准文件路径
-  
-  # === 主要融合权重配置 ===
-  # 这些权重控制不同检索和重排方法的融合比例，影响最终排序结果
-  
-  listt5_weight: 0.35         # ListT5重排序权重 (推荐范围: 0.3-0.4)
-                              # 控制ListT5重排序结果与基础分数的融合比例
-                              # 较高值更依赖ListT5的排序能力，较低值保留更多原始检索信号
-  
-  listt5_temperature: 1.0     # ListT5温度缩放参数 (推荐范围: 0.8-1.2)
-                              # 控制ListT5分数的平滑程度，影响排序的置信度分布
-  
-  learned_fusion_weight: 0.2  # Learned Fusion权重 (推荐范围: 0.15-0.25)
-                              # 控制机器学习融合模型的影响力
-                              # 该模型整合BM25、向量、图谱等多种信号进行智能融合
-  
-  # === 原子笔记特征权重配置 ===
-  # 原子特征包括: 事实数量、平均重要性、谓词覆盖、时间覆盖、跨句多样性
-  atomic_features:
-    enabled: true             # 是否启用原子笔记特征融合
-    
-    weight: 0.15              # 原子特征总权重 (推荐范围: 0.1-0.2)
-                              # 控制原子笔记特征在最终融合中的影响力
-                              # 较高值更重视知识图谱的结构化信息
-    
-    # === 原子特征子权重配置 ===
-    # 以下权重用于计算原子特征的综合分数，权重和应为1.0
-    
-    fact_hit_weight: 0.3      # 命中事实数权重 (推荐: 0.25-0.35)
-                              # 衡量候选文档包含的相关事实数量
-                              # 更多事实通常意味着更丰富的信息内容
-    
-    avg_importance_weight: 0.25 # 平均重要性权重 (推荐: 0.2-0.3)
-                                # 衡量候选文档中事实的平均重要性分数
-                                # 高重要性事实对回答问题更有价值
-    
-    predicate_coverage_weight: 0.2  # 谓词覆盖度权重 (推荐: 0.15-0.25)
-                                    # 衡量候选文档覆盖的谓词类型多样性
-                                    # 更多谓词类型提供更全面的关系信息
-    
-    temporal_coverage_weight: 0.15  # 时间覆盖度权重 (推荐: 0.1-0.2)
-                                    # 衡量候选文档的时间信息覆盖范围
-                                    # 对时间敏感问题特别重要
-    
-    diversity_weight: 0.1     # 跨句多样性权重 (推荐: 0.05-0.15)
-                              # 衡量候选文档中信息的句间多样性
-                              # 避免重复信息，提高内容丰富度
-  bm25:                     # BM25检索参数
-    k1: 1.2                 # 词频饱和参数，控制词频对得分的影响
-    b: 0.75                 # 文档长度归一化参数
-    text_field: "title_raw_span" # BM25检索的文本字段
-  graph:                    # 图谱检索配置
-    enabled: true           # 是否启用知识图谱检索
-    k_hop: 4                # 图谱遍历跳数，影响关联实体发现范围
-    expand_top_m: 50        # 图谱扩展的top-m候选数量
-    expand_k: 1             # 图扩展时的一跳扩展限制
-    db_path: "data/graph.db"  # 图数据库路径
-    max_depth: 2            # 图遍历最大深度
-    min_score: 0.3          # 最小相关性分数阈值
-    max_nodes: 50           # 单次查询最大节点数
-  multi_hop:                # 多跳检索配置
-    enabled: true           # 是否启用多跳检索（false时使用混合图检索策略）
-    # 图检索策略配置
-    strategy: "hybrid"       # 图检索策略：entity_extraction|top_k_seed|hybrid
-    top_k_seed:             # Top-K种子节点策略配置
-      enabled: false       # 是否启用Top-K种子节点策略
-      seed_count: 5         # 作为种子节点的Top-K数量
-      fallback_to_entity: true  # 当Top-K结果不足时是否回退到实体提取策略
-    entity_extraction:      # 实体提取策略配置（传统方式）
-      enabled: true         # 是否启用实体提取策略
-      max_entities: 10      # 最大提取实体数量
-    hybrid_mode:            # 混合策略配置
-      primary_strategy: "entity_extraction"  # 主策略：entity_extraction|top_k_seed
-      fallback_strategy: "top_k_seed"       # 备用策略
-      switch_threshold: 3   # 主策略结果不足时的切换阈值
-
-# 路径感知检索配置
-path_aware:
-  enabled: true            # 是否启用路径感知检索，提高多跳推理能力
-  min_path_score: 0.05       # 最小路径得分阈值
-
-# 结果分发器配置
 dispatcher:
-  final_semantic_count: 7   # 最终语义检索结果数量（减少）
-  final_graph_count: 30      # 最终图谱检索结果数量（增加）
-  bridge_policy: "boost"  # 桥接策略：none无|keepalive保活|boost增强
-  bridge_boost_epsilon: 0.03  # 桥接增强的epsilon参数
-  debug_log: true           # 是否输出调试日志
+  final_semantic_count: 7
+  final_graph_count: 0
+  bridge_policy: "keepalive"
+  bridge_boost_epsilon: 0.02
+  debug_log: true
 
-# 调度器配置
-scheduler:
-  coverage_guard: true      # 是否启用覆盖守卫，确保每个子问题至少有一条证据
-
-# 大语言模型配置
+# -------------------------
+# 答案生成：LM Studio（唯一通道）
+# -------------------------
 llm:
-  provider: "hybrid_llm"      # LLM提供商：lmstudio/openai/ollama/hybrid_llm等
-  model: "openai/gpt-oss-20b"   # 模型名称，需与provider匹配
-  temperature: 0.1          # 生成温度，控制输出随机性（0-1）
-  max_output_tokens: 8192    # 最大输出token数量
-  
-  # 混合LLM配置（当provider为hybrid_llm时生效）
-  hybrid_llm:
-    mode: "task_division"    # 混合模式：task_division任务划分|competitive竞争模式
-    
-    # 轻量级任务配置（使用Ollama）
-    light_tasks:
-      model: "qwen2.5:latest" # 轻量级任务模型
-      base_url: "http://localhost:11434"  # Ollama服务地址
-      # timeout: 30             # 请求超时时间（秒）
-      max_async: 16            # 最大异步请求数
-      # max_tokens: 1024        # 最大输出token数
-      num_ctx: 32768           # 上下文窗口大小
-      temperature: 0.1        # 生成温度
-    
-    # 重量级任务配置（使用LM Studio）
-    heavy_tasks:
-      provider: "lmstudio"    # 重量级任务提供商
-      model: "openai/gpt-oss-20b"  # 重量级任务模型
-      base_url: "http://localhost:1234/v1"  # LM Studio服务地址
-      instances: 1            # LM Studio实例数量
-      # timeout: 60             # 请求超时时间（秒）
+  provider: "lmstudio"
+  base_url: "http://localhost:1234/v1"
+  model: "openai/gpt-oss-20b"   # 或 qwen2.5-7b-instruct（二选一，保持与你本地LM Studio一致）
+  timeout: 60
+  instances: 1
+  # 若你的 LM Studio 支持 OpenAI response_format，可在代码层开启 JSON 模式（答案生成通常不需要）
 
-
-
-# 新增功能配置开关
-feature_switches:
-  # 稳定note_id生成功能
-  stable_note_id:
-    enabled: true           # 是否启用基于源文档信息的稳定note_id生成
-    use_content_hash: true  # 是否使用内容哈希作为备选方案
-    fallback_to_index: true # 无其他信息时是否回退到索引方式
-
-# 原子笔记生成并行处理配置
+# -------------------------
+# 原子笔记生成：Ollama + LM Studio 并行
+# -------------------------
 atomic_note_generation:
-  # 并行处理策略
-  parallel_enabled: true        # 是否启用并行处理
-  parallel_strategy: "task_division"  # 并行策略：task_division任务分配|competitive竞争模式|quality_selection质量选择
-  
-  # 任务分配配置（task_division策略）
+  parallel_enabled: true
+  parallel_strategy: "task_division"
   task_division:
-    enabled: true               # 是否启用任务分配策略
-    allocation_method: "round_robin"  # 分配方法：round_robin轮询|batch_split批次分割
-    enable_fallback: true       # 是否启用失败回退机制
-    fallback_timeout: 120        # 回退超时时间（秒）- 增加到120秒以避免超时错误
-    
-  # Ollama配置（用于原子笔记生成）
+    enabled: true
+    allocation_method: "round_robin"
+    enable_fallback: true
+    fallback_timeout: 120
+
+  # 后端一：Ollama
   ollama:
-    model: "qwen2.5:latest"     # Ollama模型名称
-    base_url: "http://localhost:11434"  # Ollama服务地址
-    timeout: 90                 # 请求超时时间（秒）- 增加到90秒
-    max_async: 8                # 最大异步请求数 - 减少并发以避免资源竞争
-    temperature: 0.1            # 生成温度
+    enabled: true
+    base_url: "http://localhost:11434"
+    model: "qwen2.5:latest"
+    temperature: 0.05
     num_ctx: 32768
-  # LM Studio配置（用于原子笔记生成）
+
+  # 后端二：LM Studio
   lmstudio:
-    model: "qwen2.5-7b-instruct"     # LM Studio模型名称
-    base_url: "http://localhost:1234/v1"  # LM Studio服务地址
-    timeout: 90                 # 请求超时时间（秒）- 增加到90秒
-    temperature: 0.1            # 生成温度
-    
-  # 性能监控配置
+    enabled: true
+    base_url: "http://localhost:1234/v1"
+    model: "qwen2.5-7b-instruct"
+    temperature: 0.05
+    timeout: 120
+    top_p: 0.9
+    json_mode: true   # 若模型/后端支持OpenAI的response_format
+
   monitoring:
-    enabled: true               # 是否启用性能监控
-    log_stats: true             # 是否记录统计信息
-    export_metrics: false       # 是否导出性能指标
+    enabled: true
+    log_stats: true
+    export_metrics: false
+    performance_threshold: 30.0
+    error_rate_threshold: 0.1
 
-# 增强关系提取配置
-enhanced_relation_extraction:
-  use_llm_extraction: true     # 是否启用LLM增强的语义关系提取
-  use_fast_model: true          # 是否使用快速模型
-  enable_topic_groups: true     # 是否启用主题组关系提取
-  enable_reasoning_paths: false  # 是否启用推理路径关系提取
-  
-  # 轻量级关系类型功能
-  lightweight_relations:
-    enabled: true           # 是否启用轻量级商业关系识别
-    relation_types:         # 支持的关系类型配置
-      succession: true      # 继任关系
-      acquisition: true     # 收购关系
-      ownership: true       # 归属关系
-      subsidiary: true      # 子公司关系
-      partnership: true     # 合作关系
-      merger: true          # 合并关系
-    keyword_matching: true  # 是否启用关键词匹配
-    pattern_matching: true  # 是否启用模式匹配
-  
-  # 一致性检查功能
-  consistency_check:
-    enabled: true           # 是否启用数据写入前的一致性检查
-    strict_mode: false      # 严格模式：发现严重错误时停止处理
-    check_note_id: true     # 检查note_id一致性
-    check_entity_alignment: true  # 检查实体对齐
-    check_relation_chains: true   # 检查关系链完整性
-    check_source_binding: true    # 检查源文档绑定稳定性
-    check_graph_structure: true   # 检查图结构完整性
-    entity_alignment_threshold: 0.8  # 实体对齐警告阈值（80%实体缺失才警告）
-    export_report: true     # 是否导出检查报告
-    report_format: "json"   # 报告格式：json/yaml/txt
+# -------------------------
+# 显式禁用不需要的 LLM 步骤
+# -------------------------
+rewriter:
+  enabled: false
 
-# Dataset Guard 配置
-dataset_guard:
-  enabled: true           # 是否启用数据集保护
-  bm25_fallback: true     # 是否启用BM25兜底策略
-  namespace: "musique"    # 数据集命名空间
-
-# Storage 配置
-storage:
-  result_root: "result"   # 结果存储根目录
-
-# Context Packer 配置 - 双视图上下文拼装
-context_packer:
-  token_budget: 2000           # 默认token预算
-  fact_view_ratio: 0.7         # 事实视图占比（70%用于事实）
-  paragraph_view_ratio: 0.3    # 段落视图占比（30%用于原文）
-  
-  # 事实选择参数
-  max_facts_per_entity: 3      # 每个实体最大事实数量
-  min_confidence_threshold: 0.6 # 最小置信度阈值
-  diversity_weight: 0.3        # 多样性权重
-  
-  # 文本片段选择参数
-  max_span_length: 200         # 最大片段长度
-  min_span_length: 50          # 最小片段长度
-  span_overlap_threshold: 0.5  # 片段重叠阈值
-  
-  # 优化参数
-  enable_optimization: true    # 是否启用token分配优化
-  optimization_iterations: 3   # 优化迭代次数
-
-# 注意: 融合权重配置已移至上方的 calibration 节，避免重复配置
+evaluation:
+  enabled: false

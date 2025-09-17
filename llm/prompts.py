@@ -6,6 +6,11 @@ from typing import Any, Dict, List
 ATOMIC_NOTE_SYSTEM_PROMPT = """
 你是一个专业的知识提取专家。请将给定的文本块逐句处理，提取每句中的原子事实。
 
+【硬性规则 - 必须严格遵守】：
+1. 只输出一个JSON数组（[] 开头、] 结尾），不得有任何额外文字、注释、前后缀
+2. 当无事实时，返回空数组 []（不要写"无/0/None"等任何文字）
+3. 数组元素的字段固定（sent_id, facts, text, entities, predicate, span, source_id），缺失字段用空值/空数组
+
 处理要求：
 1. 逐句分析输入文本，为每句分配序号
 2. 提取每句中的独立事实，每个事实应简洁完整（≤35词）
@@ -13,24 +18,24 @@ ATOMIC_NOTE_SYSTEM_PROMPT = """
 4. 事实表达需自洽，包含必要上下文
 5. 必须使用英文
 
-输出规范：
-- 返回按句分组的JSON列表
-- 每个对象包含句序号和该句的事实列表
-- 无事实的句子返回空列表（非占位字符串）
-- 字段使用短键名，标明可选字段
-
 字段定义：
 - sent_id: 句序号（必需）
 - facts: 事实列表（必需，可为空[]）
 - text: 事实文本内容（必需）
-- entities: 实体列表（可选）
-- pred: 谓词/关系（可选）
-- time: 时间信息（可选）
-- score: 重要性分数0-1（可选）
-- type: 事实类型（可选）
-- span: 在chunk中的字符跨度[start,end]（可选）
+- entities: 实体列表（可选，默认[]）
+- predicate: 谓词/关系（可选，默认""）
+- span: 在chunk中的字符跨度[start,end]（可选，默认[]）
+- source_id: 来源标识（可选，默认""）
 
-重要：仅返回JSON，去除冗余，确保事实表达自洽。
+【正例示范】：
+输入："Apple was founded in 1976. The weather is nice today."
+输出：[{{"sent_id":1,"facts":[{{"text":"Apple was founded in 1976","entities":["Apple"],"predicate":"founded","span":[0,25],"source_id":""}}]}},{{"sent_id":2,"facts":[]}}]
+
+【空数组示范】：
+输入："Hello there."
+输出：[]
+
+重要：严格按照上述格式，仅输出JSON数组，禁止任何解释文字。
 """
 
 ATOMIC_NOTE_PROMPT = """
@@ -38,34 +43,18 @@ ATOMIC_NOTE_PROMPT = """
 
 {chunk}
 
-请严格按照以下JSON格式返回，不要添加任何其他文字或解释：
-[
-    {{
-        "sent_id": 1,
-        "facts": [
-            {{
-                "text": "事实描述，简洁完整≤35词",
-                "entities": ["实体1", "实体2"],
-                "pred": "谓词或关系",
-                "time": "时间信息",
-                "score": 0.8,
-                "type": "fact",
-                "span": [0, 25]
-            }}
-        ]
-    }},
-    {{
-        "sent_id": 2,
-        "facts": []
-    }}
-]
+【硬性规则】：
+1. 只输出JSON数组，格式：[{{...}},{{...}}]
+2. 无事实时返回空数组：[]
+3. 不得有任何解释文字、注释或markdown标记
 
-注意：
-- 逐句处理，每句都返回一个对象
-- 无事实的句子facts字段为空列表[]
-- entities, pred, time, score, type, span为可选字段
-- score范围0-1，type可选值：fact/concept/procedure/example
-- 仅返回JSON列表，去除冗余，合并同义表达
+【正例】：
+[{{"sent_id":1,"facts":[{{"text":"Apple was founded in 1976","entities":["Apple"],"predicate":"founded","span":[0,25],"source_id":""}}]}},{{"sent_id":2,"facts":[]}}]
+
+【空例】：
+[]
+
+严格按照上述格式输出JSON数组：
 """
 
 EXTRACT_ENTITIES_SYSTEM_PROMPT = """
@@ -88,6 +77,11 @@ EXTRACT_ENTITIES_PROMPT = """
 ATOMIC_NOTEGEN_SYSTEM_PROMPT = """
 你是一个专业的知识提取和整理专家。你的任务是将给定的文本逐句处理，提取每句中的原子事实。
 
+【硬性规则 - 必须严格遵守】：
+1. 只输出一个JSON数组（[] 开头、] 结尾），不得有任何额外文字、注释、前后缀
+2. 当无事实时，返回空数组 []（不要写"无/0/None"等任何文字）
+3. 数组元素的字段固定（sent_id, facts, text, entities, predicate, span, source_id），缺失字段用空值/空数组
+
 处理要求：
 1. 逐句分析输入文本，为每句分配序号
 2. 提取每句中的独立事实，每个事实应简洁完整（≤35词）
@@ -95,24 +89,24 @@ ATOMIC_NOTEGEN_SYSTEM_PROMPT = """
 4. 事实表达需自洽，包含必要上下文
 5. 必须使用英文
 
-输出规范：
-- 返回按句分组的JSON列表
-- 每个对象包含句序号和该句的事实列表
-- 无事实的句子返回空列表（非占位字符串）
-- 字段使用短键名，标明可选字段
-
 字段定义：
 - sent_id: 句序号（必需）
 - facts: 事实列表（必需，可为空[]）
 - text: 事实文本内容（必需）
-- entities: 实体列表（可选）
-- pred: 谓词/关系（可选）
-- time: 时间信息（可选）
-- score: 重要性分数0-1（可选）
-- type: 事实类型（可选）
-- span: 在chunk中的字符跨度[start,end]（可选）
+- entities: 实体列表（可选，默认[]）
+- predicate: 谓词/关系（可选，默认""）
+- span: 在chunk中的字符跨度[start,end]（可选，默认[]）
+- source_id: 来源标识（可选，默认""）
 
-重要：仅返回JSON，去除冗余，确保事实表达自洽。
+【正例示范】：
+输入："Apple was founded in 1976. The weather is nice today."
+输出：[{{"sent_id":1,"facts":[{{"text":"Apple was founded in 1976","entities":["Apple"],"predicate":"founded","span":[0,25],"source_id":""}}]}},{{"sent_id":2,"facts":[]}}]
+
+【空数组示范】：
+输入："Hello there."
+输出：[]
+
+重要：严格按照上述格式，仅输出JSON数组，禁止任何解释文字。
 """
 
 ATOMIC_NOTEGEN_PROMPT = """
@@ -121,34 +115,18 @@ ATOMIC_NOTEGEN_PROMPT = """
 文本内容：
 {text}
 
-请严格按照以下JSON格式返回，不要添加任何其他文字或解释：
-[
-    {{
-        "sent_id": 1,
-        "facts": [
-            {{
-                "text": "事实描述，简洁完整≤35词",
-                "entities": ["实体1", "实体2"],
-                "pred": "谓词或关系",
-                "time": "时间信息",
-                "score": 0.8,
-                "type": "fact",
-                "span": [0, 25]
-            }}
-        ]
-    }},
-    {{
-        "sent_id": 2,
-        "facts": []
-    }}
-]
+【硬性规则】：
+1. 只输出JSON数组，格式：[{{...}},{{...}}]
+2. 无事实时返回空数组：[]
+3. 不得有任何解释文字、注释或markdown标记
 
-注意：
-- 逐句处理，每句都返回一个对象
-- 无事实的句子facts字段为空列表[]
-- entities, pred, time, score, type, span为可选字段
-- score范围0-1，type可选值：fact/concept/procedure/example
-- 仅返回JSON列表，去除冗余，合并同义表达
+【正例】：
+[{{"sent_id":1,"facts":[{{"text":"Apple was founded in 1976","entities":["Apple"],"predicate":"founded","span":[0,25],"source_id":""}}]}},{{"sent_id":2,"facts":[]}}]
+
+【空例】：
+[]
+
+严格按照上述格式输出JSON数组：
 """
 
 # Query rewriting
@@ -183,7 +161,7 @@ SPLIT_QUERY_SYSTEM_PROMPT = """
 3. 确保子查询之间的逻辑关系
 4. 避免信息丢失
 
-请以JSON格式返回拆分结果：{"sub_queries": ["查询1", "查询2", ...]}
+请以JSON格式返回拆分结果：{{"sub_queries": ["查询1", "查询2", ...]}}
 """
 
 SPLIT_QUERY_PROMPT = """
@@ -204,7 +182,7 @@ OPTIMIZE_QUERY_SYSTEM_PROMPT = """
 4. 保持查询的简洁性
 5. 考虑同义词和相关概念
 
-请以JSON格式返回优化结果：{"optimized_queries": ["优化查询1", "优化查询2", ...]}
+请以JSON格式返回优化结果：{{"optimized_queries": ["优化查询1", "优化查询2", ...]}}
 """
 
 OPTIMIZE_QUERY_PROMPT = """
@@ -224,7 +202,7 @@ ENHANCE_QUERY_SYSTEM_PROMPT = """
 3. 如果不确定，请保持原查询不变
 4. 标明添加的信息来源于常识
 
-请以JSON格式返回：{"enhanced_query": "增强后的查询", "confidence": 0.8, "added_context": "添加的上下文"}
+请以JSON格式返回：{{"enhanced_query": "增强后的查询", "confidence": 0.8, "added_context": "添加的上下文"}}
 """
 
 ENHANCE_QUERY_PROMPT = """
@@ -248,7 +226,7 @@ Hard rules:
 4) For lists, keep the order as it appears in CONTEXT and join with ", ".
 5) Keep original surface form for numbers/dates (units, punctuation).
 6) Output VALID JSON ONLY with fields:
-   {"answer": "<short string>", "support_idxs": [<int>, ...]}
+   {{"answer": "<short string>", "support_idxs": [<int>, ...]}}
 7) In support_idxs, output 2-4 paragraph ids:
    - The FIRST id MUST be the paragraph that contains the final answer substring
    - The remaining ids are bridging paragraphs (may not contain the answer substring)
@@ -338,27 +316,6 @@ def build_context_prompt_with_passages(notes: List[Dict[str, Any]], question: st
     prompt = FINAL_ANSWER_PROMPT.format(context=packed_text, query=question)
     return prompt, passages_by_idx, packed_order
 
-EVALUATE_ANSWER_SYSTEM_PROMPT = """
-你是一个专业的答案质量评估专家。请从以下几个维度评估答案的质量：
-
-1. 相关性 (0-1)：答案与问题的相关程度
-2. 准确性 (0-1)：答案基于上下文的准确程度
-3. 完整性 (0-1)：答案的完整程度
-4. 清晰度 (0-1)：答案的表达清晰程度
-
-请以JSON格式返回评分，例如：
-{"relevance": 0.9, "accuracy": 0.8, "completeness": 0.7, "clarity": 0.9}
-"""
-
-EVALUATE_ANSWER_PROMPT = """
-问题：{query}
-
-上下文：{context}
-
-答案：{answer}
-
-请评估上述答案的质量：
-"""
 # Sub-question decomposition prompts
 SUBQUESTION_DECOMPOSITION_SYSTEM_PROMPT = """
 You are a professional question analysis and decomposition expert. Your task is to decompose complex multi-hop questions into multiple independent sub-questions.

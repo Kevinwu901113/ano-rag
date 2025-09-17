@@ -3,6 +3,7 @@ from typing import Any, Dict, Iterator, List, Union
 import threading
 import queue
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import ollama
 import requests
@@ -12,8 +13,6 @@ from config import config
 from .prompts import (
     FINAL_ANSWER_SYSTEM_PROMPT,
     FINAL_ANSWER_PROMPT,
-    EVALUATE_ANSWER_SYSTEM_PROMPT,
-    EVALUATE_ANSWER_PROMPT,
 )
 
 
@@ -24,11 +23,11 @@ class OllamaClient:
         self.base_url = base_url or config.get("llm.ollama.base_url", "http://localhost:11434")
         self.model = model or config.get("llm.ollama.model", "gpt-oss:latest")
         self.temperature = config.get("llm.ollama.temperature", 0.7)
-        self.max_tokens = config.get("llm.ollama.max_tokens", 4096)
+        self.max_tokens = config.get("llm.ollama.max_tokens", 8192)
         
         # LightRAG-inspired configuration
         self.num_ctx = config.get("llm.ollama.num_ctx", 32768)  # Context window size
-        self.max_async = config.get("llm.ollama.max_async", 4)  # Max concurrent requests
+        self.max_async = config.get("llm.ollama.max_async", 16)  # Max concurrent requests
         self.timeout = config.get("llm.ollama.timeout", 60)  # Request timeout
         
         # Initialize client with host
@@ -40,6 +39,18 @@ class OllamaClient:
             "temperature": self.temperature,
             "num_predict": self.max_tokens,
         }
+        
+        # 并发处理配置
+        self.concurrent_enabled = config.get("llm.ollama.concurrent.enabled", False)
+        if self.concurrent_enabled:
+            self.max_concurrent_requests = config.get("llm.ollama.concurrent.max_workers", self.max_async)
+            self.executor = ThreadPoolExecutor(max_workers=self.max_concurrent_requests)
+            logger.info(f"Ollama concurrent processing enabled with {self.max_concurrent_requests} max concurrent requests")
+        else:
+            self.max_concurrent_requests = 1
+            self.executor = None
+        
+        logger.info(f"Initialized Ollama client: {'concurrent' if self.concurrent_enabled else 'single-threaded'} mode")
 
     def generate(
         self,
@@ -77,63 +88,33 @@ class OllamaClient:
                     logger.info(f"Retrying Ollama request (attempt {attempt + 1}/{max_retries + 1}) after {wait_time}s")
                     time.sleep(wait_time)
                 
-                # Use thread-safe timeout mechanism without nested ThreadPoolExecutor
-                result_queue = queue.Queue()
-                error_queue = queue.Queue()
-                
-                def generate_with_timeout_wrapper():
-                    try:
-                        result = self.client.generate(
-                            model=self.model,
-                            prompt=full_prompt,
-                            stream=stream,
-                            options=options,
-                        )
-                        result_queue.put(result)
-                    except Exception as e:
-                        error_queue.put(e)
-                
-                # Use threading.Thread instead of ThreadPoolExecutor to avoid nesting issues
-                thread = threading.Thread(target=generate_with_timeout_wrapper)
-                thread.daemon = True  # Ensure thread doesn't prevent program shutdown
-                thread.start()
-                thread.join(timeout=request_timeout)
-                
-                # Check if thread is still alive (timeout occurred)
-                if thread.is_alive():
-                    logger.warning(f"Ollama request timed out after {request_timeout} seconds (attempt {attempt + 1})")
-                    last_exception = TimeoutError(f"Ollama request timed out after {request_timeout} seconds")
-                    if attempt < max_retries:
+                # 直接调用，不使用线程超时机制来避免并发问题
+                try:
+                    result = self.client.generate(
+                        model=self.model,
+                        prompt=full_prompt,
+                        stream=stream,
+                        options=options,
+                    )
+                except Exception as e:
+                    logger.warning(f"Ollama request failed (attempt {attempt + 1}): {e}")
+                    last_exception = e
+                    if attempt < max_retries and isinstance(e, (TimeoutError, ConnectionError)):
                         continue
-                    raise last_exception
+                    raise e
                 
-                # Check for errors first
-                if not error_queue.empty():
-                    error = error_queue.get()
-                    last_exception = error
-                    if attempt < max_retries and isinstance(error, (TimeoutError, ConnectionError)):
-                        continue
-                    raise error
                 
                 # Get the result
-                if not result_queue.empty():
-                    response = result_queue.get()
-                else:
-                    last_exception = TimeoutError("No response received from Ollama")
-                    if attempt < max_retries:
-                        continue
-                    raise last_exception
-
                 text: str = ""
                 if stream:
-                    for chunk in response:
+                    for chunk in result:
                         if hasattr(chunk, "response"):
                             text += chunk.response
                 else:
-                    if hasattr(response, "response"):
-                        text = response.response
+                    if hasattr(result, "response"):
+                        text = result.response
                     else:
-                        text = str(response)
+                        text = str(result)
 
                 if not text or text.strip() == "":
                     last_exception = ValueError("Ollama returned empty response")
@@ -203,18 +184,6 @@ class OllamaClient:
         """Generate final answer from a combined prompt"""
         return self.generate(prompt, FINAL_ANSWER_SYSTEM_PROMPT, **kwargs)
 
-    def evaluate_answer(self, query: str, context: str, answer: str) -> Dict[str, float]:
-        system_prompt = EVALUATE_ANSWER_SYSTEM_PROMPT
-        prompt = EVALUATE_ANSWER_PROMPT.format(query=query, context=context, answer=answer)
-        try:
-            text = self.generate(prompt, system_prompt)
-            # 清理响应，移除可能的markdown代码块标记
-            cleaned_text = self._clean_json_response(text)
-            return json.loads(cleaned_text)
-        except Exception as e:  # pragma: no cover - runtime parsing or connection error
-            logger.error(f"Answer evaluation failed: {e}")
-            return {"relevance": 0.5, "accuracy": 0.5, "completeness": 0.5, "clarity": 0.5}
-
     def batch_generate(
         self,
         prompts: List[str],
@@ -223,13 +192,43 @@ class OllamaClient:
         stream: bool = False,
         **kwargs: Any,
     ) -> List[str]:
-        results: List[str] = []
-        for prompt in prompts:
-            try:
-                results.append(self.generate(prompt, system_prompt, stream=stream, **kwargs))
-            except Exception as e:  # pragma: no cover
-                logger.error(f"Batch generation failed for prompt: {e}")
-                results.append("")
+        """批量生成响应，支持并发处理"""
+        if not self.concurrent_enabled or len(prompts) <= 1:
+            # 单线程处理
+            results: List[str] = []
+            for prompt in prompts:
+                try:
+                    results.append(self.generate(prompt, system_prompt, stream=stream, **kwargs))
+                except Exception as e:  # pragma: no cover
+                    logger.error(f"Batch generation failed for prompt: {e}")
+                    results.append("")
+            return results
+        
+        # 使用线程池并发处理
+        return self.generate_concurrent(prompts, system_prompt, stream=stream, **kwargs)
+    
+    def generate_concurrent(self, prompts: List[str], system_prompt: str | None = None, **kwargs) -> List[str]:
+        """并发生成多个响应"""
+        if not self.concurrent_enabled or len(prompts) == 1:
+            # 单线程处理
+            return [self.generate(prompt, system_prompt, **kwargs) for prompt in prompts]
+        
+        # 使用线程池并发处理
+        futures = []
+        with self.executor as executor:
+            for prompt in prompts:
+                future = executor.submit(self.generate, prompt, system_prompt, **kwargs)
+                futures.append(future)
+            
+            results = []
+            for future in as_completed(futures):
+                try:
+                    result = future.result()
+                    results.append(result)
+                except Exception as e:
+                    logger.error(f"Concurrent generation failed: {e}")
+                    results.append("")
+        
         return results
 
     def _quick_health_check(self) -> bool:

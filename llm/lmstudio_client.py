@@ -15,8 +15,6 @@ from config import config
 from .prompts import (
     FINAL_ANSWER_SYSTEM_PROMPT,
     FINAL_ANSWER_PROMPT,
-    EVALUATE_ANSWER_SYSTEM_PROMPT,
-    EVALUATE_ANSWER_PROMPT,
 )
 
 
@@ -54,6 +52,19 @@ class LMStudioInstance:
             "max_retries": config.get("llm.lmstudio.max_retries", 3),
         }
         self.client = openai.OpenAI(**client_kwargs)
+        
+        # 测试连接
+        try:
+            response = self.client.chat.completions.create(
+                model=self.model,
+                messages=[{"role": "user", "content": "Hello"}],
+                max_tokens=1,
+                temperature=0,
+            )
+            logger.info(f"LM Studio connection test successful for {self.base_url} (model: {self.model})")
+        except Exception as e:
+            logger.error(f"LM Studio connection test failed for {self.base_url}: {e}")
+            self.is_healthy = False
 
 
 class LMStudioClient:
@@ -85,6 +96,7 @@ class LMStudioClient:
         
         # 并发处理配置
         self.concurrent_enabled = config.get("llm.lmstudio.multiple_instances.enabled", False)
+        self.multi_instance_enabled = self.concurrent_enabled  # 添加兼容性属性
         if self.concurrent_enabled:
             self.max_concurrent_requests = config.get("llm.lmstudio.multiple_instances.target_instance_count", 2)
             self.executor = ThreadPoolExecutor(max_workers=self.max_concurrent_requests)
@@ -136,11 +148,35 @@ class LMStudioClient:
     def generate(self, prompt: str, system_prompt: str = None, **kwargs) -> str:
         """生成单个响应"""
         try:
-            # 提取system_prompt参数，避免传递给OpenAI API
+            # 提取system_prompt和try_json_mode参数，避免传递给OpenAI API
             options = {**self.default_options}
             for key, value in kwargs.items():
-                if key != 'system_prompt':
+                if key not in ['system_prompt', 'try_json_mode']:
                     options[key] = value
+            
+            # 尝试启用JSON模式（如果模型支持）
+            try_json_mode = kwargs.get('try_json_mode', True)
+            if try_json_mode and 'response_format' not in options:
+                # 降低temperature以提高JSON输出稳定性
+                options['temperature'] = min(options.get('temperature', 0.7), 0.1)
+                
+                # 使用LM Studio支持的JSON Schema格式
+                try:
+                    options['response_format'] = {
+                        "type": "json_schema",
+                        "json_schema": {
+                            "name": "response",
+                            "strict": True,
+                            "schema": {
+                                "type": "object",
+                                "properties": {},
+                                "additionalProperties": True
+                            }
+                        }
+                    }
+                    logger.debug("Enabled JSON schema mode for LM Studio request")
+                except Exception as e:
+                    logger.debug(f"JSON schema mode not supported, falling back to text mode: {e}")
             
             # 准备消息
             messages = []
@@ -205,6 +241,30 @@ class LMStudioClient:
         try:
             # 合并默认选项和传入的参数
             options = {**self.default_options, **kwargs}
+            
+            # 尝试启用JSON模式（如果模型支持且不是流式）
+            try_json_mode = kwargs.get('try_json_mode', True)
+            if try_json_mode and not stream and 'response_format' not in options:
+                # 降低temperature以提高JSON输出稳定性
+                options['temperature'] = min(options.get('temperature', 0.7), 0.1)
+                
+                # 使用LM Studio支持的JSON Schema格式
+                try:
+                    options['response_format'] = {
+                        "type": "json_schema",
+                        "json_schema": {
+                            "name": "response",
+                            "strict": True,
+                            "schema": {
+                                "type": "object",
+                                "properties": {},
+                                "additionalProperties": True
+                            }
+                        }
+                    }
+                    logger.debug("Enabled JSON schema mode for LM Studio chat request")
+                except Exception as e:
+                    logger.debug(f"JSON schema mode not supported, falling back to text mode: {e}")
             
             response = self.instance.client.chat.completions.create(
                 model=self.instance.model,

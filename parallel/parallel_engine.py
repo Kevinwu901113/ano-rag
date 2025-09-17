@@ -25,7 +25,6 @@ from enum import Enum
 from loguru import logger
 
 from llm import LocalLLM
-from llm.multi_model_client import MultiModelClient
 
 
 class ParallelStrategy(Enum):
@@ -38,7 +37,6 @@ class ParallelStrategy(Enum):
 
 class ProcessingMode(Enum):
     """处理模式"""
-    MULTI_MODEL_CLIENT = "multi_model_client"  # 使用MultiModelClient
     SEPARATE_INSTANCES = "separate_instances"   # 使用独立的LLM实例
     AUTO = "auto"                              # 自动选择最优模式
 
@@ -99,7 +97,7 @@ class TaskProcessor(ABC):
     """任务处理器抽象基类"""
     
     @abstractmethod
-    def process_single_task(self, task: ParallelTask, llm: Union[LocalLLM, MultiModelClient], **kwargs) -> Dict[str, Any]:
+    def process_single_task(self, task: ParallelTask, llm: LocalLLM, **kwargs) -> Dict[str, Any]:
         """处理单个任务"""
         pass
     

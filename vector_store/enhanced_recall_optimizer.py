@@ -610,25 +610,26 @@ class EnhancedRecallOptimizer:
         return quality_score
         
     def _passes_quality_check(self, result: Dict[str, Any], query: str) -> bool:
-        """质量检查"""
-        content = result.get('content', '')
+        """质量检查 - 已禁用，所有结果都通过"""
+        # content = result.get('content', '')
         
-        # 最小长度检查
-        if len(content.strip()) < 5:
-            return False
+        # # 最小长度检查
+        # if len(content.strip()) < 5:
+        #     return False
             
-        # 相似度检查 - 放宽阈值
-        similarity = result.get('similarity_score', 0)
-        if similarity == 0:
-            # 尝试从retrieval_info中获取相似度
-            retrieval_info = result.get('retrieval_info', {})
-            similarity = retrieval_info.get('similarity', 0)
-        if similarity < 0.05:  # 降低最低相似度阈值
-            return False
+        # # 相似度检查 - 放宽阈值
+        # similarity = result.get('similarity_score', 0)
+        # if similarity == 0:
+        #     # 尝试从retrieval_info中获取相似度
+        #     retrieval_info = result.get('retrieval_info', {})
+        #     similarity = retrieval_info.get('similarity', 0)
+        # if similarity < 0.05:  # 降低最低相似度阈值
+        #     return False
             
-        # 综合分数检查 - 放宽阈值
-        comprehensive_score = result.get('comprehensive_score', 0)
-        if comprehensive_score < 0.1:  # 降低最低综合分数阈值
-            return False
+        # # 综合分数检查 - 放宽阈值
+        # comprehensive_score = result.get('comprehensive_score', 0)
+        # if comprehensive_score < 0.1:  # 降低最低综合分数阈值
+        #     return False
             
+        # 禁用质量检查：所有结果都通过
         return True
