@@ -72,28 +72,32 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "parallel_strategy": "task_division",
         "task_division": {
             "enabled": True,
-            "allocation_method": "round_robin",
+            "allocation_method": "round_robin",  # 明确默认值
             "enable_fallback": True,
-            "fallback_timeout": 10
+            "fallback_timeout": 120  # 增加默认超时时间
         },
         "ollama": {
             "enabled": True,
             "model": "qwen2.5:latest",
             "base_url": "http://localhost:11434",
             "timeout": 30,
-            "temperature": 0.1
+            "temperature": 0.05  # 降低温度以提高一致性
         },
         "lmstudio": {
             "enabled": True,
             "model": "qwen2.5-7b-instruct",
             "base_url": "http://localhost:1234/v1",
-            "timeout": 60,
-            "temperature": 0.1
+            "timeout": 120,  # 增加超时时间
+            "temperature": 0.05,  # 降低温度以提高一致性
+            "top_p": 0.9,
+            "json_mode": True
         },
         "monitoring": {
             "enabled": True,
             "log_stats": True,
-            "export_metrics": False
+            "export_metrics": False,
+            "performance_threshold": 30.0,
+            "error_rate_threshold": 0.1
         }
     },
     "vector_store": {

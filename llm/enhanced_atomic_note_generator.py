@@ -251,7 +251,8 @@ class EnhancedAtomicNoteGenerator:
         """生成单个原子笔记（基础版本）"""
         text = chunk_data.get('text', '')
         
-        prompt = ATOMIC_NOTEGEN_PROMPT.format(text=text)
+        # 使用 replace 方法避免 text 中的花括号导致 format 错误
+        prompt = ATOMIC_NOTEGEN_PROMPT.replace('{text}', text)
         
         # 根据模式选择生成器
         if self.is_hybrid_mode and self.hybrid_dispatcher:

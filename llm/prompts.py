@@ -29,7 +29,7 @@ ATOMIC_NOTE_SYSTEM_PROMPT = """
 
 【正例示范】：
 输入："Apple was founded in 1976. The weather is nice today."
-输出：[{{"sent_id":1,"facts":[{{"text":"Apple was founded in 1976","entities":["Apple"],"predicate":"founded","span":[0,25],"source_id":""}}]}},{{"sent_id":2,"facts":[]}}]
+输出：[{"sent_id":1,"facts":[{"text":"Apple was founded in 1976","entities":["Apple"],"predicate":"founded","span":[0,25],"source_id":""}]},{"sent_id":2,"facts":[]}]
 
 【空数组示范】：
 输入："Hello there."
@@ -44,12 +44,12 @@ ATOMIC_NOTE_PROMPT = """
 {chunk}
 
 【硬性规则】：
-1. 只输出JSON数组，格式：[{{...}},{{...}}]
+1. 只输出JSON数组，格式：[{...},{...}]
 2. 无事实时返回空数组：[]
 3. 不得有任何解释文字、注释或markdown标记
 
 【正例】：
-[{{"sent_id":1,"facts":[{{"text":"Apple was founded in 1976","entities":["Apple"],"predicate":"founded","span":[0,25],"source_id":""}}]}},{{"sent_id":2,"facts":[]}}]
+[{"sent_id":1,"facts":[{"text":"Apple was founded in 1976","entities":["Apple"],"predicate":"founded","span":[0,25],"source_id":""}]},{"sent_id":2,"facts":[]}]
 
 【空例】：
 []
@@ -100,7 +100,7 @@ ATOMIC_NOTEGEN_SYSTEM_PROMPT = """
 
 【正例示范】：
 输入："Apple was founded in 1976. The weather is nice today."
-输出：[{{"sent_id":1,"facts":[{{"text":"Apple was founded in 1976","entities":["Apple"],"predicate":"founded","span":[0,25],"source_id":""}}]}},{{"sent_id":2,"facts":[]}}]
+输出：[{"sent_id":1,"facts":[{"text":"Apple was founded in 1976","entities":["Apple"],"predicate":"founded","span":[0,25],"source_id":""}]},{"sent_id":2,"facts":[]}]
 
 【空数组示范】：
 输入："Hello there."
@@ -116,12 +116,12 @@ ATOMIC_NOTEGEN_PROMPT = """
 {text}
 
 【硬性规则】：
-1. 只输出JSON数组，格式：[{{...}},{{...}}]
+1. 只输出JSON数组，格式：[{...},{...}]
 2. 无事实时返回空数组：[]
 3. 不得有任何解释文字、注释或markdown标记
 
 【正例】：
-[{{"sent_id":1,"facts":[{{"text":"Apple was founded in 1976","entities":["Apple"],"predicate":"founded","span":[0,25],"source_id":""}}]}},{{"sent_id":2,"facts":[]}}]
+[{"sent_id":1,"facts":[{"text":"Apple was founded in 1976","entities":["Apple"],"predicate":"founded","span":[0,25],"source_id":""}]},{"sent_id":2,"facts":[]}]
 
 【空例】：
 []
@@ -161,7 +161,7 @@ SPLIT_QUERY_SYSTEM_PROMPT = """
 3. 确保子查询之间的逻辑关系
 4. 避免信息丢失
 
-请以JSON格式返回拆分结果：{{"sub_queries": ["查询1", "查询2", ...]}}
+请以JSON格式返回拆分结果：{"sub_queries": ["查询1", "查询2", ...]}
 """
 
 SPLIT_QUERY_PROMPT = """
@@ -182,7 +182,7 @@ OPTIMIZE_QUERY_SYSTEM_PROMPT = """
 4. 保持查询的简洁性
 5. 考虑同义词和相关概念
 
-请以JSON格式返回优化结果：{{"optimized_queries": ["优化查询1", "优化查询2", ...]}}
+请以JSON格式返回优化结果：{"optimized_queries": ["优化查询1", "优化查询2", ...]}
 """
 
 OPTIMIZE_QUERY_PROMPT = """
@@ -202,7 +202,7 @@ ENHANCE_QUERY_SYSTEM_PROMPT = """
 3. 如果不确定，请保持原查询不变
 4. 标明添加的信息来源于常识
 
-请以JSON格式返回：{{"enhanced_query": "增强后的查询", "confidence": 0.8, "added_context": "添加的上下文"}}
+请以JSON格式返回：{"enhanced_query": "增强后的查询", "confidence": 0.8, "added_context": "添加的上下文"}
 """
 
 ENHANCE_QUERY_PROMPT = """
@@ -226,7 +226,7 @@ Hard rules:
 4) For lists, keep the order as it appears in CONTEXT and join with ", ".
 5) Keep original surface form for numbers/dates (units, punctuation).
 6) Output VALID JSON ONLY with fields:
-   {{"answer": "<short string>", "support_idxs": [<int>, ...]}}
+   {"answer": "<short string>", "support_idxs": [<int>, ...]}
 7) In support_idxs, output 2-4 paragraph ids:
    - The FIRST id MUST be the paragraph that contains the final answer substring
    - The remaining ids are bridging paragraphs (may not contain the answer substring)
@@ -251,7 +251,7 @@ CONTEXT:
 {context}
 
 OUTPUT FORMAT (JSON only):
-{{"answer": "<short string>", "support_idxs": [<int>, <int>, ...]}}
+{"answer": "<short string>", "support_idxs": [<int>, <int>, ...]}
 """
 
 # Context note formatting and helpers

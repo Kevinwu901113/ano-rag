@@ -21,29 +21,32 @@ class OllamaClient:
 
     def __init__(self, base_url: str | None = None, model: str | None = None):
         self.base_url = base_url or config.get("llm.ollama.base_url", "http://localhost:11434")
-        self.model = model or config.get("llm.ollama.model", "gpt-oss:latest")
-        self.temperature = config.get("llm.ollama.temperature", 0.7)
-        self.max_tokens = config.get("llm.ollama.max_tokens", 8192)
+        self.model = model or config.get("llm.ollama.model", "qwen2.5:14b")  # 更实用的默认模型
+        self.temperature = config.get("llm.ollama.temperature", 0.3)  # 降低温度提高一致性
+        self.max_tokens = config.get("llm.ollama.max_tokens", 4096)  # 适中的token限制
         
-        # LightRAG-inspired configuration
-        self.num_ctx = config.get("llm.ollama.num_ctx", 32768)  # Context window size
-        self.max_async = config.get("llm.ollama.max_async", 16)  # Max concurrent requests
-        self.timeout = config.get("llm.ollama.timeout", 60)  # Request timeout
+        # LightRAG-inspired configuration with optimized defaults
+        self.num_ctx = config.get("llm.ollama.num_ctx", 16384)  # 减少上下文窗口以提高性能
+        self.max_async = config.get("llm.ollama.max_async", 8)  # 减少并发数避免资源竞争
+        self.timeout = config.get("llm.ollama.timeout", 90)  # 增加超时时间适应复杂任务
         
         # Initialize client with host
         self.client = ollama.Client(host=self.base_url)
         
-        # Default options for all requests
+        # Default options for all requests with optimized settings
         self.default_options = {
             "num_ctx": self.num_ctx,
             "temperature": self.temperature,
             "num_predict": self.max_tokens,
+            "top_k": config.get("llm.ollama.top_k", 40),  # 添加top_k控制
+            "top_p": config.get("llm.ollama.top_p", 0.9),  # 添加top_p控制
+            "repeat_penalty": config.get("llm.ollama.repeat_penalty", 1.1),  # 避免重复
         }
         
-        # 并发处理配置
+        # 并发处理配置 - 更保守的默认设置
         self.concurrent_enabled = config.get("llm.ollama.concurrent.enabled", False)
         if self.concurrent_enabled:
-            self.max_concurrent_requests = config.get("llm.ollama.concurrent.max_workers", self.max_async)
+            self.max_concurrent_requests = config.get("llm.ollama.concurrent.max_workers", min(self.max_async, 4))
             self.executor = ThreadPoolExecutor(max_workers=self.max_concurrent_requests)
             logger.info(f"Ollama concurrent processing enabled with {self.max_concurrent_requests} max concurrent requests")
         else:

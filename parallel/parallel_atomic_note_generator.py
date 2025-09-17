@@ -120,7 +120,8 @@ class ParallelAtomicNoteGenerator:
     def _generate_single_note_parallel(self, chunk_data: Dict[str, Any], batch_index: int = 0) -> Dict[str, Any]:
         """为单个文本块并行生成原子笔记"""
         text = chunk_data.get('text', '')
-        prompt = ATOMIC_NOTEGEN_PROMPT.format(text=text)
+        # 使用 replace 方法避免 text 中的花括号导致 format 错误
+        prompt = ATOMIC_NOTEGEN_PROMPT.replace('{text}', text)
         system_prompt = ATOMIC_NOTEGEN_SYSTEM_PROMPT
         
         if self.parallel_strategy == 'fastest_wins':

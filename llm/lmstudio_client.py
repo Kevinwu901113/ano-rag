@@ -53,18 +53,32 @@ class LMStudioInstance:
         }
         self.client = openai.OpenAI(**client_kwargs)
         
-        # 测试连接
-        try:
-            response = self.client.chat.completions.create(
-                model=self.model,
-                messages=[{"role": "user", "content": "Hello"}],
-                max_tokens=1,
-                temperature=0,
-            )
+        # 测试连接 - 使用更宽松的健康检查
+        self.is_healthy = self._quick_health_check_with_retry()
+        if self.is_healthy:
             logger.info(f"LM Studio connection test successful for {self.base_url} (model: {self.model})")
-        except Exception as e:
-            logger.error(f"LM Studio connection test failed for {self.base_url}: {e}")
-            self.is_healthy = False
+        else:
+            logger.warning(f"LM Studio connection test failed for {self.base_url}, but instance will remain available for retry")
+    
+    def _quick_health_check_with_retry(self, max_retries: int = 3, backoff_ms: int = 200) -> bool:
+        """带重试的快速健康检查"""
+        for attempt in range(max_retries):
+            try:
+                response = self.client.chat.completions.create(
+                    model=self.model,
+                    messages=[{"role": "user", "content": "Hello"}],
+                    max_tokens=1,
+                    temperature=0,
+                )
+                return True
+            except Exception as e:
+                if attempt < max_retries - 1:
+                    logger.debug(f"Health check attempt {attempt + 1} failed for {self.base_url}: {e}, retrying in {backoff_ms}ms")
+                    time.sleep(backoff_ms / 1000.0)  # 转换为秒
+                    backoff_ms *= 2  # 指数退避
+                else:
+                    logger.error(f"Health check failed for {self.base_url} after {max_retries} attempts: {e}")
+        return False
 
 
 class LMStudioClient:
@@ -146,7 +160,7 @@ class LMStudioClient:
         return results
     
     def generate(self, prompt: str, system_prompt: str = None, **kwargs) -> str:
-        """生成单个响应"""
+        """生成单个响应 - JSON模式作为软约束，失败时不判实例失效"""
         try:
             # 提取system_prompt和try_json_mode参数，避免传递给OpenAI API
             options = {**self.default_options}
@@ -154,19 +168,21 @@ class LMStudioClient:
                 if key not in ['system_prompt', 'try_json_mode']:
                     options[key] = value
             
-            # 尝试启用JSON模式（如果模型支持）
+            # JSON模式作为软约束 - 无论是否开启都走宽松JSON提取
             try_json_mode = kwargs.get('try_json_mode', True)
+            json_mode_enabled = False
+            
             if try_json_mode and 'response_format' not in options:
                 # 降低temperature以提高JSON输出稳定性
                 options['temperature'] = min(options.get('temperature', 0.7), 0.1)
                 
-                # 使用LM Studio支持的JSON Schema格式
+                # 尝试使用JSON Schema格式，但不强制
                 try:
                     options['response_format'] = {
                         "type": "json_schema",
                         "json_schema": {
                             "name": "response",
-                            "strict": True,
+                            "strict": False,  # 放宽严格性要求
                             "schema": {
                                 "type": "object",
                                 "properties": {},
@@ -174,15 +190,22 @@ class LMStudioClient:
                             }
                         }
                     }
-                    logger.debug("Enabled JSON schema mode for LM Studio request")
+                    json_mode_enabled = True
+                    logger.debug("Enabled relaxed JSON schema mode for LM Studio request")
                 except Exception as e:
                     logger.debug(f"JSON schema mode not supported, falling back to text mode: {e}")
             
-            # 准备消息
+            # 准备消息，如果启用JSON模式，添加更宽松的提示
             messages = []
             if system_prompt:
                 messages.append({"role": "system", "content": system_prompt})
-            messages.append({"role": "user", "content": prompt})
+            
+            # 无论是否启用JSON模式，都添加宽松的JSON提示
+            if try_json_mode:
+                enhanced_prompt = f"{prompt}\n\n请只输出JSON数组或对象。如果无法严格匹配格式，也不要输出额外文字，系统会自动纠错。"
+                messages.append({"role": "user", "content": enhanced_prompt})
+            else:
+                messages.append({"role": "user", "content": prompt})
             
             # 调用OpenAI客户端生成响应
             response = self.instance.client.chat.completions.create(
@@ -191,9 +214,26 @@ class LMStudioClient:
                 **options
             )
             
-            return response.choices[0].message.content.strip()
+            raw_response = response.choices[0].message.content.strip()
+            
+            # 无论是否开启JSON模式，都走宽松JSON提取
+            if try_json_mode:
+                from utils.json_utils import extract_json_from_response
+                try:
+                    cleaned_json = extract_json_from_response(raw_response)
+                    if cleaned_json:
+                        return cleaned_json
+                    else:
+                        logger.warning("No valid JSON found in LM Studio response, returning raw response")
+                        return raw_response
+                except Exception as e:
+                    logger.warning(f"JSON extraction failed: {e}, returning raw response")
+                    return raw_response
+            
+            return raw_response
             
         except Exception as e:
+            # 失败时不把实例判为"失效"，仅记录错误
             logger.error(f"LM Studio generation failed: {e}")
             return ""
     
@@ -399,7 +439,18 @@ class LMStudioClient:
     def is_available(self) -> bool:
         """Check if LM Studio API is available."""
         if not self.concurrent_enabled:
-            return self._quick_health_check(self.instances[0])
+            # 对于单实例，使用更宽松的可用性判断
+            instance = self.instances[0]
+            current_time = time.time()
+            
+            # 如果最近5秒内有成功的健康检查，认为可用
+            if instance.is_healthy and (current_time - instance.last_health_check) < 5:
+                return True
+            
+            # 否则进行新的健康检查
+            is_healthy = self._quick_health_check(instance)
+            instance.last_health_check = current_time
+            return is_healthy
         
         return any(instance.is_healthy and self._quick_health_check(instance) for instance in self.instances)
     
@@ -483,38 +534,51 @@ class LMStudioClient:
         }
     
     def _quick_health_check(self, instance=None):
-        """Quick health check for LM Studio instances."""
+        """Quick health check for LM Studio instances with retry and backoff."""
         if instance is None:
             # Check all instances
             all_models = set()
             for inst in self.instances:
-                try:
-                    # Test connection by listing models
-                    response = inst.client.models.list()
-                    models = [model.id for model in response.data]
-                    all_models.update(models)
-                    inst.is_healthy = True
-                    logger.debug(f"Health check passed for {inst.base_url}")
-                except Exception as e:
-                    inst.is_healthy = False
-                    inst.error_count += 1
-                    logger.error(f"Health check failed for {inst.base_url}: {e}")
+                is_healthy = self._quick_health_check_single_instance(inst)
+                if is_healthy:
+                    try:
+                        response = inst.client.models.list()
+                        models = [model.id for model in response.data]
+                        all_models.update(models)
+                    except Exception as e:
+                        logger.debug(f"Failed to list models for {inst.base_url}: {e}")
             
             self.all_models = all_models
             return len([inst for inst in self.instances if inst.is_healthy]) > 0
         else:
             # Check specific instance
+            return self._quick_health_check_single_instance(instance)
+    
+    def _quick_health_check_single_instance(self, instance: LMStudioInstance) -> bool:
+        """Quick health check for a single instance with retry mechanism."""
+        max_retries = 3
+        backoff_ms = 200
+        
+        for attempt in range(max_retries):
             try:
                 response = instance.client.models.list()
                 models = [model.id for model in response.data]
                 instance.is_healthy = True
+                instance.last_health_check = time.time()
                 logger.debug(f"Health check passed for {instance.base_url}")
                 return True
             except Exception as e:
-                instance.is_healthy = False
-                instance.error_count += 1
-                logger.error(f"Health check failed for {instance.base_url}: {e}")
-                return False
+                if attempt < max_retries - 1:
+                    logger.debug(f"Health check attempt {attempt + 1} failed for {instance.base_url}: {e}, retrying in {backoff_ms}ms")
+                    time.sleep(backoff_ms / 1000.0)
+                    backoff_ms *= 2  # 指数退避
+                else:
+                    # 失败时不将实例移出池，仅降低优先级
+                    instance.is_healthy = False
+                    instance.error_count += 1
+                    logger.warning(f"Health check failed for {instance.base_url} after {max_retries} attempts: {e}. Instance marked as low priority but kept in pool.")
+        
+        return False
 
 
 # 为了向后兼容，保留原有的类名别名

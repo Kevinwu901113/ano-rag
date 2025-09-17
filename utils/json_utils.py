@@ -18,45 +18,41 @@ def extract_json_from_response(response: str) -> str:
 
     text = clean_control_characters(str(response).strip())
 
+    # Step 1: 剥离 markdown 代码块
+    text = _strip_markdown_code_blocks(text)
+
     # If the whole text is JSON
     try:
-        json.loads(text)
+        parsed = json.loads(text)
+        # Step 2: 容忍外层对象，自动提取数组字段
+        extracted = _extract_array_from_wrapper(parsed)
+        if extracted is not None:
+            return json.dumps(extracted, ensure_ascii=False)
         return text
     except Exception:
         pass
-
-    # Remove common markdown code block markers
-    if text.startswith('```') and text.endswith('```'):
-        text_block = re.sub(r'^```(?:json)?', '', text[:-3], flags=re.IGNORECASE).strip()
-        try:
-            json.loads(text_block)
-            return text_block
-        except Exception:
-            pass
-
-    # Search for JSON inside markdown code block
-    code_match = re.search(r'```(?:json)?\s*(\{.*?\}|\[.*?\])\s*```', text, re.DOTALL | re.IGNORECASE)
-    if code_match:
-        candidate = clean_control_characters(code_match.group(1).strip())
-        try:
-            json.loads(candidate)
-            return candidate
-        except Exception:
-            pass
 
     # Search for JSON object or array in the text
     brace_match = re.search(r'(\{.*\}|\[.*\])', text, re.DOTALL)
     if brace_match:
         candidate = clean_control_characters(brace_match.group(1))
         try:
-            json.loads(candidate)
+            parsed = json.loads(candidate)
+            # Step 2: 容忍外层对象，自动提取数组字段
+            extracted = _extract_array_from_wrapper(parsed)
+            if extracted is not None:
+                return json.dumps(extracted, ensure_ascii=False)
             return candidate
         except Exception:
             # 尝试修复常见的JSON格式问题
             fixed_candidate = _try_fix_json_format(candidate)
             if fixed_candidate:
                 try:
-                    json.loads(fixed_candidate)
+                    parsed = json.loads(fixed_candidate)
+                    # Step 2: 容忍外层对象，自动提取数组字段
+                    extracted = _extract_array_from_wrapper(parsed)
+                    if extracted is not None:
+                        return json.dumps(extracted, ensure_ascii=False)
                     return fixed_candidate
                 except Exception:
                     pass
@@ -67,6 +63,38 @@ def extract_json_from_response(response: str) -> str:
         return fallback_json
 
     return ""
+
+
+def _strip_markdown_code_blocks(text: str) -> str:
+    """剥离 markdown 代码块，支持多种格式"""
+    if not text:
+        return text
+    
+    # 处理完整的代码块 ```json ... ``` 或 ``` ... ```
+    code_block_pattern = r'```(?:json|JSON)?\s*(.*?)\s*```'
+    match = re.search(code_block_pattern, text, re.DOTALL | re.IGNORECASE)
+    if match:
+        return match.group(1).strip()
+    
+    # 处理单行代码块 `...`
+    if text.startswith('`') and text.endswith('`') and text.count('`') == 2:
+        return text[1:-1].strip()
+    
+    return text
+
+
+def _extract_array_from_wrapper(parsed_data) -> list:
+    """从外层对象中提取数组字段，容忍 {"data": [...]} 或 {"result": [...]} 格式"""
+    if isinstance(parsed_data, list):
+        return parsed_data
+    
+    if isinstance(parsed_data, dict):
+        # 检查常见的包装字段
+        for key in ['data', 'result', 'results', 'items', 'content', 'facts', 'sentences']:
+            if key in parsed_data and isinstance(parsed_data[key], list):
+                return parsed_data[key]
+    
+    return None
 
 
 def _try_fix_json_format(json_str: str) -> str:

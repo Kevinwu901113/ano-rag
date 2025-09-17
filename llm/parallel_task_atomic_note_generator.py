@@ -66,7 +66,7 @@ class ParallelTaskAtomicNoteGenerator(AtomicNoteGenerator):
         logger.info("ParallelTaskAtomicNoteGenerator initialized with performance monitoring")
     
     def _init_parallel_clients(self):
-        """初始化Ollama和LM Studio客户端"""
+        """初始化Ollama和LM Studio客户端，即便首次不可用也保留在候选池中"""
         try:
             # 初始化Ollama客户端
             ollama_config = self.parallel_config.get('ollama', {})
@@ -79,12 +79,11 @@ class ParallelTaskAtomicNoteGenerator(AtomicNoteGenerator):
                 # timeout 参数由 OllamaClient 内部从配置文件读取，不需要在构造函数中传递
                 logger.info(f"Ollama client initialized: {ollama_config.get('model', 'default')}")
                 
-                # 测试Ollama连接
-                if not self.ollama_client.is_available():
-                    logger.error("Ollama client is not available")
-                    self.ollama_client = None
+                # 测试Ollama连接，但不管结果如何都保留在候选池中
+                if self.ollama_client.is_available():
+                    logger.info("Ollama client connection verified - high priority")
                 else:
-                    logger.info("Ollama client connection verified")
+                    logger.warning("Ollama client is not available initially, keeping it in candidate pool with low priority for lazy activation")
             else:
                 logger.info("Ollama client disabled in configuration")
             
@@ -98,12 +97,12 @@ class ParallelTaskAtomicNoteGenerator(AtomicNoteGenerator):
                 )
                 logger.info(f"LM Studio client initialized: {lmstudio_config.get('model', 'default')}")
                 
-                # 测试LM Studio连接
-                if not self.lmstudio_client.is_available():
-                    logger.error("LM Studio client is not available")
-                    self.lmstudio_client = None
+                # 测试LM Studio连接 - 即便首次 is_available() False，也登记成候选（低权重）
+                if self.lmstudio_client.is_available():
+                    logger.info("LM Studio client connection verified - high priority")
                 else:
-                    logger.info("LM Studio client connection verified")
+                    logger.warning("LM Studio client is not available initially, keeping it in candidate pool with low priority for lazy activation")
+                    # 不设置为None，保留在候选池中以便后续惰性探活提升权重
             else:
                 logger.info("LM Studio client disabled in configuration")
                 
@@ -120,7 +119,7 @@ class ParallelTaskAtomicNoteGenerator(AtomicNoteGenerator):
         return self._generate_atomic_notes_parallel_task_division(text_chunks, progress_tracker)
     
     def _generate_atomic_notes_parallel_task_division(self, text_chunks: List[Dict[str, Any]], progress_tracker: Optional[Any] = None) -> List[Dict[str, Any]]:
-        """使用任务分配的并行处理方式"""
+        """使用任务分配的并行处理方式，支持可恢复错误的重试机制"""
         if not text_chunks:
             return []
         
@@ -152,27 +151,88 @@ class ParallelTaskAtomicNoteGenerator(AtomicNoteGenerator):
                 future = executor.submit(self._process_with_lmstudio, chunk_data, index, system_prompt)
                 future_to_info[future] = ('lmstudio', index, chunk_data)
             
-            # 收集结果
+            # 收集结果，支持可恢复错误的重试
             completed_count = 0
+            failed_tasks = []  # 记录失败的任务以便重试
+            
             for future in as_completed(future_to_info):
                 client_type, index, chunk_data = future_to_info[future]
                 
                 try:
                     result = future.result()
-                    if result and result.get('atomic_notes'):
+                    
+                    # 检查结果是否有效
+                    if result and result.get('atomic_notes') and len(result['atomic_notes']) > 0:
                         with self._stats_lock:
                             self.stats['successful_chunks'] += 1
-                    results.append((index, result))
+                        results.append((index, result))
+                    elif result and result.get('error') == 'parsing_failed':
+                        # 解析失败，记录为可重试的失败任务
+                        logger.warning(f"Task {index} ({client_type}) parsing failed, marking for retry")
+                        failed_tasks.append((index, chunk_data, client_type))
+                    else:
+                        # 其他类型的失败，直接使用空结果
+                        empty_result = self._create_empty_atomic_note(chunk_data)
+                        results.append((index, empty_result))
                     
                 except Exception as e:
+                    error_msg = str(e)
                     logger.error(f"Task {index} ({client_type}) failed: {e}")
-                    # 创建空结果
-                    empty_result = self._create_empty_atomic_note(chunk_data)
-                    results.append((index, empty_result))
+                    
+                    # 检查是否为可恢复错误（No valid JSON、超时等）
+                    if self._is_recoverable_error(error_msg):
+                        logger.warning(f"Task {index} ({client_type}) has recoverable error, marking for retry")
+                        failed_tasks.append((index, chunk_data, client_type))
+                    else:
+                        # 不可恢复错误，直接创建空结果
+                        empty_result = self._create_empty_atomic_note(chunk_data)
+                        results.append((index, empty_result))
                 
                 completed_count += 1
                 if progress_tracker:
                     progress_tracker.update(completed_count / len(text_chunks))
+            
+            # 处理失败的任务：重试一次，仍失败再按 enable_fallback 切到另一端
+            if failed_tasks:
+                logger.info(f"Retrying {len(failed_tasks)} failed tasks")
+                enable_fallback = self.parallel_config.get('enable_fallback', True)
+                
+                for index, chunk_data, failed_client in failed_tasks:
+                    try:
+                        # 重试一次
+                        if failed_client == 'ollama' and self.ollama_client:
+                            result = self._process_with_ollama(chunk_data, index, system_prompt)
+                        elif failed_client == 'lmstudio' and self.lmstudio_client:
+                            result = self._process_with_lmstudio(chunk_data, index, system_prompt)
+                        else:
+                            result = None
+                        
+                        # 检查重试结果
+                        if result and result.get('atomic_notes') and len(result['atomic_notes']) > 0:
+                            logger.info(f"Task {index} retry succeeded")
+                            results.append((index, result))
+                            continue
+                        
+                        # 重试仍失败，按 enable_fallback 决定是否切到另一端
+                        if enable_fallback:
+                            logger.warning(f"Task {index} retry failed, attempting fallback to other client")
+                            if failed_client == 'ollama' and self.lmstudio_client:
+                                fallback_result = self._process_with_lmstudio(chunk_data, index, system_prompt)
+                            elif failed_client == 'lmstudio' and self.ollama_client:
+                                fallback_result = self._process_with_ollama(chunk_data, index, system_prompt)
+                            else:
+                                fallback_result = self._create_empty_atomic_note(chunk_data)
+                            
+                            results.append((index, fallback_result))
+                        else:
+                            # 不启用回退，直接使用空结果
+                            empty_result = self._create_empty_atomic_note(chunk_data)
+                            results.append((index, empty_result))
+                            
+                    except Exception as e:
+                        logger.error(f"Task {index} retry also failed: {e}")
+                        empty_result = self._create_empty_atomic_note(chunk_data)
+                        results.append((index, empty_result))
         
         # 按原始顺序排序结果
         results.sort(key=lambda x: x[0])
@@ -191,30 +251,33 @@ class ParallelTaskAtomicNoteGenerator(AtomicNoteGenerator):
         # 获取分配策略
         allocation_strategy = self.parallel_config.get('allocation_strategy', 'round_robin')
         
-        # 调试日志：检查客户端状态
-        logger.info(f"Client status - Ollama: {'Available' if self.ollama_client else 'None'}, "
-                   f"LMStudio: {'Available' if self.lmstudio_client else 'None'}")
+        # 调试日志：检查客户端状态 - 使用惰性探活策略
+        ollama_available = self.ollama_client is not None
+        lmstudio_available = self.lmstudio_client is not None
+        
+        logger.info(f"Client status - Ollama: {'Initialized' if ollama_available else 'None'}, "
+                   f"LMStudio: {'Initialized' if lmstudio_available else 'None'}")
         
         if allocation_strategy == 'round_robin':
-            # 轮询分配
+            # 轮询分配 - 使用惰性探活，即使初始不可用也分配少量任务
             for i, chunk in enumerate(text_chunks):
                 chunk_with_id = {**chunk, 'chunk_id': chunk.get('chunk_id', f'chunk_{i}')}
                 if i % 2 == 0:
                     # 偶数索引优先分配给Ollama
-                    if self.ollama_client:
+                    if ollama_available:
                         ollama_tasks.append((chunk_with_id, i))
                         logger.debug(f"Task {i} assigned to Ollama")
-                    elif self.lmstudio_client:
+                    elif lmstudio_available:
                         lmstudio_tasks.append((chunk_with_id, i))
                         logger.debug(f"Task {i} fallback to LMStudio (Ollama unavailable)")
                     else:
                         logger.warning(f"Task {i} cannot be assigned - no clients available")
                 else:
                     # 奇数索引优先分配给LMStudio
-                    if self.lmstudio_client:
+                    if lmstudio_available:
                         lmstudio_tasks.append((chunk_with_id, i))
                         logger.debug(f"Task {i} assigned to LMStudio")
-                    elif self.ollama_client:
+                    elif ollama_available:
                         ollama_tasks.append((chunk_with_id, i))
                         logger.debug(f"Task {i} fallback to Ollama (LMStudio unavailable)")
                     else:
@@ -224,18 +287,18 @@ class ParallelTaskAtomicNoteGenerator(AtomicNoteGenerator):
             # 优先使用Ollama
             for i, chunk in enumerate(text_chunks):
                 chunk_with_id = {**chunk, 'chunk_id': chunk.get('chunk_id', f'chunk_{i}')}
-                if self.ollama_client:
+                if ollama_available:
                     ollama_tasks.append((chunk_with_id, i))
-                elif self.lmstudio_client:
+                elif lmstudio_available:
                     lmstudio_tasks.append((chunk_with_id, i))
         
         elif allocation_strategy == 'lmstudio_first':
             # 优先使用LM Studio
             for i, chunk in enumerate(text_chunks):
                 chunk_with_id = {**chunk, 'chunk_id': chunk.get('chunk_id', f'chunk_{i}')}
-                if self.lmstudio_client:
+                if lmstudio_available:
                     lmstudio_tasks.append((chunk_with_id, i))
-                elif self.ollama_client:
+                elif ollama_available:
                     ollama_tasks.append((chunk_with_id, i))
         
         logger.info(f"Task allocation completed - Ollama: {len(ollama_tasks)} tasks, LMStudio: {len(lmstudio_tasks)} tasks")
@@ -254,7 +317,8 @@ class ParallelTaskAtomicNoteGenerator(AtomicNoteGenerator):
         
         try:
             text = chunk_data.get('text', '')
-            prompt = ATOMIC_NOTEGEN_PROMPT.format(text=text)
+            # 使用 replace 方法避免 text 中的花括号导致 format 错误
+            prompt = ATOMIC_NOTEGEN_PROMPT.replace('{text}', text)
             
             logger.debug(f"Ollama processing task {index}, text length: {len(text)}")
             
@@ -463,9 +527,15 @@ class ParallelTaskAtomicNoteGenerator(AtomicNoteGenerator):
         
         try:
             text = chunk_data.get('text', '')
-            prompt = ATOMIC_NOTEGEN_PROMPT.format(text=text)
+            # 使用 replace 方法避免 text 中的花括号导致 format 错误
+            prompt = ATOMIC_NOTEGEN_PROMPT.replace('{text}', text)
             
             logger.debug(f"LM Studio processing task {index}, text length: {len(text)}")
+            
+            # 检查客户端是否可用（惰性探活）
+            if not self.lmstudio_client.is_available():
+                logger.warning(f"LM Studio client not available for task {index}, attempting fallback")
+                return self._fallback_process(chunk_data, system_prompt, "lmstudio")
             
             # 第一次尝试：启用JSON模式
             response = self.lmstudio_client.generate(prompt, system_prompt, try_json_mode=True)
@@ -489,38 +559,39 @@ class ParallelTaskAtomicNoteGenerator(AtomicNoteGenerator):
                 
                 return result
             
-            # 第一次解析失败，尝试重试
-            logger.warning(f"LM Studio first parse failed: {error_msg}")
-            with self._stats_lock:
-                self.stats['parse_failures'] += 1
-                self.stats['retry_attempts'] += 1
-            
-            # 第二次尝试：使用更严格的提示
-            strict_system = system_prompt + "\n\n重要：你必须仅输出JSON数组，不得有任何其他文字！"
-            strict_prompt = f"请严格按照JSON数组格式输出结果：\n{prompt}"
-            
-            response = self.lmstudio_client.generate(strict_prompt, strict_system, try_json_mode=True)
-            parsed_data, error_msg = self._robust_parse_response(response)
-            
-            if parsed_data is not None:
-                result = self._create_atomic_note_from_parsed_data(parsed_data, chunk_data)
-                processing_time = time.time() - start_time
+            # 第一次解析失败，检查是否为可恢复错误
+            if self._is_recoverable_error(error_msg):
+                logger.warning(f"LM Studio recoverable error: {error_msg}, retrying once")
                 with self._stats_lock:
-                    self.stats['lmstudio_total_time'] += processing_time
+                    self.stats['parse_failures'] += 1
+                    self.stats['retry_attempts'] += 1
                 
-                # 记录重试成功的任务性能
-                record_task_performance(
-                    task_type="lmstudio",
-                    duration=processing_time,
-                    success=True,
-                    retry_count=1,
-                    chunk_size=len(text)
-                )
+                # 第二次尝试：使用更严格的提示
+                strict_system = system_prompt + "\n\n重要：你必须仅输出JSON数组，不得有任何其他文字！"
+                strict_prompt = f"请严格按照JSON数组格式输出结果：\n{prompt}"
                 
-                return result
+                response = self.lmstudio_client.generate(strict_prompt, strict_system, try_json_mode=True)
+                parsed_data, error_msg = self._robust_parse_response(response)
+                
+                if parsed_data is not None:
+                    result = self._create_atomic_note_from_parsed_data(parsed_data, chunk_data)
+                    processing_time = time.time() - start_time
+                    with self._stats_lock:
+                        self.stats['lmstudio_total_time'] += processing_time
+                    
+                    # 记录重试成功的任务性能
+                    record_task_performance(
+                        task_type="lmstudio",
+                        duration=processing_time,
+                        success=True,
+                        retry_count=1,
+                        chunk_size=len(text)
+                    )
+                    
+                    return result
             
-            # 两次尝试都失败，回退到Ollama
-            logger.warning(f"LM Studio retry also failed: {error_msg}, falling back to Ollama")
+            # 解析失败或不可恢复错误，回退到其他客户端
+            logger.warning(f"LM Studio processing failed: {error_msg}, falling back")
             with self._stats_lock:
                 self.stats['fallback_count'] += 1
             
@@ -531,27 +602,7 @@ class ParallelTaskAtomicNoteGenerator(AtomicNoteGenerator):
                 success=False
             )
             
-            if self.ollama_client:
-                return self._process_with_ollama(chunk_data, index, system_prompt)
-            
-            # 没有Ollama可用，返回空结果
-            logger.error("Both LM Studio and Ollama failed, returning empty result")
-            with self._stats_lock:
-                self.stats['empty_results'] += 1
-            
-            processing_time = time.time() - start_time
-            with self._stats_lock:
-                self.stats['lmstudio_total_time'] += processing_time
-            
-            # 记录失败的任务性能
-            record_task_performance(
-                task_type="lmstudio",
-                duration=processing_time,
-                success=False,
-                chunk_size=len(text)
-            )
-            
-            return self._create_empty_atomic_note(chunk_data)
+            return self._fallback_process(chunk_data, system_prompt, "lmstudio")
             
         except Exception as e:
             processing_time = time.time() - start_time
@@ -579,8 +630,26 @@ class ParallelTaskAtomicNoteGenerator(AtomicNoteGenerator):
                 chunk_size=len(chunk_data.get('text', ''))
             )
             
-            # 不抛出异常，返回空结果让流水线继续
-            return self._create_empty_atomic_note(chunk_data)
+            # 对于可恢复的错误，尝试回退；否则返回空结果
+            if self._is_recoverable_error(error_msg):
+                return self._fallback_process(chunk_data, system_prompt, "lmstudio")
+            else:
+                return self._create_empty_atomic_note(chunk_data)
+    
+    def _is_recoverable_error(self, error_msg: str) -> bool:
+        """判断错误是否可恢复（可以重试或回退）"""
+        recoverable_patterns = [
+            "no valid json found",
+            "json parsing",
+            "parsing_failed",
+            "invalid json",
+            "json decode error",
+            "timeout",  # 超时错误通常可以重试
+            "connection reset",  # 连接重置可以重试
+        ]
+        
+        error_lower = error_msg.lower()
+        return any(pattern in error_lower for pattern in recoverable_patterns)
     
     def _fallback_process(self, chunk_data: Dict[str, Any], system_prompt: str, failed_client: str) -> Dict[str, Any]:
         """回退处理机制，包含重试逻辑"""
@@ -653,7 +722,8 @@ class ParallelTaskAtomicNoteGenerator(AtomicNoteGenerator):
         try:
             logger.info("Falling back to original LLM")
             text = chunk_data.get('text', '')
-            prompt = ATOMIC_NOTEGEN_PROMPT.format(text=text)
+            # 使用 replace 方法避免 text 中的花括号导致 format 错误
+            prompt = ATOMIC_NOTEGEN_PROMPT.replace('{text}', text)
             
             # 使用原始LLM生成
             response = self.llm.generate(prompt, system_prompt)

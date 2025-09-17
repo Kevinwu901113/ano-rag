@@ -146,13 +146,17 @@ class QueryProcessor:
             self.recall_optimizer = EnhancedRecallOptimizer(self.vector_retriever, self.graph_retriever)
 
         # 初始化LLM客户端 - 支持混合模式
+        # 最终答案生成只读取 llm 顶层配置，不读取 atomic_note_generation 的子项
         llm_provider = config.get('llm.provider', 'ollama')
         if llm_provider == 'hybrid_llm':
             self.llm_client = HybridLLMDispatcher()
             logger.info("Using HybridLLMDispatcher for intelligent task routing")
         else:
-            self.llm_client = OllamaClient()
-            logger.info(f"Using single LLM provider: {llm_provider}")
+            # 确保使用顶层 llm 配置，而不是 atomic_note_generation 配置
+            llm_base_url = config.get('llm.ollama.base_url', 'http://localhost:11434')
+            llm_model = config.get('llm.ollama.model', 'gpt-oss:latest')
+            self.llm_client = OllamaClient(base_url=llm_base_url, model=llm_model)
+            logger.info(f"Using single LLM provider: {llm_provider} with model: {llm_model}")
         
         # 保持向后兼容性
         self.ollama = self.llm_client

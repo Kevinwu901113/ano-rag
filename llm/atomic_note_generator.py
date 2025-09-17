@@ -426,7 +426,8 @@ class AtomicNoteGenerator:
         
         text = chunk_data.get('text', '')
         
-        prompt = ATOMIC_NOTEGEN_PROMPT.format(text=text)
+        # 使用 replace 方法避免 text 中的花括号导致 format 错误
+        prompt = ATOMIC_NOTEGEN_PROMPT.replace('{text}', text)
         
         # 根据模式选择生成器
         if self.is_hybrid_mode and self.hybrid_dispatcher:
@@ -451,6 +452,11 @@ class AtomicNoteGenerator:
                 return self._create_fallback_note(chunk_data)
             
             note_data = json.loads(cleaned_response)
+            
+            # 特殊处理：若解析到空列表且原始文本非空，给出结构化空句条目
+            if isinstance(note_data, list) and len(note_data) == 0 and response.strip():
+                logger.info("Parsed empty list but original response is not empty, creating structured empty sentence entry")
+                return [{"sent_id": 1, "facts": []}]
             
             # 检查是否为新结构（按句分组）
             if self._is_new_structure(note_data):
