@@ -61,15 +61,25 @@ def process_docs(args):
         process_docs_parallel(args, work_dir, files)
     else:
         llm = LocalLLM()
-        processor = DocumentProcessor(output_dir=work_dir, llm=llm)
-        result = processor.process_documents(files, force_reprocess=args.force, output_dir=work_dir)
-        FileUtils.write_json(result.get('atomic_notes', []), os.path.join(work_dir, 'atomic_notes.json'))
-        stats = result.get('processing_stats', {})
-        logger.info(
-            f"Processed {stats.get('files_processed')} files, "
-            f"created {stats.get('chunks_created', 0)} chunks and "
-            f"{stats.get('atomic_notes_created', 0)} atomic notes."
-        )
+        try:
+            processor = DocumentProcessor(output_dir=work_dir, llm=llm)
+            result = processor.process_documents(files, force_reprocess=args.force, output_dir=work_dir)
+            FileUtils.write_json(result.get('atomic_notes', []), os.path.join(work_dir, 'atomic_notes.json'))
+            stats = result.get('processing_stats', {})
+            logger.info(
+                f"Processed {stats.get('files_processed')} files, "
+                f"created {stats.get('chunks_created', 0)} chunks and "
+                f"{stats.get('atomic_notes_created', 0)} atomic notes."
+            )
+        finally:
+            # 确保资源清理
+            try:
+                if hasattr(llm, 'cleanup'):
+                    llm.cleanup()
+                if hasattr(processor, 'cleanup'):
+                    processor.cleanup()
+            except Exception as e:
+                logger.warning(f"Failed to cleanup resources: {e}")
 
 
 def query_mode(args):
@@ -107,15 +117,25 @@ def query_mode(args):
             logger.warning(f'Failed to load embeddings: {e}')
 
     llm = LocalLLM()
-    processor = QueryProcessor(
-        notes,
-        embeddings,
-        graph_file=graph_file if os.path.exists(graph_file) else None,
-        vector_index_file=vector_index_file if vector_index_file and os.path.exists(vector_index_file) else None,
-        llm=llm,
-    )
-    output = processor.process(args.query)
-    print(output['answer'])
+    try:
+        processor = QueryProcessor(
+            notes,
+            embeddings,
+            graph_file=graph_file if os.path.exists(graph_file) else None,
+            vector_index_file=vector_index_file if vector_index_file and os.path.exists(vector_index_file) else None,
+            llm=llm,
+        )
+        output = processor.process(args.query)
+        print(output['answer'])
+    finally:
+        # 确保资源清理
+        try:
+            if hasattr(llm, 'cleanup'):
+                llm.cleanup()
+            if hasattr(processor, 'cleanup'):
+                processor.cleanup()
+        except Exception as e:
+            logger.warning(f"Failed to cleanup resources: {e}")
 
 
 def process_docs_parallel(args, work_dir: str, files: list):

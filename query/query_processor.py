@@ -13,7 +13,7 @@ from utils.logging_utils import (
     log_retrieval_metrics, log_diversity_metrics, log_path_aware_metrics
 )
 
-from llm import OllamaClient, LocalLLM
+from llm import OllamaClient, LMStudioClient, LocalLLM
 from llm.prompts import build_context_prompt, build_context_prompt_with_passages
 from utils.robust_json_parser import extract_prediction_with_retry
 from vector_store import VectorRetriever, EnhancedRecallOptimizer
@@ -151,6 +151,12 @@ class QueryProcessor:
         if llm_provider == 'hybrid_llm':
             self.llm_client = HybridLLMDispatcher()
             logger.info("Using HybridLLMDispatcher for intelligent task routing")
+        elif llm_provider == 'lmstudio':
+            # 使用 LM Studio 配置
+            llm_base_url = config.get('llm.base_url', 'http://localhost:1234/v1')
+            llm_model = config.get('llm.model', 'openai/gpt-oss-20b')
+            self.llm_client = LMStudioClient(base_url=llm_base_url, model=llm_model)
+            logger.info(f"Using LM Studio provider with model: {llm_model}")
         else:
             # 确保使用顶层 llm 配置，而不是 atomic_note_generation 配置
             llm_base_url = config.get('llm.ollama.base_url', 'http://localhost:11434')

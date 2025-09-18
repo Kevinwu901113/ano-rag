@@ -86,6 +86,21 @@ llm:
   timeout: 60
   instances: 1
   # 若你的 LM Studio 支持 OpenAI response_format，可在代码层开启 JSON 模式（答案生成通常不需要）
+  
+  # LM Studio 并发配置
+  lmstudio:
+    multiple_instances:
+      enabled: false  # 临时禁用多实例并发
+      target_instance_count: 2
+    concurrent:
+      enabled: false  # 临时禁用并发处理
+      max_workers: 4
+  
+  # Ollama 并发配置  
+  ollama:
+    concurrent:
+      enabled: false  # 临时禁用并发处理
+      max_workers: 4
 
 # -------------------------
 # 原子笔记生成：Ollama + LM Studio 并行
@@ -115,7 +130,7 @@ atomic_note_generation:
     temperature: 0.05
     timeout: 120
     top_p: 0.9
-    json_mode: true   # 若模型/后端支持OpenAI的response_format
+    json_mode: false   # 临时关闭JSON模式进行测试
 
   monitoring:
     enabled: true

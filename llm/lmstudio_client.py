@@ -190,7 +190,7 @@ class LMStudioClient:
             pass
     
     def generate(self, prompt: str, system_prompt: str = None, **kwargs) -> str:
-        """生成单个响应 - JSON模式作为软约束，失败时不判实例失效"""
+        """生成单个响应 - 無條件使用 JSON 模式處理，防止循環後援調用"""
         try:
             # 提取system_prompt和try_json_mode参数，避免传递给OpenAI API
             options = {**self.default_options}
@@ -198,44 +198,40 @@ class LMStudioClient:
                 if key not in ['system_prompt', 'try_json_mode']:
                     options[key] = value
             
-            # JSON模式作为软约束 - 无论是否开启都走宽松JSON提取
-            try_json_mode = kwargs.get('try_json_mode', True)
+            # 無條件啟用 JSON 模式處理 - 強制所有請求都通過 JSON 結構描述路徑
+            try_json_mode = True  # 強制啟用，忽略傳入參數
             json_mode_enabled = False
             
-            if try_json_mode and 'response_format' not in options:
-                # 降低temperature以提高JSON输出稳定性
-                options['temperature'] = min(options.get('temperature', 0.7), 0.1)
-                
-                # 尝试使用JSON Schema格式，但不强制
-                try:
-                    options['response_format'] = {
-                        "type": "json_schema",
-                        "json_schema": {
-                            "name": "response",
-                            "strict": False,  # 放宽严格性要求
-                            "schema": {
-                                "type": "object",
-                                "properties": {},
-                                "additionalProperties": True
-                            }
+            # 降低temperature以提高JSON输出稳定性
+            options['temperature'] = min(options.get('temperature', 0.7), 0.1)
+            
+            # 嘗試使用 JSON Schema 格式，但設置為非嚴格模式以提高兼容性
+            try:
+                options['response_format'] = {
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": "response",
+                        "strict": False,  # 非嚴格模式，提高兼容性
+                        "schema": {
+                            "type": "object",
+                            "properties": {},
+                            "additionalProperties": True
                         }
                     }
-                    json_mode_enabled = True
-                    logger.debug("Enabled relaxed JSON schema mode for LM Studio request")
-                except Exception as e:
-                    logger.debug(f"JSON schema mode not supported, falling back to text mode: {e}")
+                }
+                json_mode_enabled = True
+                logger.debug("Enabled relaxed JSON schema mode for LM Studio request")
+            except Exception as e:
+                logger.debug(f"JSON schema mode not supported, using text mode with JSON prompt: {e}")
             
-            # 准备消息，如果启用JSON模式，添加更宽松的提示
+            # 准备消息，無條件添加 JSON 提示
             messages = []
             if system_prompt:
                 messages.append({"role": "system", "content": system_prompt})
             
-            # 无论是否启用JSON模式，都添加宽松的JSON提示
-            if try_json_mode:
-                enhanced_prompt = f"{prompt}\n\n请只输出JSON数组或对象。如果无法严格匹配格式，也不要输出额外文字，系统会自动纠错。"
-                messages.append({"role": "user", "content": enhanced_prompt})
-            else:
-                messages.append({"role": "user", "content": prompt})
+            # 無條件添加 JSON 提示，提高 JSON 輸出成功率
+            enhanced_prompt = f"{prompt}\n\n請只輸出JSON數組或對象。如果無法嚴格匹配格式，也不要輸出額外文字，系統會自動糾錯。"
+            messages.append({"role": "user", "content": enhanced_prompt})
             
             # 调用OpenAI客户端生成响应
             response = self.instance.client.chat.completions.create(
@@ -244,23 +240,26 @@ class LMStudioClient:
                 **options
             )
             
-            raw_response = response.choices[0].message.content.strip()
+            raw_response = response.choices[0].message.content
+            if not raw_response:
+                logger.warning("LM Studio returned empty response")
+                return ""
             
-            # 无论是否开启JSON模式，都走宽松JSON提取
-            if try_json_mode:
-                from utils.json_utils import extract_json_from_response
-                try:
-                    cleaned_json = extract_json_from_response(raw_response)
-                    if cleaned_json:
-                        return cleaned_json
-                    else:
-                        logger.warning("No valid JSON found in LM Studio response, returning raw response")
-                        return raw_response
-                except Exception as e:
-                    logger.warning(f"JSON extraction failed: {e}, returning raw response")
+            raw_response = raw_response.strip()
+            
+            # 無條件進行 JSON 提取處理
+            from utils.json_utils import extract_json_from_response
+            try:
+                cleaned_json = extract_json_from_response(raw_response)
+                if cleaned_json:
+                    logger.debug("Successfully extracted JSON from LM Studio response")
+                    return cleaned_json
+                else:
+                    logger.warning("No valid JSON found in LM Studio response, returning raw response")
                     return raw_response
-            
-            return raw_response
+            except Exception as e:
+                logger.warning(f"JSON extraction failed: {e}, returning raw response")
+                return raw_response
             
         except Exception as e:
             # 失败时不把实例判为"失效"，仅记录错误

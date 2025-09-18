@@ -643,16 +643,25 @@ def main():
     if continue_from_existing:
         logger.info(f"Continue mode enabled: will resume from existing results in {output_file}")
     
-    processor.process_dataset(
-        args.input_file, 
-        output_file, 
-        atomic_notes_file=atomic_notes_file,
-        parallel=not args.serial,
-        use_engine_parallel=args.use_engine_parallel,
-        parallel_workers=args.parallel_workers,
-        parallel_strategy=args.parallel_strategy,
-        continue_from_existing=continue_from_existing
-    )
+    try:
+        processor.process_dataset(
+            args.input_file, 
+            output_file, 
+            atomic_notes_file=atomic_notes_file,
+            parallel=not args.serial,
+            use_engine_parallel=args.use_engine_parallel,
+            parallel_workers=args.parallel_workers,
+            parallel_strategy=args.parallel_strategy,
+            continue_from_existing=continue_from_existing
+        )
+    finally:
+        # 确保资源清理
+        logger.info("Cleaning up resources...")
+        try:
+            if hasattr(shared_llm, 'cleanup'):
+                shared_llm.cleanup()
+        except Exception as e:
+            logger.warning(f"Failed to cleanup shared LLM: {e}")
 
 
 if __name__ == '__main__':

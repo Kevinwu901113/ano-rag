@@ -49,6 +49,32 @@ class ParallelTaskAtomicNoteGenerator(AtomicNoteGenerator):
             'empty_results': 0
         }
         
+        # 添加循環後援防護機制
+        self._fallback_tracking = {}  # 追蹤每個任務的後援歷史
+        self._max_fallback_depth = 2  # 最大後援深度，防止無限循環
+    
+    def _can_fallback(self, task_id: str, from_client: str, to_client: str) -> bool:
+        """檢查是否可以進行後援調用，防止循環後援"""
+        if task_id not in self._fallback_tracking:
+            self._fallback_tracking[task_id] = []
+        
+        fallback_history = self._fallback_tracking[task_id]
+        
+        # 檢查後援深度
+        if len(fallback_history) >= self._max_fallback_depth:
+            logger.warning(f"Task {task_id}: Maximum fallback depth ({self._max_fallback_depth}) reached")
+            return False
+        
+        # 檢查是否會形成循環
+        fallback_chain = f"{from_client}->{to_client}"
+        if fallback_chain in fallback_history:
+            logger.warning(f"Task {task_id}: Circular fallback detected: {fallback_chain}")
+            return False
+        
+        # 記錄這次後援嘗試
+        fallback_history.append(fallback_chain)
+        return True
+        
         # 设置性能监控器
         monitoring_config = self.parallel_config.get('monitoring', {})
         thresholds = AlertThresholds(
@@ -383,22 +409,28 @@ class ParallelTaskAtomicNoteGenerator(AtomicNoteGenerator):
                 logger.debug(f"Ollama task {index}: Retry completed in {processing_time:.2f}s")
                 return result
             
-            # 两次尝试都失败，回退到LM Studio
-            logger.warning(f"Ollama task {index} retry also failed: {error_msg}, falling back to LM Studio")
-            with self._stats_lock:
-                self.stats['fallback_count'] += 1
+            # 兩次嘗試都失敗，檢查是否可以進行後援調用
+            logger.warning(f"Ollama task {index} retry also failed: {error_msg}")
             
-            # 记录回退操作
-            record_fallback_operation(
-                from_client="ollama",
-                to_client="lmstudio",
-                success=False
-            )
+            # 檢查循環後援防護
+            if self._can_fallback(task_id, "ollama", "lmstudio"):
+                logger.info(f"Attempting fallback from Ollama to LM Studio for task {index}")
+                with self._stats_lock:
+                    self.stats['fallback_count'] += 1
+                
+                # 記錄後援操作
+                record_fallback_operation(
+                    from_client="ollama",
+                    to_client="lmstudio",
+                    success=False
+                )
+                
+                if self.lmstudio_client:
+                    return self._process_with_lmstudio(chunk_data, index, system_prompt)
+            else:
+                logger.warning(f"Fallback blocked for task {index} to prevent circular calls")
             
-            if self.lmstudio_client:
-                return self._process_with_lmstudio(chunk_data, index, system_prompt)
-            
-            # 没有LM Studio可用，返回空结果
+            # 沒有LM Studio可用或後援被阻止，返回空結果
             logger.error(f"Both Ollama and LM Studio failed for task {index}, returning empty result")
             with self._stats_lock:
                 self.stats['empty_results'] += 1
@@ -590,19 +622,47 @@ class ParallelTaskAtomicNoteGenerator(AtomicNoteGenerator):
                     
                     return result
             
-            # 解析失败或不可恢复错误，回退到其他客户端
-            logger.warning(f"LM Studio processing failed: {error_msg}, falling back")
+            # 解析失敗或不可恢復錯誤，檢查是否可以進行後援調用
+            logger.warning(f"LM Studio processing failed: {error_msg}")
             with self._stats_lock:
-                self.stats['fallback_count'] += 1
+                self.stats['parse_failures'] += 1
             
-            # 记录回退操作
-            record_fallback_operation(
-                from_client="lmstudio",
-                to_client="ollama",
-                success=False
+            # 檢查循環後援防護
+            if self._can_fallback(task_id, "lmstudio", "ollama"):
+                logger.info(f"Attempting fallback from LM Studio to Ollama for task {index}")
+                with self._stats_lock:
+                    self.stats['fallback_count'] += 1
+                
+                # 記錄後援操作
+                record_fallback_operation(
+                    from_client="lmstudio",
+                    to_client="ollama",
+                    success=False
+                )
+                
+                if self.ollama_client:
+                    return self._process_with_ollama(chunk_data, index, system_prompt)
+            else:
+                logger.warning(f"Fallback blocked for task {index} to prevent circular calls")
+            
+            # 沒有Ollama可用或後援被阻止，返回空結果
+            logger.error(f"Both LM Studio and Ollama failed for task {index}, returning empty result")
+            with self._stats_lock:
+                self.stats['empty_results'] += 1
+            
+            processing_time = time.time() - start_time
+            with self._stats_lock:
+                self.stats['lmstudio_total_time'] += processing_time
+            
+            # 记录失败的任务性能
+            record_task_performance(
+                task_type="lmstudio",
+                duration=processing_time,
+                success=False,
+                chunk_size=len(text)
             )
             
-            return self._fallback_process(chunk_data, system_prompt, "lmstudio")
+            return self._create_empty_atomic_note(chunk_data)
             
         except Exception as e:
             processing_time = time.time() - start_time
@@ -652,47 +712,54 @@ class ParallelTaskAtomicNoteGenerator(AtomicNoteGenerator):
         return any(pattern in error_lower for pattern in recoverable_patterns)
     
     def _fallback_process(self, chunk_data: Dict[str, Any], system_prompt: str, failed_client: str) -> Dict[str, Any]:
-        """回退处理机制，包含重试逻辑"""
+        """回退处理机制，包含重试逻辑和循環防護"""
         start_time = time.time()
+        task_id = f"fallback_task_{hash(str(chunk_data))}"
         logger.info(f"Attempting fallback for failed {failed_client} task")
         
         try:
-            # 首先尝试重试原客户端（可能是临时网络问题）
+            # 檢查循環後援防護並嘗試回退
             if failed_client == 'ollama' and self.lmstudio_client:
-                result = self._process_with_lmstudio(chunk_data, -1, system_prompt)
-                
-                # 记录成功的回退操作
-                record_fallback_operation(
-                    from_client="ollama",
-                    to_client="lmstudio",
-                    success=True
-                )
-                
-                return result
+                if self._can_fallback(task_id, "ollama", "lmstudio"):
+                    result = self._process_with_lmstudio(chunk_data, -1, system_prompt)
+                    
+                    # 记录成功的回退操作
+                    record_fallback_operation(
+                        from_client="ollama",
+                        to_client="lmstudio",
+                        success=True
+                    )
+                    
+                    return result
+                else:
+                    logger.warning("Fallback from Ollama to LM Studio blocked to prevent circular calls")
                 
             elif failed_client == 'lmstudio' and self.ollama_client:
-                result = self._process_with_ollama(chunk_data, -1, system_prompt)
-                
-                # 记录成功的回退操作
-                record_fallback_operation(
-                    from_client="lmstudio",
-                    to_client="ollama",
-                    success=True
-                )
-                
-                return result
-            else:
-                # 如果没有其他客户端可用，回退到原始LLM
-                result = self._fallback_to_original_llm(chunk_data, system_prompt)
-                
-                # 记录回退到原始LLM的操作
-                record_fallback_operation(
-                    from_client=failed_client,
-                    to_client="original_llm",
-                    success=True
-                )
-                
-                return result
+                if self._can_fallback(task_id, "lmstudio", "ollama"):
+                    result = self._process_with_ollama(chunk_data, -1, system_prompt)
+                    
+                    # 记录成功的回退操作
+                    record_fallback_operation(
+                        from_client="lmstudio",
+                        to_client="ollama",
+                        success=True
+                    )
+                    
+                    return result
+                else:
+                    logger.warning("Fallback from LM Studio to Ollama blocked to prevent circular calls")
+            
+            # 如果没有其他客户端可用或被阻止，回退到原始LLM
+            result = self._fallback_to_original_llm(chunk_data, system_prompt)
+            
+            # 记录回退到原始LLM的操作
+            record_fallback_operation(
+                from_client=failed_client,
+                to_client="original_llm",
+                success=True
+            )
+            
+            return result
                 
         except Exception as e:
             processing_time = time.time() - start_time
