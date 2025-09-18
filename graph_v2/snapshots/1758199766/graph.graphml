@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<graphml xmlns="http://graphml.graphdrawing.org/xmlns">
+  <key id="weight" for="edge" attr.name="weight" attr.type="double"/>
+  <key id="evidence" for="edge" attr.name="evidence" attr.type="string"/>
+  <key id="title" for="node" attr.name="title" attr.type="string"/>
+  <graph id="G" edgedefault="undirected">
+    <node id="1">
+      <data key="title">人工智能基础</data>
+    </node>
+    <node id="2">
+      <data key="title">机器学习概述</data>
+    </node>
+    <edge id="e0" source="1" target="2">
+      <data key="weight">1.0</data>
+      <data key="evidence">{&quot;reason&quot;: &quot;because it directly expands on the core idea introduced in the CENTER—artificial intelligence—by exp&quot;, &quot;method&quot;: &quot;dbtes+mmr&quot;}</data>
+    </edge>
+  </graph>
+</graphml>

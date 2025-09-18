@@ -1,0 +1,2 @@
+{"src": "2hop__259228_793698", "dst": "2hop__460946_294723", "weight": 1.0, "evidence": {"reason": "LLM parsing failed, score fallback", "method": "dbtes+mmr"}}
+{"src": "2hop__252311_366220", "dst": "2hop__701895_752697", "weight": 1.0, "evidence": {"reason": "because it shares the same performer and event venue as the center note, making it the most directly", "method": "dbtes+mmr"}}

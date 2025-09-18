@@ -278,3 +278,29 @@ enhanced_relation_extraction:
     entity_alignment_threshold: 0.8  # 实体对齐警告阈值（80%实体缺失才警告）
     export_report: true     # 是否导出检查报告
     report_format: "json"   # 报告格式：json/yaml/txt
+
+retrieval_v2:
+  dbtes:
+    m: 6           # 每组候选数量
+    rounds: 2      # 早停层数（轻判+复审）
+    keep_k: 3      # 每个中心节点保留的边数上限
+    max_tokens_per_call: 300
+    temperature: 0.1
+mmr:
+  lambda: 0.7
+graph_v2:
+  degree_cap: 20   # 每节点最大边数
+
+llm_pool:
+  backends:
+    - name: lmstudio
+      weight: 3
+      max_inflight: 4
+      timeout_s: 30
+    - name: ollama
+      weight: 1
+      max_inflight: 2
+      timeout_s: 30
+  breaker:
+    fail_threshold: 3
+    cool_down_s: 60
