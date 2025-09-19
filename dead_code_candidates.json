@@ -1,6 +1,0 @@
-{
-  "priority": [],
-  "normal": [
-    "tools/find_dead_code.py"
-  ]
-}
