@@ -1,7 +1,5 @@
 {
-  "priority": [
-    "musique/musique/evaluate_v1.0.py"
-  ],
+  "priority": [],
   "normal": [
     "tools/find_dead_code.py",
     "musique/musique/download_raw_predictions.py",
