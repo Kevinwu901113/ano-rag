@@ -35,9 +35,28 @@ from atomic_v2.dbtes import dbtes_select_edges
 from retrieval_v2.mmr import mmr_select
 from graph_v2.materialize import write_snapshot
 from graph_v2.struct_prior import build_weak_graph
-from llm.lmstudio_client import LMStudioClient
-from llm.ollama_client import OllamaClient
 from llm.router import build_router_from_config
+
+
+def _make_lmstudio_call():
+    """懒加载 LMStudio 客户端"""
+    from llm.lmstudio_client import LMStudioClient
+    client = LMStudioClient()
+    def call(prompt: str) -> str:
+        return (client.chat([{"role":"user","content":prompt}]) or "").strip()
+    return call
+
+
+def _make_ollama_call():
+    """懒加载 Ollama 客户端"""
+    try:
+        from llm.ollama_client import OllamaClient
+    except Exception:
+        return None
+    client = OllamaClient()
+    def call(prompt: str) -> str:
+        return (client.generate(prompt) or "").strip()
+    return call
 
 
 class NoteGraphBuilder:
@@ -75,47 +94,12 @@ class NoteGraphBuilder:
     def _init_router(self):
         """初始化路由器"""
         try:
-            # 在方法开始时实例化客户端，避免每次调用都创建新实例
-            lm_client = LMStudioClient()
-            
-            # 检查是否有 Ollama 配置
-            ollama_config = self.config.get("atomic_note_generation", {}).get("ollama", {})
-            has_ollama = bool(ollama_config.get("base_url"))
-            
-            oll_client = None
-            if has_ollama:  # 是否配置了ollama后端
-                try:
-                    oll_client = OllamaClient()
-                except Exception:
-                    oll_client = None
-            
-            # 创建 LMStudio 调用函数，复用已实例化的客户端
-            def lmstudio_call(prompt: str) -> str:
-                try:
-                    messages = [{"role": "user", "content": prompt}]
-                    response = lm_client.chat(messages)
-                    return response.strip() if response else ""
-                except Exception as e:
-                    logger.error(f"LMStudio 调用失败: {e}")
-                    return ""
-            
-            # 创建 Ollama 调用函数，复用已实例化的客户端
-            def ollama_call(prompt: str) -> str:
-                if not oll_client:
-                    return ""
-                try:
-                    response = oll_client.generate(prompt)
-                    return response.strip() if response else ""
-                except Exception as e:
-                    logger.error(f"Ollama 调用失败: {e}")
-                    return ""
+            # 使用懒加载函数创建客户端调用
+            lm_call = _make_lmstudio_call()
+            ol_call = _make_ollama_call()
             
             # 构建路由器
-            router = build_router_from_config(
-                self.config, 
-                lmstudio_call, 
-                ollama_call if oll_client else None
-            )
+            router = build_router_from_config(self.config, lm_call, ol_call)
             
             logger.info(f"路由器初始化成功，后端: {list(router.backends.keys())}")
             return router

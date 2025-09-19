@@ -5,10 +5,14 @@ LLM路由器实现
 
 import threading
 import time
+import random
+import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError
 from typing import Dict, Any, Callable, Optional
 from dataclasses import dataclass
-from loguru import logger
+
+# 配置日志
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -154,8 +158,10 @@ class LLMRouter:
         # 统计信息
         self.stats = {
             "calls": 0,
-            "failed_calls": 0,  # 失败调用计数
-            "by_backend": {}
+            "by_backend": {b.name: 0 for b in self.backends},
+            "failures_by_backend": {b.name: 0 for b in self.backends},
+            "opened_breakers": {b.name: 0 for b in self.backends},
+            "approx_input_words": 0
         }
         
         # 解析breaker配置
@@ -190,17 +196,30 @@ class LLMRouter:
             for _ in range(backend_config.weight):
                 self.backend_weights.append(backend_config.name)
             
-            # 初始化统计
-            self.stats["by_backend"][backend_config.name] = {
-                "success": 0,
-                "failed": 0,
-                "circuit_breaks": 0
-            }
-        
         if not self.backends:
             raise ValueError("No valid backends configured")
         
+        # 随机起始索引，避免冷启动偏向
+        self.current_index = random.randrange(len(self.backend_weights)) if self.backend_weights else 0
+        
         logger.info(f"LLMRouter initialized with backends: {list(self.backends.keys())}")
+    
+    def _estimate_token_count(self, text: str) -> int:
+        """估算文本的token数量
+        
+        简单估算：中文按字符数，英文按单词数，再乘以1.3的系数
+        """
+        if not text:
+            return 0
+        
+        # 统计中文字符数
+        chinese_chars = sum(1 for char in text if '\u4e00' <= char <= '\u9fff')
+        # 统计英文单词数（简单按空格分割）
+        english_words = len([word for word in text.split() if any(c.isalpha() for c in word)])
+        
+        # 估算token数：中文字符 + 英文单词，再乘以1.3的系数
+        estimated_tokens = int((chinese_chars + english_words) * 1.3)
+        return estimated_tokens
     
     def _select_backend(self) -> Optional[str]:
         """加权轮询选择后端"""
@@ -234,8 +253,10 @@ class LLMRouter:
         Raises:
             RuntimeError: 所有后端都不可用时
         """
+        # 估算输入token数量并累加
         with self._lock:
             self.stats["calls"] += 1
+            self.stats["approx_input_words"] += len(prompt.split())
         
         # 尝试所有后端
         tried_backends = set()
@@ -257,32 +278,67 @@ class LLMRouter:
             try:
                 result = self.backends[backend_name].execute(prompt)
                 
-                # 更新统计
+                # 成功：by_backend++
                 with self._lock:
-                    self.stats["by_backend"][backend_name]["success"] += 1
+                    self.stats["by_backend"][backend_name] += 1
                 
                 logger.debug(f"Request completed by backend: {backend_name}")
                 return result
                 
             except Exception as e:
-                # 更新失败统计
+                # 失败：failures_by_backend[backend]++；当状态从 CLOSED→OPEN 时 opened_breakers[backend]++
                 with self._lock:
-                    self.stats["by_backend"][backend_name]["failed"] += 1
-                    # 检查是否是熔断导致的失败
-                    if "circuit broken" in str(e):
-                        self.stats["by_backend"][backend_name]["circuit_breaks"] = self.backends[backend_name].breaker.circuit_break_count
+                    self.stats["failures_by_backend"][backend_name] += 1
+                    # 检查是否是熔断导致的失败，并更新熔断次数
+                    if backend_name in self.backends:
+                        self.stats["opened_breakers"][backend_name] = self.backends[backend_name].breaker.circuit_break_count
                 
                 logger.warning(f"Backend {backend_name} failed: {str(e)}")
                 continue
         
         # 所有后端都失败
-        with self._lock:
-            self.stats["failed_calls"] += 1
         raise RuntimeError("All backends are unavailable")
     
     def route(self, prompt: str) -> str:
         """路由方法的别名，与 call 方法相同"""
         return self.call(prompt)
+    
+    def check_token_budget(self, edge_count: int, tokens_per_edge_max: int = 800) -> Dict[str, Any]:
+        """检查token预算并返回警告信息
+        
+        Args:
+            edge_count: 边的数量
+            tokens_per_edge_max: 每条边的最大token数阈值
+            
+        Returns:
+            Dict: 包含预算检查结果的字典
+        """
+        if edge_count <= 0:
+            return {
+                "warning": False,
+                "message": "No edges to check",
+                "tokens_per_edge": 0,
+                "total_input_tokens": self.stats.get("approx_input_words", 0)
+            }
+        
+        total_input_tokens = self.stats.get("approx_input_words", 0)
+        tokens_per_edge = total_input_tokens / edge_count
+        
+        result = {
+            "warning": tokens_per_edge > tokens_per_edge_max,
+            "tokens_per_edge": round(tokens_per_edge, 1),
+            "tokens_per_edge_max": tokens_per_edge_max,
+            "total_input_tokens": total_input_tokens,
+            "edge_count": edge_count
+        }
+        
+        if result["warning"]:
+            result["message"] = f"tokens/edge ≈ {tokens_per_edge:.1f} > {tokens_per_edge_max}, 建议收紧 gate/dbtes 配置"
+            logger.warning(result["message"])
+        else:
+            result["message"] = f"tokens/edge ≈ {tokens_per_edge:.1f} <= {tokens_per_edge_max}, 预算正常"
+        
+        return result
 
 
 def build_router_from_config(cfg: Dict[str, Any], lmstudio_call: Callable[[str], str], ollama_call: Optional[Callable[[str], str]] = None) -> LLMRouter:
@@ -360,4 +416,51 @@ for i in range(10):
 
 print(f"Dual backend stats: {router2.stats}")
 # 预期：stats["by_backend"]中lmstudio和ollama都有非零值，且lmstudio约为ollama的3倍（权重比）
+
+# run_log.json生成示例
+def generate_run_log(router, elapsed_sec, notes_count, candidate_count, all_edges, out_dir):
+    \"\"\"生成运行日志文件
+    
+    Args:
+        router: LLMRouter实例
+        elapsed_sec: 运行耗时（秒）
+        notes_count: 笔记数量
+        candidate_count: 候选数量
+        all_edges: 所有边的列表
+        out_dir: 输出目录路径
+    \"\"\"
+    import json
+    from pathlib import Path
+    
+    # 获取路由器统计信息
+    llm_stats = getattr(router, "stats", {})
+    
+    # 构建运行日志
+    run_log = {
+        "elapsed_sec": elapsed_sec,
+        "notes": notes_count,
+        "candidate_total": candidate_count,
+        "selected_edge_total": len(all_edges),
+        "llm_pool_stats": llm_stats,
+    }
+    
+    # 写入日志文件
+    log_file = Path(out_dir) / "run_log.json"
+    log_file.write_text(json.dumps(run_log, ensure_ascii=False, indent=2), "utf-8")
+    
+    # 检查token预算并输出警告
+    if all_edges:
+        budget_check = router.check_token_budget(len(all_edges))
+        if budget_check["warning"]:
+            print(f"⚠️  {budget_check['message']}")
+        else:
+            print(f"✅ {budget_check['message']}")
+    
+    return run_log
+
+# 使用示例：
+# 假设在某个处理流程结束后
+# router = build_router_from_config(config, lmstudio_call, ollama_call)
+# ... 执行一系列LLM调用 ...
+# run_log = generate_run_log(router, elapsed_time, len(notes), candidate_count, all_edges, output_directory)
 """
