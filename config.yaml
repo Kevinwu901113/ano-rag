@@ -1,3 +1,7 @@
+# === 输入配置 ===
+input:
+  path: "data/test.jsonl"  # 可改为 data/your_folder
+
 # === v2 必需 ===
 retrieval_v2:
   gate:

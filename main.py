@@ -45,6 +45,64 @@ def append_jsonl(path: Path, obj: Dict[str, Any]):
     with open(path, "a", encoding="utf-8") as f:
         f.write(json.dumps(obj, ensure_ascii=False) + "\n")
 
+def validate_input_path(input_path: str) -> Path:
+    """验证输入路径是否在 ./data 目录下，防止路径越界"""
+    path = Path(input_path).resolve()
+    data_dir = Path("./data").resolve()
+    
+    try:
+        path.relative_to(data_dir)
+    except ValueError:
+        raise ValueError(f"输入路径必须位于 ./data 目录下，当前路径: {input_path}")
+    
+    return path
+
+def collect_jsonl_files(input_path: Path) -> List[Path]:
+    """收集 .jsonl 文件，支持单文件或目录递归"""
+    if input_path.is_file():
+        if input_path.suffix != '.jsonl':
+            raise ValueError(f"文件必须是 .jsonl 格式: {input_path}")
+        return [input_path]
+    elif input_path.is_dir():
+        jsonl_files = list(input_path.rglob("*.jsonl"))
+        if not jsonl_files:
+            raise ValueError(f"目录中未找到 .jsonl 文件: {input_path}")
+        return sorted(jsonl_files)
+    else:
+        raise ValueError(f"输入路径不存在: {input_path}")
+
+def load_and_merge_samples(jsonl_files: List[Path]) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    """加载并合并多个 .jsonl 文件，返回样本列表和清单信息"""
+    all_samples = []
+    manifest = {
+        "files": [],
+        "total_samples": 0,
+        "created_at": time.strftime("%Y-%m-%d %H:%M:%S")
+    }
+    
+    for file_path in jsonl_files:
+        samples = read_jsonl(file_path)
+        all_samples.extend(samples)
+        
+        manifest["files"].append({
+            "path": str(file_path),
+            "sample_count": len(samples)
+        })
+    
+    manifest["total_samples"] = len(all_samples)
+    return all_samples, manifest
+
+def resolve_input_path(args_input: str, config: Dict[str, Any]) -> str:
+    """解析输入路径，优先级：--input → config.yaml"""
+    if args_input:
+        return args_input
+    
+    config_path = config.get("input", {}).get("path")
+    if not config_path:
+        raise ValueError("未指定输入路径，请使用 --input 参数或在 config.yaml 中配置 input.path")
+    
+    return config_path
+
 def load_done_ids(result_file: Path) -> set:
     done = set()
     if result_file.exists():
@@ -248,7 +306,7 @@ def process_one_task(task: Dict[str, Any],
 # ========== 主入口 ==========
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--input", required=True, help="MuSiQue jsonl (test)")
+    ap.add_argument("--input", help="MuSiQue jsonl (test) 或目录路径")
     ap.add_argument("--config", default="config.yaml")
     ap.add_argument("--result", default="result", help="结果根目录")
     ap.add_argument("--max-workers", type=int, default=4)
@@ -258,6 +316,24 @@ def main():
 
     # 配置与 LLM 路由
     cfg = yaml.safe_load(open(args.config, "r", encoding="utf-8"))
+    
+    # 解析输入路径（优先级：--input → config.yaml）
+    input_path_str = resolve_input_path(args.input, cfg)
+    input_path = validate_input_path(input_path_str)
+    
+    # 收集 .jsonl 文件
+    jsonl_files = collect_jsonl_files(input_path)
+    
+    # 加载并合并样本
+    samples, manifest = load_and_merge_samples(jsonl_files)
+    
+    # 如果是多文件，写出清单
+    if len(jsonl_files) > 1:
+        manifest_path = Path("input_manifest.json")
+        with open(manifest_path, "w", encoding="utf-8") as f:
+            json.dump(manifest, f, ensure_ascii=False, indent=2)
+        print(f"[INFO] 多文件输入，清单已写入: {manifest_path}")
+    
     lm = LMStudioClient()
     def lm_call(p: str) -> str:
         return (lm.chat([{"role": "user", "content": p}]) or "").strip()
@@ -281,9 +357,10 @@ def main():
     done = load_done_ids(res_file)
 
     # 读输入
-    samples = read_jsonl(Path(args.input))
     todo = [s for s in samples if s.get("id") not in done]
 
+    print(f"[INFO] input_path={input_path}")
+    print(f"[INFO] jsonl_files={len(jsonl_files)}")
     print(f"[INFO] run_dir={run_dir}")
     print(f"[INFO] total={len(samples)}, done={len(done)}, todo={len(todo)}")
 
