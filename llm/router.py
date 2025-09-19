@@ -36,6 +36,7 @@ class CircuitBreaker:
         self.failure_count = 0
         self.last_failure_time = 0
         self.state = "CLOSED"  # CLOSED, OPEN, HALF_OPEN
+        self.circuit_break_count = 0  # 熔断次数统计
         self._lock = threading.Lock()
     
     def can_execute(self) -> bool:
@@ -63,6 +64,8 @@ class CircuitBreaker:
             self.failure_count += 1
             self.last_failure_time = time.time()
             if self.failure_count >= self.fail_threshold:
+                if self.state != "OPEN":  # 只在状态变化时计数
+                    self.circuit_break_count += 1
                 self.state = "OPEN"
 
 
@@ -76,6 +79,7 @@ class BackendManager:
         self.semaphore = threading.Semaphore(config.max_inflight)
         self.active_requests = 0
         self.total_requests = 0
+        self.failed_requests = 0  # 失败请求计数
         self._lock = threading.Lock()
     
     def is_available(self) -> bool:
@@ -96,19 +100,31 @@ class BackendManager:
                 self.active_requests += 1
                 self.total_requests += 1
             
-            # 使用线程池执行带超时的调用
-            with ThreadPoolExecutor(max_workers=1) as executor:
-                future = executor.submit(self.call_func, prompt)
+            # 用原生线程 + join 超时，避免每次建池
+            res, err = {}, {}
+            def _run():
                 try:
-                    result = future.result(timeout=self.config.timeout_s)
-                    self.breaker.record_success()
-                    return result
-                except TimeoutError:
-                    self.breaker.record_failure()
-                    raise RuntimeError(f"Backend {self.config.name} timeout after {self.config.timeout_s}s")
+                    res["v"] = self.call_func(prompt)
                 except Exception as e:
-                    self.breaker.record_failure()
-                    raise RuntimeError(f"Backend {self.config.name} failed: {str(e)}")
+                    err["e"] = e
+            
+            t = threading.Thread(target=_run, daemon=True)
+            t.start()
+            t.join(self.config.timeout_s)
+            
+            if t.is_alive():
+                with self._lock:
+                    self.failed_requests += 1
+                self.breaker.record_failure()
+                raise RuntimeError(f"Backend {self.config.name} timeout after {self.config.timeout_s}s")
+            if "e" in err:
+                with self._lock:
+                    self.failed_requests += 1
+                self.breaker.record_failure()
+                raise RuntimeError(f"Backend {self.config.name} failed: {err['e']}")
+            
+            self.breaker.record_success()
+            return res.get("v", "")
         finally:
             with self._lock:
                 self.active_requests -= 1
@@ -138,6 +154,7 @@ class LLMRouter:
         # 统计信息
         self.stats = {
             "calls": 0,
+            "failed_calls": 0,  # 失败调用计数
             "by_backend": {}
         }
         
@@ -174,7 +191,11 @@ class LLMRouter:
                 self.backend_weights.append(backend_config.name)
             
             # 初始化统计
-            self.stats["by_backend"][backend_config.name] = 0
+            self.stats["by_backend"][backend_config.name] = {
+                "success": 0,
+                "failed": 0,
+                "circuit_breaks": 0
+            }
         
         if not self.backends:
             raise ValueError("No valid backends configured")
@@ -238,17 +259,30 @@ class LLMRouter:
                 
                 # 更新统计
                 with self._lock:
-                    self.stats["by_backend"][backend_name] += 1
+                    self.stats["by_backend"][backend_name]["success"] += 1
                 
                 logger.debug(f"Request completed by backend: {backend_name}")
                 return result
                 
             except Exception as e:
+                # 更新失败统计
+                with self._lock:
+                    self.stats["by_backend"][backend_name]["failed"] += 1
+                    # 检查是否是熔断导致的失败
+                    if "circuit broken" in str(e):
+                        self.stats["by_backend"][backend_name]["circuit_breaks"] = self.backends[backend_name].breaker.circuit_break_count
+                
                 logger.warning(f"Backend {backend_name} failed: {str(e)}")
                 continue
         
         # 所有后端都失败
+        with self._lock:
+            self.stats["failed_calls"] += 1
         raise RuntimeError("All backends are unavailable")
+    
+    def route(self, prompt: str) -> str:
+        """路由方法的别名，与 call 方法相同"""
+        return self.call(prompt)
 
 
 def build_router_from_config(cfg: Dict[str, Any], lmstudio_call: Callable[[str], str], ollama_call: Optional[Callable[[str], str]] = None) -> LLMRouter:

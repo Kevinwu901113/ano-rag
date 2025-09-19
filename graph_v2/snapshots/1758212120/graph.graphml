@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<graphml xmlns="http://graphml.graphdrawing.org/xmlns">
+  <key id="weight" for="edge" attr.name="weight" attr.type="double"/>
+  <key id="evidence" for="edge" attr.name="evidence" attr.type="string"/>
+  <key id="title" for="node" attr.name="title" attr.type="string"/>
+  <graph id="G" edgedefault="undirected">
+    <node id="4">
+      <data key="title">神经网络架构</data>
+    </node>
+    <node id="5">
+      <data key="title">自然语言处理</data>
+    </node>
+    <edge id="e0" source="4" target="5">
+      <data key="weight">1.0</data>
+      <data key="evidence">{&quot;reason&quot;: &quot;LLM parsing failed, score fallback&quot;, &quot;method&quot;: &quot;dbtes+mmr&quot;}</data>
+    </edge>
+  </graph>
+</graphml>

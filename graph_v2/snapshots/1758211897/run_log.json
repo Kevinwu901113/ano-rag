@@ -1,0 +1,15 @@
+{
+  "start_time": 1758211893.6257615,
+  "end_time": 1758211897.4311855,
+  "total_duration_s": 3.8054239749908447,
+  "note_count": 5,
+  "candidate_count": 20,
+  "selected_edge_count": 0,
+  "llm_pool_stats": {
+    "calls": 5,
+    "by_backend": {
+      "lmstudio": 4,
+      "ollama": 1
+    }
+  }
+}

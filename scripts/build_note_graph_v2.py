@@ -34,6 +34,7 @@ from retrieval_v2.candidate_gate import build_candidates_for_note
 from atomic_v2.dbtes import dbtes_select_edges
 from retrieval_v2.mmr import mmr_select
 from graph_v2.materialize import write_snapshot
+from graph_v2.struct_prior import build_weak_graph
 from llm.lmstudio_client import LMStudioClient
 from llm.ollama_client import OllamaClient
 from llm.router import build_router_from_config
@@ -74,37 +75,46 @@ class NoteGraphBuilder:
     def _init_router(self):
         """初始化路由器"""
         try:
-            # 创建 LMStudio 调用函数
-            def lmstudio_call(prompt: str) -> str:
-                try:
-                    lmstudio_config = self.config.get("atomic_note_generation", {}).get("lmstudio", {})
-                    client = LMStudioClient()
-                    messages = [{"role": "user", "content": prompt}]
-                    response = client.chat(messages)
-                    return response.strip() if response else ""
-                except Exception as e:
-                    logger.error(f"LMStudio 调用失败: {e}")
-                    return ""
-            
-            # 创建 Ollama 调用函数（可选）
-            def ollama_call(prompt: str) -> str:
-                try:
-                    client = OllamaClient()
-                    response = client.generate(prompt)
-                    return response.strip() if response else ""
-                except Exception as e:
-                    logger.error(f"Ollama 调用失败: {e}")
-                    return ""
+            # 在方法开始时实例化客户端，避免每次调用都创建新实例
+            lm_client = LMStudioClient()
             
             # 检查是否有 Ollama 配置
             ollama_config = self.config.get("atomic_note_generation", {}).get("ollama", {})
             has_ollama = bool(ollama_config.get("base_url"))
             
+            oll_client = None
+            if has_ollama:  # 是否配置了ollama后端
+                try:
+                    oll_client = OllamaClient()
+                except Exception:
+                    oll_client = None
+            
+            # 创建 LMStudio 调用函数，复用已实例化的客户端
+            def lmstudio_call(prompt: str) -> str:
+                try:
+                    messages = [{"role": "user", "content": prompt}]
+                    response = lm_client.chat(messages)
+                    return response.strip() if response else ""
+                except Exception as e:
+                    logger.error(f"LMStudio 调用失败: {e}")
+                    return ""
+            
+            # 创建 Ollama 调用函数，复用已实例化的客户端
+            def ollama_call(prompt: str) -> str:
+                if not oll_client:
+                    return ""
+                try:
+                    response = oll_client.generate(prompt)
+                    return response.strip() if response else ""
+                except Exception as e:
+                    logger.error(f"Ollama 调用失败: {e}")
+                    return ""
+            
             # 构建路由器
             router = build_router_from_config(
                 self.config, 
                 lmstudio_call, 
-                ollama_call if has_ollama else None
+                ollama_call if oll_client else None
             )
             
             logger.info(f"路由器初始化成功，后端: {list(router.backends.keys())}")
@@ -114,6 +124,11 @@ class NoteGraphBuilder:
             logger.error(f"路由器初始化失败: {e}")
             raise RuntimeError(f"无法初始化路由器: {e}")
     
+    def _title_char_jaccard(self, a: str, b: str) -> float:
+        """计算两个标题的字符级 Jaccard 相似度"""
+        A, B = set((a or "").lower()), set((b or "").lower())
+        return len(A & B) / max(1, len(A | B))
+
     def _init_llm_client(self) -> Any:
         """初始化 LLM 客户端"""
         # 优先使用 lmstudio，回退到 ollama
@@ -211,8 +226,9 @@ class NoteGraphBuilder:
         try:
             # 1. 构建候选
             candidates = build_candidates_for_note(
-                center_note=center_note,
+                center_id=center_id,
                 notes=notes,
+                weak_graph=weak_graph,
                 config=self.retrieval_v2_config
             )
             
@@ -227,21 +243,50 @@ class NoteGraphBuilder:
             selected_edges = dbtes_select_edges(
                 center_note=center_note,
                 candidates=candidates,
-                notes_dict=notes_dict,
-                weak_graph=weak_graph,
-                llm_call=self.router.route,
-                config=self.dbtes_config
+                llm_call=self.router.call,
+                config=self.dbtes_config,
+                notes=notes
             )
             
             if not selected_edges:
                 logger.debug(f"笔记 {center_id} DBTES 未选中任何边")
                 return []
             
+            # 转换为边格式
+            # 创建候选分数映射
+            cand_map = {c["id"]: c["score"] for c in candidates}
+            
+            formatted_edges = []
+            for edge in selected_edges:
+                formatted_edges.append({
+                    "src": center_id,
+                    "dst": edge["id"],
+                    "weight": float(cand_map.get(edge["id"], 0.9)),  # ✅ 用 gate 分
+                    "evidence": {
+                        "reason": edge.get("reason", "Selected by DBTES"),
+                        "method": "dbtes"
+                    }
+                })
+
             # 3. MMR 选择
-            final_edges = mmr_select(
-                edges=selected_edges,
-                config=self.mmr_config
-            )
+            keep_k = self.mmr_config.get("keep_k", 3)
+            if keep_k and keep_k < len(formatted_edges):
+                # 填充 title 以便相似度使用
+                id2title = {x["id"]: x.get("title", "") for x in notes}
+                for e in formatted_edges:
+                    e["title"] = id2title.get(e["dst"], "")
+                final_edges = mmr_select(
+                    items=formatted_edges, 
+                    k=keep_k,
+                    sim=lambda x, y: self._title_char_jaccard(x.get("title", ""), y.get("title", ""))
+                )
+            else:
+                final_edges = formatted_edges[:keep_k]
+            
+            # 为 MMR 选择的边添加方法标记
+            for edge in final_edges:
+                if "evidence" in edge and isinstance(edge["evidence"], dict):
+                    edge["evidence"]["method"] = "dbtes+mmr"
             
             return final_edges
             
@@ -297,8 +342,12 @@ class NoteGraphBuilder:
         # 创建笔记索引
         notes_dict = {note["id"]: note for note in notes}
         
-        # 初始化弱图（空图，struct_prior 需要）
-        weak_graph = {}
+        # 构建 paras_like 结构并生成真正的弱图
+        paras_like = {
+            n["id"]: {"idx": n["id"], "title": n.get("title", ""), "paragraph_text": n.get("text", "")}
+            for n in notes
+        }
+        weak_graph = build_weak_graph(paras_like)  # ✅ 用真图
         
         all_edges = []
         total_notes = len(notes)
