@@ -15,7 +15,7 @@ MuSiQue end2end (v2) runner
 import argparse, json, os, sys, time, glob, math, yaml, re
 from contextlib import nullcontext
 from pathlib import Path
-from typing import List, Dict, Any, Tuple, Optional, Sequence
+from typing import List, Dict, Any, Tuple, Optional, Sequence, Set
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # --- v2 构图/检索 ---
@@ -34,8 +34,13 @@ except Exception:
 
 from query.evaluator import RetrievalEvaluator
 from utils.logging import StructuredLogger
+from utils.context_scheduler import ContextScheduler
+from utils.guardrail import apply_guardrails
 from vector_store.hybrid_retriever import HybridRetriever
 from rerank import CrossEncoderReranker
+
+
+CONTEXT_SCHEDULER = ContextScheduler()
 
 # ========== 工具 ==========
 def _as_bool(value, default: bool = False) -> bool:
@@ -254,7 +259,7 @@ def retrieve_for_question(question: str,
                           config: Dict[str, Any],
                           task_id: Any,
                           logger: Optional[StructuredLogger] = None
-                          ) -> Tuple[List[Tuple[str, float]], List[str], str]:
+                          ) -> Tuple[List[Tuple[str, float]], List[str], str, Dict[str, Dict[str, Any]]]:
     retriever = HybridRetriever(
         notes=notes,
         config=config,
@@ -271,7 +276,7 @@ def retrieve_for_question(question: str,
             vector_only=result.breakdown.get("vector_only", 0),
             both=result.breakdown.get("both", 0),
         )
-    return result.merged, result.support_ids, result.mode
+    return result.merged, result.support_ids, result.mode, result.per_candidate
 
 # ========== 生成答案（RAG） ==========
 def answer_by_rag(question: str,
@@ -303,7 +308,7 @@ def process_one_task(task: Dict[str, Any],
         "retrieval", query_id=task.get("id"), query=task.get("question", "")
     ) if structured_logger else nullcontext({"elapsed_ms": None})
     with retrieval_cm as retrieval_ctx:
-        recall_list, retrieved_support_ids, retrieval_mode = retrieve_for_question(
+        recall_list, retrieved_support_ids, retrieval_mode, per_candidate_info = retrieve_for_question(
             task["question"],
             notes,
             edges,
@@ -331,6 +336,8 @@ def process_one_task(task: Dict[str, Any],
         )
 
     question_text = task.get("question", "")
+    guardrail_cfg = cfg.get("guardrail", {}) or {}
+    per_candidate_info = per_candidate_info or {}
     pre_rerank_support_ids = (retrieved_support_ids or [])[:recall_topk]
     target_topk = max(1, min(recall_topk, getattr(reranker, "top_k", recall_topk) if reranker else recall_topk))
 
@@ -356,7 +363,6 @@ def process_one_task(task: Dict[str, Any],
             (cand_id, float(score) if isinstance(score, (int, float)) else 0.0)
             for cand_id, score in recall_list[:target_topk]
         ]
-    support_ids = [cand_id for cand_id, _ in reranked_candidates[:target_topk]]
     rerank_latency = rerank_ctx.get("elapsed_ms") if isinstance(rerank_ctx, dict) else None
     if structured_logger:
         structured_logger.log_candidates(
@@ -368,9 +374,173 @@ def process_one_task(task: Dict[str, Any],
             query=question_text,
         )
 
+    id2note = {str(n["id"]): n for n in notes}
+
+    def _note_content(note: Dict[str, Any]) -> str:
+        title = (note.get("title") or "").strip()
+        text = (note.get("text") or "").strip()
+        if title and text:
+            return f"{title}\n{text}"
+        return title or text
+
+    def _compute_centrality(edge_list: List[Dict[str, Any]]) -> Dict[str, float]:
+        centrality: Dict[str, float] = {}
+        for edge in edge_list or []:
+            src = edge.get("src")
+            dst = edge.get("dst")
+            if src is None or dst is None:
+                continue
+            src_key = str(src)
+            dst_key = str(dst)
+            centrality[src_key] = centrality.get(src_key, 0.0) + 1.0
+            centrality[dst_key] = centrality.get(dst_key, 0.0) + 1.0
+        return centrality
+
+    centrality_map = _compute_centrality(edges)
+
+    rerank_score_map: Dict[str, float] = {}
+    for cand_id, score in reranked_candidates:
+        cand_key = str(cand_id)
+        try:
+            rerank_score_map[cand_key] = float(score)
+        except (TypeError, ValueError):
+            rerank_score_map[cand_key] = 0.0
+
+    max_candidates_cfg = guardrail_cfg.get("max_candidates")
+    try:
+        max_candidates = int(max_candidates_cfg) if max_candidates_cfg is not None else None
+    except (TypeError, ValueError):
+        max_candidates = None
+
+    candidate_pairs: List[Tuple[str, float]] = []
+    seen_candidate_ids: Set[str] = set()
+
+    def _append_candidate_pair(raw_id: Any, raw_score: Any) -> None:
+        if raw_id is None:
+            return
+        cand_key = str(raw_id)
+        if cand_key in seen_candidate_ids:
+            return
+        try:
+            score_val = float(raw_score)
+        except (TypeError, ValueError):
+            score_val = 0.0
+        candidate_pairs.append((cand_key, score_val))
+        seen_candidate_ids.add(cand_key)
+
+    for cand_id, score in reranked_candidates:
+        _append_candidate_pair(cand_id, score)
+
+    cutoff = max(target_topk, max_candidates or 0)
+    for cand_id, score in recall_list:
+        if max_candidates is not None and len(candidate_pairs) >= cutoff:
+            break
+        _append_candidate_pair(cand_id, score)
+        if max_candidates is not None and len(candidate_pairs) >= cutoff:
+            break
+
+    candidate_objects: List[Dict[str, Any]] = []
+    for rank, (cand_id_str, fusion_score) in enumerate(candidate_pairs, start=1):
+        note = id2note.get(cand_id_str)
+        if not note:
+            continue
+        metadata = dict(per_candidate_info.get(cand_id_str, {}))
+        retrieval_info = {
+            "similarity": rerank_score_map.get(cand_id_str, fusion_score),
+            "fusion_score": fusion_score,
+            "rerank_score": rerank_score_map.get(cand_id_str),
+            "bm25_rank": metadata.get("bm25_rank"),
+            "vector_rank": metadata.get("vector_rank"),
+            "fusion_rank": rank,
+        }
+        candidate_objects.append({
+            "note_id": cand_id_str,
+            "title": note.get("title", ""),
+            "text": note.get("text", ""),
+            "content": _note_content(note),
+            "retrieval_info": retrieval_info,
+            "centrality": float(centrality_map.get(cand_id_str, 0.0)),
+            "cluster_id": metadata.get("cluster_id"),
+            "metadata": metadata,
+        })
+
+    filtered_candidates, guardrail_reports = apply_guardrails(
+        candidate_objects,
+        question_text,
+        guardrail_cfg,
+        logger=structured_logger,
+        query_id=task.get("id"),
+    )
+
+    if structured_logger:
+        filtered_for_logging = [
+            (cand["note_id"], cand.get("retrieval_info", {}).get("similarity", 0.0))
+            for cand in filtered_candidates
+        ]
+        structured_logger.log_candidates(
+            stage="guardrail_after",
+            query_id=task.get("id"),
+            candidates=filtered_for_logging,
+            limit=len(filtered_for_logging) or target_topk,
+            query=question_text,
+        )
+
+    scheduled_candidates = (
+        CONTEXT_SCHEDULER.schedule(filtered_candidates, query_processor=None)
+        if filtered_candidates
+        else []
+    )
+    if not scheduled_candidates:
+        fallback_candidates = filtered_candidates if filtered_candidates else candidate_objects
+        scheduled_candidates = fallback_candidates[:target_topk]
+        if structured_logger and scheduled_candidates:
+            structured_logger.warning(
+                "context_scheduler_fallback",
+                query_id=task.get("id"),
+                reason="empty_selection",
+                fallback_count=len(scheduled_candidates),
+            )
+
+    if structured_logger and scheduled_candidates:
+        scheduler_for_logging = [
+            (
+                cand.get("note_id"),
+                cand.get("context_score", cand.get("retrieval_info", {}).get("similarity", 0.0)),
+            )
+            for cand in scheduled_candidates
+        ]
+        structured_logger.log_candidates(
+            stage="context_scheduler_after",
+            query_id=task.get("id"),
+            candidates=scheduler_for_logging,
+            limit=len(scheduler_for_logging) or target_topk,
+            query=question_text,
+        )
+
+    selected_candidates: List[Dict[str, Any]] = []
+    seen_support_ids: Set[str] = set()
+    for cand in scheduled_candidates:
+        note_id = cand.get("note_id")
+        if not note_id or note_id in seen_support_ids:
+            continue
+        selected_candidates.append(cand)
+        seen_support_ids.add(note_id)
+        if len(selected_candidates) >= target_topk:
+            break
+    if len(selected_candidates) < target_topk:
+        for cand in filtered_candidates:
+            note_id = cand.get("note_id")
+            if not note_id or note_id in seen_support_ids:
+                continue
+            selected_candidates.append(cand)
+            seen_support_ids.add(note_id)
+            if len(selected_candidates) >= target_topk:
+                break
+
+    support_ids = [cand.get("note_id") for cand in selected_candidates if cand.get("note_id")]
+
     # 生成答案
-    id2note = {n["id"]: n for n in notes}
-    answer  = answer_by_rag(task["question"], support_ids, id2note, router)
+    answer = answer_by_rag(task["question"], support_ids, id2note, router)
 
     # 结果与日志
     def _note_id_to_idx(note_id: Any) -> Optional[int]:
@@ -410,6 +580,9 @@ def process_one_task(task: Dict[str, Any],
         "retrieval_latency_ms": retrieval_latency,
         "rerank_latency_ms": rerank_latency,
         "retrieval_mode": retrieval_mode,
+        "guardrail_filtered_note_ids": [cand.get("note_id") for cand in filtered_candidates],
+        "context_scheduler_note_ids": [cand.get("note_id") for cand in selected_candidates],
+        "guardrail_reports": guardrail_reports,
     }
     result_record = {
         "id": task["id"],
@@ -422,6 +595,8 @@ def process_one_task(task: Dict[str, Any],
         "chosen": support_ids,
         "pre_rerank_chosen": pre_rerank_support_ids[:target_topk],
         "mode": retrieval_mode,
+        "guardrail_filtered": [cand.get("note_id") for cand in filtered_candidates],
+        "context_selected": support_ids,
     }
     evaluation_payload = {
         "query_id": task.get("id"),
@@ -431,6 +606,7 @@ def process_one_task(task: Dict[str, Any],
         "predicted_support_idxs": used_idx,
         "pre_rerank_support_idxs": pre_rerank_used_idx,
         "reference": task,
+        "guardrail_reports": guardrail_reports,
     }
     return result_record, log, recall_record, evaluation_payload
 

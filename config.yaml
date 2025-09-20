@@ -76,6 +76,65 @@ metrics:
     metrics: {}
     enforce_non_negative: false
 
+guardrail:
+  enabled: true
+  numeric_date:
+    enabled: true
+    min_keep: 1
+    question_triggers:
+      - "how many"
+      - "how much"
+      - "number"
+      - "total"
+      - "when"
+      - "what year"
+      - "date"
+      - "year"
+    month_keywords:
+      - "january"
+      - "february"
+      - "march"
+      - "april"
+      - "may"
+      - "june"
+      - "july"
+      - "august"
+      - "september"
+      - "october"
+      - "november"
+      - "december"
+  entity_block:
+    enabled: true
+    min_overlap: 1
+    min_keep: 1
+    stopwords:
+      - "the"
+      - "and"
+      - "for"
+      - "with"
+      - "from"
+      - "that"
+      - "this"
+      - "which"
+  atomicity_check:
+    enabled: true
+    max_sentences: 5
+    max_length: 800
+    min_keep: 2
+    disallowed_connectors:
+      - "however"
+      - "meanwhile"
+      - "whereas"
+      - "on the other hand"
+      - "additionally"
+      - "moreover"
+      - "furthermore"
+  diversify:
+    enabled: true
+    max_per_cluster: 2
+    min_clusters: 1
+    min_keep: 2
+
 logging:
   level: INFO
   json: true
