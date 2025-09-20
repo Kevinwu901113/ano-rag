@@ -35,6 +35,7 @@ except Exception:
 from query.evaluator import RetrievalEvaluator
 from utils.logging import StructuredLogger
 from vector_store.hybrid_retriever import HybridRetriever
+from rerank import CrossEncoderReranker
 
 # ========== 工具 ==========
 def _as_bool(value, default: bool = False) -> bool:
@@ -289,7 +290,8 @@ def process_one_task(task: Dict[str, Any],
                      recall_topk: int = 5,
                      structured_logger: Optional[StructuredLogger] = None,
                      candidate_log_limit: int = 50,
-                     retrieval_latency_collector: Optional[List[float]] = None
+                     retrieval_latency_collector: Optional[List[float]] = None,
+                     reranker: Optional[CrossEncoderReranker] = None
                      ) -> Tuple[Dict[str, Any], Dict[str, Any], Dict[str, Any], Dict[str, Any]]:
     t0 = time.time()
     # 仅 paragraphs → 构图
@@ -328,24 +330,42 @@ def process_one_task(task: Dict[str, Any],
             query=task.get("question", ""),
         )
 
+    question_text = task.get("question", "")
+    pre_rerank_support_ids = (retrieved_support_ids or [])[:recall_topk]
+    target_topk = max(1, min(recall_topk, getattr(reranker, "top_k", recall_topk) if reranker else recall_topk))
+
     rerank_cm = structured_logger.time_stage(
-        "rerank", query_id=task.get("id"), query=task.get("question", "")
+        "rerank", query_id=task.get("id"), query=question_text
     ) if structured_logger else nullcontext({"elapsed_ms": None})
+    reranked_candidates: List[Tuple[str, float]] = []
     with rerank_cm as rerank_ctx:
-        support_ids = (retrieved_support_ids or [])[:recall_topk]
+        if reranker and reranker.is_enabled:
+            reranked_candidates = reranker.rerank(
+                question=question_text,
+                candidates=recall_list,
+                notes=notes,
+                top_k=target_topk,
+            )
+        else:
+            reranked_candidates = [
+                (cand_id, float(score) if isinstance(score, (int, float)) else 0.0)
+                for cand_id, score in recall_list[:target_topk]
+            ]
+    if not reranked_candidates:
+        reranked_candidates = [
+            (cand_id, float(score) if isinstance(score, (int, float)) else 0.0)
+            for cand_id, score in recall_list[:target_topk]
+        ]
+    support_ids = [cand_id for cand_id, _ in reranked_candidates[:target_topk]]
     rerank_latency = rerank_ctx.get("elapsed_ms") if isinstance(rerank_ctx, dict) else None
     if structured_logger:
-        score_map = {nid: score for nid, score in recall_list}
-        rerank_candidates = [
-            {"id": nid, "score": score_map.get(nid)} for nid in support_ids
-        ]
         structured_logger.log_candidates(
             stage="rerank_after",
             query_id=task.get("id"),
-            candidates=rerank_candidates,
+            candidates=reranked_candidates,
             latency_ms=rerank_latency,
-            limit=len(rerank_candidates) or recall_topk,
-            query=task.get("question", ""),
+            limit=len(reranked_candidates) or target_topk,
+            query=question_text,
         )
 
     # 生成答案
@@ -353,14 +373,31 @@ def process_one_task(task: Dict[str, Any],
     answer  = answer_by_rag(task["question"], support_ids, id2note, router)
 
     # 结果与日志
+    def _note_id_to_idx(note_id: Any) -> Optional[int]:
+        if note_id is None:
+            return None
+        try:
+            text = str(note_id)
+        except Exception:
+            return None
+        if "__" in text:
+            text = text.split("__")[-1]
+        try:
+            return int(text)
+        except Exception:
+            return None
+
     used_idx = []
     for nid in support_ids:
-        # 从 note_id 还原 paragraphs 的 idx
-        # 形如 "<task_id>__<idx>"
-        try:
-            used_idx.append(int(nid.split("__")[-1]))
-        except Exception:
-            pass
+        idx = _note_id_to_idx(nid)
+        if idx is not None:
+            used_idx.append(idx)
+
+    pre_rerank_used_idx: List[int] = []
+    for nid in pre_rerank_support_ids[:target_topk]:
+        idx = _note_id_to_idx(nid)
+        if idx is not None:
+            pre_rerank_used_idx.append(idx)
 
     log = {
         "id": task["id"],
@@ -369,6 +406,7 @@ def process_one_task(task: Dict[str, Any],
         "n_edges": len(edges),
         "recall_top": recall_list[:min(20, len(recall_list))],
         "support_note_ids": support_ids,
+        "pre_rerank_support_note_ids": pre_rerank_support_ids[:target_topk],
         "retrieval_latency_ms": retrieval_latency,
         "rerank_latency_ms": rerank_latency,
         "retrieval_mode": retrieval_mode,
@@ -382,6 +420,7 @@ def process_one_task(task: Dict[str, Any],
         "id": task["id"],
         "recall": recall_list,
         "chosen": support_ids,
+        "pre_rerank_chosen": pre_rerank_support_ids[:target_topk],
         "mode": retrieval_mode,
     }
     evaluation_payload = {
@@ -390,6 +429,7 @@ def process_one_task(task: Dict[str, Any],
         "retrieval_candidates": recall_list,
         "predicted_answer": answer,
         "predicted_support_idxs": used_idx,
+        "pre_rerank_support_idxs": pre_rerank_used_idx,
         "reference": task,
     }
     return result_record, log, recall_record, evaluation_payload
@@ -449,6 +489,15 @@ def main():
         logging_enabled=logging_enabled,
         metrics_enabled=metrics_enabled,
         metrics_topk=metrics_topk,
+    )
+    reranker = CrossEncoderReranker(cfg, structured_logger)
+    structured_logger.info(
+        "rerank_initialized",
+        enabled=reranker.is_enabled,
+        model=getattr(reranker, "model_name", None),
+        top_n=getattr(reranker, "top_n", None),
+        top_k=getattr(reranker, "top_k", None),
+        device=getattr(reranker, "device", None),
     )
     retrieval_latencies: List[float] = []
     
@@ -519,6 +568,7 @@ def main():
                 structured_logger,
                 candidate_log_limit,
                 retrieval_latencies,
+                reranker,
             ): t for t in todo
         }
         for fu in as_completed(futs):

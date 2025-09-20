@@ -54,6 +54,14 @@ ann:
     ef_construction: 200
     ef_search: 64
 
+rerank:
+  enabled: false
+  model: null  # e.g. "cross-encoder/ms-marco-MiniLM-L-6-v2"
+  topN: 50
+  topK: 5
+  max_len: 512
+  device: null
+
 graph_v2:
   degree_cap: 20   # 每节点最大出边，避免星型爆炸
 
