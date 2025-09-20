@@ -26,6 +26,14 @@ graph_v2:
 # main.py 检索阶段（question→段落）上下文拼接数量
 retrieval_topk: 5
 
+metrics:
+  enable: false
+  topk_eval: 50
+
+logging:
+  level: INFO
+  json: true
+
 # === LLM 路由（LM Studio + Ollama）===
 llm_pool:
   backends:

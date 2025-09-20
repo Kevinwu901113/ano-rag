@@ -13,8 +13,9 @@ MuSiQue end2end (v2) runner
 """
 
 import argparse, json, os, sys, time, glob, math, yaml
+from contextlib import nullcontext
 from pathlib import Path
-from typing import List, Dict, Any, Tuple
+from typing import List, Dict, Any, Tuple, Optional
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # --- v2 构图/检索 ---
@@ -31,7 +32,23 @@ try:
 except Exception:
     OllamaClient = None
 
+from query.evaluator import RetrievalEvaluator
+from utils.logging import StructuredLogger
+
 # ========== 工具 ==========
+def _as_bool(value, default: bool = False) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in {"true", "1", "yes", "y", "on"}:
+            return True
+        if lowered in {"false", "0", "no", "n", "off"}:
+            return False
+    return bool(value)
+
 def read_jsonl(path: Path) -> List[Dict[str, Any]]:
     out = []
     with open(path, "r", encoding="utf-8") as f:
@@ -264,14 +281,51 @@ def answer_by_rag(question: str,
 def process_one_task(task: Dict[str, Any],
                      cfg: Dict[str, Any],
                      router,
-                     recall_topk: int = 5) -> Dict[str, Any]:
+                     recall_topk: int = 5,
+                     structured_logger: Optional[StructuredLogger] = None,
+                     candidate_log_limit: int = 50) -> Tuple[Dict[str, Any], Dict[str, Any], Dict[str, Any], Dict[str, Any]]:
     t0 = time.time()
     # 仅 paragraphs → 构图
     notes = notes_from_task(task)
     edges = build_graph_for_task(notes, cfg, router)
 
     # 仅 question → 检索
-    recall_list, support_ids = retrieve_for_question(task["question"], notes, edges, topk=recall_topk)
+    retrieval_cm = structured_logger.time_stage(
+        "retrieval", query_id=task.get("id"), query=task.get("question", "")
+    ) if structured_logger else nullcontext({"elapsed_ms": None})
+    with retrieval_cm as retrieval_ctx:
+        recall_list, retrieved_support_ids = retrieve_for_question(
+            task["question"], notes, edges, topk=recall_topk)
+    retrieval_latency = retrieval_ctx.get("elapsed_ms") if isinstance(retrieval_ctx, dict) else None
+    if structured_logger:
+        structured_logger.log_candidates(
+            stage="retrieval_after",
+            query_id=task.get("id"),
+            candidates=recall_list,
+            latency_ms=retrieval_latency,
+            limit=candidate_log_limit,
+            query=task.get("question", ""),
+        )
+
+    rerank_cm = structured_logger.time_stage(
+        "rerank", query_id=task.get("id"), query=task.get("question", "")
+    ) if structured_logger else nullcontext({"elapsed_ms": None})
+    with rerank_cm as rerank_ctx:
+        support_ids = (retrieved_support_ids or [])[:recall_topk]
+    rerank_latency = rerank_ctx.get("elapsed_ms") if isinstance(rerank_ctx, dict) else None
+    if structured_logger:
+        score_map = {nid: score for nid, score in recall_list}
+        rerank_candidates = [
+            {"id": nid, "score": score_map.get(nid)} for nid in support_ids
+        ]
+        structured_logger.log_candidates(
+            stage="rerank_after",
+            query_id=task.get("id"),
+            candidates=rerank_candidates,
+            latency_ms=rerank_latency,
+            limit=len(rerank_candidates) or recall_topk,
+            query=task.get("question", ""),
+        )
 
     # 生成答案
     id2note = {n["id"]: n for n in notes}
@@ -293,7 +347,9 @@ def process_one_task(task: Dict[str, Any],
         "n_notes": len(notes),
         "n_edges": len(edges),
         "recall_top": recall_list[:min(20, len(recall_list))],
-        "support_note_ids": support_ids
+        "support_note_ids": support_ids,
+        "retrieval_latency_ms": retrieval_latency,
+        "rerank_latency_ms": rerank_latency,
     }
     result_record = {
         "id": task["id"],
@@ -301,7 +357,15 @@ def process_one_task(task: Dict[str, Any],
         "support_idxs": used_idx  # 官方可选字段；仅 {id, answer} 也可提交
     }
     recall_record = {"id": task["id"], "recall": recall_list, "chosen": support_ids}
-    return result_record, log, recall_record
+    evaluation_payload = {
+        "query_id": task.get("id"),
+        "question": task.get("question", ""),
+        "retrieval_candidates": recall_list,
+        "predicted_answer": answer,
+        "predicted_support_idxs": used_idx,
+        "reference": task,
+    }
+    return result_record, log, recall_record, evaluation_payload
 
 # ========== 主入口 ==========
 def main():
@@ -316,6 +380,33 @@ def main():
 
     # 配置与 LLM 路由
     cfg = yaml.safe_load(open(args.config, "r", encoding="utf-8"))
+    logging_cfg = cfg.get("logging", {}) or {}
+    log_level = str(logging_cfg.get("level", "INFO"))
+    log_json = _as_bool(logging_cfg.get("json", True), True)
+    logging_enabled = log_level.upper() != "OFF"
+    structured_logger = StructuredLogger(
+        level=log_level,
+        json_lines=log_json,
+        enabled=logging_enabled,
+    )
+    metrics_cfg = cfg.get("metrics", {}) or {}
+    raw_topk = metrics_cfg.get("topk_eval", 50)
+    try:
+        metrics_topk = int(raw_topk)
+    except (TypeError, ValueError):
+        metrics_topk = 50
+    metrics_topk = max(1, metrics_topk)
+    metrics_enabled = _as_bool(metrics_cfg.get("enable", False), False)
+    evaluator = RetrievalEvaluator(topk_eval=metrics_topk) if metrics_enabled else None
+    candidate_log_limit = max(metrics_topk, args.retrieval_topk)
+    structured_logger.info(
+        "config_loaded",
+        log_level=log_level,
+        logging_json=log_json,
+        logging_enabled=logging_enabled,
+        metrics_enabled=metrics_enabled,
+        metrics_topk=metrics_topk,
+    )
     
     # 解析输入路径（优先级：--input → config.yaml）
     input_path_str = resolve_input_path(args.input, cfg)
@@ -363,21 +454,62 @@ def main():
     print(f"[INFO] jsonl_files={len(jsonl_files)}")
     print(f"[INFO] run_dir={run_dir}")
     print(f"[INFO] total={len(samples)}, done={len(done)}, todo={len(todo)}")
+    structured_logger.info(
+        "runner_start",
+        input_path=str(input_path),
+        total=len(samples),
+        done=len(done),
+        todo=len(todo),
+        run_dir=str(run_dir),
+    )
 
     # 并行执行（跑多少写多少）
     with ThreadPoolExecutor(max_workers=args.max_workers) as ex:
-        futs = {ex.submit(process_one_task, t, cfg, router, args.retrieval_topk): t for t in todo}
+        futs = {
+            ex.submit(
+                process_one_task,
+                t,
+                cfg,
+                router,
+                args.retrieval_topk,
+                structured_logger,
+                candidate_log_limit,
+            ): t for t in todo
+        }
         for fu in as_completed(futs):
             task = futs[fu]
             try:
-                result_record, log_record, recall_record = fu.result()
+                result_record, log_record, recall_record, eval_payload = fu.result()
                 append_jsonl(res_file,   result_record)
                 append_jsonl(log_file,   log_record)
                 append_jsonl(recall_file,recall_record)
+                if evaluator is not None and eval_payload:
+                    evaluator.add_record(**eval_payload)
             except Exception as e:
                 append_jsonl(err_file, {"id": task.get("id"), "error": str(e)})
+                structured_logger.error(
+                    "task_failed",
+                    query_id=task.get("id"),
+                    error=str(e),
+                )
 
     print(f"[DONE] wrote -> {res_file} , {log_file} , {err_file} , {recall_file}")
+    structured_logger.info(
+        "runner_finished",
+        result_file=str(res_file),
+        log_file=str(log_file),
+        error_file=str(err_file),
+        recall_file=str(recall_file),
+    )
+    if evaluator is not None:
+        report_path, report_payload = evaluator.finalize()
+        if report_path:
+            print(f"[METRICS] wrote -> {report_path}")
+            structured_logger.info(
+                "metrics_written",
+                path=str(report_path),
+                metrics=report_payload.get("metrics", {}),
+            )
 
 if __name__ == "__main__":
     main()
