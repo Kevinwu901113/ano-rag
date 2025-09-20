@@ -196,6 +196,7 @@ class RetrievalEvaluator:
         predicted_answer: Optional[str],
         predicted_support_idxs: Optional[Sequence[Any]],
         reference: Optional[Dict[str, Any]] = None,
+        pre_rerank_support_idxs: Optional[Sequence[Any]] = None,
     ) -> None:
         prepared_candidates = self._prepare_candidates(retrieval_candidates)
         record = {
@@ -206,6 +207,7 @@ class RetrievalEvaluator:
             "predicted_support_idxs": _ensure_int_list(predicted_support_idxs),
             "gold_answers": _extract_gold_answers(reference),
             "gold_support_idxs": _extract_gold_support_idxs(reference),
+            "pre_rerank_support_idxs": _ensure_int_list(pre_rerank_support_idxs),
         }
         self.records.append(record)
 
@@ -300,6 +302,7 @@ class RetrievalEvaluator:
         metrics: Dict[str, float] = {}
         gold_supports = record.get("gold_support_idxs", [])
         pred_supports = record.get("predicted_support_idxs", [])
+        pre_rerank_supports = record.get("pre_rerank_support_idxs", [])
         candidate_indices = [_candidate_idx(item.get("id")) for item in record.get("retrieval_candidates", [])]
         candidate_indices = [idx for idx in candidate_indices if idx is not None]
         recall_key = f"recall_at_{self.topk_eval}"
@@ -311,8 +314,16 @@ class RetrievalEvaluator:
             else:
                 metrics[recall_key] = 0.0
                 metrics[mrr_key] = 0.0
+            metrics["support_index_coverage_pre_rerank"] = _coverage(pre_rerank_supports, gold_supports)
+            metrics["support_f1_pre_rerank"] = _support_f1(pre_rerank_supports, gold_supports)
             metrics["support_index_coverage"] = _coverage(pred_supports, gold_supports)
             metrics["support_f1"] = _support_f1(pred_supports, gold_supports)
+            metrics["support_index_coverage_delta"] = (
+                metrics["support_index_coverage"] - metrics["support_index_coverage_pre_rerank"]
+            )
+            metrics["support_f1_delta"] = (
+                metrics["support_f1"] - metrics["support_f1_pre_rerank"]
+            )
         gold_answers = record.get("gold_answers", [])
         if gold_answers:
             pred_answer = record.get("predicted_answer", "")
@@ -348,6 +359,10 @@ class RetrievalEvaluator:
             "answer_f1": "AnswerF1",
             "support_f1": "SupportF1",
             "support_index_coverage": "SupportIndexCoverage",
+            "support_f1_pre_rerank": "SupportF1Pre",
+            "support_f1_delta": "SupportF1Delta",
+            "support_index_coverage_pre_rerank": "SupportIndexCoveragePre",
+            "support_index_coverage_delta": "SupportIndexCoverageDelta",
         }
         for key, values in aggregates.items():
             if not values:
