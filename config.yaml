@@ -20,6 +20,21 @@ retrieval_v2:
 mmr:
   keep_k: 3
 
+retriever:
+  hybrid:
+    enabled: true
+    fusion_topk: 50
+    bm25_topk: 50
+    vector_topk: 50
+    bm25_k1: 1.5
+    bm25_b: 0.75
+    fusion:
+      strategy: zscore
+      weights:
+        bm25: 1.0
+        vector: 1.0
+      rrf_k: 60
+
 embedding:
   model: "BAAI/bge-m3"
   dimension: 1024
@@ -48,6 +63,10 @@ retrieval_topk: 5
 metrics:
   enable: false
   topk_eval: 50
+  baseline:
+    path: null
+    metrics: {}
+    enforce_non_negative: false
 
 logging:
   level: INFO

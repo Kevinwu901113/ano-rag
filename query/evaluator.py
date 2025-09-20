@@ -173,10 +173,19 @@ def _extract_gold_support_idxs(reference: Optional[Dict[str, Any]]) -> List[int]
 class RetrievalEvaluator:
     """Accumulates retrieval and answer metrics across queries."""
 
-    def __init__(self, topk_eval: int = 50, results_dir: str = "results") -> None:
+    def __init__(
+        self,
+        topk_eval: int = 50,
+        results_dir: str = "results",
+        baseline: Optional[Any] = None,
+        enforce_non_negative: bool = False,
+    ) -> None:
         self.topk_eval = topk_eval
         self.results_dir = Path(results_dir)
         self.records: List[Dict[str, Any]] = []
+        self.baseline_reference_path: Optional[str] = None
+        self.baseline_metrics: Dict[str, float] = self._load_baseline(baseline)
+        self.enforce_non_negative = enforce_non_negative
 
     def add_record(
         self,
@@ -227,6 +236,65 @@ class RetrievalEvaluator:
                     score = None
             prepared.append({"id": cand_id, "score": score})
         return prepared
+
+    def _coerce_metric_dict(self, metrics: Any) -> Dict[str, float]:
+        if not isinstance(metrics, dict):
+            return {}
+        coerced: Dict[str, float] = {}
+        for key, value in metrics.items():
+            try:
+                coerced[str(key)] = float(value)
+            except (TypeError, ValueError):
+                continue
+        return coerced
+
+    def _load_baseline_from_path(self, path: Path) -> Dict[str, float]:
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return {}
+        metrics = payload.get("metrics")
+        if not metrics:
+            return {}
+        self.baseline_reference_path = str(path)
+        return self._coerce_metric_dict(metrics)
+
+    def _load_baseline(self, baseline: Optional[Any]) -> Dict[str, float]:
+        if baseline is None:
+            return {}
+        if isinstance(baseline, (str, Path)):
+            path = Path(baseline)
+            self.baseline_reference_path = str(path)
+            if path.exists():
+                return self._load_baseline_from_path(path)
+            return {}
+        if isinstance(baseline, dict):
+            path_value = baseline.get("path")
+            if path_value:
+                path = Path(path_value)
+                self.baseline_reference_path = str(path)
+                if path.exists():
+                    metrics = self._load_baseline_from_path(path)
+                    if metrics:
+                        return metrics
+            metrics = baseline.get("metrics")
+            if metrics:
+                return self._coerce_metric_dict(metrics)
+            return self._coerce_metric_dict(baseline)
+        return {}
+
+    def _baseline_comparison(self, summary: Dict[str, float]) -> Dict[str, float]:
+        deltas: Dict[str, float] = {}
+        if not self.baseline_metrics:
+            return deltas
+        targets = [f"R@{self.topk_eval}", f"MRR@{self.topk_eval}"]
+        for metric_key in targets:
+            baseline_value = self.baseline_metrics.get(metric_key)
+            current_value = summary.get(metric_key)
+            if baseline_value is None or current_value is None:
+                continue
+            deltas[f"Δ{metric_key}"] = current_value - baseline_value
+        return deltas
 
     def _per_query_metrics(self, record: Dict[str, Any]) -> Dict[str, float]:
         metrics: Dict[str, float] = {}
@@ -299,6 +367,21 @@ class RetrievalEvaluator:
             "metrics": summary,
             "per_query": per_query,
         }
+        if self.baseline_metrics:
+            comparison = self._baseline_comparison(summary)
+            baseline_info: Dict[str, Any] = {"metrics": self.baseline_metrics}
+            if self.baseline_reference_path:
+                baseline_info["reference_path"] = self.baseline_reference_path
+            if comparison:
+                baseline_info["comparison"] = comparison
+                baseline_info["non_negative"] = all(delta >= 0 for delta in comparison.values())
+                if self.enforce_non_negative:
+                    regressions = {k: v for k, v in comparison.items() if v < 0}
+                    if regressions:
+                        baseline_info["regressions"] = regressions
+            else:
+                baseline_info["non_negative"] = True
+            report["baseline"] = baseline_info
         self.results_dir.mkdir(parents=True, exist_ok=True)
         output_path = self.results_dir / f"baseline_{datetime.utcnow().strftime('%Y%m%d')}.json"
         with open(output_path, "w", encoding="utf-8") as f:
