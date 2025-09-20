@@ -20,6 +20,25 @@ retrieval_v2:
 mmr:
   keep_k: 3
 
+embedding:
+  model: "BAAI/bge-m3"
+  dimension: 1024
+  normalize: true
+  batch_size: 32
+  # instruction: ""        # 可选，统一前缀
+  # note_instruction: ""   # 可选，笔记编码前缀
+  # query_instruction: ""  # 可选，问题编码前缀
+
+ann:
+  enabled: false
+  index_path: "vector_index"
+  metric: ip
+  topk_raw: 50
+  params:
+    M: 32
+    ef_construction: 200
+    ef_search: 64
+
 graph_v2:
   degree_cap: 20   # 每节点最大出边，避免星型爆炸
 
