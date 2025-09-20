@@ -12,10 +12,10 @@ MuSiQue end2end (v2) runner
 - 断点重续：默认使用 result/ 下最新 run 目录，跳过已完成 id；加 --new 则新建 run 目录
 """
 
-import argparse, json, os, sys, time, glob, math, yaml
+import argparse, json, os, sys, time, glob, math, yaml, hashlib, re
 from contextlib import nullcontext
 from pathlib import Path
-from typing import List, Dict, Any, Tuple, Optional
+from typing import List, Dict, Any, Tuple, Optional, Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # --- v2 构图/检索 ---
@@ -34,6 +34,8 @@ except Exception:
 
 from query.evaluator import RetrievalEvaluator
 from utils.logging import StructuredLogger
+from vector.encoder import encode_notes, encode_query
+from vector.indexer import VectorIndexer
 
 # ========== 工具 ==========
 def _as_bool(value, default: bool = False) -> bool:
@@ -216,6 +218,63 @@ def build_graph_for_task(notes: List[Dict[str, Any]],
             })
     return edges
 
+# ========== 向量检索辅助 ==========
+def _safe_index_name(identifier: Any) -> str:
+    text = str(identifier or "default")
+    safe = re.sub(r"[^0-9a-zA-Z._-]", "_", text)
+    return safe or "default"
+
+
+def _resolve_index_path(base_path: Optional[str], task_id: Any) -> Optional[Path]:
+    if not base_path:
+        return None
+    base = Path(base_path)
+    if base.suffix:
+        return base
+    return base / f"{_safe_index_name(task_id)}.faiss"
+
+
+def _notes_fingerprint(notes: Sequence[Dict[str, Any]]) -> str:
+    hasher = hashlib.sha1()
+    for note in notes:
+        hasher.update(str(note.get("id", "")).encode("utf-8"))
+        hasher.update(b"\x1f")
+        hasher.update((note.get("title", "") or "").encode("utf-8"))
+        hasher.update(b"\x1f")
+        hasher.update((note.get("text", "") or "").encode("utf-8"))
+        hasher.update(b"\x1e")
+    return hasher.hexdigest()
+
+
+def _latency_percentile(values: Sequence[float], percentile: float) -> float:
+    if not values:
+        return 0.0
+    ordered = sorted(values)
+    if len(ordered) == 1:
+        return float(ordered[0])
+    rank = (len(ordered) - 1) * (percentile / 100.0)
+    lower = math.floor(rank)
+    upper = math.ceil(rank)
+    if lower == upper:
+        return float(ordered[int(rank)])
+    weight = rank - lower
+    return float(ordered[lower] * (1 - weight) + ordered[upper] * weight)
+
+
+def _summarize_latencies(latencies: Sequence[float]) -> Dict[str, float]:
+    if not latencies:
+        return {"count": 0, "mean_ms": 0.0, "p50_ms": 0.0, "p95_ms": 0.0}
+    values = [float(v) for v in latencies if v is not None]
+    if not values:
+        return {"count": 0, "mean_ms": 0.0, "p50_ms": 0.0, "p95_ms": 0.0}
+    mean_ms = sum(values) / len(values)
+    return {
+        "count": len(values),
+        "mean_ms": round(mean_ms, 3),
+        "p50_ms": round(_latency_percentile(values, 50), 3),
+        "p95_ms": round(_latency_percentile(values, 95), 3),
+    }
+
 # ========== 检索（仅 question，不透题） ==========
 def _idf(corpus: List[List[str]]) -> Dict[str, float]:
     df = {}
@@ -229,43 +288,178 @@ def _idf(corpus: List[List[str]]) -> Dict[str, float]:
 def _tokenize(text: str) -> List[str]:
     return [t for t in "".join(ch.lower() if ch.isalnum() else " " for ch in text).split() if t]
 
-def retrieve_for_question(question: str,
-                          notes: List[Dict[str, Any]],
-                          edges: List[Dict[str, Any]],
-                          topk: int = 5) -> Tuple[List[Tuple[str, float]], List[str]]:
-    """
-    返回：(recall_list, support_note_ids)
-      - recall_list: [(note_id, score), ...]  根据 question 与 note.text 的 BM25-like 打分
-      - support_note_ids: 最终用于生成的 note id（取前 topk）
-    """
-    # 构建索引（当前任务的 notes）
-    texts = [n["text"] for n in notes]
-    toks  = [_tokenize(t) for t in texts]
-    idf   = _idf(toks)
-    qtok  = _tokenize(question)
+def _bm25_retrieve(question: str,
+                   notes: List[Dict[str, Any]],
+                   topk: int) -> Tuple[List[Tuple[str, float]], List[str]]:
+    texts = [n.get("text", "") for n in notes]
+    toks = [_tokenize(t) for t in texts]
+    idf = _idf(toks)
+    qtok = _tokenize(question)
 
     def bm25(q: List[str], d: List[str], k1=1.5, b=0.75) -> float:
-        if not d: return 0.0
+        if not d:
+            return 0.0
         import collections
+
         tf = collections.Counter(d)
         dl = len(d)
         avgdl = sum(len(x) for x in toks) / max(1, len(toks))
         score = 0.0
         for w in set(q):
-            if w not in idf: continue
+            if w not in idf:
+                continue
             tfw = tf.get(w, 0)
             denom = tfw + k1 * (1 - b + b * dl / max(1e-9, avgdl))
             score += idf[w] * (tfw * (k1 + 1) / max(1e-9, denom))
         return score
 
-    scored = []
+    scored: List[Tuple[str, float]] = []
     for n in notes:
-        s = bm25(qtok, _tokenize(n["text"]))
-        scored.append((n["id"], s))
+        note_id = n.get("id")
+        if note_id is None:
+            continue
+        score = bm25(qtok, _tokenize(n.get("text", "")))
+        scored.append((note_id, score))
     scored.sort(key=lambda x: -x[1])
-
     support_note_ids = [nid for nid, _ in scored[:topk]]
     return scored, support_note_ids
+
+
+def retrieve_for_question(question: str,
+                          notes: List[Dict[str, Any]],
+                          edges: List[Dict[str, Any]],
+                          topk: int,
+                          config: Dict[str, Any],
+                          task_id: Any,
+                          logger: Optional[StructuredLogger] = None
+                          ) -> Tuple[List[Tuple[str, float]], List[str], str]:
+    ann_cfg = (config.get("ann") or {})
+    embedding_cfg = (config.get("embedding") or {})
+    use_vector = bool(embedding_cfg) and _as_bool(ann_cfg.get("enabled", False), False)
+    vector_results: Optional[List[Tuple[str, float]]] = None
+    vector_support: List[str] = []
+
+    if use_vector:
+        model_name = embedding_cfg.get("model")
+        dimension = embedding_cfg.get("dimension")
+        if not model_name or not dimension:
+            if logger:
+                logger.warning(
+                    "vector_config_incomplete",
+                    model=model_name,
+                    dimension=dimension,
+                )
+        else:
+            normalize = _as_bool(embedding_cfg.get("normalize", True), True)
+            batch_size = int(embedding_cfg.get("batch_size", 32) or 32)
+            note_instruction = embedding_cfg.get("note_instruction") or embedding_cfg.get("instruction")
+            query_instruction = embedding_cfg.get("query_instruction") or embedding_cfg.get("instruction")
+            index_path = _resolve_index_path(ann_cfg.get("index_path"), task_id)
+            ann_params = ann_cfg.get("params") or {}
+            topk_raw = int(ann_cfg.get("topk_raw", max(topk, 50)) or max(topk, 50))
+            topk_raw = max(topk_raw, topk)
+            fingerprint = _notes_fingerprint(notes)
+            indexer = VectorIndexer(
+                int(dimension),
+                metric=ann_cfg.get("metric", "ip"),
+                index_path=index_path,
+                ann_params=ann_params,
+            )
+
+            loaded = False
+            if index_path is not None:
+                try:
+                    loaded = indexer.load(expected_version=fingerprint)
+                except Exception as exc:  # pragma: no cover - defensive logging
+                    loaded = False
+                    if logger:
+                        logger.warning(
+                            "vector_index_load_failed",
+                            error=str(exc),
+                            index_path=str(index_path),
+                        )
+            if not loaded:
+                try:
+                    note_vectors = encode_notes(
+                        notes,
+                        model_name=model_name,
+                        normalize=normalize,
+                        batch_size=batch_size,
+                        instruction=note_instruction,
+                    )
+                except Exception as exc:  # pragma: no cover - encoding failure
+                    if logger:
+                        logger.error("vector_note_encode_failed", error=str(exc))
+                else:
+                    if note_vectors.shape[1] != int(dimension):
+                        if logger:
+                            logger.error(
+                                "vector_dimension_mismatch",
+                                expected=int(dimension),
+                                actual=int(note_vectors.shape[1]),
+                            )
+                    else:
+                        try:
+                            ids = []
+                            for idx, note in enumerate(notes):
+                                note_id = note.get("id")
+                                ids.append(str(note_id) if note_id is not None else f"note_{idx}")
+                            indexer.build(
+                                note_vectors,
+                                ids,
+                                note_version=fingerprint,
+                            )
+                            if index_path is not None:
+                                try:
+                                    indexer.persist()
+                                except Exception as exc:  # pragma: no cover
+                                    if logger:
+                                        logger.warning(
+                                            "vector_index_persist_failed",
+                                            error=str(exc),
+                                            index_path=str(index_path),
+                                        )
+                            if logger:
+                                logger.debug(
+                                    "vector_index_built",
+                                    count=len(notes),
+                                    index_path=str(index_path) if index_path else None,
+                                )
+                        except Exception as exc:  # pragma: no cover - build failure
+                            if logger:
+                                logger.error("vector_index_build_failed", error=str(exc))
+            else:
+                if logger:
+                    logger.debug(
+                        "vector_index_loaded",
+                        index_path=str(index_path),
+                        count=len(notes),
+                    )
+
+            if indexer.index is not None and len(indexer) > 0:
+                try:
+                    query_vec = encode_query(
+                        question,
+                        model_name=model_name,
+                        normalize=normalize,
+                        instruction=query_instruction,
+                    )
+                    vector_results = indexer.query(query_vec, topk_raw)
+                    vector_support = [nid for nid, _ in vector_results[:topk]]
+                except Exception as exc:  # pragma: no cover - query failure
+                    vector_results = None
+                    vector_support = []
+                    if logger:
+                        logger.error("vector_query_failed", error=str(exc))
+            elif logger and use_vector:
+                logger.warning("vector_index_unavailable", index_path=str(index_path))
+
+    if vector_results:
+        return vector_results, vector_support, "vector"
+
+    # fallback to BM25
+    bm25_results, bm25_support = _bm25_retrieve(question, notes, topk)
+    return bm25_results, bm25_support, "bm25"
 
 # ========== 生成答案（RAG） ==========
 def answer_by_rag(question: str,
@@ -283,7 +477,9 @@ def process_one_task(task: Dict[str, Any],
                      router,
                      recall_topk: int = 5,
                      structured_logger: Optional[StructuredLogger] = None,
-                     candidate_log_limit: int = 50) -> Tuple[Dict[str, Any], Dict[str, Any], Dict[str, Any], Dict[str, Any]]:
+                     candidate_log_limit: int = 50,
+                     retrieval_latency_collector: Optional[List[float]] = None
+                     ) -> Tuple[Dict[str, Any], Dict[str, Any], Dict[str, Any], Dict[str, Any]]:
     t0 = time.time()
     # 仅 paragraphs → 构图
     notes = notes_from_task(task)
@@ -294,10 +490,24 @@ def process_one_task(task: Dict[str, Any],
         "retrieval", query_id=task.get("id"), query=task.get("question", "")
     ) if structured_logger else nullcontext({"elapsed_ms": None})
     with retrieval_cm as retrieval_ctx:
-        recall_list, retrieved_support_ids = retrieve_for_question(
-            task["question"], notes, edges, topk=recall_topk)
+        recall_list, retrieved_support_ids, retrieval_mode = retrieve_for_question(
+            task["question"],
+            notes,
+            edges,
+            topk=recall_topk,
+            config=cfg,
+            task_id=task.get("id"),
+            logger=structured_logger,
+        )
     retrieval_latency = retrieval_ctx.get("elapsed_ms") if isinstance(retrieval_ctx, dict) else None
+    if retrieval_latency is not None and retrieval_latency_collector is not None:
+        retrieval_latency_collector.append(float(retrieval_latency))
     if structured_logger:
+        structured_logger.info(
+            "retrieval_mode",
+            query_id=task.get("id"),
+            mode=retrieval_mode,
+        )
         structured_logger.log_candidates(
             stage="retrieval_after",
             query_id=task.get("id"),
@@ -350,13 +560,19 @@ def process_one_task(task: Dict[str, Any],
         "support_note_ids": support_ids,
         "retrieval_latency_ms": retrieval_latency,
         "rerank_latency_ms": rerank_latency,
+        "retrieval_mode": retrieval_mode,
     }
     result_record = {
         "id": task["id"],
         "answer": answer,
         "support_idxs": used_idx  # 官方可选字段；仅 {id, answer} 也可提交
     }
-    recall_record = {"id": task["id"], "recall": recall_list, "chosen": support_ids}
+    recall_record = {
+        "id": task["id"],
+        "recall": recall_list,
+        "chosen": support_ids,
+        "mode": retrieval_mode,
+    }
     evaluation_payload = {
         "query_id": task.get("id"),
         "question": task.get("question", ""),
@@ -407,6 +623,7 @@ def main():
         metrics_enabled=metrics_enabled,
         metrics_topk=metrics_topk,
     )
+    retrieval_latencies: List[float] = []
     
     # 解析输入路径（优先级：--input → config.yaml）
     input_path_str = resolve_input_path(args.input, cfg)
@@ -474,6 +691,7 @@ def main():
                 args.retrieval_topk,
                 structured_logger,
                 candidate_log_limit,
+                retrieval_latencies,
             ): t for t in todo
         }
         for fu in as_completed(futs):
@@ -492,6 +710,15 @@ def main():
                     query_id=task.get("id"),
                     error=str(e),
                 )
+
+    if retrieval_latencies:
+        stats = _summarize_latencies(retrieval_latencies)
+        structured_logger.info("retrieval_latency_stats", **stats)
+        print(
+            "[STATS] retrieval latency ms "
+            f"mean={stats['mean_ms']}, p50={stats['p50_ms']}, "
+            f"p95={stats['p95_ms']} (n={stats['count']})"
+        )
 
     print(f"[DONE] wrote -> {res_file} , {log_file} , {err_file} , {recall_file}")
     structured_logger.info(
