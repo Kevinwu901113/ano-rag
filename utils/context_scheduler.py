@@ -809,6 +809,7 @@ class MultiHopContextScheduler(ContextScheduler):
         max_tokens: Optional[int] = None,
         budget_tokens: Optional[int] = None,
         query_processor=None,
+        **_: Any,
     ) -> List[Dict[str, Any]]:
         candidate_list = [c for c in candidate_notes if isinstance(c, MutableMapping)]
         if not candidate_list:

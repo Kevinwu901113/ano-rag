@@ -57,9 +57,25 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "bridge_boost_epsilon": 0.02,
         "debug_log": True,
     },
+    "scheduler": {
+        "topk": 12,
+        "neighbor_hops": 1,
+        "budget_tokens": 2048,
+        "time_window_sec": 86400,
+        "per_cluster_limit": 2,
+    },
+    "guardrail": {
+        "diversify": {
+            "topk": 12,
+            "neighbor_hops": 1,
+            "budget_tokens": 2048,
+            "time_window_sec": 86400,
+            "per_cluster_limit": 2,
+        }
+    },
     "llm": {
-        "provider": "lmstudio", 
-        "model": "openai/gpt-oss-20b", 
+        "provider": "lmstudio",
+        "model": "openai/gpt-oss-20b",
         "base_url": "http://localhost:1234/v1",
         "timeout": 60,
         "instances": 1,

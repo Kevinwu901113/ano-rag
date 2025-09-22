@@ -524,7 +524,13 @@ class QueryProcessor:
             return {}
 
         kwargs: Dict[str, Any] = {}
-        for key in ('topk', 'neighbor_hops', 'budget_tokens'):
+        for key in (
+            'topk',
+            'neighbor_hops',
+            'budget_tokens',
+            'time_window_sec',
+            'per_cluster_limit',
+        ):
             value = scheduler_config.get(key)
             if value is not None:
                 kwargs[key] = value
