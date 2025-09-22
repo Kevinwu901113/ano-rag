@@ -1,13 +1,22 @@
 import os
+import re
+from collections import Counter
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
+
 import numpy as np
-from typing import List, Dict, Any, Optional, Tuple
 from loguru import logger
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
-import re
-from collections import Counter
+
 from .embedding_manager import EmbeddingManager
 from .vector_index import VectorIndex
+from .retrieval_result import (
+    HybridRetrievalResult,
+    collect_topical_tags,
+    merge_per_candidate_maps,
+    normalize_timestamp,
+    resolve_candidate_id,
+)
 from utils import BatchProcessor, FileUtils
 from config import config
 
@@ -183,10 +192,10 @@ class VectorRetriever:
             logger.error(f"Failed to build vector index: {e}")
             return False
     
-    def search(self, queries: List[str], 
+    def search(self, queries: List[str],
               top_k: Optional[int] = None,
               similarity_threshold: Optional[float] = None,
-              include_metadata: bool = True) -> List[List[Dict[str, Any]]]:
+              include_metadata: bool = True) -> List[HybridRetrievalResult]:
         """搜索相似的原子笔记"""
         if not queries:
             return []
@@ -216,28 +225,25 @@ class VectorRetriever:
             )
             
             # 处理搜索结果
-            final_results = []
-            
+            structured_results: List[HybridRetrievalResult] = []
+
             # 确保search_results是列表的列表
             if len(queries) == 1 and isinstance(search_results, list) and \
                len(search_results) > 0 and isinstance(search_results[0], dict):
                 search_results = [search_results]
-            
+
             for query_idx, query in enumerate(queries):
-                query_results = []
-                
+                query_results: List[Dict[str, Any]] = []
+
                 if query_idx < len(search_results):
                     for result in search_results[query_idx]:
-                        # 过滤低相似度结果
                         if result.get('similarity', 0) < similarity_threshold:
                             continue
-                        
-                        # 获取原子笔记
+
                         note_index = result['index']
                         if note_index < len(self.atomic_notes):
                             note = self.atomic_notes[note_index].copy()
-                            
-                            # 添加检索信息
+
                             retrieval_info = {
                                 'similarity': result['similarity'],
                                 'score': result['score'],
@@ -245,27 +251,25 @@ class VectorRetriever:
                                 'query': query,
                                 'retrieval_method': 'vector_search'
                             }
-                            
+
                             if include_metadata:
                                 note['retrieval_info'] = retrieval_info
                             else:
-                                # 只保留核心信息，但保留paragraph_idxs字段
                                 note = {
                                     'note_id': note.get('note_id'),
                                     'content': note.get('content'),
                                     'paragraph_idxs': note.get('paragraph_idxs', []),
                                     'retrieval_info': retrieval_info
                                 }
-                            
+
                             query_results.append(note)
-                
-                final_results.append(query_results)
-            
-            # 记录搜索统计
-            total_results = sum(len(results) for results in final_results)
+
+                structured_results.append(self._build_result(query_results, query))
+
+            total_results = sum(len(result) for result in structured_results)
             logger.info(f"Search completed: {total_results} results for {len(queries)} queries")
-            
-            return final_results
+
+            return structured_results
         
         except Exception as e:
             logger.error(f"Failed to search: {e}")
@@ -275,7 +279,7 @@ class VectorRetriever:
                     top_k: Optional[int] = None,
                     similarity_threshold: Optional[float] = None,
                     include_metadata: bool = True,
-                    **kwargs) -> List[List[Dict[str, Any]]]:
+                    **kwargs) -> List[HybridRetrievalResult]:
         """使用混合检索进行搜索"""
         if not self.enable_hybrid_search or not self.hybrid_searcher:
             logger.warning("Hybrid search not available, falling back to vector search")
@@ -292,27 +296,23 @@ class VectorRetriever:
                 similarity_threshold=similarity_threshold or self.similarity_threshold,
                 **kwargs
             )
-            
-            # 格式化结果
-            formatted_results = []
+
+            structured_results: List[HybridRetrievalResult] = []
             for query_idx, query_results in enumerate(results):
-                formatted_query_results = []
+                formatted_query_results: List[Dict[str, Any]] = []
                 for result in query_results:
-                    if include_metadata:
-                        formatted_query_results.append(result)
-                    else:
-                        # 只保留核心信息，但保留paragraph_idxs字段
-                        core_result = {
-                            'note_id': result.get('note_id'),
-                            'content': result.get('content'),
-                            'paragraph_idxs': result.get('paragraph_idxs', []),
-                            'retrieval_info': result.get('retrieval_info')
-                        }
-                        formatted_query_results.append(core_result)
-                formatted_results.append(formatted_query_results)
-            
-            logger.info(f"Hybrid search completed: {sum(len(r) for r in formatted_results)} total results")
-            return formatted_results
+                    note = result if include_metadata else {
+                        'note_id': result.get('note_id'),
+                        'content': result.get('content'),
+                        'paragraph_idxs': result.get('paragraph_idxs', []),
+                        'retrieval_info': result.get('retrieval_info')
+                    }
+                    formatted_query_results.append(note)
+                query_text = queries[query_idx] if query_idx < len(queries) else None
+                structured_results.append(self._build_result(formatted_query_results, query_text))
+
+            logger.info(f"Hybrid search completed: {sum(len(r) for r in structured_results)} total results")
+            return structured_results
             
         except Exception as e:
             logger.error(f"Hybrid search failed: {e}")
@@ -323,18 +323,18 @@ class VectorRetriever:
                            top_k: Optional[int] = None,
                            similarity_threshold: Optional[float] = None,
                            include_metadata: bool = True,
-                           **kwargs) -> List[Dict[str, Any]]:
+                           **kwargs) -> HybridRetrievalResult:
         """单个查询的混合检索"""
         results = self.hybrid_search([query], top_k, similarity_threshold, include_metadata, **kwargs)
-        return results[0] if results else []
-    
-    def search_single(self, query: str, 
+        return results[0] if results else HybridRetrievalResult()
+
+    def search_single(self, query: str,
                      top_k: Optional[int] = None,
                      similarity_threshold: Optional[float] = None,
-                     include_metadata: bool = True) -> List[Dict[str, Any]]:
+                     include_metadata: bool = True) -> HybridRetrievalResult:
         """搜索单个查询"""
         results = self.search([query], top_k, similarity_threshold, include_metadata)
-        return results[0] if results else []
+        return results[0] if results else HybridRetrievalResult()
     
     def retrieve(self, query: str,
                 top_k: Optional[int] = None,
@@ -345,7 +345,7 @@ class VectorRetriever:
                 boost_predicates: Optional[List[str]] = None,
                 topk_multiplier: float = 3.0,
                 include_metadata: bool = True,
-                enable_guardrail: Optional[bool] = None) -> List[Dict[str, Any]]:
+                enable_guardrail: Optional[bool] = None) -> HybridRetrievalResult:
         """增强的向量检索器，支持过滤和相关性提升功能
         
         Args:
@@ -379,16 +379,18 @@ class VectorRetriever:
             # 第1阶段：向量检索 - 获取 top_k*topk_multiplier 数量的候选结果
             effective_multiplier = topk_multiplier if topk_multiplier is not None else self.default_topk_multiplier
             expanded_top_k = int(top_k * effective_multiplier)
-            candidates = self.search_single(
+            candidate_results = self.search_single(
                 query=query,
                 top_k=expanded_top_k,
                 similarity_threshold=0.0,  # 暂时不过滤，后续统一处理
                 include_metadata=include_metadata
             )
-            
+
+            candidates = candidate_results.to_list()
+
             if not candidates:
                 logger.info("No candidates found in vector search")
-                return []
+                return HybridRetrievalResult()
                 
             logger.info(f"Found {len(candidates)} candidates from vector search")
             
@@ -407,8 +409,8 @@ class VectorRetriever:
                 logger.info(f"After filtering: {len(candidates)} candidates remain")
             
             # 第3阶段：相关性调整
-            enhanced_candidates = []
-            
+            enhanced_candidates: List[Dict[str, Any]] = []
+
             for candidate in candidates:
                 # 获取候选文本内容
                 content = candidate.get('content', '')
@@ -500,16 +502,143 @@ class VectorRetriever:
             
             # 返回 top_k 个结果
             final_results = filtered_final[:top_k]
-            
+
             logger.info(f"Enhanced retrieval completed: {len(final_results)} results returned")
-            
-            return final_results
-            
+
+            return self._build_result(final_results, query)
+
         except Exception as e:
             logger.error(f"Enhanced retrieval failed: {e}")
             # 回退到基础搜索
             logger.info("Falling back to basic search")
             return self.search_single(query, top_k, similarity_threshold, include_metadata)
+
+    def _canonical_paragraph_ids(self, note: Dict[str, Any]) -> List[str]:
+        values: List[str] = []
+
+        for key in ('paragraph_id',):
+            value = note.get(key)
+            if isinstance(value, (list, tuple, set)):
+                values.extend(str(v) for v in value if v is not None)
+            elif value is not None:
+                values.append(str(value))
+
+        extra_ids = note.get('paragraph_ids')
+        if isinstance(extra_ids, (list, tuple, set)):
+            values.extend(str(v) for v in extra_ids if v is not None)
+
+        paragraph_idxs = note.get('paragraph_idxs')
+        if isinstance(paragraph_idxs, Iterable) and not isinstance(paragraph_idxs, (str, bytes, dict)):
+            base = note.get('note_id') or note.get('document_id') or note.get('doc_id')
+            for idx in paragraph_idxs:
+                if idx is None:
+                    continue
+                values.append(f"{base}:{idx}" if base is not None else str(idx))
+
+        metadata = note.get('metadata')
+        if isinstance(metadata, Mapping):
+            for key in ('paragraph_id', 'paragraph', 'paragraph_ids'):
+                meta_value = metadata.get(key)
+                if isinstance(meta_value, (list, tuple, set)):
+                    values.extend(str(v) for v in meta_value if v is not None)
+                elif meta_value is not None:
+                    values.append(str(meta_value))
+
+        canonical: List[str] = []
+        seen: set[str] = set()
+        for value in values:
+            if value in seen:
+                continue
+            seen.add(value)
+            canonical.append(value)
+        return canonical
+
+    def _extract_timestamp(self, note: Dict[str, Any]) -> Optional[float]:
+        timestamp_fields = ('timestamp', 'created_at', 'published_at', 'updated_at', 'time')
+        for key in timestamp_fields:
+            if key in note:
+                normalized = normalize_timestamp(note.get(key))
+                if normalized is not None:
+                    return normalized
+
+        metadata = note.get('metadata')
+        if isinstance(metadata, Mapping):
+            for key in ('timestamp', 'created_at', 'published_at', 'updated_at'):
+                if key in metadata:
+                    normalized = normalize_timestamp(metadata.get(key))
+                    if normalized is not None:
+                        return normalized
+
+        return None
+
+    def _apply_structured_metadata(self, note: Dict[str, Any]) -> Dict[str, Any]:
+        payload: Dict[str, Any] = {}
+
+        paragraph_ids = self._canonical_paragraph_ids(note)
+        if paragraph_ids:
+            payload['paragraph_ids'] = list(paragraph_ids)
+            payload['paragraph_id'] = paragraph_ids[0]
+            note.setdefault('paragraph_id', paragraph_ids[0])
+            note.setdefault('paragraph_ids', list(paragraph_ids))
+
+        timestamp = self._extract_timestamp(note)
+        if timestamp is not None:
+            payload['timestamp'] = timestamp
+            existing_timestamp = note.get('timestamp')
+            if existing_timestamp is None or not isinstance(existing_timestamp, (int, float)):
+                if existing_timestamp is not None and 'raw_timestamp' not in note:
+                    note['raw_timestamp'] = existing_timestamp
+                note['timestamp'] = timestamp
+
+        tags = collect_topical_tags(note)
+        if tags:
+            payload['topical_tags'] = list(tags)
+            if not note.get('topical_tags'):
+                note['topical_tags'] = list(tags)
+
+        cluster_id = note.get('cluster_id')
+        if cluster_id is not None:
+            payload['cluster_id'] = cluster_id
+
+        return payload
+
+    def _build_result(self, candidates: Sequence[Dict[str, Any]], query: Optional[str] = None) -> HybridRetrievalResult:
+        structured: List[Dict[str, Any]] = []
+        per_candidate: Dict[str, Dict[str, Any]] = {}
+
+        for note in candidates:
+            if not isinstance(note, dict):
+                continue
+
+            base_payload = self._apply_structured_metadata(note)
+            candidate_id = resolve_candidate_id(note)
+            structured.append(note)
+
+            if not candidate_id:
+                continue
+
+            payload = dict(base_payload)
+
+            retrieval_info = note.get('retrieval_info')
+            if isinstance(retrieval_info, dict):
+                payload['retrieval_info'] = dict(retrieval_info)
+                score = retrieval_info.get('similarity')
+                if not isinstance(score, (int, float)):
+                    score = retrieval_info.get('score')
+                if isinstance(score, (int, float)):
+                    payload['score'] = float(score)
+
+            if query is not None:
+                payload.setdefault('query', query)
+
+            for key in ('note_id', 'id', 'document_id', 'doc_id'):
+                value = note.get(key)
+                if value is not None:
+                    payload.setdefault(key, value)
+
+            merge_per_candidate_maps(per_candidate, {candidate_id: payload})
+
+        return HybridRetrievalResult(list(structured), per_candidate)
     
     def add_notes(self, new_notes: List[Dict[str, Any]], 
                  rebuild_index: bool = False) -> bool:

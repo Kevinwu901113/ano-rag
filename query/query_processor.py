@@ -1,4 +1,4 @@
-from typing import List, Dict, Any, Optional, Mapping, Sequence
+from typing import List, Dict, Any, Optional, Mapping, Sequence, Set, Tuple
 from loguru import logger
 import os
 import numpy as np
@@ -17,6 +17,11 @@ from llm import OllamaClient, LMStudioClient, LocalLLM
 from llm.prompts import build_context_prompt, build_context_prompt_with_passages
 from utils.robust_json_parser import extract_prediction_with_retry
 from vector_store import VectorRetriever, EnhancedRecallOptimizer
+from vector_store.retrieval_result import (
+    HybridRetrievalResult,
+    merge_per_candidate_maps,
+    resolve_candidate_id,
+)
 from graph.graph_builder import GraphBuilder
 from graph.graph_index import GraphIndex
 from graph.graph_retriever import GraphRetriever
@@ -542,11 +547,7 @@ class QueryProcessor:
         return kwargs
 
     def _derive_candidate_identifier(self, note: Mapping[str, Any]) -> Optional[str]:
-        for key in ('note_id', 'id', 'uuid', 'document_id', 'doc_id'):
-            value = note.get(key)
-            if value is not None:
-                return str(value)
-        return None
+        return resolve_candidate_id(note)
 
     def _extract_scheduler_payload(self, note: Mapping[str, Any]) -> Dict[str, Any]:
         payload: Dict[str, Any] = {}
@@ -595,22 +596,54 @@ class QueryProcessor:
 
         return payload
 
+    def _collect_candidates_from_results(
+        self,
+        results: Sequence[Any],
+    ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+        candidates: List[Dict[str, Any]] = []
+        per_candidate: Dict[str, Any] = {}
+        seen_ids: Set[str] = set()
+
+        for entry in results or []:
+            if isinstance(entry, HybridRetrievalResult):
+                merge_per_candidate_maps(per_candidate, entry.per_candidate)
+                iterable = entry.candidates
+            elif isinstance(entry, Sequence):
+                iterable = entry
+            else:
+                continue
+
+            for note in iterable:
+                if not isinstance(note, Mapping):
+                    continue
+                candidate_id = resolve_candidate_id(note)
+                if candidate_id and candidate_id in seen_ids:
+                    continue
+                if candidate_id:
+                    seen_ids.add(candidate_id)
+                candidates.append(note)
+
+        return candidates, per_candidate
+
     def _build_per_candidate_metadata(
         self,
         candidates: Sequence[Mapping[str, Any]],
+        base: Optional[Mapping[str, Any]] = None,
     ) -> Dict[str, Any]:
         if not candidates:
-            return {}
+            return dict(base) if isinstance(base, Mapping) else {}
 
         scheduler = getattr(self, 'scheduler', None)
         if scheduler is None:
-            return {}
+            return dict(base) if isinstance(base, Mapping) else {}
 
         get_candidate_id = None
         if hasattr(scheduler, '_candidate_id'):
             get_candidate_id = scheduler._candidate_id  # type: ignore[attr-defined]
 
         per_candidate: Dict[str, Any] = {}
+        if isinstance(base, Mapping):
+            merge_per_candidate_maps(per_candidate, base)
         for note in candidates:
             if not isinstance(note, Mapping):
                 continue
@@ -632,13 +665,7 @@ class QueryProcessor:
             if not payload:
                 continue
 
-            existing = per_candidate.get(candidate_id)
-            if isinstance(existing, Mapping):
-                merged = dict(existing)
-                merged.update(payload)
-                per_candidate[candidate_id] = merged
-            else:
-                per_candidate[candidate_id] = payload
+            merge_per_candidate_maps(per_candidate, {candidate_id: payload})
 
         return per_candidate
 
@@ -1311,7 +1338,7 @@ class QueryProcessor:
             return []
         
         candidate_pool = []
-        seen_ids = set()
+        seen_ids: Set[str] = set()
         entity_stats = {}
         
         for entity in bridge_entities:
@@ -1322,11 +1349,11 @@ class QueryProcessor:
             
             entity_candidates = 0
             for candidate in candidates:
-                note_id = candidate.get('note_id')
-                if note_id and note_id not in seen_ids:
+                candidate_id = resolve_candidate_id(candidate)
+                if candidate_id and candidate_id not in seen_ids:
                     candidate['bridge_entity'] = entity
                     candidate_pool.append(candidate)
-                    seen_ids.add(note_id)
+                    seen_ids.add(candidate_id)
                     entity_candidates += 1
             
             entity_stats[entity] = entity_candidates
@@ -1350,17 +1377,18 @@ class QueryProcessor:
             entity_candidates = 0
             try:
                 results = self.vector_retriever.search([entity])
-                if results and results[0]:
-                    for candidate in results[0][:5]:  # 每个实体取前5个结果
-                        # 检查候选是否包含该实体
-                        if self._candidate_contains_entity(candidate, entity):
-                            note_id = candidate.get('note_id')
-                            if note_id and note_id not in seen_ids:
-                                candidate['bridge_entity'] = entity
-                                candidate['fallback_source'] = 'vector_search'
-                                fallback_candidates.append(candidate)
-                                seen_ids.add(note_id)
-                                entity_candidates += 1
+                result_set = results[0] if results else HybridRetrievalResult()
+                for candidate in list(result_set)[:5]:  # 每个实体取前5个结果
+                    if not isinstance(candidate, Mapping):
+                        continue
+                    if self._candidate_contains_entity(candidate, entity):
+                        candidate_id = resolve_candidate_id(candidate)
+                        if candidate_id and candidate_id not in seen_ids:
+                            candidate['bridge_entity'] = entity
+                            candidate['fallback_source'] = 'vector_search'
+                            fallback_candidates.append(candidate)
+                            seen_ids.add(candidate_id)
+                            entity_candidates += 1
                 entity_fallback_stats[entity] = entity_candidates
             except Exception as e:
                 logger.error(f"Fallback search failed for entity {entity}: {e}")
@@ -1717,24 +1745,20 @@ class QueryProcessor:
             # 使用新的结构增强上下文调度器
             # 首先进行向量检索获取候选结果
             vector_results = self.vector_retriever.search(queries)
-            
-            # 合并结果并去重
-            candidate_notes = []
-            seen_note_ids = set()
-            for sub in vector_results:
-                for note in sub:
-                    note_id = note.get('note_id')
-                    if note_id and note_id not in seen_note_ids:
-                        candidate_notes.append(note)
-                        seen_note_ids.add(note_id)
-                    elif not note_id:  # 如果没有note_id，基于内容去重
-                        content = note.get('content', '')
-                        content_hash = hash(content)
-                        if content_hash not in seen_note_ids:
-                            candidate_notes.append(note)
-                            seen_note_ids.add(content_hash)
-            
-            logger.info(f"Initial vector recall for dispatcher: {len(candidate_notes)} unique notes")
+
+            candidate_notes, per_candidate_metadata = self._collect_candidates_from_results(vector_results)
+            total_raw = sum(len(result) for result in vector_results) if vector_results else 0
+            seen_note_ids: Set[str] = set()
+            for note in candidate_notes:
+                candidate_id = resolve_candidate_id(note)
+                if candidate_id:
+                    seen_note_ids.add(candidate_id)
+
+            logger.info(
+                "Initial vector recall for dispatcher: %s unique notes from %s total results",
+                len(candidate_notes),
+                total_raw,
+            )
             
             # 如果启用了多跳检索，添加图检索结果
             logger.info(f"Multi-hop enabled: {self.multi_hop_enabled}")
@@ -1764,11 +1788,11 @@ class QueryProcessor:
                     
                     # 将图检索结果添加到候选结果中
                     for note in graph_notes:
-                        note_id = note.get('note_id')
-                        if note_id and note_id not in seen_note_ids:
+                        candidate_id = resolve_candidate_id(note)
+                        if candidate_id and candidate_id not in seen_note_ids:
                             candidate_notes.append(note)
-                            seen_note_ids.add(note_id)
-                    
+                            seen_note_ids.add(candidate_id)
+
                     logger.info(f"Added {len(graph_notes)} graph retrieval results")
                     
                 except Exception as e:
@@ -1833,28 +1857,28 @@ class QueryProcessor:
             # 1. 首轮向量召回
             vector_results = self.vector_retriever.search(queries)
 
-            # 合并结果并去重
-            candidate_notes = []
-            seen_note_ids = set()
-            for sub in vector_results:
-                for note in sub:
-                    note_id = note.get('note_id')
-                    if note_id and note_id not in seen_note_ids:
-                        candidate_notes.append(note)
-                        seen_note_ids.add(note_id)
-                    elif not note_id:  # 如果没有note_id，基于内容去重
-                        content = note.get('content', '')
-                        content_hash = hash(content)
-                        if content_hash not in seen_note_ids:
-                            candidate_notes.append(note)
-                            seen_note_ids.add(content_hash)
-            
-            logger.info(f"Initial vector recall: {len(candidate_notes)} unique notes from {sum(len(sub) for sub in vector_results)} total results")
+            candidate_notes, per_candidate_metadata = self._collect_candidates_from_results(vector_results)
+            total_raw_results = sum(len(sub) for sub in vector_results) if vector_results else 0
+
+            logger.info(
+                "Initial vector recall: %s unique notes from %s total results",
+                len(candidate_notes),
+                total_raw_results,
+            )
+
+            per_candidate_metadata = self._build_per_candidate_metadata(
+                candidate_notes,
+                base=per_candidate_metadata,
+            )
             
             # 第一阶段命名空间过滤：首轮召回后
             if self.namespace_filtering_enabled and 'initial_recall' in self.namespace_filter_stages and dataset and qid:
                 try:
                     candidate_notes = filter_notes_by_namespace(candidate_notes, dataset, qid)
+                    per_candidate_metadata = self._build_per_candidate_metadata(
+                        candidate_notes,
+                        base=per_candidate_metadata,
+                    )
                     logger.info(f"Stage 1 - After initial recall namespace filtering: {len(candidate_notes)} notes")
                 except Exception as e:
                     if self.same_namespace_bm25_fallback:
@@ -1873,30 +1897,46 @@ class QueryProcessor:
                 try:
                     # 生成检索守卫参数（包含段域过滤和词面保底）
                     must_have_terms, boost_entities, boost_predicates = self._generate_enhanced_guardrail_params(query)
-                    
+
                     # 调用增强的混合检索（使用新融合公式）
                     candidate_notes = self._enhanced_hybrid_search_v2(
-                        query, candidate_notes, 
+                        query, candidate_notes,
                         must_have_terms=must_have_terms,
-                        boost_entities=boost_entities, 
+                        boost_entities=boost_entities,
                         boost_predicates=boost_predicates
+                    )
+                    per_candidate_metadata = self._build_per_candidate_metadata(
+                        candidate_notes,
+                        base=per_candidate_metadata,
                     )
                     logger.info(f"After hybrid fusion (final_base = 1.0*dense + 0.6*sparse): {len(candidate_notes)} notes")
                 except Exception as e:
                     logger.error(f"Hybrid search failed: {e}, continuing with vector results")
-            
+
             # 修复实体抽取流程
             if self.fix_entity_extraction_enabled:
                 logger.info("Fixing entity extraction flow after fusion")
                 candidate_notes = self._fix_entity_extraction_flow(candidate_notes)
-            
+                per_candidate_metadata = self._build_per_candidate_metadata(
+                    candidate_notes,
+                    base=per_candidate_metadata,
+                )
+
             # 应用噪声阈值过滤
             must_have_terms, _, _ = self._generate_enhanced_guardrail_params(query)
             candidate_notes = self._apply_noise_threshold_filtering(candidate_notes, must_have_terms)
-            
+            per_candidate_metadata = self._build_per_candidate_metadata(
+                candidate_notes,
+                base=per_candidate_metadata,
+            )
+
             # 第二阶段命名空间过滤：融合后
             if self.namespace_filtering_enabled and 'post_fusion' in self.namespace_filter_stages and dataset and qid:
                 candidate_notes = filter_notes_by_namespace(candidate_notes, dataset, qid)
+                per_candidate_metadata = self._build_per_candidate_metadata(
+                    candidate_notes,
+                    base=per_candidate_metadata,
+                )
                 logger.info(f"Stage 2 - After post-fusion namespace filtering: {len(candidate_notes)} notes")
             
             # 3. 从第一跳TopM候选中抽取实体并发起二跳检索
@@ -1927,24 +1967,45 @@ class QueryProcessor:
                 
                 candidate_notes.extend(second_hop_notes)
                 logger.info(f"After merging first and second hop: {len(candidate_notes)} total notes")
-                
+
+                per_candidate_metadata = self._build_per_candidate_metadata(
+                    candidate_notes,
+                    base=per_candidate_metadata,
+                )
+
                 # 对合并后的候选再次修复实体抽取
                 if self.fix_entity_extraction_enabled:
                     logger.info("Fixing entity extraction flow for merged candidates")
                     candidate_notes = self._fix_entity_extraction_flow(candidate_notes)
-                
+                    per_candidate_metadata = self._build_per_candidate_metadata(
+                        candidate_notes,
+                        base=per_candidate_metadata,
+                    )
+
                 # 对合并后的候选应用噪声阈值过滤
                 candidate_notes = self._apply_noise_threshold_filtering(candidate_notes, must_have_terms)
-            
+                per_candidate_metadata = self._build_per_candidate_metadata(
+                    candidate_notes,
+                    base=per_candidate_metadata,
+                )
+
             # 第三阶段命名空间过滤：二跳合并后
             if self.namespace_filtering_enabled and 'post_two_hop' in self.namespace_filter_stages and dataset and qid:
                 candidate_notes = filter_notes_by_namespace(candidate_notes, dataset, qid)
+                per_candidate_metadata = self._build_per_candidate_metadata(
+                    candidate_notes,
+                    base=per_candidate_metadata,
+                )
                 logger.info(f"Stage 3 - After two-hop merge namespace filtering: {len(candidate_notes)} notes")
-            
+
             # 5. 路径感知重排（计算path_score）
             if self.path_aware_enabled and self.path_aware_ranker:
                 try:
                     candidate_notes = self._apply_path_aware_reranking(candidate_notes, query)
+                    per_candidate_metadata = self._build_per_candidate_metadata(
+                        candidate_notes,
+                        base=per_candidate_metadata,
+                    )
                     logger.info(f"After path-aware reranking: {len(candidate_notes)} notes")
                 except Exception as e:
                     logger.error(f"Path-aware reranking failed: {e}")
@@ -1953,6 +2014,10 @@ class QueryProcessor:
             query_emb = self.vector_retriever.embedding_manager.encode_queries([query])[0]
             if self.recall_optimization_enabled:
                 candidate_notes = self.recall_optimizer.optimize_recall(candidate_notes, query, query_emb)
+                per_candidate_metadata = self._build_per_candidate_metadata(
+                    candidate_notes,
+                    base=per_candidate_metadata,
+                )
 
             # 7. 图扩展（混合策略）
             reasoning_paths: List[Dict[str, Any]] = []
@@ -1962,7 +2027,10 @@ class QueryProcessor:
                 candidate_notes.extend(graph_notes)
                 for n in graph_notes:
                     reasoning_paths.extend(n.get('reasoning_paths', []))
-                per_candidate_metadata = self._build_per_candidate_metadata(candidate_notes)
+                per_candidate_metadata = self._build_per_candidate_metadata(
+                    candidate_notes,
+                    base=per_candidate_metadata,
+                )
                 scheduler_kwargs = self._get_scheduler_kwargs()
                 selected_notes = self.scheduler.schedule_for_multi_hop(
                     candidate_notes,
@@ -1974,7 +2042,10 @@ class QueryProcessor:
                 # 使用混合图检索策略
                 graph_notes = self._perform_hybrid_graph_retrieval(candidate_notes, query)
                 candidate_notes.extend(graph_notes)
-                per_candidate_metadata = self._build_per_candidate_metadata(candidate_notes)
+                per_candidate_metadata = self._build_per_candidate_metadata(
+                    candidate_notes,
+                    base=per_candidate_metadata,
+                )
                 scheduler_kwargs = self._get_scheduler_kwargs()
                 selected_notes = self.scheduler.schedule(
                     candidate_notes,
@@ -2431,19 +2502,35 @@ class QueryProcessor:
         
         # Step 3: Initial vector retrieval with expanded query
         vector_results = self.vector_retriever.search([expanded_query])
-        vector_notes = vector_results[0] if vector_results else []
-        
+        vector_notes, per_candidate_metadata = self._collect_candidates_from_results(vector_results)
+        per_candidate_metadata = self._build_per_candidate_metadata(
+            vector_notes,
+            base=per_candidate_metadata,
+        )
+
         logger.info(f"Sub-question {index}: '{sub_question}' initial vector recall: {len(vector_notes)} notes")
         
         # Step 4: Apply minimum candidate constraint (k_min=1)
         min_per_subq = config.get('retrieval.min_per_subq', 1)
         if len(vector_notes) < min_per_subq:
             logger.warning(f"Sub-question {index}: Insufficient candidates ({len(vector_notes)} < {min_per_subq}), triggering fallback retrieval")
-            vector_notes = self._fallback_retrieval_for_subquestion(sub_question, expanded_query, must_have_entities, dataset, qid)
+            fallback_vector_notes, fallback_metadata = self._fallback_retrieval_for_subquestion(
+                sub_question,
+                expanded_query,
+                must_have_entities,
+                dataset,
+                qid,
+            )
+            vector_notes = fallback_vector_notes
+            merge_per_candidate_maps(per_candidate_metadata, fallback_metadata)
         
         # 第一阶段命名空间守卫：子问题向量召回后
         if self.namespace_guard_enabled and dataset and qid:
             vector_notes = filter_notes_by_namespace(vector_notes, dataset, qid)
+            per_candidate_metadata = self._build_per_candidate_metadata(
+                vector_notes,
+                base=per_candidate_metadata,
+            )
             logger.info(f"Sub-question {index}: After namespace filtering: {len(vector_notes)} notes")
         
         # Apply hybrid search if enabled
@@ -2459,6 +2546,10 @@ class QueryProcessor:
                     boost_entities=boost_entities,
                     boost_predicates=boost_predicates
                 )
+                per_candidate_metadata = self._build_per_candidate_metadata(
+                    vector_notes,
+                    base=per_candidate_metadata,
+                )
                 logger.info(f"Sub-question {index}: After hybrid search: {len(vector_notes)} notes")
             except Exception as e:
                 logger.error(f"Hybrid search failed for sub-question {index}: {e}")
@@ -2466,15 +2557,28 @@ class QueryProcessor:
         # 第二阶段命名空间守卫：子问题混合检索后
         if self.namespace_guard_enabled and dataset and qid:
             vector_notes = filter_notes_by_namespace(vector_notes, dataset, qid)
+            per_candidate_metadata = self._build_per_candidate_metadata(
+                vector_notes,
+                base=per_candidate_metadata,
+            )
             logger.info(f"Sub-question {index}: After post-hybrid namespace filtering: {len(vector_notes)} notes")
         
         # Step 5: Graph retrieval with entity-anchored expansion
         seed_ids = [note.get('note_id') for note in vector_notes if note.get('note_id')]
         graph_notes = self._entity_anchored_graph_retrieval(seed_ids, must_have_entities) if seed_ids else []
-        
+        if graph_notes:
+            per_candidate_metadata = self._build_per_candidate_metadata(
+                graph_notes,
+                base=per_candidate_metadata,
+            )
+
         # 第三阶段命名空间守卫：子问题图扩展后
         if self.namespace_guard_enabled and dataset and qid:
             graph_notes = filter_notes_by_namespace(graph_notes, dataset, qid)
+            per_candidate_metadata = self._build_per_candidate_metadata(
+                graph_notes,
+                base=per_candidate_metadata,
+            )
             logger.info(f"Sub-question {index}: After graph expansion namespace filtering: {len(graph_notes)} notes")
         
         # Step 6: Check if fallback retrieval is needed
@@ -2486,17 +2590,22 @@ class QueryProcessor:
         if initial_candidates_count < min_per_subq:
             fallback_triggered = True
             logger.info(f"Sub-question {index}: Triggering fallback retrieval, current: {initial_candidates_count}, required: {min_per_subq}")
-            fallback_candidates = self._fallback_retrieval_for_subquestion(
+            fallback_candidates, fallback_meta = self._fallback_retrieval_for_subquestion(
                 sub_question=sub_question,
                 expanded_query=expanded_query,
                 must_have_entities=must_have_entities,
                 dataset=dataset,
                 qid=qid
             )
+            merge_per_candidate_maps(per_candidate_metadata, fallback_meta)
             
             # 第四阶段命名空间守卫：回补检索后
             if self.namespace_guard_enabled and dataset and qid:
                 fallback_candidates = filter_notes_by_namespace(fallback_candidates, dataset, qid)
+                per_candidate_metadata = self._build_per_candidate_metadata(
+                    fallback_candidates,
+                    base=per_candidate_metadata,
+                )
                 logger.info(f"Sub-question {index}: After fallback namespace filtering: {len(fallback_candidates)} notes")
         
         # Step 7: Tag candidates with subq_id for later integrity checking
@@ -2542,7 +2651,8 @@ class QueryProcessor:
             'constraint_words': constraint_words,
             'expanded_query': expanded_query,
             'entity_hits': hit_entities,
-            'fallback_triggered': fallback_triggered
+            'fallback_triggered': fallback_triggered,
+            'per_candidate_metadata': per_candidate_metadata,
         }
     
     def _extract_key_entities_from_subquestion(self, sub_question: str) -> List[str]:
@@ -2594,9 +2704,17 @@ class QueryProcessor:
         expanded_query = ' '.join(expanded_parts)
         return expanded_query
     
-    def _fallback_retrieval_for_subquestion(self, sub_question: str, expanded_query: str, must_have_entities: List[str], dataset: Optional[str] = None, qid: Optional[str] = None) -> List[Dict[str, Any]]:
+    def _fallback_retrieval_for_subquestion(
+        self,
+        sub_question: str,
+        expanded_query: str,
+        must_have_entities: List[str],
+        dataset: Optional[str] = None,
+        qid: Optional[str] = None,
+    ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
         """Perform fallback retrieval when initial retrieval fails to meet minimum threshold."""
         fallback_candidates = []
+        fallback_metadata: Dict[str, Any] = {}
         # 从配置获取性能控制参数
         max_fallback_per_step = config.get('retrieval.performance.max_fallback_per_step', 3)
         max_total_fallback = config.get('retrieval.performance.max_total_fallback', 10)
@@ -2615,21 +2733,25 @@ class QueryProcessor:
         # 检查超时
         if (time.time() * 1000 - start_time) > fallback_timeout_ms:
             logger.warning(f"Fallback retrieval timeout after {fallback_timeout_ms}ms")
-            return fallback_candidates[:max_total_fallback]
+            return fallback_candidates[:max_total_fallback], fallback_metadata
         
         try:
-            bm25_results = self._bm25_fallback_search(sub_question, dataset or '', qid or '', top_k=max_fallback_per_step)
-            if bm25_results:
-                bm25_count = len(bm25_results)
-                # 限制总候选数量
-                available_slots = max_total_fallback - len(fallback_candidates)
-                bm25_results = bm25_results[:available_slots]
-                bm25_count = len(bm25_results)
-                fallback_candidates.extend(bm25_results)
-                bm25_success = True
-                # 标记候选来源
-                for note in bm25_results:
-                    note['retrieval_source'] = 'bm25_fallback'
+                bm25_results = self._bm25_fallback_search(sub_question, dataset or '', qid or '', top_k=max_fallback_per_step)
+                if bm25_results:
+                    bm25_count = len(bm25_results)
+                    # 限制总候选数量
+                    available_slots = max_total_fallback - len(fallback_candidates)
+                    bm25_results = bm25_results[:available_slots]
+                    bm25_count = len(bm25_results)
+                    fallback_candidates.extend(bm25_results)
+                    bm25_success = True
+                    # 标记候选来源
+                    for note in bm25_results:
+                        note['retrieval_source'] = 'bm25_fallback'
+                    fallback_metadata = self._build_per_candidate_metadata(
+                        fallback_candidates,
+                        base=fallback_metadata,
+                    )
                 logger.debug(f"Fallback step 1 (BM25): retrieved {bm25_count} candidates")
         except Exception as e:
             logger.error(f"BM25 fallback failed: {e}")
@@ -2649,14 +2771,22 @@ class QueryProcessor:
             # 检查超时
             if (time.time() * 1000 - start_time) > fallback_timeout_ms:
                 logger.warning(f"Fallback retrieval timeout after {fallback_timeout_ms}ms")
-                return fallback_candidates[:max_total_fallback]
+                return fallback_candidates[:max_total_fallback], fallback_metadata
             
             try:
                 vector_results = self.vector_retriever.search([expanded_query], top_k=max_fallback_per_step)
-                vector_notes = vector_results[0] if vector_results else []
+                vector_notes, vector_metadata = self._collect_candidates_from_results(vector_results)
+                merge_per_candidate_maps(fallback_metadata, vector_metadata)
                 # Filter out duplicates
-                existing_ids = {note.get('note_id') for note in fallback_candidates}
-                new_vector_notes = [note for note in vector_notes if note.get('note_id') not in existing_ids]
+                existing_ids = {resolve_candidate_id(note) for note in fallback_candidates if resolve_candidate_id(note)}
+                new_vector_notes: List[Dict[str, Any]] = []
+                for note in vector_notes:
+                    candidate_id = resolve_candidate_id(note)
+                    if candidate_id and candidate_id in existing_ids:
+                        continue
+                    if candidate_id:
+                        existing_ids.add(candidate_id)
+                    new_vector_notes.append(note)
                 # 限制总候选数量
                 available_slots = max_total_fallback - len(fallback_candidates)
                 new_vector_notes = new_vector_notes[:available_slots]
@@ -2666,6 +2796,10 @@ class QueryProcessor:
                 # 标记候选来源
                 for note in new_vector_notes:
                     note['retrieval_source'] = 'vector_fallback'
+                fallback_metadata = self._build_per_candidate_metadata(
+                    fallback_candidates,
+                    base=fallback_metadata,
+                )
                 logger.debug(f"Fallback step 2 (Vector): retrieved {vector_count} new candidates")
             except Exception as e:
                 logger.error(f"Vector fallback failed: {e}")
@@ -2705,14 +2839,25 @@ class QueryProcessor:
                     if actual_max_candidates > 0:
                         graph_candidates = self._graph_neighborhood_expansion_fallback(must_have_entities, actual_max_candidates)
                         # Filter out duplicates
-                        existing_ids = {note.get('note_id') for note in fallback_candidates}
-                        new_graph_candidates = [note for note in graph_candidates if note.get('note_id') not in existing_ids]
+                        existing_ids = {resolve_candidate_id(note) for note in fallback_candidates if resolve_candidate_id(note)}
+                        new_graph_candidates: List[Dict[str, Any]] = []
+                        for note in graph_candidates:
+                            candidate_id = resolve_candidate_id(note)
+                            if candidate_id and candidate_id in existing_ids:
+                                continue
+                            if candidate_id:
+                                existing_ids.add(candidate_id)
+                            new_graph_candidates.append(note)
                         graph_count = len(new_graph_candidates)
                         fallback_candidates.extend(new_graph_candidates)
                         graph_success = True
                         # 标记候选来源
                         for note in new_graph_candidates:
                             note['retrieval_source'] = 'graph_fallback'
+                        fallback_metadata = self._build_per_candidate_metadata(
+                            fallback_candidates,
+                            base=fallback_metadata,
+                        )
                         logger.debug(f"Fallback step 3 (Graph): retrieved {graph_count} new candidates")
                     else:
                         logger.debug(f"Fallback step 3 (Graph): skipped due to candidate limit ({len(fallback_candidates)}/{max_total_fallback})")
@@ -2741,7 +2886,7 @@ class QueryProcessor:
         )
         
         logger.info(f"Fallback retrieval completed: {len(fallback_candidates)} total candidates")
-        return fallback_candidates
+        return fallback_candidates, fallback_metadata
     
     def _log_fallback_retrieval_info(self, sub_question: str, expanded_query: str, must_have_entities: List[str], 
                                    min_threshold: int, fallback_steps: List[Dict], final_candidates: List[Dict], 
@@ -2906,7 +3051,8 @@ class QueryProcessor:
             
             # Fallback to vector retriever with keyword emphasis
             vector_results = self.vector_retriever.search([query], top_k=top_k)
-            return vector_results[0] if vector_results else []
+            vector_notes, _ = self._collect_candidates_from_results(vector_results)
+            return vector_notes[:top_k]
             
         except Exception as e:
             logger.error(f"BM25 fallback search failed: {e}")
@@ -3585,22 +3731,22 @@ class QueryProcessor:
             合并后的去重结果
         """
         try:
-            # 使用note_id进行去重
-            seen_ids = set()
+            # 使用候选ID进行去重
+            seen_ids: Set[str] = set()
             merged_results = []
-            
+
             # 首先添加主要结果
             for note in primary_results:
-                note_id = note.get('note_id', note.get('id', ''))
-                if note_id and note_id not in seen_ids:
-                    seen_ids.add(note_id)
+                candidate_id = resolve_candidate_id(note)
+                if candidate_id and candidate_id not in seen_ids:
+                    seen_ids.add(candidate_id)
                     merged_results.append(note)
-            
+
             # 然后添加次要结果中的新结果
             for note in secondary_results:
-                note_id = note.get('note_id', note.get('id', ''))
-                if note_id and note_id not in seen_ids:
-                    seen_ids.add(note_id)
+                candidate_id = resolve_candidate_id(note)
+                if candidate_id and candidate_id not in seen_ids:
+                    seen_ids.add(candidate_id)
                     merged_results.append(note)
             
             logger.debug(f"Merged {len(primary_results)} + {len(secondary_results)} -> {len(merged_results)} unique results")

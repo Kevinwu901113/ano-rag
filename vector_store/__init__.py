@@ -1,6 +1,7 @@
 from .embedding_manager import EmbeddingManager
 from .vector_index import VectorIndex
 from .retriever import VectorRetriever
+from .retrieval_result import HybridRetrievalResult
 from .enhanced_recall_optimizer import EnhancedRecallOptimizer
 from .embedding_strategy import (
     EmbeddingStrategy,
@@ -17,7 +18,8 @@ from .embedding_strategy import (
 __all__ = [
     'EmbeddingManager', 
     'VectorIndex', 
-    'VectorRetriever', 
+    'VectorRetriever',
+    'HybridRetrievalResult',
     'EnhancedRecallOptimizer',
     'EmbeddingStrategy',
     'EmbeddingConfig',

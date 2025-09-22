@@ -14,6 +14,7 @@ from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 
 from config import config
+from vector_store.retrieval_result import HybridRetrievalResult, resolve_candidate_id
 
 try:
     # Optional import used for isinstance checks
@@ -414,20 +415,22 @@ class EnhancedRecallOptimizer:
         supplement_queries = self._build_supplement_queries(requirements)
         
         additional_results = []
-        existing_ids = {result.get('note_id') for result in existing_results}
-        
+        existing_ids = {resolve_candidate_id(result) for result in existing_results if resolve_candidate_id(result)}
+
         for supp_query in supplement_queries:
             try:
                 supp_results = self.vector_retriever.search([supp_query], top_k=5)
-                for result in supp_results[0] if supp_results else []:
-                    if result.get('note_id') not in existing_ids:
+                result_set = supp_results[0] if supp_results else HybridRetrievalResult()
+                for result in result_set:
+                    candidate_id = resolve_candidate_id(result)
+                    if candidate_id and candidate_id not in existing_ids:
                         result['optimization_info'] = result.get('optimization_info', {})
                         result['optimization_info']['supplement_recall'] = supp_query
                         additional_results.append(result)
-                        existing_ids.add(result.get('note_id'))
+                        existing_ids.add(candidate_id)
             except Exception as e:
                 logger.warning(f"补充召回失败: {e}")
-                
+
         return additional_results
         
     def _build_supplement_queries(self, requirements: Dict[str, Any]) -> List[str]:
@@ -454,18 +457,19 @@ class EnhancedRecallOptimizer:
         hop_queries = self._decompose_multi_hop_query(query)
         
         enhanced_results = results.copy()
-        existing_ids = {result.get('note_id') for result in results}
+        existing_ids = {resolve_candidate_id(result) for result in results if resolve_candidate_id(result)}
         
         # 执行多跳检索
         for hop_query in hop_queries:
             hop_results = self._execute_multi_hop_retrieval(hop_query, existing_ids)
             for result in hop_results:
-                if result.get('note_id') not in existing_ids:
+                candidate_id = resolve_candidate_id(result)
+                if candidate_id and candidate_id not in existing_ids:
                     result['optimization_info'] = result.get('optimization_info', {})
                     result['optimization_info']['multi_hop'] = hop_query
                     enhanced_results.append(result)
-                    existing_ids.add(result.get('note_id'))
-                    
+                    existing_ids.add(candidate_id)
+
         return enhanced_results
         
     def _decompose_multi_hop_query(self, query: str) -> List[str]:
@@ -518,20 +522,24 @@ class EnhancedRecallOptimizer:
 
             if not hop_results:
                 # 回退到向量检索
-                hop_results = self.vector_retriever.search([hop_query], top_k=3)
-                hop_results = hop_results[0] if hop_results else []
+                hop_result_set = self.vector_retriever.search([hop_query], top_k=3)
+                hop_sequence = hop_result_set[0] if hop_result_set else HybridRetrievalResult()
+                hop_results_iterable = list(hop_sequence)
+            else:
+                hop_results_iterable = hop_results
 
             # 过滤已存在的结果
             filtered_results: List[Dict[str, Any]] = []
-            for result in hop_results:
-                note_id = result.get("note_id")
-                if note_id and note_id not in existing_ids:
+            for result in hop_results_iterable:
+                candidate_id = resolve_candidate_id(result)
+                if candidate_id and candidate_id not in existing_ids:
                     similarity = result.get(
                         "similarity_score",
                         result.get("retrieval_info", {}).get("similarity", 0),
                     )
                     if similarity >= self.hop_similarity_threshold:
                         filtered_results.append(result)
+                        existing_ids.add(candidate_id)
 
             return filtered_results
 
