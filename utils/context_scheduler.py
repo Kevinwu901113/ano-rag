@@ -63,6 +63,9 @@ class ContextScheduler:
             "max_tokens": self._normalize_int(
                 self._scheduler_config.get("max_tokens")
             ),
+            "budget_tokens": self._normalize_int(
+                self._scheduler_config.get("budget_tokens")
+            ),
             "time_window_sec": self._normalize_int(
                 self._scheduler_config.get("time_window_sec")
             ),
@@ -109,6 +112,7 @@ class ContextScheduler:
         topk: Optional[int] = None,
         neighbor_hops: int = 1,
         max_tokens: Optional[int] = None,
+        budget_tokens: Optional[int] = None,
         query_processor=None,
         **_: Any,
     ) -> List[Dict[str, Any]]:
@@ -139,11 +143,16 @@ class ContextScheduler:
         if neighbor_hops is None:
             neighbor_hops = self._defaults.get("neighbor_hops", 1)
         neighbor_hops = max(neighbor_hops or 0, 0)
-        token_budget = (
-            self._normalize_int(max_tokens)
-            if max_tokens is not None
-            else self._defaults.get("max_tokens")
-        )
+        token_budget = None
+        if budget_tokens is not None:
+            token_budget = self._normalize_int(budget_tokens)
+        if token_budget is None:
+            if max_tokens is not None:
+                token_budget = self._normalize_int(max_tokens)
+            else:
+                token_budget = self._defaults.get("budget_tokens")
+                if token_budget is None:
+                    token_budget = self._defaults.get("max_tokens")
 
         sampled = self._diversity_sample(deduped, per_candidate, topk_value)
         expanded = self._expand_neighbors(
@@ -794,9 +803,11 @@ class MultiHopContextScheduler(ContextScheduler):
         candidate_notes: Sequence[Dict[str, Any]],
         reasoning_paths: Sequence[Dict[str, Any]],
         *,
+        per_candidate: Optional[Mapping[str, Any]] = None,
         topk: Optional[int] = None,
         neighbor_hops: int = 1,
         max_tokens: Optional[int] = None,
+        budget_tokens: Optional[int] = None,
         query_processor=None,
     ) -> List[Dict[str, Any]]:
         candidate_list = [c for c in candidate_notes if isinstance(c, MutableMapping)]
@@ -806,9 +817,16 @@ class MultiHopContextScheduler(ContextScheduler):
             )
             return []
 
+        combined_per_candidate: Dict[str, Any] = {}
+        if isinstance(per_candidate, Mapping):
+            for key, value in per_candidate.items():
+                if isinstance(value, Mapping):
+                    combined_per_candidate[str(key)] = dict(value)
+                else:
+                    combined_per_candidate[str(key)] = value
+
         path_scores = self._calculate_path_scores(candidate_list, reasoning_paths)
 
-        per_candidate: Dict[str, Dict[str, float]] = {}
         for note in candidate_list:
             base_score = self._calculate_base_score(note)
             note_id = self._candidate_id(note)
@@ -818,19 +836,31 @@ class MultiHopContextScheduler(ContextScheduler):
             )
             total = 0.3 * base_score + 0.4 * path_score + 0.3 * completeness
             note["multi_hop_score"] = total
-            per_candidate[note_id] = {
-                "score": total,
+            payload = {
+                "multi_hop_score": total,
                 "base_score": base_score,
                 "path_score": path_score,
                 "completeness": completeness,
             }
+            existing = combined_per_candidate.get(note_id)
+            if isinstance(existing, Mapping):
+                merged_payload = dict(existing)
+                if "score" not in merged_payload:
+                    merged_payload["score"] = total
+                merged_payload.update(payload)
+                combined_per_candidate[note_id] = merged_payload
+            else:
+                payload_with_score = dict(payload)
+                payload_with_score.setdefault("score", total)
+                combined_per_candidate[note_id] = payload_with_score
 
         scheduled = super().schedule(
             candidate_list,
-            per_candidate=per_candidate,
+            per_candidate=combined_per_candidate,
             topk=topk,
             neighbor_hops=neighbor_hops,
             max_tokens=max_tokens,
+            budget_tokens=budget_tokens,
             query_processor=query_processor,
         )
 

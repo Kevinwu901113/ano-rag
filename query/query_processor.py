@@ -1,4 +1,4 @@
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Mapping, Sequence
 from loguru import logger
 import os
 import numpy as np
@@ -133,10 +133,13 @@ class QueryProcessor:
             logger.info("Using ContextDispatcher for structure-enhanced retrieval")
         else:
             # 使用原有的调度器
+            scheduler_config = config.get('scheduler', {})
+            if not isinstance(scheduler_config, dict):
+                scheduler_config = {}
             if self.multi_hop_enabled:
-                self.scheduler = MultiHopContextScheduler()
+                self.scheduler = MultiHopContextScheduler(scheduler_config)
             else:
-                self.scheduler = ContextScheduler()
+                self.scheduler = ContextScheduler(scheduler_config)
             logger.info("Using legacy ContextScheduler")
 
         self.recall_optimization_enabled = config.get('vector_store.recall_optimization.enabled', True)
@@ -503,7 +506,7 @@ class QueryProcessor:
         
         # 初始化结构化日志记录器
         self.structured_logger = StructuredLogger("QueryProcessor")
-        self.structured_logger.info("QueryProcessor initialized successfully", 
+        self.structured_logger.info("QueryProcessor initialized successfully",
                                   notes_count=len(atomic_notes),
                                   hybrid_search=self.hybrid_search_enabled,
                                   path_aware=self.path_aware_enabled,
@@ -514,6 +517,124 @@ class QueryProcessor:
                                   consistency_checker=self.use_consistency_checker,
                                   atomic_features=self.use_atomic_features,
                                   listt5=self.use_listt5)
+
+    def _get_scheduler_kwargs(self) -> Dict[str, Any]:
+        scheduler_config = config.get('scheduler', {})
+        if not isinstance(scheduler_config, Mapping):
+            return {}
+
+        kwargs: Dict[str, Any] = {}
+        for key in ('topk', 'neighbor_hops', 'budget_tokens'):
+            value = scheduler_config.get(key)
+            if value is not None:
+                kwargs[key] = value
+
+        budget = kwargs.get('budget_tokens')
+        if budget is not None:
+            kwargs.setdefault('max_tokens', budget)
+
+        return kwargs
+
+    def _derive_candidate_identifier(self, note: Mapping[str, Any]) -> Optional[str]:
+        for key in ('note_id', 'id', 'uuid', 'document_id', 'doc_id'):
+            value = note.get(key)
+            if value is not None:
+                return str(value)
+        return None
+
+    def _extract_scheduler_payload(self, note: Mapping[str, Any]) -> Dict[str, Any]:
+        payload: Dict[str, Any] = {}
+        metadata_keys = (
+            'scheduler_payload',
+            'scheduler_metadata',
+            'per_candidate',
+            'per_candidate_metadata',
+        )
+        for key in metadata_keys:
+            value = note.get(key)
+            if isinstance(value, Mapping):
+                payload.update(value)
+
+        retrieval_info = note.get('retrieval_info')
+        if isinstance(retrieval_info, Mapping):
+            payload.setdefault('retrieval_info', retrieval_info)
+            info_score = retrieval_info.get('score')
+            if not isinstance(info_score, (int, float)):
+                info_score = retrieval_info.get('similarity')
+            if isinstance(info_score, (int, float)):
+                payload.setdefault('score', float(info_score))
+
+        metadata = note.get('metadata')
+        if isinstance(metadata, Mapping):
+            payload.setdefault('metadata', metadata)
+
+        first_numeric: Optional[float] = None
+        numeric_fields = (
+            ('score', note.get('score')),
+            ('multi_hop_score', note.get('multi_hop_score')),
+            ('context_score', note.get('context_score')),
+            ('graph_score', note.get('graph_score')),
+            ('final_similarity', note.get('final_similarity')),
+            ('similarity', note.get('similarity')),
+        )
+        for field_name, value in numeric_fields:
+            if isinstance(value, (int, float)):
+                numeric_value = float(value)
+                payload.setdefault(field_name, numeric_value)
+                if first_numeric is None:
+                    first_numeric = numeric_value
+
+        if 'score' not in payload and first_numeric is not None:
+            payload['score'] = first_numeric
+
+        return payload
+
+    def _build_per_candidate_metadata(
+        self,
+        candidates: Sequence[Mapping[str, Any]],
+    ) -> Dict[str, Any]:
+        if not candidates:
+            return {}
+
+        scheduler = getattr(self, 'scheduler', None)
+        if scheduler is None:
+            return {}
+
+        get_candidate_id = None
+        if hasattr(scheduler, '_candidate_id'):
+            get_candidate_id = scheduler._candidate_id  # type: ignore[attr-defined]
+
+        per_candidate: Dict[str, Any] = {}
+        for note in candidates:
+            if not isinstance(note, Mapping):
+                continue
+
+            candidate_id: Optional[str] = None
+            if get_candidate_id is not None:
+                try:
+                    candidate_id = get_candidate_id(note)
+                except Exception:
+                    candidate_id = None
+
+            if not candidate_id:
+                candidate_id = self._derive_candidate_identifier(note)
+
+            if not candidate_id:
+                continue
+
+            payload = self._extract_scheduler_payload(note)
+            if not payload:
+                continue
+
+            existing = per_candidate.get(candidate_id)
+            if isinstance(existing, Mapping):
+                merged = dict(existing)
+                merged.update(payload)
+                per_candidate[candidate_id] = merged
+            else:
+                per_candidate[candidate_id] = payload
+
+        return per_candidate
 
     @log_performance("QueryProcessor.process")
     def process(self, query: str, dataset: Optional[str] = None, qid: Optional[str] = None) -> Dict[str, Any]:
@@ -1835,12 +1956,25 @@ class QueryProcessor:
                 candidate_notes.extend(graph_notes)
                 for n in graph_notes:
                     reasoning_paths.extend(n.get('reasoning_paths', []))
-                selected_notes = self.scheduler.schedule_for_multi_hop(candidate_notes, reasoning_paths)
+                per_candidate_metadata = self._build_per_candidate_metadata(candidate_notes)
+                scheduler_kwargs = self._get_scheduler_kwargs()
+                selected_notes = self.scheduler.schedule_for_multi_hop(
+                    candidate_notes,
+                    reasoning_paths,
+                    per_candidate=per_candidate_metadata,
+                    **scheduler_kwargs,
+                )
             else:
                 # 使用混合图检索策略
                 graph_notes = self._perform_hybrid_graph_retrieval(candidate_notes, query)
                 candidate_notes.extend(graph_notes)
-                selected_notes = self.scheduler.schedule(candidate_notes)
+                per_candidate_metadata = self._build_per_candidate_metadata(candidate_notes)
+                scheduler_kwargs = self._get_scheduler_kwargs()
+                selected_notes = self.scheduler.schedule(
+                    candidate_notes,
+                    per_candidate=per_candidate_metadata,
+                    **scheduler_kwargs,
+                )
             
             # 第四阶段命名空间过滤：最终调度后
             if self.namespace_filtering_enabled and 'final_scheduling' in self.namespace_filter_stages and dataset and qid:
@@ -2850,15 +2984,27 @@ class QueryProcessor:
                                            error=str(e))
         
         # 传统调度器作为兜底
+        scheduler_kwargs = self._get_scheduler_kwargs()
+        per_candidate_metadata = self._build_per_candidate_metadata(merged_evidence)
+
         if self.multi_hop_enabled:
             # Extract reasoning paths from merged evidence
             reasoning_paths = []
             for evidence in merged_evidence:
                 reasoning_paths.extend(evidence.get('reasoning_paths', []))
-            
-            selected_notes = self.scheduler.schedule_for_multi_hop(merged_evidence, reasoning_paths)
+
+            selected_notes = self.scheduler.schedule_for_multi_hop(
+                merged_evidence,
+                reasoning_paths,
+                per_candidate=per_candidate_metadata,
+                **scheduler_kwargs,
+            )
         else:
-            selected_notes = self.scheduler.schedule(merged_evidence)
+            selected_notes = self.scheduler.schedule(
+                merged_evidence,
+                per_candidate=per_candidate_metadata,
+                **scheduler_kwargs,
+            )
         
         self.structured_logger.debug("Traditional scheduler completed",
                                    selected_count=len(selected_notes),
