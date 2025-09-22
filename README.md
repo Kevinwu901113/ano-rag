@@ -294,6 +294,23 @@ context_scheduler:
   graph_weight: 0.25
   topic_weight: 0.2
   feedback_weight: 0.15
+
+# 调整候选调度窗口与配额
+scheduler:
+  topk: 12                # 允许调度的最大候选数量
+  neighbor_hops: 1        # 最多扩展的图邻居层数
+  budget_tokens: 2048     # 令牌预算，防止上下文过长
+  time_window_sec: 86400  # 时间窗口，限制同一时间段的笔记数量
+  per_cluster_limit: 2    # 每个聚类的最大候选条目
+
+# 为检索保障器配置与调度一致的多样性约束
+guardrail:
+  diversify:
+    topk: 12
+    neighbor_hops: 1
+    budget_tokens: 2048
+    time_window_sec: 86400
+    per_cluster_limit: 2
 ```
 
 ### 评估和监控

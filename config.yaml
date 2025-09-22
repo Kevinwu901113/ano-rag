@@ -147,3 +147,18 @@ rewriter:
 
 evaluation:
   enabled: false
+
+scheduler:
+  topk: 12
+  neighbor_hops: 1
+  budget_tokens: 2048
+  time_window_sec: 86400
+  per_cluster_limit: 2
+
+guardrail:
+  diversify:
+    topk: 12
+    neighbor_hops: 1
+    budget_tokens: 2048
+    time_window_sec: 86400
+    per_cluster_limit: 2
