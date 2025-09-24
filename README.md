@@ -1,443 +1,115 @@
-# Ano-RAG
-
-一个基于图谱增强的高级检索增强生成（RAG）系统，结合了向量检索、知识图谱和智能上下文调度，为复杂查询提供精准的答案生成。
-
-## 🌟 核心特性
-
-### 📚 智能文档处理
-- **多格式支持**: JSON、JSONL、DOCX等格式文档
-- **原子笔记生成**: 将文档分解为语义完整的原子笔记单元
-- **实体归一化**: 标准化并追踪文档中的人物和实体
-- **增量处理**: 智能检测文档变更，避免重复处理
-- **批量处理**: 支持大规模文档的高效并行处理
-- **GPU加速**: 使用NVIDIA RAPIDS进行高性能数据处理
-
-### 🧠 知识图谱构建
-- **多层关系提取**: 支持引用、实体共现、上下文关系、主题链接等多种关系类型
-- **图谱索引**: 高效的图结构索引和检索
-- **K-hop检索**: 基于图结构的多跳关系检索（默认2-hop）
-- **关系权重**: 智能计算不同关系类型的重要性权重
-- **动态图构建**: 基于聚类结果和嵌入向量构建知识图谱
-
-### 🔍 混合检索策略
-- **向量检索**: 基于BGE-M3模型的语义相似度检索
-- **图谱检索**: 基于知识图谱的关系推理检索
-- **智能融合**: 多种检索结果的智能融合和排序
-- **查询重写**: 自动扩展和优化查询语句
-
-### 🎯 上下文调度
-- **多维度评分**: 语义相似度、图谱重要性、主题相关性、反馈质量等
-- **冗余消除**: 智能去除重复和冗余信息
-- **动态权重**: 根据查询类型动态调整各维度权重
-- **Top-N选择**: 智能选择最相关的上下文信息
-
-### 🚀 性能优化
-- **GPU加速**: 支持CUDA加速的向量计算和图处理
-- **RAPIDS集成**: 使用NVIDIA RAPIDS进行高性能数据处理
-- **缓存机制**: 多层缓存提升响应速度
-- **并行处理**: 充分利用多核CPU和GPU资源
-- **增量更新**: 智能检测文档变更，避免重复处理
-
-## 🏗️ 系统架构
-
-```
-┌─────────────────┐    ┌─────────────────┐    ┌─────────────────┐
-│   文档输入      │───▶│   文档处理      │───▶│   原子笔记      │
-│  (多种格式)     │    │  (分块+生成)    │    │   (结构化)      │
-└─────────────────┘    └─────────────────┘    └─────────────────┘
-                                                        │
-                                                        ▼
-┌─────────────────┐    ┌─────────────────┐    ┌─────────────────┐
-│   查询处理      │◀───│   上下文调度    │◀───│   知识图谱      │
-│  (重写+扩展)    │    │  (智能选择)     │    │  (关系提取)     │
-└─────────────────┘    └─────────────────┘    └─────────────────┘
-         │                       │                       ▲
-         ▼                       ▼                       │
-┌─────────────────┐    ┌─────────────────┐    ┌─────────────────┐
-│   向量检索      │    │   答案生成      │    │   向量存储      │
-│  (语义匹配)     │───▶│   (LLM生成)     │    │  (嵌入索引)     │
-└─────────────────┘    └─────────────────┘    └─────────────────┘
-```
-
-## 📦 安装配置
-
-### 环境要求
-- **Python**: 3.10+
-- **CUDA**: 11.8+ (用于GPU加速)
-- **内存**: 16GB+ RAM (推荐)
-- **GPU**: NVIDIA GPU with compute capability 6.0+ (可选)
-- **Ollama**: 用于本地LLM服务
-
-### 安装步骤
-
-1. **克隆项目**
-```bash
-git clone <repository-url>
-cd anorag
-```
-
-2. **安装基础依赖**
-```bash
-pip install -r requirements.txt
-```
-
-3. **安装RAPIDS (GPU加速，可选)**
-```bash
-# 使用提供的安装脚本
-chmod +x install_rapids.sh
-./install_rapids.sh
-
-# 或手动安装
-pip install --no-cache-dir --extra-index-url https://pypi.nvidia.com \
-    cudf-cu11 cuml-cu11 cugraph-cu11 cupy-cuda11x
-```
-
-4. **配置Ollama**
-```bash
-# 安装Ollama
-curl -fsSL https://ollama.ai/install.sh | sh
-
-# 下载模型
-ollama pull gemma3:4b-it-fp16
-```
-
-5. **准备数据目录**
-```bash
-mkdir -p data result
-# 将文档放入data目录
-```
-
-### 配置说明
-
-主要配置项（`config.yaml`）：
-
-```yaml
-# 文档处理
-document:
-  chunk_size: 512          # 分块大小
-  overlap: 50              # 重叠字符数
-  batch_size: 32           # 批处理大小
-
-# 嵌入模型
-embedding:
-  model_name: "BAAI/bge-m3"  # 嵌入模型
-  batch_size: 64             # 批处理大小
-  device: "cuda"             # 设备选择
-  normalize: true            # 向量归一化
-
-# 聚类算法
-clustering:
-  algorithm: "hdbscan"       # 聚类算法
-  min_cluster_size: 5        # 最小聚类大小
-  use_gpu: true              # 使用GPU加速
-
-# 图谱构建
-graph:
-  k_hop: 2                   # K跳检索
-  similarity_threshold: 0.7   # 相似度阈值
-  weights:                   # 关系权重
-    reference: 1.0
-    entity_coexistence: 0.8
-    context_relation: 0.6
-
-# 多跳推理
-multi_hop:
-  max_reasoning_hops: 3      # 最大推理步数
-  max_paths: 10              # 路径数量上限
-  min_path_score: 0.3        # 初始路径分数阈值
-  min_path_score_floor: 0.1  # 最低阈值，路径过少时逐步降低
-  min_path_score_step: 0.05  # 阈值降低步长
-  path_diversity_threshold: 0.7  # 路径多样性阈值
-
-在推理路径过少时，检索器会按照 `min_path_score_step` 逐步降低阈值，
-最低不低于 `min_path_score_floor`，以便在弱连接图中也能找到可行路径。
-
-# LLM配置
-llm:
-  ollama:
-    model: "gemma3:4b-it-fp16"  # Ollama模型
-    temperature: 0.7            # 生成温度
-    max_tokens: 4096           # 最大token数
-
-# 性能优化
-performance:
-  use_gpu: true              # 启用GPU
-  use_cudf: true             # 启用cuDF
-  num_workers: 4             # 工作进程数
-```
-
-## 🚀 快速开始
-
-### 1. 处理文档
-
-```bash
-# 处理data目录下的所有文档
-python main.py process
-
-# 创建新的工作目录并处理
-python main.py process --new
-
-# 强制重新处理所有文档
-python main.py process --force
-```
-
-处理流程：
-1. **文档分块**: 将文档切分为语义块
-2. **原子笔记生成**: 使用LLM生成结构化笔记
-3. **实体归一化**: 统一笔记中的实体名称并跟踪位置
-4. **向量嵌入**: 生成语义向量表示
-5. **主题聚类**: 基于语义相似度聚类
-6. **图谱构建**: 提取实体关系构建知识图谱
-
-### 2. 查询问答
-
-```bash
-# 简单查询
-python main.py query "什么是机器学习？"
-
-# 复杂查询
-python main.py query "深度学习和传统机器学习的主要区别是什么？"
-
-# 指定工作目录查询
-python main.py query "解释神经网络的工作原理" --work-dir result/1
-```
-
-查询流程：
-1. **查询重写**: 扩展和优化查询语句
-2. **向量检索**: 基于语义相似度检索相关笔记
-3. **图谱检索**: 基于知识图谱进行关系推理
-4. **上下文调度**: 智能选择最相关的上下文
-5. **答案生成**: 使用LLM生成最终答案
-
-### 3. Python API使用
-
-```python
-from doc import DocumentProcessor
-from query import QueryProcessor
-from utils import FileUtils
-
-# 处理文档
-processor = DocumentProcessor(output_dir="result/1")
-files = ["data/document1.json", "data/document2.jsonl"]
-result = processor.process_documents(files)
-
-# 保存原子笔记
-FileUtils.write_json(result['atomic_notes'], "result/1/atomic_notes.json")
-
-# 查询处理
-query_processor = QueryProcessor(
-    atomic_notes=result['atomic_notes'],
-    graph_file="result/1/graph.json",
-    vector_index_file="result/1/vector_index.faiss"
-)
-
-response = query_processor.process("你的问题")
-print(f"答案: {response['answer']}")
-print(f"相关性评分: {response['scores']}")
-```
-
-## 📊 性能特性
-
-### 处理能力
-- **文档处理**: 1000+ 文档/小时 (GPU加速)
-- **查询响应**: <2秒 (典型查询)
-- **并发支持**: 10+ 并发查询
-- **内存效率**: 智能批处理和缓存
-- **GPU加速**: 支持RAPIDS加速的数据处理
-
-### 准确性指标
-- **检索精度**: 85%+ (在标准数据集上)
-- **答案质量**: 基于BLEU、ROUGE等指标评估
-- **关系准确性**: 90%+ (实体关系提取)
-- **聚类质量**: Silhouette Score > 0.5
-
-## 🔧 高级功能
-
-### 增量处理
-系统支持智能增量处理，只处理变更的文档：
-
-```python
-# 系统会自动检测文件变更
-processor.process_documents(files, force_reprocess=False)
-```
-
-### GPU加速
-启用RAPIDS进行GPU加速处理：
-
-```yaml
-performance:
-  use_gpu: true
-  use_cudf: true
-clustering:
-  use_gpu: true
-```
-
-### 自定义配置
-
-```yaml
-# 自定义聚类算法
-clustering:
-  algorithm: "hdbscan"  # 或 "kmeans", "dbscan"
-  min_cluster_size: 10
-  metric: "euclidean"
-
-# 自定义图谱权重
-graph:
-  weights:
-    reference: 1.0
-    entity_coexistence: 0.8
-    semantic_similarity: 0.6
-
-# 自定义上下文调度权重
-context_scheduler:
-  semantic_weight: 0.3
-  graph_weight: 0.25
-  topic_weight: 0.2
-  feedback_weight: 0.15
-```
-
-### 评估和监控
-
-```bash
-# 运行评估
-python -m eval.evaluator --dataset eval_data.json
-
-# 性能监控
-python -m utils.monitor --watch-queries
-```
-
-## 📁 项目结构
-
-```
-anorag/
-├── config/                  # 配置管理
-│   ├── __init__.py
-│   └── config_loader.py
-├── doc/                     # 文档处理模块
-│   ├── chunker.py          # 文档分块
-│   ├── clustering.py       # 主题聚类
-│   ├── document_processor.py # 主处理器
-│   └── incremental_processor.py # 增量处理
-├── graph/                   # 知识图谱模块
-│   ├── graph_builder.py    # 图谱构建
-│   ├── graph_index.py      # 图谱索引
-│   ├── graph_retriever.py  # 图谱检索
-│   └── relation_extractor.py # 关系提取
-├── llm/                     # 语言模型模块
-│   ├── atomic_note_generator.py # 原子笔记生成
-│   ├── local_llm.py        # 本地LLM
-│   ├── ollama_client.py    # Ollama客户端
-│   ├── prompts.py          # 提示模板
-│   └── query_rewriter.py   # 查询重写
-├── query/                   # 查询处理模块
-│   └── query_processor.py  # 查询处理器
-├── vector_store/            # 向量存储模块
-│   ├── embedding_manager.py # 嵌入管理
-│   ├── retriever.py        # 向量检索
-│   └── vector_index.py     # 向量索引
-├── utils/                   # 工具模块
-│   ├── batch_processor.py  # 批处理
-│   ├── context_scheduler.py # 上下文调度
-│   ├── file_utils.py       # 文件工具
-│   ├── gpu_utils.py        # GPU工具
-│   ├── logging_utils.py    # 日志工具
-│   └── text_utils.py       # 文本工具
-├── eval/                    # 评估模块
-│   └── evaluator.py        # 评估器
-├── musique/                 # 测试数据集
-├── result/                  # 处理结果目录
-├── config.yaml             # 主配置文件
-├── requirements.txt        # 依赖列表
-├── install_rapids.sh       # RAPIDS安装脚本
-├── RAPIDS_INSTALL_GUIDE.md # RAPIDS安装指南
-└── main.py                 # 主入口
-```
-
-## 🛠️ 故障排除
-
-### RAPIDS安装问题
-如果遇到cuDF导入失败：
-
-```bash
-# 检查CUDA版本
-nvcc --version
-nvidia-smi
-
-# 重新安装RAPIDS
-./install_rapids.sh
-
-# 或参考详细指南
-cat RAPIDS_INSTALL_GUIDE.md
-```
-
-### 内存不足
-```yaml
-# 减少批处理大小
-document:
-  batch_size: 16
-embedding:
-  batch_size: 32
-
-# 禁用GPU加速
-performance:
-  use_gpu: false
-  use_cudf: false
-```
-
-### Ollama连接问题
-```bash
-# 检查Ollama服务
-ollama list
-ollama serve
-
-# 测试模型
-ollama run gemma3:4b-it-fp16
-```
-
-## 🤝 贡献指南
-
-欢迎贡献代码！请遵循以下步骤：
-
-1. Fork 项目
-2. 创建特性分支 (`git checkout -b feature/AmazingFeature`)
-3. 提交更改 (`git commit -m 'Add some AmazingFeature'`)
-4. 推送到分支 (`git push origin feature/AmazingFeature`)
-5. 开启 Pull Request
-
-### 开发环境设置
-```bash
-# 安装开发依赖
-pip install -r requirements-dev.txt
-
-# 运行测试
-python -m pytest tests/
-
-# 代码格式化
-black .
-flake8 .
-```
-
-## 📄 许可证
-
-本项目采用 MIT 许可证 - 查看 [LICENSE](LICENSE) 文件了解详情。
-
-## 🙏 致谢
-
-- [BAAI/bge-m3](https://huggingface.co/BAAI/bge-m3) - 高质量中英文嵌入模型
-- [Ollama](https://ollama.ai/) - 本地LLM服务框架
-- [NVIDIA RAPIDS](https://rapids.ai/) - GPU加速数据科学库
-- [NetworkX](https://networkx.org/) - Python图处理库
-- [FAISS](https://github.com/facebookresearch/faiss) - 高效相似度搜索库
-- [scikit-learn](https://scikit-learn.org/) - 机器学习库
-
-## 📞 联系方式
-
-如有问题或建议，请通过以下方式联系：
-
-- 提交 GitHub Issue
-- 发送邮件至项目维护者
-- 参与项目讨论
-
----
-
-**Ano-RAG** - 让知识检索更智能，让答案生成更精准！🚀
+# AnoRAG：原子笔记 + 图谱增强的检索增强生成系统
+
+简述：AnoRAG 是一个以“原子笔记”为核心的知识工程与问答系统。它将文档拆分为细粒度的语义单元（原子笔记），为其建立向量索引与主题簇，并抽取笔记间的实体/关系构建知识图谱。在查询阶段，它融合语义向量检索、词法（BM25）检索以及图路径评分，支持多跳检索与答案验证，提供可扩展、可并行的端到端 RAG 能力。
+
+## 总览图（流程与结构）
+下图展示了离线文档处理与在线查询的端到端流程，以及核心模块之间的关系与依赖，可帮助快速理解系统方法与接口边界。
+
+<p align="center">
+  <img src="docs/images/system_flow.svg" alt="系统流程图" width="92%" />
+</p>
+
+<p align="center">
+  <img src="docs/images/module_relations.svg" alt="模块关系图" width="92%" />
+</p>
+
+<p align="center">
+  <img src="docs/images/artifacts_map.svg" alt="数据产物示意图" width="88%" />
+</p>
+
+## 能做什么
+- 文档语义化加工：自动分块、生成风格统一的原子笔记、向量化嵌入、主题聚类。
+- 知识图谱构建：从原子笔记抽取实体与关系，形成带权边的图结构，并导出 GraphML。
+- 混合检索与融合：将语义向量、BM25、图路径（Path-aware）多源分数融合为统一相似度，提升召回与可解释性。
+- 多跳问题求解：基于图邻域与桥接实体进行二跳/多跳检索，支持子问题分解与证据合并。
+- 上下文调度与打包：在结构增强的调度器下选择最相关笔记并打包上下文，减少冗余与噪声。
+- 答案定位与审核：答案片段定位（span picking）、摘要质量审计（NER+LLM 两阶段）、一致性检查与答案校验。
+- 并行与增量：支持文档并行处理与查询并行检索；提供增量处理缓存与进度跟踪。
+
+## 系统如何工作（方法流程）
+1. 文档处理（离线/批处理）
+   - 文档分块：根据内容结构将原文切分为粒度稳定的段（chunks）。
+   - 原子笔记生成：调用本地/外部 LLM，按统一模板生成含实体与关系线索的原子笔记。
+   - 嵌入与聚类：对笔记向量化并进行主题聚类，形成主题池与簇信息。
+   - 图谱构建：抽取笔记之间的实体与关系，生成节点（note）与边（关系）构成的知识图谱，并可导出 GraphML。
+   - 质量与一致性：对聚类与图结构进行一致性检查，必要时记录错误报告与提示修复。
+2. 查询处理（在线）
+   - 初始检索候选：语义向量检索与 BM25 词法检索共同给出候选集合。
+   - 图谱增强与路径评分：结合图索引与路径质量，对候选进行加权与重排。
+   - 多跳检索（可选）：识别桥接实体，执行第二跳检索并与第一跳证据融合。
+   - 子问题分解（可选）：将复杂问题拆成子问题，分别检索与合并证据，最后调度上下文。
+   - 上下文打包：在结构增强调度器下，选择最相关、覆盖度更高的笔记集合，构造提示上下文。
+   - 答案生成与验证：生成最终答案，进行片段定位与质量审核，输出答案与检索明细。
+
+## 系统结构（组件与交互）
+- 文档处理层（doc/）
+  - DocumentProcessor：文档处理主流程，管控分块、笔记生成、嵌入、聚类、图谱、缓存与一致性检查。
+  - Chunker/Clustering/IncrementalProcessor：分块、聚类与增量处理子模块。
+- LLM 适配层（llm/）
+  - AtomicNoteGenerator/ParallelTaskAtomicNoteGenerator：原子笔记生成器（支持并行任务分配）。
+  - LocalLLM、OllamaClient、OpenAIClient、LMStudioClient、MultiModelClient：多种 LLM 提供方与混合路由。
+  - prompts：统一的系统/任务提示词模板。
+- 知识图谱层（graph/）
+  - GraphBuilder：从笔记与关系抽取器构建图谱；支持计算图质量指标与 GraphML 导出。
+  - RelationExtractor：抽取笔记间实体与关系，生成带类型与权重的边。
+  - GraphIndex/GraphRetriever：图索引与基于图的检索器，提供邻域扩展与路径评估能力。
+  - MultiHopQueryProcessor：多跳查询处理组件。
+- 向量与检索层（vector_store/、retrieval/）
+  - EmbeddingManager/VectorIndex/VectorRetriever：向量化管理、索引与候选检索；内置 BM25 回退与召回增强。
+  - HybridSearcher（retrieval/hybrid_search）：将 dense/BM25/graph/path 统一融合为最终分数，支持 linear/RRF。
+  - PathAwareRanker、ListT5Reranker、LearnedFusion：路径感知重排、列表重排序与可学习融合。
+  - RetrievalGuardrail、DiversityScheduler、LLMBasedRewriter：检索护栏、多样性调度与查询改写（可选）。
+- 查询编排层（query/）
+  - QueryProcessor：端到端查询流水线，编排混合检索、图增强、多跳/子问题分解、上下文调度与答案生成。
+  - SubQuestionPlanner、EvidenceMerger、ContextPacker：子问题规划、证据合并与上下文打包。
+- 上下文与工具层（context/、utils/）
+  - ContextDispatcher/ContextScheduler：结构增强/传统上下文调度器。
+  - EnhancedNER、SummaryAuditor、ConsistencyChecker：实体识别、摘要审计与一致性检查。
+  - FileUtils、BatchProcessor、ProgressTracker、Logging：通用工具与并行/进度支持。
+- 并行执行层（parallel/）
+  - ParallelEngine/Interface：文档与查询的并行执行框架，支持多策略（数据复制/拆分/任务分发/混合）。
+- 答案与评估（answer/、eval/、training/）
+  - SpanPicker、VerifyShell：答案片段定位与外壳验证。
+  - EnhancedEvaluator/QA 覆盖度：评估指标与覆盖度估计。
+  - training/calibrate：融合与评分的校准训练流程。
+
+## 数据与产物（典型输出）
+- 原子笔记集合：atomic_notes.json（或 processed/atomic_notes.json）。
+- 向量嵌入：embeddings.npy 与向量索引（faiss/自定义索引文件）。
+- 主题聚类：clustering.json（包含簇分配、主题池与簇统计）。
+- 知识图谱：graph.json（node-link 格式）与 graph.graphml（可视化/分析）。
+- 分块数据：chunks.jsonl（可追踪原文来源与段落映射）。
+- 日志与报告：一致性报告、审计标记、进度日志与性能统计。
+
+## 关键设计与优势
+- 原子笔记为核心：以最小语义单元组织知识，便于检索、聚类与关系抽取。
+- 图谱增强检索：结合图邻域与路径质量为候选加权，提升复杂查询的可解释性与可靠性。
+- 混合分数融合：统一融合 dense/BM25/graph/path，支持线性与 RRF，两者均可配置权重与超参。
+- 多跳与子问题：自然支持桥接实体与多跳推理；复杂问题拆解为可控的检索与合并流程。
+- 质量保障：NER+LLM 的两阶段摘要审计与一致性检查，降低信息缺失与结构错误风险。
+- 并行与增量：面向工程的并行调度与缓存管理，适配大规模文档与高并发查询。
+- 可扩展与可插拔：LLM 提供方、融合器、重排器、护栏与调度器均以配置驱动、模块化实现。
+
+## 模块职责一览（简表）
+- doc/document_processor.py：离线处理流水线与缓存/一致性管理。
+- graph/graph_builder.py：图谱构建与关系注入。
+- retrieval/hybrid_search.py：多源分数融合器。
+- vector_store/retriever.py：向量检索、BM25 回退与召回增强。
+- query/query_processor.py：查询主编排与多跳/子问题/调度/答案生成。
+- utils/*：工具箱（NER、审计、一致性、并行、日志、进度等）。
+- llm/*：LLM 客户端与原子笔记生成器。
+- parallel/*：并行执行框架。
+- answer/*：答案片段定位与验证。
+
+## 适用场景与边界
+- 适合需要结构化知识组织与可解释检索的企业知识库、学术资料库与长文档问答。
+- 对关系抽取质量与图谱连通性有一定依赖；可通过校准与护栏提升稳健性。
+- 多跳与子问题会增加时延与复杂度，建议按需求在配置中启用/调整。
+
+## 未来方向
+- 引入更强的关系抽取模型与事件图谱支持。
+- 提升跨文档实体对齐与别名归并质量。
+- 加强可学习融合与在线校准，进一步优化不同检索信号的协同效果。
+
+——
+如需按你的数据与任务进行定制（例如更强的子问题规划、特定领域实体规范化、融合权重校准等），可以基于配置与模块化接口快速扩展。

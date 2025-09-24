@@ -1,0 +1,129 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="900" viewBox="0 0 1200 900">
+  <style>
+    .box { fill: #ffffff; stroke: #4a5568; stroke-width: 2; rx: 8; }
+    .group { fill: #e2e8f0; stroke: #cbd5e0; stroke-width: 1; rx: 10; }
+    .title { font-family: Arial, sans-serif; font-size: 18px; font-weight: bold; fill: #1a202c; }
+    .text { font-family: Arial, sans-serif; font-size: 14px; fill: #2d3748; }
+    .arrow { stroke: #2d3748; stroke-width: 2; marker-end: url(#arrowhead); }
+    .dashed { stroke-dasharray: 6 4; }
+    .label { font-family: Arial, sans-serif; font-size: 16px; fill: #2d3748; font-weight: bold; }
+  </style>
+  <defs>
+    <marker id="arrowhead" markerWidth="10" markerHeight="7" refX="8" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#2d3748" />
+    </marker>
+  </defs>
+
+  <!-- Groups -->
+  <rect x="40" y="40" width="530" height="380" class="group" />
+  <text x="50" y="30" class="label">文档处理层</text>
+
+  <rect x="630" y="40" width="530" height="380" class="group" />
+  <text x="640" y="30" class="label">检索层</text>
+
+  <rect x="40" y="450" width="530" height="380" class="group" />
+  <text x="50" y="440" class="label">图谱与多跳</text>
+
+  <rect x="630" y="450" width="530" height="380" class="group" />
+  <text x="640" y="440" class="label">LLM 与编排</text>
+
+  <!-- Document Processing -->
+  <rect x="60" y="70" width="220" height="70" class="box" />
+  <text x="70" y="95" class="title">DocumentProcessor</text>
+  <text x="70" y="120" class="text">分块/笔记/嵌入/聚类/图谱</text>
+
+  <rect x="300" y="70" width="220" height="70" class="box" />
+  <text x="310" y="95" class="title">AtomicNoteGenerator</text>
+  <text x="310" y="120" class="text">LocalLLM / 并行</text>
+
+  <rect x="60" y="160" width="220" height="70" class="box" />
+  <text x="70" y="185" class="title">EmbeddingManager</text>
+  <text x="70" y="210" class="text">嵌入生成</text>
+
+  <rect x="300" y="160" width="220" height="70" class="box" />
+  <text x="310" y="185" class="title">VectorIndex</text>
+  <text x="310" y="210" class="text">索引构建</text>
+
+  <rect x="60" y="250" width="220" height="70" class="box" />
+  <text x="70" y="275" class="title">GraphBuilder</text>
+  <text x="70" y="300" class="text">关系抽取/节点/边</text>
+
+  <rect x="300" y="250" width="220" height="70" class="box" />
+  <text x="310" y="275" class="title">GraphIndex</text>
+  <text x="310" y="300" class="text">图索引</text>
+
+  <!-- Retrieval Layer -->
+  <rect x="650" y="70" width="240" height="70" class="box" />
+  <text x="660" y="95" class="title">VectorRetriever</text>
+  <text x="660" y="120" class="text">dense/Hybrid/BM25 回退</text>
+
+  <rect x="910" y="70" width="240" height="70" class="box" />
+  <text x="920" y="95" class="title">HybridSearcher</text>
+  <text x="920" y="120" class="text">Linear/RRF 融合</text>
+
+  <rect x="650" y="160" width="240" height="70" class="box" />
+  <text x="660" y="185" class="title">PathAwareRanker</text>
+  <text x="660" y="210" class="text">路径重排</text>
+
+  <rect x="910" y="160" width="240" height="70" class="box" />
+  <text x="920" y="185" class="title">ListT5Reranker</text>
+  <text x="920" y="210" class="text">列表重排（可选）</text>
+
+  <rect x="650" y="250" width="240" height="70" class="box" />
+  <text x="660" y="275" class="title">LearnedFusion</text>
+  <text x="660" y="300" class="text">可学习融合（训练）</text>
+
+  <rect x="910" y="250" width="240" height="70" class="box" />
+  <text x="920" y="275" class="title">BM25</text>
+  <text x="920" y="300" class="text">词法检索</text>
+
+  <!-- Graph & Multi-hop -->
+  <rect x="60" y="480" width="220" height="70" class="box" />
+  <text x="70" y="505" class="title">GraphRetriever</text>
+  <text x="70" y="530" class="text">邻域/路径评估</text>
+
+  <rect x="300" y="480" width="220" height="70" class="box" />
+  <text x="310" y="505" class="title">MultiHopQueryProcessor</text>
+  <text x="310" y="530" class="text">多跳检索</text>
+
+  <rect x="60" y="570" width="220" height="70" class="box" />
+  <text x="70" y="595" class="title">SubQuestionPlanner</text>
+  <text x="70" y="620" class="text">子问题分解</text>
+
+  <rect x="300" y="570" width="220" height="70" class="box" />
+  <text x="310" y="595" class="title">EvidenceMerger</text>
+  <text x="310" y="620" class="text">证据合并</text>
+
+  <!-- LLM & Orchestration -->
+  <rect x="650" y="480" width="240" height="70" class="box" />
+  <text x="660" y="505" class="title">HybridLLMDispatcher</text>
+  <text x="660" y="530" class="text">多模型路由</text>
+
+  <rect x="910" y="480" width="240" height="70" class="box" />
+  <text x="920" y="505" class="title">QueryProcessor</text>
+  <text x="920" y="530" class="text">端到端查询编排</text>
+
+  <rect x="650" y="570" width="240" height="70" class="box" />
+  <text x="660" y="595" class="title">ContextDispatcher</text>
+  <text x="660" y="620" class="text">上下文调度</text>
+
+  <rect x="910" y="570" width="240" height="70" class="box" />
+  <text x="920" y="595" class="title">AtomicNoteGenerator</text>
+  <text x="920" y="620" class="text">答案摘要（可选）</text>
+
+  <!-- Edges -->
+  <line x1="280" y1="105" x2="300" y2="105" class="arrow" />
+  <line x1="280" y1="195" x2="300" y2="195" class="arrow" />
+  <line x1="160" y1="230" x2="160" y2="250" class="arrow" />
+  <line x1="520" y1="195" x2="650" y2="105" class="arrow" />
+  <line x1="520" y1="285" x2="300" y2="285" class="arrow" />
+  <line x1="770" y1="105" x2="910" y2="105" class="arrow" />
+  <line x1="770" y1="195" x2="910" y2="195" class="arrow" />
+  <line x1="650" y1="285" x2="910" y2="285" class="arrow dashed" />
+  <line x1="160" y1="320" x2="160" y2="480" class="arrow" />
+  <line x1="420" y1="320" x2="420" y2="480" class="arrow" />
+  <line x1="650" y1="515" x2="910" y2="515" class="arrow" />
+  <line x1="910" y1="515" x2="650" y2="605" class="arrow" />
+  <line x1="650" y1="605" x2="910" y2="605" class="arrow" />
+</svg>
