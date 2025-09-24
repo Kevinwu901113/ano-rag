@@ -99,6 +99,24 @@ DEFAULT_CONFIG: Dict[str, Any] = {
             "export_metrics": False
         }
     },
+    "notes_llm": {
+        "stream_early_stop": True,
+        "sentinel_char": "~",
+        "enable_fast_path": True,
+        "retry_once_on_parse_error": True,
+        "shorten_on_retry_chars": 1000,
+        "min_chars": 25,
+        "max_chars": 400,
+        "min_salience": 0.3,
+        "max_notes_per_chunk": 6,
+        "enable_rule_fallback": True,
+        "llm_params": {
+            "temperature": 0,
+            "top_p": 0,
+            "max_tokens": 128,
+            "stop": ["\n\n", "~"]
+        }
+    },
     "vector_store": {
         "top_k": 20,
         "similarity_threshold": 0.5,

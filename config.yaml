@@ -248,7 +248,9 @@ atomic_note_generation:
 
 # 原子笔记生成优化配置
 notes_llm:
-  sentinel_char: "~"           # 哨兵字符，表示0条笔记
+  # 流式处理早停机制配置
+  stream_early_stop: true      # 启用流式处理早停机制
+  sentinel_char: "~"           # 哨兵字符，表示0条笔记，首字符为此字符时立即停止
   enable_fast_path: true       # 启用快速路径优化
   retry_once_on_parse_error: true  # 解析错误时重试一次
   shorten_on_retry_chars: 1000 # 重试时缩短chunk长度
@@ -263,7 +265,6 @@ notes_llm:
     top_p: 0                   # top_p设为0，进一步确保确定性
     max_tokens: 128            # 限制输出长度，提高响应速度
     stop: ["\n\n", "~"]        # 停止标记，遇到双换行或哨兵字符时停止
-    stream_early_stop: true    # 流式生成时，首token为~立即停止
 
 # 增强关系提取配置
 enhanced_relation_extraction:

@@ -12,6 +12,7 @@ from .prompts import (
     EVALUATE_ANSWER_SYSTEM_PROMPT,
     EVALUATE_ANSWER_PROMPT,
 )
+from .streaming_early_stop import create_early_stop_stream
 
 
 class OllamaClient:
@@ -116,6 +117,54 @@ class OllamaClient:
             else:
                 logger.error(f"Generation failed: {e} (status code: {getattr(e, 'status_code', 'unknown')})")
             raise e
+
+    def generate_stream(
+        self,
+        prompt: str,
+        system_prompt: str | None = None,
+        timeout: int | None = None,
+        **kwargs: Any,
+    ) -> Iterator[str]:
+        """生成流式响应"""
+        request_timeout = timeout or self.timeout
+        
+        try:
+            # 创建原始流
+            def original_stream():
+                response = self.client.generate(
+                    model=self.model,
+                    prompt=prompt,
+                    system=system_prompt,
+                    stream=True,
+                    options={
+                        "temperature": kwargs.get("temperature", self.temperature),
+                        "num_predict": kwargs.get("max_tokens", self.max_tokens),
+                    },
+                )
+                
+                for chunk in response:
+                    if chunk.get('response'):
+                        yield chunk['response']
+            
+            # 检查是否启用早停机制
+            stream_early_stop = config.get('notes_llm.stream_early_stop', False)
+            if stream_early_stop:
+                sentinel_char = config.get('notes_llm.sentinel_char', '~')
+                # 应用早停机制
+                yield from create_early_stop_stream(original_stream(), sentinel_char, 16)
+            else:
+                # 直接返回原始流
+                yield from original_stream()
+                
+        except Exception as e:
+            error_msg = str(e)
+            if "not found" in error_msg.lower():
+                logger.error(f"Model error: Model '{self.model}' not found - {e}")
+            elif "timeout" in error_msg.lower():
+                logger.error(f"Timeout error: Request exceeded {request_timeout}s - {e}")
+            else:
+                logger.error(f"Generation failed: {e} (status code: {getattr(e, 'status_code', 'unknown')})")
+            yield ""
 
     def chat(
         self,

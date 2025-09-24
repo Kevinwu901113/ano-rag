@@ -323,7 +323,20 @@ class AtomicNoteGenerator:
             if self.is_hybrid_mode and self.hybrid_dispatcher:
                 return self.hybrid_dispatcher.process_single(user_prompt, sys_prompt, **llm_params)
             else:
-                return self.llm.generate(user_prompt, sys_prompt, **llm_params)
+                # 检查是否启用流式处理和早停机制
+                stream_early_stop = config.get('notes_llm.stream_early_stop', False)
+                if stream_early_stop and hasattr(self.llm, 'generate_stream'):
+                    # 使用流式生成并收集完整响应
+                    response_parts = []
+                    try:
+                        for chunk in self.llm.generate_stream(user_prompt, sys_prompt, **llm_params):
+                            response_parts.append(chunk)
+                        return ''.join(response_parts)
+                    except Exception as e:
+                        logger.warning(f"Stream generation failed, falling back to regular generation: {e}")
+                        return self.llm.generate(user_prompt, sys_prompt, **llm_params)
+                else:
+                    return self.llm.generate(user_prompt, sys_prompt, **llm_params)
         
         # 定义解析函数
         def parse_func(response: str) -> Optional[List[Dict[str, Any]]]:

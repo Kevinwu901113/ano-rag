@@ -50,13 +50,13 @@ def parse_notes_response(raw: str, sentinel: str = "~") -> Optional[List[Dict[st
     except Exception as e:
         logger.warning(f"Unexpected error during JSON parsing: {e}")
     
-    # 容错：从文本中提取JSON数组
-    json_match = re.search(r'\[[\s\S]*\]', s)
+    # 容错：从尾部提取JSON数组（使用正则表达式 \[[\s\S]*\]$）
+    json_match = re.search(r'\[[\s\S]*\]$', s)
     if json_match:
         try:
             obj = json.loads(json_match.group(0))
             if isinstance(obj, list):
-                logger.debug(f"Successfully extracted JSON array from text with {len(obj)} items")
+                logger.debug(f"Successfully extracted JSON array from text tail with {len(obj)} items")
                 return obj
         except json.JSONDecodeError as e:
             logger.debug(f"Extracted JSON parsing failed: {e}")

@@ -31,6 +31,7 @@ class NotesStatsLogger:
             'sentinel_rate': 0.0,
             'parse_fail_rate': 0.0,
             'rule_fallback_rate': 0.0,
+            'avg_notes_per_chunk': 0.0,
             'total_chunks_processed': 0,
             'total_notes_generated': 0,
             'quality_filter_stats': {},
@@ -113,6 +114,12 @@ class NotesStatsLogger:
         if self.session_stats['total_chunks_processed'] > 0:
             self.session_stats['sentinel_rate'] = (
                 self.session_stats['notes_zero_count'] / 
+                self.session_stats['total_chunks_processed']
+            )
+            
+            # 计算平均每块笔记数
+            self.session_stats['avg_notes_per_chunk'] = (
+                self.session_stats['total_notes_generated'] / 
                 self.session_stats['total_chunks_processed']
             )
             
@@ -238,7 +245,8 @@ class NotesStatsLogger:
                 f.write(f"零笔记数量: {session['notes_zero_count']}\n")
                 f.write(f"哨兵字符率: {session['sentinel_rate']:.2%}\n")
                 f.write(f"解析失败率: {session['parse_fail_rate']:.2%}\n")
-                f.write(f"规则回退率: {session['rule_fallback_rate']:.2%}\n\n")
+                f.write(f"规则回退率: {session['rule_fallback_rate']:.2%}\n")
+                f.write(f"平均每块笔记数: {session['avg_notes_per_chunk']:.2f}\n\n")
                 
                 # 累积统计
                 cumulative = data['cumulative_stats']
@@ -265,6 +273,7 @@ class NotesStatsLogger:
             'sentinel_rate': self.session_stats['sentinel_rate'],
             'parse_fail_rate': self.session_stats['parse_fail_rate'],
             'rule_fallback_rate': self.session_stats['rule_fallback_rate'],
+            'avg_notes_per_chunk': self.session_stats['avg_notes_per_chunk'],
             'processing_time': self.session_stats['total_processing_time']
         }
 

@@ -11,6 +11,7 @@ from .prompts import (
     EVALUATE_ANSWER_SYSTEM_PROMPT,
     EVALUATE_ANSWER_PROMPT,
 )
+from .streaming_early_stop import create_early_stop_stream
 
 
 class OpenAIClient:
@@ -97,8 +98,64 @@ class OpenAIClient:
                 logger.error(f"Generation failed: {e}")
             return ""
 
-    def chat(
+    def generate_stream(
         self,
+        prompt: str,
+        system_prompt: str | None = None,
+        **kwargs: Any,
+    ) -> Iterator[str]:
+        """生成流式响应"""
+        # Merge default options with kwargs
+        options = self.default_options.copy()
+        options.update({
+            "temperature": kwargs.get("temperature", self.temperature),
+            "max_tokens": kwargs.get("max_tokens", self.max_tokens),
+        })
+        
+        # Prepare messages
+        messages = []
+        if system_prompt:
+            messages.append({"role": "system", "content": system_prompt})
+        messages.append({"role": "user", "content": prompt})
+        
+        try:
+            response = self.client.chat.completions.create(
+                model=self.model,
+                messages=messages,
+                stream=True,
+                **options,
+            )
+
+            # 创建原始流
+            def original_stream():
+                for chunk in response:
+                    if chunk.choices[0].delta.content:
+                        yield chunk.choices[0].delta.content
+            
+            # 检查是否启用早停机制
+            stream_early_stop = config.get('notes_llm.stream_early_stop', False)
+            if stream_early_stop:
+                sentinel_char = config.get('notes_llm.sentinel_char', '~')
+                # 应用早停机制
+                yield from create_early_stop_stream(original_stream(), sentinel_char, 16)
+            else:
+                # 直接返回原始流
+                yield from original_stream()
+            
+        except Exception as e:
+            # Log the specific error for debugging
+            error_msg = str(e)
+            if "api_key" in error_msg.lower():
+                logger.error(f"API Key error: Invalid or missing OpenAI API key - {e}")
+            elif "model" in error_msg.lower() and "not found" in error_msg.lower():
+                logger.error(f"Model error: Model '{self.model}' not found - {e}")
+            elif "rate_limit" in error_msg.lower():
+                logger.error(f"Rate limit error: OpenAI API rate limit exceeded - {e}")
+            else:
+                logger.error(f"Generation failed: {e}")
+            yield ""
+
+    def chat(
         messages: list[dict[str, str]],
         *,
         stream: bool = False,

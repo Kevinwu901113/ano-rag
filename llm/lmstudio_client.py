@@ -18,6 +18,7 @@ from .prompts import (
     EVALUATE_ANSWER_SYSTEM_PROMPT,
     EVALUATE_ANSWER_PROMPT,
 )
+from .streaming_early_stop import create_early_stop_stream
 
 
 class LoadBalancingStrategy(Enum):
@@ -186,9 +187,21 @@ class LMStudioClient:
                 **options
             )
             
-            for chunk in response:
-                if chunk.choices[0].delta.content:
-                    yield chunk.choices[0].delta.content
+            # 创建原始流
+            def original_stream():
+                for chunk in response:
+                    if chunk.choices[0].delta.content:
+                        yield chunk.choices[0].delta.content
+            
+            # 检查是否启用早停机制
+            stream_early_stop = config.get('notes_llm.stream_early_stop', False)
+            if stream_early_stop:
+                sentinel_char = config.get('notes_llm.sentinel_char', '~')
+                # 应用早停机制
+                yield from create_early_stop_stream(original_stream(), sentinel_char, 16)
+            else:
+                # 直接返回原始流
+                yield from original_stream()
                     
         except Exception as e:
             logger.error(f"LM Studio stream generation failed: {e}")

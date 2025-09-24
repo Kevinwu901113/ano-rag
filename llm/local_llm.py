@@ -16,6 +16,7 @@ from .prompts import (
     EXTRACT_ENTITIES_SYSTEM_PROMPT,
     EXTRACT_ENTITIES_PROMPT,
 )
+from .streaming_early_stop import create_early_stop_stream
 
 class LocalLLM:
     """统一LLM类，支持本地和在线模型，用于原子笔记生成和查询重写等任务
@@ -247,6 +248,92 @@ class LocalLLM:
         except Exception as e:
             logger.error(f"Generation failed: {e}")
             return ""
+    
+    def generate_stream(self, prompt: str, system_prompt: str = None, **kwargs):
+        """流式生成文本，支持early_stop机制"""
+        try:
+            # 如果是混合模式，委托给hybrid_dispatcher
+            if hasattr(self, 'is_hybrid_mode') and self.is_hybrid_mode:
+                if self.hybrid_dispatcher:
+                    # 假设hybrid_dispatcher有generate_stream方法
+                    if hasattr(self.hybrid_dispatcher, 'generate_stream'):
+                        original_stream = self.hybrid_dispatcher.generate_stream(
+                            prompt=prompt,
+                            system_prompt=system_prompt,
+                            **kwargs
+                        )
+                    else:
+                        # 如果没有generate_stream，使用generate并转换为流
+                        response = self.hybrid_dispatcher.process_single(
+                            prompt=prompt,
+                            system_prompt=system_prompt,
+                            **kwargs
+                        )
+                        yield response
+                        return
+                else:
+                    logger.warning("Hybrid dispatcher not available")
+                    return
+            elif self.is_ollama_model and self.ollama_client:
+                # 使用Ollama客户端的流式生成
+                original_stream = self.ollama_client.generate_stream(
+                    prompt=prompt,
+                    system_prompt=system_prompt,
+                    temperature=kwargs.get('temperature', self.temperature),
+                    max_tokens=kwargs.get('max_tokens', self.max_tokens)
+                )
+            elif self.is_openai_model and self.openai_client:
+                # 使用OpenAI客户端的流式生成
+                original_stream = self.openai_client.generate_stream(
+                    prompt=prompt,
+                    system_prompt=system_prompt,
+                    temperature=kwargs.get('temperature', self.temperature),
+                    max_tokens=kwargs.get('max_tokens', self.max_tokens)
+                )
+            elif self.is_lmstudio_model:
+                if self.multi_model_client and hasattr(self.multi_model_client, 'generate_stream'):
+                    # 使用多模型客户端的流式生成
+                    original_stream = self.multi_model_client.generate_stream(
+                        prompt=prompt,
+                        system_prompt=system_prompt,
+                        temperature=kwargs.get('temperature', self.temperature),
+                        max_tokens=kwargs.get('max_tokens', self.max_tokens)
+                    )
+                elif self.lmstudio_client:
+                    # 使用LM Studio客户端的流式生成
+                    original_stream = self.lmstudio_client.generate_stream(
+                        prompt=prompt,
+                        system_prompt=system_prompt,
+                        temperature=kwargs.get('temperature', self.temperature),
+                        max_tokens=kwargs.get('max_tokens', self.max_tokens)
+                    )
+                else:
+                    logger.warning("No LMStudio client available for streaming")
+                    return
+            else:
+                # transformers模式暂不支持流式生成，回退到普通生成
+                response = self.generate(prompt, system_prompt, **kwargs)
+                yield response
+                return
+            
+            # 应用early_stop机制
+            if config.get('notes_llm.stream_early_stop', False):
+                sentinel_char = config.get('notes_llm.sentinel_char', '~')
+                early_stop_stream = create_early_stop_stream(
+                    original_stream, 
+                    sentinel_char=sentinel_char, 
+                    max_chars_before_check=16
+                )
+                yield from early_stop_stream
+            else:
+                yield from original_stream
+                
+        except Exception as e:
+            logger.error(f"Stream generation failed: {e}")
+            # 回退到普通生成
+            response = self.generate(prompt, system_prompt, **kwargs)
+            if response:
+                yield response
     
     def batch_generate(self, prompts: List[str], system_prompt: str = None, **kwargs) -> List[str]:
         """批量生成文本"""
