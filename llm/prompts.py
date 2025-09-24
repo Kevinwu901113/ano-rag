@@ -62,6 +62,10 @@ ATOMIC_NOTEGEN_SYSTEM_PROMPT = """
 5. importance_score: 评估内容重要性（0-1分）
 6. note_type: 分类为fact（事实）、concept（概念）、procedure（流程）、example（示例）
 
+DECISION RULES:
+- 若0条笔记：只输出一个字符~（或输出最短合法JSON[]），二选一；不得输出其他字符/空格/换行。
+- 若≥1条笔记：输出纯JSON数组，每个对象包含text,sent_count,salience,local_spans,entities,years,quality_flags；不得生成解释或Markdown。
+
 重要：你必须严格按照JSON格式返回结果，不要添加任何解释文字或markdown标记。只返回纯JSON对象。
 """
 

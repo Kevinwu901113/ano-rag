@@ -246,6 +246,25 @@ atomic_note_generation:
     log_stats: true             # 是否记录统计信息
     export_metrics: false       # 是否导出性能指标
 
+# 原子笔记生成优化配置
+notes_llm:
+  sentinel_char: "~"           # 哨兵字符，表示0条笔记
+  enable_fast_path: true       # 启用快速路径优化
+  retry_once_on_parse_error: true  # 解析错误时重试一次
+  shorten_on_retry_chars: 1000 # 重试时缩短chunk长度
+  min_chars: 25                # 笔记最小字符数
+  max_chars: 400               # 笔记最大字符数
+  min_salience: 0.3            # 最小显著性阈值
+  max_notes_per_chunk: 6       # 每个chunk最大笔记数
+  enable_rule_fallback: true   # 启用规则回退机制
+  # LLM调用参数优化
+  llm_params:
+    temperature: 0             # 生成温度设为0，确保确定性输出
+    top_p: 0                   # top_p设为0，进一步确保确定性
+    max_tokens: 128            # 限制输出长度，提高响应速度
+    stop: ["\n\n", "~"]        # 停止标记，遇到双换行或哨兵字符时停止
+    stream_early_stop: true    # 流式生成时，首token为~立即停止
+
 # 增强关系提取配置
 enhanced_relation_extraction:
   use_llm_extraction: true     # 是否启用LLM增强的语义关系提取

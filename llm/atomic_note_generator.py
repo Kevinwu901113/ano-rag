@@ -3,10 +3,15 @@ from loguru import logger
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import threading
 import re
+import time
 from .local_llm import LocalLLM
 from utils.batch_processor import BatchProcessor
 from utils.text_utils import TextUtils
 from utils.json_utils import extract_json_from_response, clean_control_characters
+from utils.notes_parser import parse_notes_response, filter_valid_notes, normalize_note_fields
+from utils.notes_quality_filter import NotesQualityFilter
+from utils.notes_retry_handler import NotesRetryHandler
+from utils.notes_stats_logger import get_global_stats_logger, log_notes_stats, finalize_notes_session
 from config import config
 from .prompts import (
     ATOMIC_NOTEGEN_SYSTEM_PROMPT,
@@ -43,7 +48,21 @@ class AtomicNoteGenerator:
         
         # 检查LLM是否支持并发处理（包括多模型并行）
         self.concurrent_support = self._check_concurrent_support()
-    
+        
+        # 新增：优化配置
+        self.enable_fast_path = config.get('notes_llm.enable_fast_path', True)
+        self.sentinel_char = config.get('notes_llm.sentinel_char', '~')
+        
+        # 统计信息
+        self.processing_stats = {
+            'notes_zero_count': 0,
+            'sentinel_rate': 0.0,
+            'parse_fail_rate': 0.0,
+            'rule_fallback_rate': 0.0,
+            'total_chunks_processed': 0,
+            'total_notes_generated': 0
+        }
+
     def _check_concurrent_support(self) -> bool:
         """检查LLM是否支持并发处理（包括多模型并行和单实例队列）"""
         try:
@@ -67,20 +86,40 @@ class AtomicNoteGenerator:
         except Exception as e:
             logger.warning(f"Failed to check concurrent support: {e}")
             return False
-        
+    
     def generate_atomic_notes(self, text_chunks: List[Dict[str, Any]], progress_tracker: Optional[Any] = None) -> List[Dict[str, Any]]:
         """从文本块生成原子笔记"""
         logger.info(f"Generating atomic notes for {len(text_chunks)} text chunks")
+        
+        # 重置统计信息
+        self.reset_processing_stats()
+        start_time = time.time()
         
         # 如果启用并发且支持并发处理，使用并发处理
         if self.concurrent_enabled and self.concurrent_support:
             client = getattr(self.llm, 'lmstudio_client', None) or getattr(self.llm, 'client', None)
             instance_count = len(getattr(client, 'model_instances', getattr(client, 'instances', []))) if client else 1
             logger.info(f"Using concurrent processing with {instance_count} instances")
-            return self._generate_atomic_notes_concurrent(text_chunks, progress_tracker)
+            atomic_notes = self._generate_atomic_notes_concurrent(text_chunks, progress_tracker)
         else:
             logger.info("Using sequential processing")
-            return self._generate_atomic_notes_sequential(text_chunks, progress_tracker)
+            atomic_notes = self._generate_atomic_notes_sequential(text_chunks, progress_tracker)
+        
+        # 计算处理时间
+        processing_time = time.time() - start_time
+        
+        # 更新统计信息
+        final_stats = self.get_processing_stats()
+        final_stats['total_processing_time'] = processing_time
+        
+        # 记录到全局统计记录器
+        log_notes_stats(final_stats)
+        
+        # 记录会话摘要
+        session_summary = finalize_notes_session(processing_time)
+        logger.info(f"Notes generation completed: {session_summary}")
+        
+        return atomic_notes
     
     def _generate_atomic_notes_sequential(self, text_chunks: List[Dict[str, Any]], progress_tracker: Optional[Any] = None) -> List[Dict[str, Any]]:
         """顺序生成原子笔记（原有逻辑）"""
@@ -261,7 +300,7 @@ class AtomicNoteGenerator:
         return atomic_notes
     
     def _generate_single_atomic_note(self, chunk_data: Union[Dict[str, Any], Any], system_prompt: str) -> Dict[str, Any]:
-        """生成单个原子笔记"""
+        """生成单个原子笔记 - 使用新的优化流程"""
         # 确保 chunk_data 是字典类型
         if not isinstance(chunk_data, dict):
             logger.warning(f"chunk_data is not a dict, got {type(chunk_data)}: {chunk_data}")
@@ -273,57 +312,80 @@ class AtomicNoteGenerator:
                 return self._create_fallback_note({'text': str(chunk_data)})
         
         text = chunk_data.get('text', '')
+        self.processing_stats['total_chunks_processed'] += 1
         
+        # 准备LLM调用参数
+        llm_params = self._get_optimized_llm_params()
         prompt = ATOMIC_NOTEGEN_PROMPT.format(text=text)
         
-        # 根据模式选择生成器
-        if self.is_hybrid_mode and self.hybrid_dispatcher:
-            response = self.hybrid_dispatcher.process_single(prompt, system_prompt)
-        else:
-            response = self.llm.generate(prompt, system_prompt)
+        # 定义LLM生成函数
+        def llm_generate_func(user_prompt: str, sys_prompt: str) -> str:
+            if self.is_hybrid_mode and self.hybrid_dispatcher:
+                return self.hybrid_dispatcher.process_single(user_prompt, sys_prompt, **llm_params)
+            else:
+                return self.llm.generate(user_prompt, sys_prompt, **llm_params)
         
-        try:
-            import json
-            import re
-            
-            # 清理响应，提取JSON部分
-            cleaned_response = extract_json_from_response(response)
-            
-            if not cleaned_response:
-                logger.warning(f"No valid JSON found in response: {response[:200]}...")
-                return self._create_fallback_note(chunk_data)
-            
-            note_data = json.loads(cleaned_response)
-            
-            # 处理 note_data 的不同类型
-            if isinstance(note_data, list):
-                # 如果是列表，处理所有有效的字典项
-                valid_notes = [item for item in note_data if isinstance(item, dict)]
-                if valid_notes:
-                    logger.info(f"Processing {len(valid_notes)} atomic notes from list")
-                    # 处理第一个笔记，其余的将在后续处理中返回
-                    note_data = valid_notes[0]
-                    # 如果有多个笔记，我们需要特殊处理
-                    if len(valid_notes) > 1:
-                        # 存储额外的笔记以便后续处理
-                        chunk_data['_additional_notes'] = valid_notes[1:]
-                else:
-                    logger.warning("No valid dict found in list, creating fallback note")
-                    return self._create_fallback_note(chunk_data)
-            elif not isinstance(note_data, dict):
-                logger.warning(f"note_data is not a dict or list, got {type(note_data)}: {note_data}")
-                return self._create_fallback_note(chunk_data)
-            
-            # 使用统一的方法创建原子笔记
-            return self._create_atomic_note_from_data(note_data, chunk_data)
-            
-        except (json.JSONDecodeError, ValueError) as e:
-            logger.warning(f"Failed to parse JSON response: {e}. Response: {response[:200]}...")
-            return self._create_fallback_note(chunk_data)
+        # 定义解析函数
+        def parse_func(response: str) -> Optional[List[Dict[str, Any]]]:
+            return parse_notes_response(response, sentinel=self.sentinel_char)
+        
+        # 使用重试处理器
+        retry_handler = NotesRetryHandler()
+        parsed_notes, retry_metadata = retry_handler.process_chunk_with_retry(
+            chunk_data, llm_generate_func, parse_func, system_prompt, prompt
+        )
+        
+        # 更新统计信息
+        if retry_metadata.get('used_fallback', False):
+            self.processing_stats['rule_fallback_rate'] += 1
+        
+        if not parsed_notes:
+            # 空结果
+            self.processing_stats['notes_zero_count'] += 1
+            return None  # 返回None表示没有生成笔记
+        
+        # 标准化笔记字段
+        normalized_notes = [normalize_note_fields(note) for note in parsed_notes]
+        
+        # 过滤有效笔记
+        valid_notes = filter_valid_notes(normalized_notes)
+        
+        if not valid_notes:
+            self.processing_stats['notes_zero_count'] += 1
+            return None
+        
+        # 质量过滤
+        quality_filter = NotesQualityFilter()
+        filtered_notes, filter_stats = quality_filter.filter_notes(valid_notes)
+        
+        if not filtered_notes:
+            self.processing_stats['notes_zero_count'] += 1
+            return None
+        
+        # 转换为原有格式（取第一个笔记，其余的存储在_additional_notes中）
+        primary_note = self._convert_to_atomic_note_format(filtered_notes[0], chunk_data)
+        
+        if len(filtered_notes) > 1:
+            # 存储额外的笔记
+            additional_notes = [self._convert_to_atomic_note_format(note, chunk_data) for note in filtered_notes[1:]]
+            chunk_data['_additional_notes'] = additional_notes
+        
+        self.processing_stats['total_notes_generated'] += len(filtered_notes)
+        return primary_note
     
-    def _create_atomic_note_from_data(self, note_data: Dict[str, Any], chunk_data: Dict[str, Any]) -> Dict[str, Any]:
-        """从note_data和chunk_data创建完整的原子笔记"""
-        text = chunk_data.get('text', '')
+    def _get_optimized_llm_params(self) -> Dict[str, Any]:
+        """获取优化的LLM调用参数"""
+        params = config.get('notes_llm.llm_params', {})
+        return {
+            'temperature': params.get('temperature', 0),
+            'top_p': params.get('top_p', 0),
+            'max_tokens': params.get('max_tokens', 128),
+            'stop': params.get('stop', ['\n\n', self.sentinel_char])
+        }
+    
+    def _convert_to_atomic_note_format(self, note: Dict[str, Any], chunk_data: Dict[str, Any]) -> Dict[str, Any]:
+        """将新格式的笔记转换为原有的原子笔记格式"""
+        text = note.get('text', '')
         
         # 提取相关的paragraph idx信息
         paragraph_idx_mapping = chunk_data.get('paragraph_idx_mapping', {})
@@ -334,45 +396,42 @@ class AtomicNoteGenerator:
         raw_span = text  # raw_span就是原始文本内容
         
         # 提取实体和关系信息
-        entities = self._clean_list(note_data.get('entities', []))
-        relations = note_data.get('relations', [])
+        entities = note.get('entities', [])
+        relations = []  # 新格式暂不包含relations
         
         # 生成raw_span_evidence
         raw_span_evidence = self._generate_raw_span_evidence(entities, relations, text)
         
-        # 验证和清理数据
+        # 构建原子笔记
         atomic_note = {
-            'original_text': text,
-            'content': note_data.get('content', text),
-            'summary': note_data.get('summary', note_data.get('content', text)),  # 保留summary字段用于前端显示
+            'original_text': chunk_data.get('text', ''),
+            'content': text,
+            'summary': text,  # 保留summary字段用于前端显示
             'title': title,
             'raw_span': raw_span,
-            'raw_span_evidence': raw_span_evidence,  # 新增字段
-            'keywords': self._clean_list(note_data.get('keywords', [])),
+            'raw_span_evidence': raw_span_evidence,
+            'keywords': [],  # 新格式暂不包含keywords
             'entities': entities,
-            'concepts': self._clean_list(note_data.get('concepts', [])),
-            'relations': relations if isinstance(relations, list) else [],  # 确保relations字段存在
-            'normalized_entities': self._clean_list(note_data.get('normalized_entities', [])),
-            'normalized_predicates': self._clean_list(note_data.get('normalized_predicates', [])),
-            'importance_score': float(note_data.get('importance_score', 0.5)),
-            'note_type': note_data.get('note_type', 'fact'),
+            'concepts': [],  # 新格式暂不包含concepts
+            'relations': relations,
+            'normalized_entities': [],
+            'normalized_predicates': [],
+            'importance_score': note.get('salience', 0.5),
+            'note_type': 'fact',
             'source_info': chunk_data.get('source_info', {}),
             'chunk_index': chunk_data.get('chunk_index', 0),
             'length': len(text),
-            'paragraph_idxs': relevant_idxs
+            'paragraph_idxs': relevant_idxs,
+            # 新增字段
+            'sent_count': note.get('sent_count', 1),
+            'salience': note.get('salience', 0.5),
+            'local_spans': note.get('local_spans', []),
+            'years': note.get('years', []),
+            'quality_flags': note.get('quality_flags', ['OK'])
         }
         
-        # 提取额外的实体（如果LLM没有提取到）
-        if not atomic_note['entities']:
-            atomic_note['entities'] = TextUtils.extract_entities(text)
-        
-        # 确保包含主要实体
-        primary_entity = chunk_data.get('primary_entity')
-        if primary_entity and primary_entity not in atomic_note['entities']:
-            atomic_note['entities'].insert(0, primary_entity)
-        
         return atomic_note
-    
+
     def _generate_raw_span_evidence(self, entities: List[str], relations: List[Any], text: str) -> str:
         """生成raw_span_evidence，由实体与关系抽取器拼接成简单证据句
         
@@ -756,6 +815,23 @@ class AtomicNoteGenerator:
                 })
         
         return relations
+    
+    def get_processing_stats(self) -> Dict[str, Any]:
+        """获取处理统计信息"""
+        stats = self.processing_stats.copy()
+        
+        # 计算比率
+        if stats['total_chunks_processed'] > 0:
+            stats['sentinel_rate'] = stats['notes_zero_count'] / stats['total_chunks_processed']
+            stats['rule_fallback_rate'] = stats['rule_fallback_rate'] / stats['total_chunks_processed']
+        
+        return stats
+    
+    def reset_processing_stats(self):
+        """重置处理统计信息"""
+        for key in self.processing_stats:
+            if isinstance(self.processing_stats[key], (int, float)):
+                self.processing_stats[key] = 0
     
     def validate_atomic_notes(self, atomic_notes: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """验证原子笔记的质量"""
