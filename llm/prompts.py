@@ -75,20 +75,29 @@ ATOMIC_NOTEGEN_PROMPT = """
 文本内容：
 {text}
 
-请严格按照以下JSON格式返回，不要添加任何其他文字或解释：
-{{
-    "content": "原子笔记的完整内容，包含所有重要信息",
-    "keywords": ["关键词1", "关键词2"],
-    "entities": ["实体1", "实体2"],
-    "concepts": ["概念1", "概念2"],
-    "importance_score": 0.8,
-    "note_type": "fact"
-}}
+请严格按照以下JSON数组格式返回，每个对象包含以下字段：
+[
+    {{
+        "text": "原子笔记的完整内容，包含所有重要信息",
+        "sent_count": 1,
+        "salience": 0.8,
+        "local_spans": [],
+        "entities": ["实体1", "实体2"],
+        "years": [],
+        "quality_flags": ["OK"]
+    }}
+]
 
 注意：
-- importance_score必须是0到1之间的数字
-- note_type必须是以下之一：fact, concept, procedure, example
-- 只返回JSON对象，不要包含markdown代码块标记
+- text: 原子笔记的完整文本内容
+- sent_count: 句子数量（正整数）
+- salience: 重要性评分（0到1之间的数字）
+- local_spans: 本地文本片段（通常为空数组）
+- entities: 识别出的实体列表
+- years: 相关年份（如果有的话）
+- quality_flags: 质量标记，通常为["OK"]
+- 如果没有有效的原子笔记，返回空数组[]
+- 只返回JSON数组，不要包含markdown代码块标记
 """
 
 # Query rewriting

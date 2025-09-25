@@ -12,6 +12,7 @@ from loguru import logger
 def parse_notes_response(raw: str, sentinel: str = "~") -> Optional[List[Dict[str, Any]]]:
     """
     统一解析器，解析LLM生成的原子笔记响应
+    按照指定顺序进行解析，增强容错处理
     
     Args:
         raw: LLM的原始响应文本
@@ -25,17 +26,17 @@ def parse_notes_response(raw: str, sentinel: str = "~") -> Optional[List[Dict[st
     
     s = raw.strip()
     
-    # 哨兵字符检查：0条笔记
+    # 1. 哨兵字符检查：0条笔记
     if s == sentinel:
         logger.debug(f"Detected sentinel character '{sentinel}', returning empty list")
         return []
     
-    # 最短JSON检查：0条笔记
+    # 2. 最短JSON检查：0条笔记
     if s == "[]":
         logger.debug("Detected empty JSON array, returning empty list")
         return []
     
-    # 尝试标准JSON解析
+    # 3. 尝试标准JSON解析
     try:
         obj = json.loads(s)
         if isinstance(obj, list):
@@ -50,7 +51,7 @@ def parse_notes_response(raw: str, sentinel: str = "~") -> Optional[List[Dict[st
     except Exception as e:
         logger.warning(f"Unexpected error during JSON parsing: {e}")
     
-    # 容错：从尾部提取JSON数组（使用正则表达式 \[[\s\S]*\]$）
+    # 4. 从文本尾部提取最外层JSON数组（兜住"模型先讲两句解释、最后才输出数组"的情况）
     json_match = re.search(r'\[[\s\S]*\]$', s)
     if json_match:
         try:
@@ -63,7 +64,7 @@ def parse_notes_response(raw: str, sentinel: str = "~") -> Optional[List[Dict[st
         except Exception as e:
             logger.warning(f"Unexpected error during extracted JSON parsing: {e}")
     
-    # 容错：尝试提取单个JSON对象
+    # 5. 容错：尝试提取单个JSON对象
     json_obj_match = re.search(r'\{[\s\S]*\}', s)
     if json_obj_match:
         try:

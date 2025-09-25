@@ -326,12 +326,32 @@ class AtomicNoteGenerator:
                 # 检查是否启用流式处理和早停机制
                 stream_early_stop = config.get('notes_llm.stream_early_stop', False)
                 if stream_early_stop and hasattr(self.llm, 'generate_stream'):
-                    # 使用流式生成并收集完整响应
+                    # 使用流式生成并实现真正的早停逻辑
                     response_parts = []
+                    seen_first = False
                     try:
                         for chunk in self.llm.generate_stream(user_prompt, sys_prompt, **llm_params):
+                            if not chunk:
+                                continue
                             response_parts.append(chunk)
-                        return ''.join(response_parts)
+                            
+                            # 检测首个非空白字符
+                            if not seen_first:
+                                head = "".join(response_parts).lstrip()
+                                if not head:
+                                    continue
+                                seen_first = True
+                                c0 = head[0]
+                                
+                                # 立刻早停：无事实
+                                if c0 == config.get('notes_llm.sentinel_char', '~'):
+                                    return c0
+                                
+                                # 检查是否为无效前缀，触发回退
+                                if c0 not in ['[', config.get('notes_llm.sentinel_char', '~')] and len(head) > 16:
+                                    raise RuntimeError("early-stop: invalid prefix")
+                        
+                        return "".join(response_parts)
                     except Exception as e:
                         logger.warning(f"Stream generation failed, falling back to regular generation: {e}")
                         return self.llm.generate(user_prompt, sys_prompt, **llm_params)
@@ -645,6 +665,10 @@ class AtomicNoteGenerator:
         if not entities and primary_entity:
             entities = [primary_entity]
 
+        # 提取相关的paragraph idx信息
+        paragraph_idx_mapping = chunk_data.get('paragraph_idx_mapping', {})
+        relevant_idxs = self._extract_relevant_paragraph_idxs(text, paragraph_idx_mapping)
+
         return {
             'original_text': text,
             'content': text,
@@ -655,7 +679,8 @@ class AtomicNoteGenerator:
             'note_type': 'fact',
             'source_info': chunk_data.get('source_info', {}),
             'chunk_index': chunk_data.get('chunk_index', 0),
-            'length': len(text)
+            'length': len(text),
+            'paragraph_idxs': relevant_idxs
         }
     
     def _get_atomic_note_system_prompt(self) -> str:
@@ -681,11 +706,15 @@ class AtomicNoteGenerator:
         relevant_idxs: List[int] = []
 
         if not paragraph_idx_mapping:
+            logger.debug("paragraph_idx_mapping is empty, returning empty list")
             return relevant_idxs
 
         # Clean the chunk text once for all comparisons
         clean_text = TextUtils.clean_text(text)
         clean_text_lower = clean_text.lower()
+        
+        logger.debug(f"Matching text (length: {len(clean_text)}): {clean_text[:100]}...")
+        logger.debug(f"Available paragraph mappings: {len(paragraph_idx_mapping)}")
 
         # 对于每个段落文本，检查是否与当前chunk的文本相关
         for paragraph_text, idx in paragraph_idx_mapping.items():
@@ -694,16 +723,19 @@ class AtomicNoteGenerator:
 
             # 多种匹配策略
             match_found = False
+            match_strategy = ""
 
             # 1. 双向文本包含检查
             if clean_paragraph_text in clean_text or clean_text in clean_paragraph_text:
                 match_found = True
+                match_strategy = "bidirectional_containment"
 
             # 2. 检查段落的前100个字符是否在文本中，或文本是否在段落中
             elif len(clean_paragraph_text) > 100:
                 prefix = clean_paragraph_text[:100]
                 if prefix in clean_text or clean_text in clean_paragraph_text:
                     match_found = True
+                    match_strategy = "prefix_matching"
 
             # 3. 按句子分割检查（针对长段落）
             if not match_found:
@@ -711,6 +743,7 @@ class AtomicNoteGenerator:
                 for sentence in sentences[:3]:  # 只检查前3个句子
                     if sentence in clean_text or clean_text in sentence:
                         match_found = True
+                        match_strategy = "sentence_matching"
                         break
 
             # 4. 关键词匹配（提取段落中的关键词）
@@ -722,12 +755,18 @@ class AtomicNoteGenerator:
                     word_matches = sum(1 for word in words[:10] if word.lower() in clean_text_lower)
                     if word_matches >= min(3, len(words) // 2):
                         match_found = True
+                        match_strategy = "keyword_matching"
 
             if match_found:
                 relevant_idxs.append(idx)
+                logger.debug(f"Found match for idx {idx} using {match_strategy}")
+            else:
+                logger.debug(f"No match found for idx {idx} (paragraph length: {len(clean_paragraph_text)})")
 
         # 去重并排序
-        return sorted(set(relevant_idxs))
+        result = sorted(set(relevant_idxs))
+        logger.debug(f"Final relevant_idxs: {result}")
+        return result
     
     def _generate_stable_note_id(self, note: Dict[str, Any], fallback_index: int) -> str:
         """生成基于源文档信息的稳定note_id"""
@@ -852,8 +891,13 @@ class AtomicNoteGenerator:
         
         for note in atomic_notes:
             # 基本验证
-            if not note.get('content') or len(note['content'].strip()) < 10:
-                logger.warning(f"Skipping note with insufficient content: {note.get('note_id')}")
+            content = note.get('content', '')
+            content_length = len(content.strip()) if content else 0
+            
+            logger.debug(f"Validating note {note.get('note_id')}: content_length={content_length}, content_preview='{content[:50] if content else 'None'}...'")
+            
+            if not content or content_length < 10:
+                logger.warning(f"Skipping note with insufficient content: {note.get('note_id')} (length: {content_length})")
                 continue
             
             # 重要性评分验证

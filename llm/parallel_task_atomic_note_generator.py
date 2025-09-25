@@ -242,6 +242,7 @@ class ParallelTaskAtomicNoteGenerator(AtomicNoteGenerator):
                 raise ValueError("Ollama returned empty response - possible connection or model issue")
             
             logger.debug(f"Ollama task {index}: Response length: {len(response)}")
+            logger.debug(f"Ollama task {index}: Raw response: {response[:500]}...")
             
             # 解析响应
             cleaned_response = extract_json_from_response(response)
@@ -249,11 +250,20 @@ class ParallelTaskAtomicNoteGenerator(AtomicNoteGenerator):
                 logger.error(f"Ollama task {index}: No valid JSON in response: {response[:200]}...")
                 raise ValueError(f"No valid JSON found in Ollama response: {response[:200]}...")
             
+            logger.debug(f"Ollama task {index}: Cleaned JSON: {cleaned_response[:300]}...")
+            
             note_data = json.loads(cleaned_response)
             if isinstance(note_data, list) and note_data:
                 note_data = note_data[0]
             
             result = self._create_atomic_note_from_data(note_data, chunk_data)
+            
+            # Debug log the generated content
+            if result and 'content' in result:
+                content_length = len(result['content']) if result['content'] else 0
+                logger.debug(f"Ollama task {index}: Generated content length: {content_length}, preview: {result['content'][:100] if result['content'] else 'EMPTY'}")
+            else:
+                logger.debug(f"Ollama task {index}: No content field in result: {result}")
             
             # 记录处理时间
             processing_time = time.time() - start_time
@@ -288,18 +298,38 @@ class ParallelTaskAtomicNoteGenerator(AtomicNoteGenerator):
             text = chunk_data.get('text', '')
             prompt = ATOMIC_NOTEGEN_PROMPT.format(text=text)
             
+            logger.debug(f"LMStudio processing task {index}, text length: {len(text)}")
+            
             response = self.lmstudio_client.generate(prompt, system_prompt)
+            
+            # 检查响应是否为空
+            if not response or response.strip() == "":
+                logger.error(f"LMStudio task {index}: Empty response received")
+                raise ValueError("LMStudio returned empty response - possible connection or model issue")
+            
+            logger.debug(f"LMStudio task {index}: Response length: {len(response)}")
+            logger.debug(f"LMStudio task {index}: Raw response: {response[:500]}...")
             
             # 解析响应
             cleaned_response = extract_json_from_response(response)
             if not cleaned_response:
-                raise ValueError(f"No valid JSON found in LM Studio response")
+                logger.error(f"LMStudio task {index}: No valid JSON in response: {response[:200]}...")
+                raise ValueError(f"No valid JSON found in LM Studio response: {response[:200]}...")
+            
+            logger.debug(f"LMStudio task {index}: Cleaned JSON: {cleaned_response[:300]}...")
             
             note_data = json.loads(cleaned_response)
             if isinstance(note_data, list) and note_data:
                 note_data = note_data[0]
             
             result = self._create_atomic_note_from_data(note_data, chunk_data)
+            
+            # Debug log the generated content
+            if result and 'content' in result:
+                content_length = len(result['content']) if result['content'] else 0
+                logger.debug(f"LMStudio task {index}: Generated content length: {content_length}, preview: {result['content'][:100] if result['content'] else 'EMPTY'}")
+            else:
+                logger.debug(f"LMStudio task {index}: No content field in result: {result}")
             
             # 记录处理时间
             processing_time = time.time() - start_time
@@ -314,6 +344,41 @@ class ParallelTaskAtomicNoteGenerator(AtomicNoteGenerator):
                 self.stats['lmstudio_total_time'] += processing_time
             raise e
     
+    def _process_chunk_lmstudio(self, chunk_data: Dict[str, Any], system_prompt: str) -> Dict[str, Any]:
+        """使用LM Studio处理单个chunk"""
+        try:
+            text = chunk_data.get('text', '')
+            prompt = ATOMIC_NOTEGEN_PROMPT.format(text=text)
+            
+            # 调用LM Studio生成
+            response = self.lmstudio_client.generate_response(
+                prompt=prompt,
+                system_prompt=system_prompt,
+                temperature=0.3,
+                max_tokens=1024
+            )
+            
+            raw_response = response.get('content', '')
+            logger.debug(f"LM Studio raw response for chunk: {raw_response[:200]}...")
+            
+            # 解析响应
+            parsed_notes = parse_notes_response(raw_response)
+            logger.debug(f"Parsed {len(parsed_notes)} notes from LM Studio response")
+            
+            if not parsed_notes:
+                logger.warning("No notes parsed from LM Studio response, creating fallback")
+                return self._create_fallback_note(chunk_data)
+            
+            # 转换为原子笔记格式
+            atomic_note = self._convert_to_atomic_note_format(parsed_notes[0], chunk_data)
+            logger.debug(f"Generated atomic note content length: {len(atomic_note.get('content', ''))}")
+            
+            return atomic_note
+            
+        except Exception as e:
+            logger.error(f"LM Studio processing failed: {e}")
+            return self._create_fallback_note(chunk_data)
+            
     def _fallback_process(self, chunk_data: Dict[str, Any], system_prompt: str, failed_client: str) -> Dict[str, Any]:
         """回退处理机制，包含重试逻辑"""
         logger.info(f"Attempting fallback for failed {failed_client} task")
@@ -396,6 +461,14 @@ class ParallelTaskAtomicNoteGenerator(AtomicNoteGenerator):
             logger.info(f"LM Studio average time: {avg_lmstudio_time:.2f}s")
         
         logger.info("=============================================")
+    
+    def _create_atomic_note_from_data(self, note_data: Dict[str, Any], chunk_data: Dict[str, Any]) -> Dict[str, Any]:
+        """从解析的笔记数据创建原子笔记格式
+        
+        这个方法将解析后的笔记数据转换为标准的原子笔记格式。
+        它是 AtomicNoteGenerator 中 _convert_to_atomic_note_format 方法的别名。
+        """
+        return self._convert_to_atomic_note_format(note_data, chunk_data)
     
     def get_performance_stats(self) -> Dict[str, Any]:
         """获取性能统计信息"""

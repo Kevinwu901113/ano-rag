@@ -139,12 +139,19 @@ class MusiqueProcessor:
             
             if not process_result.get('atomic_notes'):
                 logger.warning(f"No atomic notes generated for item {item_id}")
-                return {
+                error_result = {
                     'id': item_id,
                     'predicted_answer': 'No answer found',
                     'predicted_support_idxs': [],
                     'predicted_answerable': True
                 }
+                error_atomic_notes = {
+                    'id': item_id,
+                    'question': question,
+                    'recalled_atomic_notes': [],
+                    'error': 'No atomic notes generated'
+                }
+                return error_result, error_atomic_notes
             
             # 3. 查询处理
             atomic_notes = process_result['atomic_notes']

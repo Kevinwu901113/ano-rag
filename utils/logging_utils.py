@@ -47,6 +47,11 @@ class StructuredLogger:
 
 def setup_logging(log_file: str, log_level: str = "INFO", enable_json: bool = False):
     """配置增强的loguru日志系统"""
+    # 从环境变量读取日志级别，优先级高于参数
+    env_log_level = os.environ.get('LOGURU_LEVEL')
+    if env_log_level:
+        log_level = env_log_level.upper()
+    
     os.makedirs(os.path.dirname(log_file) or '.', exist_ok=True)
     logger.remove()
     
