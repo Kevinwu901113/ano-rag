@@ -202,11 +202,18 @@ class MusiqueProcessor:
             }
             
             for note in recalled_notes:
+                # 获取检索信息
+                retrieval_info = note.get('retrieval_info', {})
+                
                 note_info = {
                     'note_id': note.get('note_id', ''),
                     'content': note.get('content', ''),
                     'paragraph_idxs': note.get('paragraph_idxs', []),
-                    'similarity_score': note.get('retrieval_info', {}).get('similarity', 0.0)
+                    'similarity_score': retrieval_info.get('similarity', 0.0),
+                    # 添加检索方法信息
+                    'retrieval_method': retrieval_info.get('retrieval_method', 'unknown'),
+                    'subq_source': note.get('tags', {}).get('subq_source', 'unknown'),
+                    'source_tag': note.get('tags', {}).get('source', 'unknown')
                 }
                 atomic_notes_info['recalled_atomic_notes'].append(note_info)
             
