@@ -535,45 +535,82 @@ class QueryProcessor:
         return list(set(normalized))  # 去重
     
     def _extract_relation_focus_phrase(self, query: str) -> str:
-        """
-        从原始问句中抽出"关系焦点短语"：移除实体、去停用词与疑问词，保留核心内容词。
-        不依赖具体谓词词表，适配 spouse/author/birthplace 等各种关系。
-        """
-        q = (query or "").strip()
-        if not q:
-            return ""
-
-        # 1) 去除命名实体（如果 EnhancedNER 可用）
-        text_wo_entities = q
-        try:
-            if hasattr(self, "enhanced_ner") and self.enhanced_ner:
-                spans = self.enhanced_ner.find_entities_with_spans(q)
-                if spans:
-                    # spans: [(start, end, label), ...] 假设有这样的方法；若没有，退化为原文
-                    mask = [True] * len(q)
-                    for s, e, _lab in spans:
-                        for i in range(s, e):
-                            if 0 <= i < len(mask):
-                                mask[i] = False
-                    text_wo_entities = "".join([ch for i, ch in enumerate(q) if mask[i]])
-        except Exception:
-            text_wo_entities = q
-
-        # 2) 粗略 token 化 + 停用词/疑问词过滤（不引入新依赖）
+        """去实体 + 去停用词，保留前 4 个内容词；不依赖词表/谓词。"""
         import re
-        tokens = re.findall(r"[A-Za-z]+", text_wo_entities.lower())
-        stop = {
-            "a","an","the","of","in","on","at","for","to","by","from",
-            "and","or","as","is","are","was","were","be","been","being",
-            "with","that","this","those","these","it","its","their","his","her",
-            "who","whom","what","when","where","why","how","which"
-        }
-        content = [t for t in tokens if t not in stop and len(t) >= 2]
-
-        # 限制长度，避免太长；保留前 4 个内容词
-        if not content:
-            return ""
+        q = (query or "").strip()
+        # 去实体（若EnhancedNER可用）
+        try:
+            if getattr(self, "enhanced_ner", None):
+                spans = self.enhanced_ner.find_entities_with_spans(q) or []
+                mask = [True]*len(q)
+                for s, e, _ in spans:
+                    for i in range(s, min(e, len(mask))):
+                        mask[i] = False
+                q = "".join(ch for i, ch in enumerate(q) if mask[i])
+        except Exception:
+            pass
+        toks = re.findall(r"[A-Za-z]+", q.lower())
+        stop = {"a","an","the","of","in","on","for","to","by","from","and","or","as",
+                "is","are","was","were","be","been","being","with","that","this",
+                "those","these","it","its","their","his","her","who","whom","what",
+                "when","where","why","how","which"}
+        content = [t for t in toks if t not in stop and len(t) >= 2]
         return " ".join(content[:4])
+
+    def _do_prf_bridge(self, query, first_hop_notes, existing_candidates):
+        """从第一跳topK原子笔记的entities里选频次最高的桥接实体 E*，构造一次小检索 补充候选。"""
+        cfg = (self.config or {}).get("hybrid_search", {})
+        prf_cfg = cfg.get("prf_bridge", {})
+        if not prf_cfg.get("enabled", True):
+            return []
+        topk = int(prf_cfg.get("first_hop_topk", 2))
+        prf_topk = int(prf_cfg.get("prf_topk", 20))
+
+        pool = first_hop_notes[:topk]
+        from collections import Counter
+        cnt = Counter()
+        for n in pool:
+            for e in set(n.get("entities", []) or []):
+                cnt[e] += 1
+        if not cnt:
+            return []
+        bridge_entity, _ = cnt.most_common(1)[0]
+        relation_focus = self._extract_relation_focus_phrase(query)
+        q_focus = f"{bridge_entity} {relation_focus}".strip()
+
+        # 仅一次小规模向量检索
+        prf_notes = self.vector_index.search(q_focus, top_k=prf_topk)  # 复用你现有接口
+        # 去重（避免和已有候选重复）
+        exist_ids = {c.get("note_id") for c in existing_candidates}
+        out = []
+        for n in prf_notes:
+            if n.get("note_id") in exist_ids:
+                continue
+            n["retrieval_method"] = "prf_bridge"
+            n["bridge_entity"] = bridge_entity
+            n["hop_type"] = n.get("hop_type") or "second_hop"  # 保守
+            out.append(n)
+        return out
+
+    def _compute_cov_cons(self, note, path_entities):
+        """实体覆盖率 & 路径一致性（只用 note.entities / title/content）。"""
+        ne = set((note.get("entities") or []))
+        pe = set(e.lower() for e in (path_entities or []))
+        if not pe:
+            return 0.0, 0
+        cov = len({e.lower() for e in ne} & pe) / max(1, len(pe))
+        text = f"{note.get('title','')} {note.get('content','')}".lower()
+        cons = 1 if any(e in text for e in pe) else 0
+        return float(cov), int(cons)
+
+    def _rrf_score(self, ranks_dict, k=50):
+        """ranks_dict: {'dense': {note_id:rank}, 'bm25':{...}, 'prf':{...}}"""
+        import math
+        agg = {}
+        for _, ranks in ranks_dict.items():
+            for nid, r in ranks.items():
+                agg[nid] = agg.get(nid, 0.0) + 1.0 / (k + r)
+        return agg
 
     def _infer_qtype(self, query: str) -> str:
         """
@@ -1108,10 +1145,28 @@ class QueryProcessor:
                 logger.info(f"After namespace filtering: {len(filtered_pool)} candidates (dropped: {len(candidate_pool) - len(filtered_pool)})")
                 candidate_pool = filtered_pool
             
-            # 4. 对候选池进行重排
+            # 4. PRF-Bridge: 一次二次微检索（合并去重）
+            # 位置调整：在重排之前进行PRF Bridge
+            try:
+                # 使用第一跳的 top_m_notes 作为 first_hop_notes
+                first_hop_notes = candidate_pool[:10]  # 取前10个作为第一跳笔记
+                existing_candidates = candidate_pool  # 现有候选为候选池
+                prf_bridge_notes = self._do_prf_bridge(query, first_hop_notes, existing_candidates)
+                
+                if prf_bridge_notes:
+                    candidate_pool.extend(prf_bridge_notes)
+                    logger.info(f"PRF-Bridge supplemented {len(prf_bridge_notes)} additional candidates")
+            except Exception as e:
+                logger.error(f"PRF-Bridge failed: {e}")
+            
+            # 5. 对合并后的候选池进行重排
             second_hop_notes = self._rerank_khop_candidates(query, candidate_pool)
             
-            # 5. 限制最终数量
+            # 6. 应用簇抑制：去冗余去噪
+            second_hop_notes = self._apply_cluster_suppression(second_hop_notes)
+            logger.info(f"After cluster suppression: {len(second_hop_notes)} candidates")
+            
+            # 7. 限制最终数量
             second_hop_notes = second_hop_notes[:self.max_second_hop_candidates]
             
             logger.info(f"Final second hop results: {len(second_hop_notes)} candidates")
@@ -1238,215 +1293,125 @@ class QueryProcessor:
         # 为向后兼容，调用新的通用函数
         return self._rerank_khop_candidates(query, candidates)
     
-    def _rerank_khop_candidates(self, query: str, candidates: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """
-        对包含 hop_no 的多跳候选统一重排：base_score + relation-focused + answer-bias + hop_decay
-        
-        运行时开销控制：
-        1. Beam/Top-M 限定：beam_width 控制每跳扩展的实体数，per_hop_keep_top_m 控制每跳进入后续步骤的候选数
-        2. Focused 相似度计算规模：仅对"进入重排的候选"各算 1 次向量相似度
-        3. 路径查询长度：focused_query 仅取路径末端2个实体 + 关系短语，避免 query 过长
-        4. 提前剪枝：如果某一跳没有产生新实体/候选，立即停止扩展（early stop）
-        """
+    def _rerank_khop_candidates(self, query: str, candidates: List[Dict[str, Any]], path_entities: List[str] = None) -> List[Dict[str, Any]]:
+        """保持你原有 dense/bm25 基础分，再融合 focused、cov/cons、RRF、跳数衰减。"""
         if not candidates:
             return []
 
         cfg = (self.config or {}).get("hybrid_search", {})
-        mh_cfg = cfg.get("multi_hop", {})
-        fw_by_hop = mh_cfg.get("focused_weight_by_hop", {})
-        hop_decay = float(mh_cfg.get("hop_decay", 0.85))
-        beam_width = int(mh_cfg.get("beam_width", 8))
-        per_hop_keep_top_m = int(mh_cfg.get("per_hop_keep_top_m", 5))
+        fus = cfg.get("fusion", {})
+        feat = cfg.get("features", {})
+        dense_w = float(fus.get("dense_weight", 1.0))
+        bm25_w = float(fus.get("bm25_weight", 0.6))
+        focused_w2 = float(fus.get("focused_weight_hop2", 0.30))
+        hop_decay = float(feat.get("hop_decay", 0.85))
+        cov_w = float(feat.get("cov_weight", 0.10))
+        cons_w = float(feat.get("cons_weight", 0.05))
+        rrf_lambda = float(fus.get("rrf_lambda", 0.2))
 
-        bias_cfg = cfg.get("answer_bias", {})
-        who_person_boost = float(bias_cfg.get("who_person_boost", 1.10))
+        # 基础分
+        dense_scores = self._calculate_vector_similarities(query, candidates)
+        bm25_scores = self._calculate_bm25_similarities(query, candidates) if hasattr(self, "_calculate_bm25_similarities") else [0.0]*len(candidates)
 
-        # === 运行时开销控制：Beam/Top-M 限定 ===
-        # 按跳数分组，每跳最多保留 beam_width 个候选进入重排
-        from collections import defaultdict
-        hop_buckets = defaultdict(list)
-        for cand in candidates:
-            hop_no = int(cand.get("hop_no", 1))
-            hop_buckets[hop_no].append(cand)
+        # RRF 输入准备：把三路rank做出来（Dense/BM25/PRF）
+        def ranks_from(scores):
+            # 分数越大排名越靠前
+            pairs = sorted([(i, s) for i, s in enumerate(scores)], key=lambda x: x[1], reverse=True)
+            return {candidates[i].get("note_id"): (ri+1) for ri, (i, _) in enumerate(pairs)}
 
-        # 对每跳应用 beam_width 限制
-        filtered_candidates = []
-        for hop_no, bucket in hop_buckets.items():
-            # 按现有分数排序（如果有的话）
-            bucket.sort(key=lambda x: x.get("final_score", x.get("score", 0.0)), reverse=True)
-            # 应用 beam_width 限制
-            beam_limited = bucket[:beam_width]
-            filtered_candidates.extend(beam_limited)
-            
-            if len(bucket) > beam_width:
-                logger.info(f"Beam limiting hop {hop_no}: {len(bucket)} -> {len(beam_limited)} candidates")
-
-        # === 提前剪枝检查 ===
-        # 检查是否有新实体/候选产生，如果没有则可以提前停止
-        unique_entities = set()
-        for cand in filtered_candidates:
-            if cand.get("bridge_entity"):
-                unique_entities.add(cand["bridge_entity"])
-            for entity in (cand.get("bridge_path") or []):
-                unique_entities.add(entity)
-        
-        if len(unique_entities) == 0:
-            logger.info("Early stopping: No new entities found in candidates")
-            return []
-
-        # 基础分（与原问句相似度），尽量复用你现有的 dense/bm25 逻辑
-        dense_scores = self._calculate_vector_similarities(query, filtered_candidates)
-        bm25_scores = self._calculate_bm25_similarities(query, filtered_candidates)
+        ranks = {
+            "dense": ranks_from(dense_scores),
+            "bm25": ranks_from(bm25_scores),
+            "prf": {c.get("note_id"): (ri+1) for ri, c in enumerate(sorted(
+                [c for c in candidates if c.get("retrieval_method") == "prf_bridge"],
+                key=lambda x: x.get("similarity_score", 0.0), reverse=True
+            ))} if any(c.get("retrieval_method") == "prf_bridge" for c in candidates) else {}
+        }
+        rrf_map = self._rrf_score(ranks, k=50) if any(ranks.values()) else {}
 
         relation_focus = self._extract_relation_focus_phrase(query)
-        qtype = self._infer_qtype(query)
-
-        # === Focused 相似度计算规模控制 ===
-        # 仅对进入重排的候选计算 focused 相似度，且仅计算一次
-        focused_scores = {}
-        if relation_focus:
-            focused_candidates_for_calc = []
-            focused_queries = []
-            
-            for i, cand in enumerate(filtered_candidates):
-                hop_no = int(cand.get("hop_no", 1))
-                alpha = float(fw_by_hop.get(str(hop_no), fw_by_hop.get("2", 0.25)))
-                
-                # 深跳的 focused_weight 更小 + hop_decay 更重
-                if hop_no > 2:
-                    alpha *= 0.8  # 深跳衰减
-                
-                if alpha > 0.0:
-                    path_entities = cand.get("bridge_path") or []
-                    if not path_entities and cand.get("bridge_entity"):
-                        path_entities = [cand["bridge_entity"]]
-                    
-                    if path_entities:
-                        # === 路径查询长度控制：仅取路径末端2个实体 + 关系短语 ===
-                        tail = path_entities[-2:]  # 只取最后 2 个，控制开销
-                        focused_query = " ".join(tail + [relation_focus])
-                        focused_candidates_for_calc.append(cand)
-                        focused_queries.append(focused_query)
-                        focused_scores[i] = {"alpha": alpha, "query": focused_query}
-            
-            # 批量计算 focused 相似度（如果有需要计算的）
-            if focused_candidates_for_calc and focused_queries:
-                try:
-                    # 为了进一步控制开销，只对 Top-K（如32）候选计算 focused sim
-                    max_focused_calc = min(32, len(focused_candidates_for_calc))
-                    if len(focused_candidates_for_calc) > max_focused_calc:
-                        # 按基础分数排序，只对前32个计算focused相似度
-                        temp_scores = []
-                        for i, cand in enumerate(focused_candidates_for_calc):
-                            base_score = (dense_scores[filtered_candidates.index(cand)] if cand in filtered_candidates else 0.0) + \
-                                       (bm25_scores[filtered_candidates.index(cand)] if cand in filtered_candidates else 0.0)
-                            temp_scores.append((base_score, i, cand))
-                        temp_scores.sort(reverse=True)
-                        
-                        top_focused_candidates = [item[2] for item in temp_scores[:max_focused_calc]]
-                        top_focused_queries = [focused_queries[item[1]] for item in temp_scores[:max_focused_calc]]
-                        
-                        focused_sims = self._calculate_vector_similarities_batch(top_focused_queries, top_focused_candidates)
-                        
-                        # 更新 focused_scores
-                        for j, (_, orig_i, _) in enumerate(temp_scores[:max_focused_calc]):
-                            if orig_i < len(focused_candidates_for_calc):
-                                cand_idx = filtered_candidates.index(focused_candidates_for_calc[orig_i])
-                                focused_scores[cand_idx]["similarity"] = focused_sims[j] if j < len(focused_sims) else 0.0
-                    else:
-                        focused_sims = self._calculate_vector_similarities_batch(focused_queries, focused_candidates_for_calc)
-                        for j, cand in enumerate(focused_candidates_for_calc):
-                            cand_idx = filtered_candidates.index(cand)
-                            focused_scores[cand_idx]["similarity"] = focused_sims[j] if j < len(focused_sims) else 0.0
-                            
-                except Exception as e:
-                    logger.warning(f"Failed to calculate focused similarities: {e}")
-                    focused_scores = {}
+        q_focus = " ".join([*list(set([e for e in (path_entities or [])][-2:])), relation_focus]).strip()
 
         reranked = []
-        for i, cand in enumerate(filtered_candidates):
-            dense = dense_scores[i] if i < len(dense_scores) else 0.0
-            sparse = bm25_scores[i] if i < len(bm25_scores) else 0.0
+        for i, cand in enumerate(candidates):
+            base = dense_w * (dense_scores[i] if i < len(dense_scores) else 0.0) \
+                 + bm25_w * (bm25_scores[i] if i < len(bm25_scores) else 0.0)
 
-            # 你已有的惩罚/加成（若无就当1.0）
-            try:
-                pred_pen = self._calculate_predicate_penalty(cand)
-            except Exception:
-                pred_pen = 1.0
-            dense *= pred_pen
-            sparse *= pred_pen
+            # 聚焦相似度（不靠谓词，只靠"桥接实体+剩余词"）
+            focused = 0.0
+            if q_focus:
+                focused = self._calculate_vector_similarities(q_focus, [cand])[0]
 
-            base_final = 1.0 * dense + 0.6 * sparse   # 保持你当前融合
+            # 原子笔记实体优势：覆盖率/一致性
+            cov, cons = self._compute_cov_cons(cand, path_entities)
 
-            # === 关系聚焦（多跳版，使用预计算的结果）===
-            focused_final = base_final
-            if i in focused_scores and "similarity" in focused_scores[i]:
-                alpha = focused_scores[i]["alpha"]
-                focused_sim = focused_scores[i]["similarity"]
-                focused_final = (1.0 - alpha) * base_final + alpha * focused_sim
+            # RRF
+            rrf_bonus = rrf_map.get(cand.get("note_id"), 0.0)
 
-            final_score = focused_final
-
-            # === 答案类型偏置（轻量通用）===
-            if qtype == "who" and who_person_boost > 1.0:
-                text = f"{cand.get('content','')} {cand.get('title','')}"
-                try:
-                    has_person = False
-                    if hasattr(self, "enhanced_ner") and self.enhanced_ner:
-                        has_person = self.enhanced_ner.contains_person_name(text)
-                    else:
-                        import re
-                        has_person = bool(re.search(r"\b[A-Z][a-z]+ [A-Z][a-z]+\b", text))
-                    if has_person:
-                        final_score *= who_person_boost
-                except Exception:
-                    pass
-
-            # === 跳数惩罚（越远越弱，避免噪声）===
             hop_no = int(cand.get("hop_no", 1))
+            focused_w = focused_w2 if hop_no == 2 else max(0.0, focused_w2 - 0.10*(hop_no-2))
+
+            final = base + focused_w * focused + cov_w * cov + cons_w * cons + rrf_lambda * rrf_bonus
             if hop_no > 1 and 0.0 < hop_decay < 1.0:
-                final_score *= (hop_decay ** (hop_no - 1))
+                final *= (hop_decay ** (hop_no - 1))
 
-            # === 路径一致性与协同打分（可选但推荐，仍然通用）===
-            consistency_bonus = 1.0
-            be = cand.get("bridge_entity", "")
-            text = f"{cand.get('title','')} {cand.get('content','')}".lower()
-            if be and be.lower() in text:
-                consistency_bonus *= 1.05   # 5% 小奖励
-            if relation_focus:
-                rf_tokens = relation_focus.split()
-                if any(tok in text for tok in rf_tokens):
-                    consistency_bonus *= 1.03
-            final_score *= consistency_bonus
-
-            cand["final_score"] = float(final_score)
+            cand["final_score"] = float(final)
             reranked.append(cand)
 
-        # 最终排序
         reranked.sort(key=lambda x: x.get("final_score", 0.0), reverse=True)
-        
-        # === 应用 per_hop_keep_top_m 限制 ===
-        # 重新按跳数分组，每跳保留 top_m
-        final_hop_buckets = defaultdict(list)
-        for cand in reranked:
-            hop_no = int(cand.get("hop_no", 1))
-            final_hop_buckets[hop_no].append(cand)
+        return reranked
 
-        final_candidates = []
-        for hop_no, bucket in final_hop_buckets.items():
-            kept = bucket[:per_hop_keep_top_m]
-            final_candidates.extend(kept)
-            if len(bucket) > per_hop_keep_top_m:
-                logger.info(f"Per-hop top-M limiting hop {hop_no}: {len(bucket)} -> {len(kept)} candidates")
+    def _apply_cluster_suppression(self, candidates):
+        """近邻簇抑制：小集合上去冗余去噪
+        
+        位置：重排完成、过滤之前
+        通过余弦相似度聚类，每个簇保留前 M 个最高分候选
+        """
+        cfg = (self.config or {}).get("hybrid_search", {})
+        cs = cfg.get("cluster_suppression", {})
+        if not cs.get("enabled", True) or not candidates:
+            return candidates
+        
+        thr = float(cs.get("cos_threshold", 0.90))
+        keep_m = int(cs.get("keep_per_cluster", 2))
 
-        # 重新排序最终结果
-        final_candidates.sort(key=lambda x: x.get("final_score", 0.0), reverse=True)
+        # 取得/缓存每个候选的向量
+        vecs = []
+        for c in candidates:
+            v = c.get("_embed_vec")
+            if v is None:
+                v = self.vector_index.embed(f"{c.get('title','')} {c.get('content','')}")
+                c["_embed_vec"] = v
+            vecs.append(v)
+
+        import numpy as np
+        kept = []
+        used = set()
+        for i, ci in enumerate(candidates):
+            if i in used:
+                continue
+            cluster = [(i, ci)]
+            vi = vecs[i] / (np.linalg.norm(vecs[i]) + 1e-8)
+            # 简单近邻聚类
+            for j in range(i+1, len(candidates)):
+                if j in used:
+                    continue
+                vj = vecs[j] / (np.linalg.norm(vecs[j]) + 1e-8)
+                if float(vi @ vj) >= thr:
+                    cluster.append((j, candidates[j]))
+            # 按 final_score 保前 M
+            cluster.sort(key=lambda x: x[1].get("final_score", 0.0), reverse=True)
+            for k, c in cluster[:keep_m]:
+                kept.append(c)
+                used.add(k)
+            for k, _ in cluster[keep_m:]:
+                used.add(k)
+        # 维持原有排序稳定性
+        kept.sort(key=lambda x: x.get("final_score", 0.0), reverse=True)
         
-        logger.info(f"Multi-hop reranking completed: {len(candidates)} -> {len(filtered_candidates)} -> {len(final_candidates)} candidates, "
-                   f"relation_focus='{relation_focus}', qtype={qtype}, hop_decay={hop_decay}, "
-                   f"beam_width={beam_width}, per_hop_keep_top_m={per_hop_keep_top_m}")
-        
-        return final_candidates
+        logger.info(f"Cluster suppression: {len(candidates)} -> {len(kept)} candidates, "
+                   f"threshold={thr}, keep_per_cluster={keep_m}")
+        return kept
     
     def _calculate_predicate_penalty(self, candidate: Dict[str, Any]) -> float:
         """计算谓词惩罚分数（found等谓词软过滤）。"""
@@ -1920,7 +1885,17 @@ class QueryProcessor:
                 must_have_terms = list(ml)
                 logger.info(f"Added {len(bridge_terms)} bridge entities to must_have_terms: {bridge_terms}")
             
-            candidate_notes = self._filter_with_multihop_safety(candidate_notes, query)
+            # 提取路径实体用于多跳安全过滤
+            path_entities = []
+            if bridge_terms:
+                path_entities = bridge_terms
+            
+            # 获取第一跳文档ID（如果有的话）
+            first_hop_doc_id = None
+            if candidate_notes:
+                first_hop_doc_id = candidate_notes[0].get("doc_id")
+            
+            candidate_notes = self._filter_with_multihop_safety(candidate_notes, query, path_entities, first_hop_doc_id)
             
             # 第二阶段命名空间过滤：融合后
             if self.namespace_filtering_enabled and 'post_fusion' in self.namespace_filter_stages and dataset and qid:
@@ -1975,7 +1950,21 @@ class QueryProcessor:
                     must_have_terms = list(ml)
                     logger.info(f"Added {len(bridge_terms)} bridge entities to must_have_terms for merged candidates: {bridge_terms}")
                 
-                candidate_notes = self._filter_with_multihop_safety(candidate_notes, query)
+                # 提取路径实体用于多跳安全过滤
+                path_entities = []
+                if bridge_terms:
+                    path_entities = bridge_terms
+                
+                # 获取第一跳文档ID（如果有的话）
+                first_hop_doc_id = None
+                if candidate_notes:
+                    first_hop_doc_id = candidate_notes[0].get("doc_id")
+                
+                candidate_notes = self._filter_with_multihop_safety(candidate_notes, query, path_entities, first_hop_doc_id)
+                
+                # 应用簇抑制：对合并后的候选进行去冗余去噪
+                candidate_notes = self._apply_cluster_suppression(candidate_notes)
+                logger.info(f"After cluster suppression on merged candidates: {len(candidate_notes)} candidates")
             
             # 第三阶段命名空间过滤：二跳合并后
             if self.namespace_filtering_enabled and 'post_two_hop' in self.namespace_filter_stages and dataset and qid:
@@ -2079,47 +2068,84 @@ class QueryProcessor:
                 f"Final scheduling: {len(candidate_notes)} candidates -> {len(selected_notes)} selected: "
                 f"{[n.get('note_id') for n in selected_notes]}"
             )
-        # 生成答案和评分
-        # 使用新的 build_context_prompt_with_passages 函数生成带有 [P{idx}] 标签的上下文和passages字典
-        prompt, passages_by_idx, packed_order = build_context_prompt_with_passages(selected_notes, query)
-        raw_answer = self.ollama.generate_final_answer(prompt)
+        # EFSA实体聚合答案生成（在LLM答案生成前尝试）
+        from answer.efsa_answer import efsa_answer_with_fallback
         
-        # 使用鲁棒的JSON解析器，带重试机制
-        def retry_generate():
-            return self.ollama.generate_final_answer(prompt)
+        # 提取桥接实体和路径实体信息
+        bridge_entities = []
+        path_entities = []
+        for note in selected_notes:
+            if note.get('bridge_entity'):
+                bridge_entities.append(note['bridge_entity'])
+            if note.get('bridge_path'):
+                path_entities.extend(note['bridge_path'])
         
-        # 从配置获取重试参数
-        json_parsing_config = config.get('retrieval.json_parsing', {})
-        max_retries = json_parsing_config.get('max_retries', 3)
+        # 去重并取最后几个路径实体
+        bridge_entities = list(set(bridge_entities))
+        path_entities = list(set(path_entities))[-2:] if path_entities else []
         
-        answer, raw_support_idxs = extract_prediction_with_retry(
-            raw_answer, passages_by_idx, retry_func=retry_generate, max_retries=max_retries
+        # 尝试EFSA实体答案生成
+        efsa_answer, efsa_support_idxs = efsa_answer_with_fallback(
+            candidates=selected_notes,
+            query=query,
+            bridge_entity=bridge_entities[0] if bridge_entities else None,
+            path_entities=path_entities,
+            topN=20
         )
         
-        # 写盘前的最终合法性校验：再次过滤幽灵id并补齐
-        # 第二道兜底：确保最终结果没有幽灵id
-        filtered_support_idxs = [i for i in raw_support_idxs if i in passages_by_idx]
-        
-        # 若过滤后为空且上下文中存在任何包含答案子串的段，用其中一个合法id顶上第一位
-        if not filtered_support_idxs and answer:
-            for idx, content in passages_by_idx.items():
-                if answer in content:
-                    filtered_support_idxs = [idx]
-                    break
-        
-        # 使用支持段落补齐模块对LLM输出进行结构化补齐/纠偏
-        from utils.support_fill import fill_support_idxs_noid
-        predicted_support_idxs = fill_support_idxs_noid(
-            question=query,
-            answer=answer, 
-            raw_support_idxs=filtered_support_idxs,  # 使用过滤后的合法id
-            passages_by_idx=passages_by_idx,
-            packed_order=packed_order
-        )
-        
-        # 评估答案质量
-        context = "\n".join(n.get('content','') for n in selected_notes)
-        scores = self.ollama.evaluate_answer(query, context, answer)
+        if efsa_answer:
+            # EFSA成功生成实体答案
+            logger.info(f"EFSA generated entity answer: {efsa_answer}")
+            answer = efsa_answer
+            predicted_support_idxs = efsa_support_idxs
+            
+            # 为了保持一致性，仍然生成评分
+            context = "\n".join(n.get('content','') for n in selected_notes)
+            scores = self.ollama.evaluate_answer(query, context, answer)
+        else:
+            # EFSA未找到实体答案，回退到原有的LLM句子型答案生成
+            logger.info("EFSA did not find entity answer, falling back to LLM-based answer generation")
+            
+            # 生成答案和评分
+            # 使用新的 build_context_prompt_with_passages 函数生成带有 [P{idx}] 标签的上下文和passages字典
+            prompt, passages_by_idx, packed_order = build_context_prompt_with_passages(selected_notes, query)
+            raw_answer = self.ollama.generate_final_answer(prompt)
+            # 使用鲁棒的JSON解析器，带重试机制
+            def retry_generate():
+                return self.ollama.generate_final_answer(prompt)
+            
+            # 从配置获取重试参数
+            json_parsing_config = config.get('retrieval.json_parsing', {})
+            max_retries = json_parsing_config.get('max_retries', 3)
+            
+            answer, raw_support_idxs = extract_prediction_with_retry(
+                raw_answer, passages_by_idx, retry_func=retry_generate, max_retries=max_retries
+            )
+            
+            # 写盘前的最终合法性校验：再次过滤幽灵id并补齐
+            # 第二道兜底：确保最终结果没有幽灵id
+            filtered_support_idxs = [i for i in raw_support_idxs if i in passages_by_idx]
+            
+            # 若过滤后为空且上下文中存在任何包含答案子串的段，用其中一个合法id顶上第一位
+            if not filtered_support_idxs and answer:
+                for idx, content in passages_by_idx.items():
+                    if answer in content:
+                        filtered_support_idxs = [idx]
+                        break
+            
+            # 使用支持段落补齐模块对LLM输出进行结构化补齐/纠偏
+            from utils.support_fill import fill_support_idxs_noid
+            predicted_support_idxs = fill_support_idxs_noid(
+                question=query,
+                answer=answer, 
+                raw_support_idxs=filtered_support_idxs,  # 使用过滤后的合法id
+                passages_by_idx=passages_by_idx,
+                packed_order=packed_order
+            )
+            
+            # 评估答案质量
+            context = "\n".join(n.get('content','') for n in selected_notes)
+            scores = self.ollama.evaluate_answer(query, context, answer)
         
         # 为笔记添加反馈分数
         for n in selected_notes:
@@ -3686,72 +3712,50 @@ class QueryProcessor:
             logger.error(f"Hybrid mode graph retrieval failed: {e}")
             return []
 
-    def _filter_with_multihop_safety(self, all_candidates: List[Dict[str, Any]], query: str) -> List[Dict[str, Any]]:
+    def _filter_with_multihop_safety(self, all_candidates, query, path_entities, first_hop_doc_id=None):
         """
-        多跳安全网（每跳 Top-M 保活 + must-have 扩展）
+        过滤/保活：纯实体/文档维度（无谓词）
         
-        把"桥接实体并入 must-have"和"Top-M 保活"推广到每一跳：
-        
-        Args:
-            all_candidates: 各跳合并后的候选（每个 cand 有 hop_no / bridge_entity / bridge_path）
-            query: 原始查询
-            
-        规则：
-          1) 每跳 Top-M 无条件保活
-          2) 其余用放宽阈值 + must-have（包含所有路径上实体）再筛
+        位置：你现有的 _apply_noise_threshold_filtering / _filter_with_multihop_safety
         """
-        if not all_candidates:
-            return []
-
         cfg = (self.config or {}).get("hybrid_search", {})
-        mh = cfg.get("multi_hop", {})
-        per_hop_keep_top_m = int(mh.get("per_hop_keep_top_m", 5))
-        lower_th = float(mh.get("lower_threshold", 0.10))
+        safe = cfg.get("safety", {})
+        per_hop_top_m = int(safe.get("per_hop_keep_top_m", 6))
+        lower_th = float(safe.get("lower_threshold", 0.10))
+        keep_one_per_doc = bool(safe.get("keep_one_per_doc", True))
 
-        # 1) 生成 must-have：原始问句 terms + 所有路径上的实体（去重）
-        must_have_terms, _, _ = self._generate_guardrail_params(query)
-        path_terms = set()
-        for c in all_candidates:
-            # 收集桥接路径上的所有实体
-            for e in (c.get("bridge_path") or []):
-                path_terms.add(e.lower())
-            # 收集桥接实体
-            if c.get("bridge_entity"):
-                path_terms.add(c["bridge_entity"].lower())
-        
-        # 合并原始must_have_terms和路径实体
-        mh_terms = set(t.lower() for t in (must_have_terms or []))
-        mh_terms |= path_terms
-        must_have_terms = list(mh_terms)
+        # must-have：把路径实体并入（不是词表，是实体）
+        must_have_terms = set(t.lower() for t in (path_entities or []))
 
-        # 2) 分 hop 分桶
+        # 分hop分桶
         from collections import defaultdict
         buckets = defaultdict(list)
         for c in all_candidates:
-            hop_no = int(c.get("hop_no", 1))
-            buckets[hop_no].append(c)
+            buckets[int(c.get("hop_no", 1))].append(c)
 
         kept = []
         for hop_no, bucket in buckets.items():
-            # 按final_score降序排序
             bucket.sort(key=lambda x: x.get("final_score", 0.0), reverse=True)
-            
-            # Top-M 保活
-            safe = bucket[:per_hop_keep_top_m]
-            tail = bucket[per_hop_keep_top_m:]
-
-            # 对剩余候选应用放宽阈值 + must-have 过滤
+            # Top-M 无条件保活
+            safe_head = bucket[:per_hop_top_m]
+            tail = bucket[per_hop_top_m:]
+            # 放宽阈值 + must-have（实体出现即可）
             filtered_tail = []
             for c in tail:
-                score_ok = c.get("final_score", 0.0) >= lower_th
-                must_ok = self._contains_any_term(c, must_have_terms)
-                if score_ok and must_ok:
+                txt = f"{c.get('title','')} {c.get('content','')}".lower()
+                mh_ok = (not must_have_terms) or any(e in txt for e in must_have_terms)
+                if c.get("final_score", 0.0) >= lower_th and mh_ok:
                     filtered_tail.append(c)
+            kept.extend(safe_head + filtered_tail)
 
-            kept.extend(safe + filtered_tail)
-            
-            logger.info(f"Multi-hop safety filter - Hop {hop_no}: {len(bucket)} -> {len(safe + filtered_tail)} "
-                       f"(safe: {len(safe)}, filtered: {len(filtered_tail)})")
+        # doc内保活：确保第一跳命中文档至少留 1 条
+        if keep_one_per_doc and first_hop_doc_id:
+            if not any(c.get("doc_id") == first_hop_doc_id for c in kept):
+                # 在全体候选中找同doc_id最高分的一条补入
+                same = [c for c in all_candidates if c.get("doc_id") == first_hop_doc_id]
+                if same:
+                    same.sort(key=lambda x: x.get("final_score", 0.0), reverse=True)
+                    kept.append(same[0])
 
-        logger.info(f"Multi-hop safety filtering: {len(all_candidates)} -> {len(kept)} candidates total")
+        kept.sort(key=lambda x: x.get("final_score", 0.0), reverse=True)
         return kept

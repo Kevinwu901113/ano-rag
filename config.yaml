@@ -79,15 +79,15 @@ retrieval:
   # 重排配置
   rerank:
     cross_encoder: "bge-reranker-large"  # 或 monoT5 / E5-reranker
-    final_topk: 10
+    final_topk: 15
     margin_threshold: 0.15     # 低于阈值的直接裁掉
     diversity_by_title: true
     
     # ListT5重排序配置
     use_listt5: true           # 是否启用ListT5重排序
     listt5_model: "castorini/doc2query-t5-large-list"  # ListT5模型名称
-    listt5_input_topk: 24      # 进入ListT5的候选数量
-    keep_after_listt5: 16      # ListT5重排后保留的候选数量
+    listt5_input_topk: 50      # 进入ListT5的候选数量
+    keep_after_listt5: 25      # ListT5重排后保留的候选数量
     max_seq_len: 2048          # ListT5最大序列长度
     batch_size: 4              # ListT5批处理大小
   
@@ -127,6 +127,31 @@ retrieval:
       lower_threshold: 0.10      # 多跳候选放宽阈值（尾部过滤）
     answer_bias:
       who_person_boost: 1.10     # 人物类问题答案增强
+
+# 混合搜索配置
+hybrid_search:
+  prf_bridge:
+    enabled: true
+    first_hop_topk: 2       # 统计桥接实体的来源数
+    prf_topk: 20            # 二次小检索条数
+  fusion:
+    dense_weight: 1.0
+    bm25_weight: 0.6
+    focused_weight_hop2: 0.30   # 二跳聚焦相似度权重（不是谓词，只是聚焦查询）
+    rrf_lambda: 0.2
+  features:
+    cov_weight: 0.10        # 实体覆盖率
+    cons_weight: 0.05       # 路径一致性
+    hop_decay: 0.85
+  cluster_suppression:
+    enabled: true
+    cos_threshold: 0.90
+    keep_per_cluster: 2
+  safety:
+    per_hop_keep_top_m: 6
+    lower_threshold: 0.10
+    keep_one_per_doc: true
+
   # 重排权重配置
   rerank:
     entity_overlap_weight: 0.4     # 实体重叠打分权重

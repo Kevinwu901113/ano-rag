@@ -59,10 +59,25 @@ def create_new_workdir() -> str:
     return work_dir
 
 
-def create_item_workdir(base_work_dir: str, item_id: str) -> str:
-    """为单个item创建工作目录"""
-    debug_dir = os.path.join(base_work_dir, "debug")
-    item_work_dir = os.path.join(debug_dir, f"item_{item_id}")
+def create_item_workdir(base_work_dir: str, item_id: str, debug_mode: bool = False) -> str:
+    """为单个item创建工作目录
+    
+    Args:
+        base_work_dir: 基础工作目录
+        item_id: 项目ID
+        debug_mode: 是否为debug模式，如果是则创建debug子文件夹
+    
+    Returns:
+        工作目录路径
+    """
+    if debug_mode:
+        # debug模式：/results/数字/debug/item_id/
+        debug_dir = os.path.join(base_work_dir, "debug")
+        item_work_dir = os.path.join(debug_dir, item_id)
+    else:
+        # 非debug模式：直接在base_work_dir下创建临时目录
+        item_work_dir = os.path.join(base_work_dir, f"temp_{item_id}")
+    
     os.makedirs(item_work_dir, exist_ok=True)
     return item_work_dir
 
@@ -156,6 +171,16 @@ class MusiqueProcessor:
             # 3. 查询处理
             atomic_notes = process_result['atomic_notes']
             
+            # 在debug模式下，保存原子笔记到单独的文件
+            if self.debug:
+                atomic_notes_debug_file = os.path.join(work_dir, 'atomic_notes.json')
+                try:
+                    with open(atomic_notes_debug_file, 'w', encoding='utf-8') as f:
+                        json.dump(atomic_notes, f, ensure_ascii=False, indent=2)
+                    logger.info(f"Debug mode: saved atomic notes to {atomic_notes_debug_file}")
+                except Exception as e:
+                    logger.warning(f"Failed to save debug atomic notes: {e}")
+            
             # 加载必要的文件
             graph_file = os.path.join(work_dir, 'graph.json')
             embed_file = os.path.join(work_dir, 'embeddings.npy')
@@ -192,6 +217,7 @@ class MusiqueProcessor:
                         pass
             else:
                 logger.info(f"Debug mode: keeping temp files {paragraph_files}")
+                logger.info(f"Debug mode: all process artifacts saved in {work_dir}")
             
             # 6. 收集召回的原子文档信息
             recalled_notes = query_result.get('notes', [])
@@ -328,7 +354,7 @@ class MusiqueProcessor:
                 futures = []
                 for i, item in enumerate(items):
                     item_id = item.get('id', f'item_{i}')
-                    work_dir = create_item_workdir(self.base_work_dir, item_id)
+                    work_dir = create_item_workdir(self.base_work_dir, item_id, debug_mode=self.debug)
                     future = executor.submit(self.process_single_item, item, work_dir)
                     futures.append((future, work_dir, item_id))
                 
@@ -410,7 +436,7 @@ class MusiqueProcessor:
             # 串行处理
             for i, item in enumerate(tqdm(items, desc="Processing items")):
                 item_id = item.get('id', f'item_{i}')
-                work_dir = create_item_workdir(self.base_work_dir, item_id)
+                work_dir = create_item_workdir(self.base_work_dir, item_id, debug_mode=self.debug)
                 try:
                     result, atomic_notes_info = self.process_single_item(item, work_dir)
                     results.append(result)
@@ -479,8 +505,9 @@ class MusiqueProcessor:
         
         if self.debug:
             logger.info(f"Debug mode: All intermediate files preserved in {self.base_work_dir}")
-            logger.info(f"  - Item work directories: {self.base_work_dir}/debug/item_<id>/")
-            logger.info(f"  - Each item directory contains: atomic_notes.json, graph.json, embeddings.npy, etc.")
+            logger.info(f"  - Item work directories: {self.base_work_dir}/debug/<item_id>/")
+            logger.info(f"  - Each item directory contains: atomic_notes.json, graph.json, embeddings.npy, chunks.jsonl, etc.")
+            logger.info(f"  - Process artifacts structure: /results/<number>/debug/<item_id>/atomic_notes.json")
     
     def _process_with_parallel_engine(self, items: List[Dict[str, Any]], 
                                       parallel_workers: int, parallel_strategy: str) -> List[Dict[str, Any]]:
@@ -550,7 +577,11 @@ def main():
     else:
         work_dir = get_latest_workdir()  # 使用最新的工作目录继续任务
     
-    # 将所有输出文件路径调整到工作目录内
+    # 将最终产物文件路径调整到工作目录（即结果根目录）
+    # 这样note、recall、log等最终产物都在 /results/32/ 下
+    # 而中间产物在 /results/32/debug/<item_id>/ 下
+    # work_dir 本身就是 /results/32/ 这样的目录
+    
     if not os.path.isabs(args.output_file):
         output_file = os.path.join(work_dir, args.output_file)
     else:
@@ -561,7 +592,7 @@ def main():
     else:
         atomic_notes_file = args.atomic_notes_file
     
-    # 设置日志文件路径到工作目录内
+    # 设置日志文件路径到结果根目录
     if args.log_file:
         if not os.path.isabs(args.log_file):
             log_file = os.path.join(work_dir, args.log_file)

@@ -63,6 +63,177 @@ class SimpleBM25:
         return scores
 
 
+class FieldWeightedBM25:
+    """支持字段权重的BM25实现，用于title、entities、content的加权计算"""
+    
+    def __init__(self, corpus: List[Dict[str, List[str]]], field_weights: Dict[str, float] = None, k1: float = 1.5, b: float = 0.75):
+        """
+        Args:
+            corpus: 文档列表，每个文档是字段到token列表的映射，如 {'title': [...], 'entities': [...], 'content': [...]}
+            field_weights: 字段权重，如 {'title': 2.0, 'entities': 1.5, 'content': 1.0}
+            k1, b: BM25参数
+        """
+        self.corpus = corpus
+        self.field_weights = field_weights or {'title': 2.0, 'entities': 1.5, 'content': 1.0}
+        self.k1 = k1
+        self.b = b
+        self.doc_count = len(corpus)
+        
+        # 为每个字段计算统计信息
+        self.field_stats = {}
+        self.field_doc_freqs = {}
+        self.field_idf = {}
+        
+        for field in self.field_weights.keys():
+            # 计算字段的文档长度和平均长度
+            field_doc_lens = []
+            field_doc_freqs = []
+            
+            for doc in corpus:
+                field_tokens = doc.get(field, [])
+                field_doc_lens.append(len(field_tokens))
+                field_doc_freqs.append(Counter(field_tokens))
+            
+            avgdl = sum(field_doc_lens) / len(field_doc_lens) if field_doc_lens else 0
+            
+            self.field_stats[field] = {
+                'doc_lens': field_doc_lens,
+                'avgdl': avgdl
+            }
+            self.field_doc_freqs[field] = field_doc_freqs
+            
+            # 计算字段的IDF
+            all_terms = set()
+            for doc_freq in field_doc_freqs:
+                all_terms.update(doc_freq.keys())
+            
+            field_idf = {}
+            for term in all_terms:
+                containing_docs = sum(1 for doc_freq in field_doc_freqs if term in doc_freq)
+                field_idf[term] = math.log((self.doc_count - containing_docs + 0.5) / (containing_docs + 0.5) + 1.0)
+            
+            self.field_idf[field] = field_idf
+    
+    def get_scores(self, query: List[str]) -> List[float]:
+        """计算查询对所有文档的BM25分数"""
+        scores = []
+        
+        for doc_idx in range(self.doc_count):
+            total_score = 0.0
+            
+            # 对每个字段计算BM25分数并加权
+            for field, weight in self.field_weights.items():
+                field_score = 0.0
+                doc_freq = self.field_doc_freqs[field][doc_idx]
+                doc_len = self.field_stats[field]['doc_lens'][doc_idx]
+                avgdl = self.field_stats[field]['avgdl']
+                
+                for term in query:
+                    if term in doc_freq:
+                        tf = doc_freq[term]
+                        idf = self.field_idf[field].get(term, 0)
+                        
+                        # BM25公式
+                        numerator = tf * (self.k1 + 1)
+                        denominator = tf + self.k1 * (1 - self.b + self.b * (doc_len / avgdl)) if avgdl > 0 else tf + self.k1
+                        field_score += idf * (numerator / denominator)
+                
+                # 应用字段权重
+                total_score += weight * field_score
+            
+            scores.append(total_score)
+        
+        return scores
+
+
+def build_field_weighted_bm25_corpus(notes: List[Dict[str, Any]], field_weights: Dict[str, float] = None) -> FieldWeightedBM25:
+    """
+    构建支持字段权重的BM25语料库
+    
+    Args:
+        notes: 笔记列表
+        field_weights: 字段权重，默认为 {'title': 2.0, 'entities': 1.5, 'content': 1.0}
+    
+    Returns:
+        FieldWeightedBM25对象
+    """
+    if field_weights is None:
+        field_weights = {'title': 2.0, 'entities': 1.5, 'content': 1.0}
+    
+    # 构建字段化的语料库
+    field_corpus = []
+    
+    for note in notes:
+        doc_fields = {}
+        
+        # 提取title字段
+        title = note.get('title', '') or ''
+        doc_fields['title'] = tokenize_text(title)
+        
+        # 提取entities字段
+        entities = note.get('entities', []) or []
+        if isinstance(entities, list):
+            entities_text = ' '.join(entities)
+        else:
+            entities_text = str(entities)
+        doc_fields['entities'] = tokenize_text(entities_text)
+        
+        # 提取content字段
+        content = note.get('content', '') or ''
+        doc_fields['content'] = tokenize_text(content)
+        
+        field_corpus.append(doc_fields)
+    
+    corpus = FieldWeightedBM25(field_corpus, field_weights)
+    logger.debug(f"Built field-weighted BM25 corpus with {len(field_corpus)} documents, weights: {field_weights}")
+    return corpus
+
+
+def field_weighted_bm25_scores(corpus: FieldWeightedBM25, docs: List[Dict[str, Any]], query: str) -> List[float]:
+    """
+    使用字段权重BM25计算相关性分数
+    
+    Args:
+        corpus: FieldWeightedBM25语料库对象
+        docs: 文档列表（用于验证长度匹配）
+        query: 查询字符串
+    
+    Returns:
+        BM25分数列表
+    """
+    try:
+        # 分词查询
+        query_tokens = tokenize_text(query)
+        
+        if not query_tokens:
+            logger.warning("Empty query tokens, returning zero scores")
+            return [0.0] * len(docs)
+        
+        # 获取分数
+        scores = corpus.get_scores(query_tokens)
+        
+        # 确保分数长度匹配文档长度
+        if len(scores) != len(docs):
+            logger.warning(f"Score length mismatch: {len(scores)} scores vs {len(docs)} docs")
+            if len(scores) < len(docs):
+                scores.extend([0.0] * (len(docs) - len(scores)))
+            else:
+                scores = scores[:len(docs)]
+        
+        # 归一化分数到[0, 1]范围
+        if scores:
+            max_score = max(scores)
+            if max_score > 0:
+                scores = [score / max_score for score in scores]
+        
+        logger.debug(f"Calculated field-weighted BM25 scores for {len(docs)} documents, max score: {max(scores) if scores else 0}")
+        return scores
+        
+    except Exception as e:
+        logger.error(f"Error calculating field-weighted BM25 scores: {e}")
+        return [0.0] * len(docs)
+
+
 def tokenize_text(text: str) -> List[str]:
     """Simple tokenization function."""
     # Convert to lowercase and split on non-alphanumeric characters

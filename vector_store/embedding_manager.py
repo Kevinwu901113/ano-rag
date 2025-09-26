@@ -466,34 +466,36 @@ class EmbeddingManager:
     
     def _extract_title_raw_span_text(self, note: Dict[str, Any], field_priority: List[str], 
                                    text_combination: Dict[str, Any]) -> str:
-        """提取title+raw_span组合文本"""
-        text_parts = []
-        separator = text_combination.get('separator', ' ')
-        max_length = text_combination.get('max_combined_length', 512)
-        enable_dedup = text_combination.get('enable_deduplication', True)
+        """提取title+raw_span组合文本，使用优化的实体增强格式"""
+        # 获取基础字段
+        title = note.get('title', '').strip()
+        content = note.get('content', '').strip() or note.get('raw_span', '').strip()
+        entities = note.get('entities', [])
         
-        # 按优先级提取字段
-        for field in field_priority:
-            value = note.get(field, '').strip()
-            if value:
-                if not enable_dedup or value not in text_parts:
-                    text_parts.append(value)
+        # 构造实体字符串
+        entity_str = ""
+        if entities:
+            if isinstance(entities, list):
+                entity_str = ', '.join(str(e) for e in entities if e)
+            else:
+                entity_str = str(entities)
         
-        # 组合文本
-        combined_text = separator.join(text_parts)
+        # 使用优化的拼接格式：title || content || ENTITIES: entities
+        embed_text = f"{title} || {content} || ENTITIES: {entity_str}"
         
         # 截断处理
-        if len(combined_text) > max_length:
+        max_length = text_combination.get('max_combined_length', 512)
+        if len(embed_text) > max_length:
             truncate_strategy = text_combination.get('truncate_strategy', 'tail')
             if truncate_strategy == 'head':
-                combined_text = combined_text[:max_length]
+                embed_text = embed_text[:max_length]
             elif truncate_strategy == 'tail':
-                combined_text = combined_text[-max_length:]
+                embed_text = embed_text[-max_length:]
             elif truncate_strategy == 'middle':
                 half = max_length // 2
-                combined_text = combined_text[:half] + combined_text[-half:]
+                embed_text = embed_text[:half] + embed_text[-half:]
         
-        return combined_text or "Empty note"
+        return embed_text or "Empty note"
     
     def _extract_title_content_text(self, note: Dict[str, Any], content_field: str, 
                                   text_combination: Dict[str, Any]) -> str:
