@@ -1,4 +1,5 @@
 import yaml
+from copy import deepcopy
 from pathlib import Path
 from typing import Any, Dict, Tuple
 
@@ -42,7 +43,96 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         },
     },
     "path_aware": {"enabled": True, "min_path_score": 0.3},
+    "hybrid_search": {
+        "enabled": True,
+        "fusion_method": "linear",
+        "linear": {
+            "vector_weight": 1.0,
+            "bm25_weight": 0.5,
+            "path_weight": 0.1,
+        },
+        "rrf": {
+            "k": 60,
+            "vector_weight": 1.0,
+            "bm25_weight": 1.0,
+            "path_weight": 1.0,
+        },
+        "weights": {"dense": 1.0, "bm25": 0.5, "graph": 0.5, "path": 0.1},
+        "bm25": {"k1": 1.2, "b": 0.75, "corpus_field": "title_raw_span"},
+        "path_aware": {"enabled": True},
+        "retrieval_guardrail": {
+            "enabled": True,
+            "must_have_terms": {},
+            "boost_entities": {},
+            "boost_predicates": {},
+            "predicate_mappings": {},
+        },
+        "fallback": {
+            "enabled": True,
+            "sparse_boost_factor": 1.5,
+            "query_rewrite_enabled": True,
+            "max_retries": 2,
+        },
+        "two_hop_expansion": {
+            "enabled": True,
+            "top_m_candidates": 20,
+            "entity_extraction_method": "rule_based",
+            "target_predicates": [
+                "founded_by",
+                "located_in",
+                "member_of",
+                "works_for",
+                "part_of",
+                "instance_of",
+            ],
+            "max_second_hop_candidates": 15,
+            "merge_strategy": "weighted",
+        },
+        "section_filtering": {
+            "enabled": True,
+            "filter_rule": "main_entity_related",
+            "fallback_to_lexical": True,
+        },
+        "lexical_fallback": {
+            "enabled": True,
+            "must_have_terms_sources": ["main_entity", "predicate_stems"],
+            "miss_penalty": 0.6,
+            "blacklist_penalty": 0.5,
+            "noise_threshold": 0.20,
+        },
+        "namespace_filtering": {
+            "enabled": True,
+            "stages": [
+                "initial_recall",
+                "post_fusion",
+                "post_two_hop",
+                "final_scheduling",
+            ],
+            "same_namespace_bm25_fallback": True,
+            "strict_mode": True,
+        },
+        "multi_hop": {
+            "max_hops": 4,
+            "beam_width": 8,
+            "per_hop_keep_top_m": 5,
+            "focused_weight_by_hop": {1: 0.30, 2: 0.25, 3: 0.20, 4: 0.15},
+            "hop_decay": 0.85,
+            "lower_threshold": 0.10,
+        },
+        "answer_bias": {"who_person_boost": 1.10},
+    },
     "dispatcher": {
+        "final_semantic_count": 8,
+        "final_graph_count": 5,
+        "bridge_policy": "keepalive",
+        "bridge_boost_epsilon": 0.02,
+        "debug_log": True,
+        "enabled": True,
+        "k_hop": 2,
+    },
+    "context_dispatcher": {
+        "enabled": True,
+        "k_hop": 2,
         "final_semantic_count": 8,
         "final_graph_count": 5,
         "bridge_policy": "keepalive",
@@ -152,6 +242,111 @@ def _merge_with_defaults(data: Dict[str, Any], defaults: Dict[str, Any], path: s
     return result, deprecated
 
 
+def _get_path(data: Dict[str, Any] | None, path: Tuple[str, ...]):
+    cur: Any = data
+    for key in path:
+        if not isinstance(cur, dict) or key not in cur:
+            return None
+        cur = cur[key]
+    return cur
+
+
+def _set_path(data: Dict[str, Any], path: Tuple[str, ...], value: Any):
+    cur = data
+    for key in path[:-1]:
+        cur = cur.setdefault(key, {})
+    cur[path[-1]] = value
+
+
+def _deep_merge(base: Any, updates: Any):
+    if updates is None:
+        return deepcopy(base)
+    if not isinstance(base, dict) or not isinstance(updates, dict):
+        return deepcopy(updates)
+    merged = deepcopy(base)
+    for key, value in updates.items():
+        if isinstance(value, dict):
+            merged[key] = _deep_merge(merged.get(key, {}), value)
+        else:
+            merged[key] = deepcopy(value)
+    return merged
+
+
+def _normalize_hybrid_branch(config_data: Dict[str, Any]):
+    hybrid = _get_path(config_data, ("hybrid_search",))
+    if not isinstance(hybrid, dict):
+        return
+
+    normalized = deepcopy(hybrid)
+    linear = normalized.get("linear", {}) or {}
+    weights = normalized.get("weights", {}) or {}
+
+    if not linear and weights:
+        linear = {
+            "vector_weight": weights.get("dense", 1.0),
+            "bm25_weight": weights.get("bm25", 0.5),
+            "path_weight": weights.get("path", 0.1),
+        }
+    else:
+        weights = dict(weights)
+        if "vector_weight" in linear:
+            weights["dense"] = linear["vector_weight"]
+        if "bm25_weight" in linear:
+            weights["bm25"] = linear["bm25_weight"]
+        if "path_weight" in linear:
+            weights["path"] = linear["path_weight"]
+        if "graph" not in weights:
+            weights["graph"] = DEFAULT_CONFIG["hybrid_search"]["weights"].get("graph", 0.5)
+
+    normalized["linear"] = linear
+    normalized["weights"] = weights
+
+    rrf = normalized.get("rrf", {}) or {}
+    if "k" not in rrf:
+        rrf["k"] = normalized.get("rrf_k", DEFAULT_CONFIG["hybrid_search"]["rrf"]["k"])
+    normalized["rrf"] = rrf
+    normalized["rrf_k"] = rrf.get("k")
+
+    _set_path(config_data, ("hybrid_search",), deepcopy(normalized))
+    _set_path(config_data, ("retrieval", "hybrid"), deepcopy(normalized))
+
+
+def _synchronize_aliases(config_data: Dict[str, Any], raw_data: Dict[str, Any] | None):
+    raw_data = raw_data or {}
+
+    # Context dispatcher mirrors dispatcher settings
+    context_default = _get_path(DEFAULT_CONFIG, ("context_dispatcher",)) or {}
+    dispatcher_override = _get_path(raw_data, ("dispatcher",))
+    context_override = _get_path(raw_data, ("context_dispatcher",))
+    merged_context = _deep_merge(context_default, dispatcher_override)
+    merged_context = _deep_merge(merged_context, context_override)
+    if not isinstance(merged_context, dict):
+        merged_context = {"enabled": bool(merged_context)}
+    _set_path(config_data, ("context_dispatcher",), deepcopy(merged_context))
+    _set_path(config_data, ("dispatcher",), deepcopy(merged_context))
+
+    # Hybrid search mirrors retrieval.hybrid
+    hybrid_default = _get_path(DEFAULT_CONFIG, ("hybrid_search",)) or {}
+    legacy_hybrid_override = _get_path(raw_data, ("retrieval", "hybrid"))
+    hybrid_override = _get_path(raw_data, ("hybrid_search",))
+    merged_hybrid = _deep_merge(hybrid_default, legacy_hybrid_override)
+    merged_hybrid = _deep_merge(merged_hybrid, hybrid_override)
+    if not isinstance(merged_hybrid, dict):
+        merged_hybrid = {"enabled": bool(merged_hybrid)}
+    _set_path(config_data, ("hybrid_search",), deepcopy(merged_hybrid))
+
+    # BM25 parameters shared between schemas
+    bm25_default = _get_path(DEFAULT_CONFIG, ("hybrid_search", "bm25")) or {}
+    legacy_bm25_override = _get_path(raw_data, ("retrieval", "bm25"))
+    hybrid_bm25_override = _get_path(raw_data, ("hybrid_search", "bm25"))
+    merged_bm25 = _deep_merge(bm25_default, legacy_bm25_override)
+    merged_bm25 = _deep_merge(merged_bm25, hybrid_bm25_override)
+    _set_path(config_data, ("hybrid_search", "bm25"), deepcopy(merged_bm25))
+    _set_path(config_data, ("retrieval", "bm25"), deepcopy(merged_bm25))
+
+    _normalize_hybrid_branch(config_data)
+
+
 class ConfigLoader:
     """Load and access configuration with strict schema."""
 
@@ -160,6 +355,7 @@ class ConfigLoader:
             config_path = Path(__file__).resolve().parent.parent / "config.yaml"
         self.config_path = Path(config_path)
         self._config: Dict[str, Any] | None = None
+        self._raw_config: Dict[str, Any] | None = None
         self.deprecated_keys: list[str] = []
 
     def load_config(self) -> Dict[str, Any]:
@@ -169,8 +365,10 @@ class ConfigLoader:
                     raw = yaml.safe_load(f) or {}
             else:
                 raw = {}
+            self._raw_config = raw
             merged, deprecated = _merge_with_defaults(raw, DEFAULT_CONFIG)
             self._config = merged
+            _synchronize_aliases(self._config, self._raw_config)
             self.deprecated_keys = deprecated
             for key in deprecated:
                 print(f"[Config] deprecated field ignored: {key}")
@@ -201,7 +399,14 @@ class ConfigLoader:
         # Set the final key
         current[keys[-1]] = value
         self._config = config
-    
+        if self._raw_config is None:
+            self._raw_config = {}
+        raw_current = self._raw_config
+        for k in keys[:-1]:
+            raw_current = raw_current.setdefault(k, {})
+        raw_current[keys[-1]] = value
+        _synchronize_aliases(self._config, self._raw_config)
+
     def update_config(self, updates: Dict[str, Any]):
         config = self.load_config()
         # shallow update only for existing keys
@@ -209,6 +414,7 @@ class ConfigLoader:
             if k in config:
                 config[k] = v
         self._config = config
+        _synchronize_aliases(self._config, self._raw_config)
 
     def save_config(self):
         if self._config is not None:
