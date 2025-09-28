@@ -57,6 +57,9 @@ class QueryProcessor:
         vector_index_file: Optional[str] = None,
         llm: Optional[LocalLLM] = None,
     ):
+        # Cache configuration for helper methods that access nested settings.
+        self.config = config.load_config()
+
         # Query rewriter functionality has been removed
         self.vector_retriever = VectorRetriever()
         if vector_index_file and os.path.exists(vector_index_file):
@@ -435,12 +438,21 @@ class QueryProcessor:
         
         # 初始化结构化日志记录器
         self.structured_logger = StructuredLogger("QueryProcessor")
-        self.structured_logger.info("QueryProcessor initialized successfully", 
+        self.structured_logger.info("QueryProcessor initialized successfully",
                                   notes_count=len(atomic_notes),
                                   hybrid_search=self.hybrid_search_enabled,
                                   path_aware=self.path_aware_enabled,
                                   diversity_scheduler=self.diversity_scheduler_enabled,
                                   multi_hop=self.multi_hop_enabled)
+
+    def _get_config_dict(self, *path: str) -> Dict[str, Any]:
+        """Safely traverse the cached configuration and return a nested dict."""
+        cfg: Any = self.config if isinstance(self.config, dict) else {}
+        for key in path:
+            if not isinstance(cfg, dict):
+                return {}
+            cfg = cfg.get(key)
+        return cfg if isinstance(cfg, dict) else {}
 
     @log_performance("QueryProcessor.process")
     def process(self, query: str, dataset: Optional[str] = None, qid: Optional[str] = None) -> Dict[str, Any]:
@@ -559,12 +571,22 @@ class QueryProcessor:
 
     def _do_prf_bridge(self, query, first_hop_notes, existing_candidates):
         """从第一跳topK原子笔记的entities里选频次最高的桥接实体 E*，构造一次小检索 补充候选。"""
-        cfg = (self.config or {}).get("hybrid_search", {})
-        prf_cfg = cfg.get("prf_bridge", {})
-        if not prf_cfg.get("enabled", True):
+        prf_cfg = self._get_config_dict("hybrid_search", "prf_bridge")
+        enabled = prf_cfg.get("enabled", True)
+        if isinstance(enabled, str):
+            enabled = enabled.strip().lower() not in {"false", "0", "no"}
+        else:
+            enabled = bool(enabled)
+        if not enabled:
             return []
-        topk = int(prf_cfg.get("first_hop_topk", 2))
-        prf_topk = int(prf_cfg.get("prf_topk", 20))
+        try:
+            topk = int(prf_cfg.get("first_hop_topk", 2))
+        except (TypeError, ValueError):
+            topk = 2
+        try:
+            prf_topk = int(prf_cfg.get("prf_topk", 20))
+        except (TypeError, ValueError):
+            prf_topk = 20
 
         pool = first_hop_notes[:topk]
         from collections import Counter
@@ -720,10 +742,15 @@ class QueryProcessor:
         if not candidates:
             return candidates
         
-        cfg = (self.config or {}).get("hybrid_search", {})
-        sec_cfg = cfg.get("second_hop_safety", {})
-        keep_top_m = int(sec_cfg.get("keep_top_m", 5))
-        lower_th = float(sec_cfg.get("lower_threshold", 0.10))
+        sec_cfg = self._get_config_dict("hybrid_search", "second_hop_safety")
+        try:
+            keep_top_m = int(sec_cfg.get("keep_top_m", 5))
+        except (TypeError, ValueError):
+            keep_top_m = 5
+        try:
+            lower_th = float(sec_cfg.get("lower_threshold", 0.10))
+        except (TypeError, ValueError):
+            lower_th = 0.10
         
         primary_bucket, second_bucket = [], []
         for c in candidates:
@@ -1298,16 +1325,36 @@ class QueryProcessor:
         if not candidates:
             return []
 
-        cfg = (self.config or {}).get("hybrid_search", {})
-        fus = cfg.get("fusion", {})
-        feat = cfg.get("features", {})
-        dense_w = float(fus.get("dense_weight", 1.0))
-        bm25_w = float(fus.get("bm25_weight", 0.6))
-        focused_w2 = float(fus.get("focused_weight_hop2", 0.30))
-        hop_decay = float(feat.get("hop_decay", 0.85))
-        cov_w = float(feat.get("cov_weight", 0.10))
-        cons_w = float(feat.get("cons_weight", 0.05))
-        rrf_lambda = float(fus.get("rrf_lambda", 0.2))
+        fus = self._get_config_dict("hybrid_search", "fusion")
+        feat = self._get_config_dict("hybrid_search", "features")
+        try:
+            dense_w = float(fus.get("dense_weight", 1.0))
+        except (TypeError, ValueError):
+            dense_w = 1.0
+        try:
+            bm25_w = float(fus.get("bm25_weight", 0.6))
+        except (TypeError, ValueError):
+            bm25_w = 0.6
+        try:
+            focused_w2 = float(fus.get("focused_weight_hop2", 0.30))
+        except (TypeError, ValueError):
+            focused_w2 = 0.30
+        try:
+            hop_decay = float(feat.get("hop_decay", 0.85))
+        except (TypeError, ValueError):
+            hop_decay = 0.85
+        try:
+            cov_w = float(feat.get("cov_weight", 0.10))
+        except (TypeError, ValueError):
+            cov_w = 0.10
+        try:
+            cons_w = float(feat.get("cons_weight", 0.05))
+        except (TypeError, ValueError):
+            cons_w = 0.05
+        try:
+            rrf_lambda = float(fus.get("rrf_lambda", 0.2))
+        except (TypeError, ValueError):
+            rrf_lambda = 0.2
 
         # 基础分
         dense_scores = self._calculate_vector_similarities(query, candidates)
@@ -1367,13 +1414,23 @@ class QueryProcessor:
         位置：重排完成、过滤之前
         通过余弦相似度聚类，每个簇保留前 M 个最高分候选
         """
-        cfg = (self.config or {}).get("hybrid_search", {})
-        cs = cfg.get("cluster_suppression", {})
-        if not cs.get("enabled", True) or not candidates:
+        cs = self._get_config_dict("hybrid_search", "cluster_suppression")
+        enabled = cs.get("enabled", True)
+        if isinstance(enabled, str):
+            enabled = enabled.strip().lower() not in {"false", "0", "no"}
+        else:
+            enabled = bool(enabled)
+        if not enabled or not candidates:
             return candidates
-        
-        thr = float(cs.get("cos_threshold", 0.90))
-        keep_m = int(cs.get("keep_per_cluster", 2))
+
+        try:
+            thr = float(cs.get("cos_threshold", 0.90))
+        except (TypeError, ValueError):
+            thr = 0.90
+        try:
+            keep_m = int(cs.get("keep_per_cluster", 2))
+        except (TypeError, ValueError):
+            keep_m = 2
 
         # 取得/缓存每个候选的向量
         vecs = []
@@ -3718,11 +3775,27 @@ class QueryProcessor:
         
         位置：你现有的 _apply_noise_threshold_filtering / _filter_with_multihop_safety
         """
-        cfg = (self.config or {}).get("hybrid_search", {})
-        safe = cfg.get("safety", {})
-        per_hop_top_m = int(safe.get("per_hop_keep_top_m", 6))
-        lower_th = float(safe.get("lower_threshold", 0.10))
-        keep_one_per_doc = bool(safe.get("keep_one_per_doc", True))
+        safe = self._get_config_dict("hybrid_search", "safety")
+
+        def _as_int(value, default):
+            try:
+                return int(value)
+            except (TypeError, ValueError):
+                return default
+
+        def _as_float(value, default):
+            try:
+                return float(value)
+            except (TypeError, ValueError):
+                return default
+
+        per_hop_top_m = _as_int(safe.get("per_hop_keep_top_m", 6), 6)
+        lower_th = _as_float(safe.get("lower_threshold", 0.10), 0.10)
+        keep_one_per_doc = safe.get("keep_one_per_doc", True)
+        if isinstance(keep_one_per_doc, str):
+            keep_one_per_doc = keep_one_per_doc.strip().lower() not in {"false", "0", "no"}
+        else:
+            keep_one_per_doc = bool(keep_one_per_doc)
 
         # must-have：把路径实体并入（不是词表，是实体）
         must_have_terms = set(t.lower() for t in (path_entities or []))
