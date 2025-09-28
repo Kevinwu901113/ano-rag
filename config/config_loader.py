@@ -26,6 +26,13 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "multi_hop": {
             "enabled": True,
             "strategy": "hybrid",
+            "max_hops": 3,
+            "max_paths": 10,
+            "min_path_score": 0.3,
+            "min_path_score_floor": 0.1,
+            "min_path_score_step": 0.05,
+            "path_diversity_threshold": 0.7,
+            "max_initial_candidates": 20,
             "top_k_seed": {
                 "enabled": False,
                 "seed_count": 5,
@@ -343,6 +350,17 @@ def _synchronize_aliases(config_data: Dict[str, Any], raw_data: Dict[str, Any] |
     merged_bm25 = _deep_merge(merged_bm25, hybrid_bm25_override)
     _set_path(config_data, ("hybrid_search", "bm25"), deepcopy(merged_bm25))
     _set_path(config_data, ("retrieval", "bm25"), deepcopy(merged_bm25))
+
+    # Multi-hop configuration shared between legacy and retrieval-scoped keys
+    multi_hop_default = _get_path(DEFAULT_CONFIG, ("retrieval", "multi_hop")) or {}
+    legacy_multi_hop_override = _get_path(raw_data, ("multi_hop",))
+    retrieval_multi_hop_override = _get_path(raw_data, ("retrieval", "multi_hop"))
+    merged_multi_hop = _deep_merge(multi_hop_default, legacy_multi_hop_override)
+    merged_multi_hop = _deep_merge(merged_multi_hop, retrieval_multi_hop_override)
+    if not isinstance(merged_multi_hop, dict):
+        merged_multi_hop = {"enabled": bool(merged_multi_hop)}
+    _set_path(config_data, ("retrieval", "multi_hop"), deepcopy(merged_multi_hop))
+    _set_path(config_data, ("multi_hop",), deepcopy(merged_multi_hop))
 
     _normalize_hybrid_branch(config_data)
 

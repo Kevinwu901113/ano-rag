@@ -25,6 +25,13 @@ class MultiHopQueryProcessor:
     ) -> None:
         builder = GraphBuilder()
 
+        legacy_multi_hop = config.get('multi_hop', {}) or {}
+        retrieval_multi_hop = config.get('retrieval.multi_hop', None)
+        if isinstance(retrieval_multi_hop, dict):
+            self.multi_hop_config = {**legacy_multi_hop, **retrieval_multi_hop}
+        else:
+            self.multi_hop_config = legacy_multi_hop
+
         if graph_index is not None:
             self.graph_index = graph_index
         elif graph_file:

@@ -111,7 +111,10 @@ class QueryProcessor:
             self.graph_index = GraphIndex()
             self.graph_index.build_index(graph, atomic_notes, embeddings)
 
-        self.multi_hop_enabled = config.get('retrieval.multi_hop.enabled', False)
+        multi_hop_enabled = config.get('retrieval.multi_hop.enabled', None)
+        if multi_hop_enabled is None:
+            multi_hop_enabled = config.get('multi_hop.enabled', False)
+        self.multi_hop_enabled = bool(multi_hop_enabled)
         if self.multi_hop_enabled:
             self.multi_hop_processor = MultiHopQueryProcessor(
                 atomic_notes,
@@ -380,7 +383,12 @@ class QueryProcessor:
         logger.info(f"Namespace filtering stages: {self.namespace_filter_stages}")
         
         # 图检索策略配置
-        graph_config = config.get('retrieval.multi_hop', {})
+        legacy_graph_config = config.get('multi_hop', {}) or {}
+        retrieval_graph_config = config.get('retrieval.multi_hop', None)
+        if isinstance(retrieval_graph_config, dict):
+            graph_config = {**legacy_graph_config, **retrieval_graph_config}
+        else:
+            graph_config = legacy_graph_config
         self.graph_strategy = graph_config.get('strategy', 'entity_extraction')
         
         # Top-K种子节点策略配置
