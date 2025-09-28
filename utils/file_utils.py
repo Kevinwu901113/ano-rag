@@ -102,6 +102,15 @@ class FileUtils:
         return hash_md5.hexdigest()
     
     @staticmethod
+    def sha1sum(file_path: str) -> str:
+        """获取文件的SHA1哈希值"""
+        hash_sha1 = hashlib.sha1()
+        with open(file_path, "rb") as f:
+            for chunk in iter(lambda: f.read(4096), b""):
+                hash_sha1.update(chunk)
+        return hash_sha1.hexdigest()
+    
+    @staticmethod
     def is_file_modified(file_path: str, hash_cache: Dict[str, str]) -> bool:
         """判断文件是否被修改"""
         if not os.path.exists(file_path):

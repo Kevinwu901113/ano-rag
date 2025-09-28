@@ -379,17 +379,36 @@ class SpanPicker:
         logger.info(f"Span picker training completed. Metrics: {metrics}")
         return metrics
     
-    def pick_best_span(self, question: str, evidence_sentences: List[str]) -> Tuple[str, float]:
+    def pick_best_span(self, question: str, evidence_sentences: List[str] = None, 
+                      final_recall_path: Optional[str] = None) -> Tuple[str, float]:
         """
         Pick the best span from evidence sentences.
         
         Args:
             question: The input question
-            evidence_sentences: List of evidence sentences
+            evidence_sentences: List of evidence sentences (可选，如果提供final_recall_path则从文件读取)
+            final_recall_path: final_recall.jsonl文件路径，如果提供则从此文件读取evidence
             
         Returns:
             Tuple of (best_span, score)
         """
+        # 如果提供了final_recall_path，从文件读取evidence_sentences
+        if final_recall_path and Path(final_recall_path).exists():
+            logger.info(f"Loading evidence from final_recall_path: {final_recall_path}")
+            try:
+                evidence_sentences = []
+                with open(final_recall_path, 'r', encoding='utf-8') as f:
+                    for line in f:
+                        note = json.loads(line.strip())
+                        content = note.get('content', '')
+                        if content:
+                            evidence_sentences.append(content)
+                logger.info(f"Loaded {len(evidence_sentences)} evidence sentences from {final_recall_path}")
+            except Exception as e:
+                logger.error(f"Failed to load evidence from {final_recall_path}: {e}")
+                if evidence_sentences is None:
+                    evidence_sentences = []
+        
         if not evidence_sentences:
             return "", 0.0
         

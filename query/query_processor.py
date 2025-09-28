@@ -43,6 +43,7 @@ from retrieval.learned_fusion import create_learned_fusion
 from reasoning.qa_coverage import create_qa_coverage_scorer
 from answer.span_picker import create_span_picker
 from answer.verify_shell import create_answer_verifier
+from answer.efsa_answer import efsa_answer_with_fallback
 from context.packer import ContextPacker
 from retrieval.listt5_reranker import ListT5Reranker, create_listt5_reranker, fuse_scores, sort_desc
 
@@ -56,9 +57,45 @@ class QueryProcessor:
         graph_file: Optional[str] = None,
         vector_index_file: Optional[str] = None,
         llm: Optional[LocalLLM] = None,
+        cfg: Optional[dict] = None,
     ):
-        # Cache configuration for helper methods that access nested settings.
-        self.config = config.load_config()
+        # 如果外部没传，才加载一次
+        self.config = cfg if cfg is not None else config.load_config()
+
+        # 强化：常用旋钮在 __init__ 缓存成成员，后面只读这些
+        hd = self._get_config_dict("hybrid_search")
+        self._prf_cfg = hd.get("prf_bridge", {})
+        self._twohop_cfg = hd.get("two_hop_expansion", {})
+        self._fusion_cfg = hd.get("weights", {})
+        self._safety_cfg = self._get_config_dict("safety")  # 如果你用这个层
+        
+        # 缓存更多常用配置项
+        self._dataset_guard_cfg = self._get_config_dict("dataset_guard")
+        self._llm_cfg = self._get_config_dict("llm")
+        self._query_cfg = self._get_config_dict("query")
+        self._vector_store_cfg = self._get_config_dict("vector_store")
+        self._calibration_cfg = self._get_config_dict("calibration")
+        self._learned_fusion_cfg = self._get_config_dict("learned_fusion")
+        self._answer_verification_cfg = self._get_config_dict("answer_verification")
+        self._rerank_cfg = self._get_config_dict("rerank")
+        self._path_aware_ranker_cfg = self._get_config_dict("path_aware_ranker")
+        self._diversity_scheduler_cfg = self._get_config_dict("diversity_scheduler")
+        self._multi_hop_cfg = self._get_config_dict("multi_hop")
+        self._retrieval_cfg = self._get_config_dict("retrieval")
+        
+        # 缓存 hybrid_search 子配置
+        self._hybrid_search_cfg = hd
+        self._linear_cfg = hd.get("linear", {})
+        self._rrf_cfg = hd.get("rrf", {})
+        self._bm25_cfg = hd.get("bm25", {})
+        self._path_aware_cfg = hd.get("path_aware", {})
+        self._retrieval_guardrail_cfg = hd.get("retrieval_guardrail", {})
+        self._fallback_cfg = hd.get("fallback", {})
+        self._section_filtering_cfg = hd.get("section_filtering", {})
+        self._lexical_fallback_cfg = hd.get("lexical_fallback", {})
+        self._namespace_filtering_cfg = hd.get("namespace_filtering", {})
+        self._multi_hop_search_cfg = hd.get("multi_hop", {})
+        self._answer_bias_cfg = hd.get("answer_bias", {})
 
         # Query rewriter functionality has been removed
         self.vector_retriever = VectorRetriever()
@@ -141,14 +178,14 @@ class QueryProcessor:
                 self.scheduler = ContextScheduler()
             logger.info("Using legacy ContextScheduler")
 
-        self.recall_optimization_enabled = config.get('vector_store.recall_optimization.enabled', True)
+        self.recall_optimization_enabled = self._vector_store_cfg.get('recall_optimization', {}).get('enabled', True)
         if self.multi_hop_enabled:
             self.recall_optimizer = EnhancedRecallOptimizer(self.vector_retriever, self.multi_hop_processor)
         else:
             self.recall_optimizer = EnhancedRecallOptimizer(self.vector_retriever, self.graph_retriever)
 
         # 初始化LLM客户端 - 支持混合模式
-        llm_provider = config.get('llm.provider', 'ollama')
+        llm_provider = self._llm_cfg.get('provider', 'ollama')
         if llm_provider == 'hybrid_llm':
             self.llm_client = HybridLLMDispatcher()
             logger.info("Using HybridLLMDispatcher for intelligent task routing")
@@ -161,11 +198,11 @@ class QueryProcessor:
         self.atomic_notes = atomic_notes
         
         # 初始化子问题分解组件
-        self.use_subquestion_decomposition = config.get('query.use_subquestion_decomposition', False)
+        self.use_subquestion_decomposition = self._query_cfg.get('use_subquestion_decomposition', False)
         if self.use_subquestion_decomposition:
             self.subquestion_planner = SubQuestionPlanner(llm_client=self.llm_client)
             self.evidence_merger = EvidenceMerger()
-            self.parallel_retrieval = config.get('query.subquestion.parallel_retrieval', True)
+            self.parallel_retrieval = self._query_cfg.get('subquestion', {}).get('parallel_retrieval', True)
             logger.info("Sub-question decomposition enabled")
         else:
             self.subquestion_planner = None
@@ -174,56 +211,51 @@ class QueryProcessor:
             logger.info("Sub-question decomposition disabled")
         
         # 初始化命名空间守卫配置
-        self.namespace_guard_enabled = config.get('dataset_guard.enabled', True)
-        self.bm25_fallback_enabled = config.get('dataset_guard.bm25_fallback', True)
+        self.namespace_guard_enabled = self._dataset_guard_cfg.get('enabled', True)
+        self.bm25_fallback_enabled = self._dataset_guard_cfg.get('bm25_fallback', True)
         logger.info(f"Dataset namespace guard: {'enabled' if self.namespace_guard_enabled else 'disabled'}")
         logger.info(f"BM25 fallback: {'enabled' if self.bm25_fallback_enabled else 'disabled'}")
         
         # 初始化混合检索配置（强制启用）
-        self.hybrid_search_enabled = config.get('hybrid_search.enabled', True)  # 强制默认启用
-        self.fusion_method = config.get('hybrid_search.fusion_method', 'linear')
+        self.hybrid_search_enabled = self._hybrid_search_cfg.get('enabled', True)  # 强制默认启用
+        self.fusion_method = self._hybrid_search_cfg.get('fusion_method', 'linear')
         
         # 获取融合权重配置
         if self.fusion_method == 'linear':
-            linear_config = config.get('hybrid_search.linear', {})
-            self.vector_weight = linear_config.get('vector_weight', 0.7)
-            self.bm25_weight = linear_config.get('bm25_weight', 0.3)
-            self.path_weight = linear_config.get('path_weight', 0.3)
+            self.vector_weight = self._linear_cfg.get('vector_weight', 0.7)
+            self.bm25_weight = self._linear_cfg.get('bm25_weight', 0.3)
+            self.path_weight = self._linear_cfg.get('path_weight', 0.3)
         else:  # rrf
-            rrf_config = config.get('hybrid_search.rrf', {})
-            self.rrf_k = rrf_config.get('k', 60)
-            self.vector_weight = rrf_config.get('vector_weight', 1.0)
-            self.bm25_weight = rrf_config.get('bm25_weight', 1.0)
-            self.path_weight = rrf_config.get('path_weight', 1.0)
+            self.rrf_k = self._rrf_cfg.get('k', 60)
+            self.vector_weight = self._rrf_cfg.get('vector_weight', 1.0)
+            self.bm25_weight = self._rrf_cfg.get('bm25_weight', 1.0)
+            self.path_weight = self._rrf_cfg.get('path_weight', 1.0)
         
         # BM25配置
-        bm25_config = config.get('hybrid_search.bm25', {})
-        self.bm25_k1 = bm25_config.get('k1', 1.2)
-        self.bm25_b = bm25_config.get('b', 0.75)
-        self.bm25_corpus_field = bm25_config.get('corpus_field', 'title_raw_span')
+        self.bm25_k1 = self._bm25_cfg.get('k1', 1.2)
+        self.bm25_b = self._bm25_cfg.get('b', 0.75)
+        self.bm25_corpus_field = self._bm25_cfg.get('corpus_field', 'title_raw_span')
         
         # 初始化PathAwareRanker
-        path_config = config.get('hybrid_search.path_aware', {})
-        self.path_aware_enabled = path_config.get('enabled', True)
+        self.path_aware_enabled = self._path_aware_cfg.get('enabled', True)
         if self.path_aware_enabled:
             try:
-                ranker_config = config.get('path_aware_ranker', {})
-                self.path_aware_ranker = create_path_aware_ranker(ranker_config)
+                self.path_aware_ranker = create_path_aware_ranker(self._path_aware_ranker_cfg)
                 logger.info("PathAwareRanker initialized successfully")
             except Exception as e:
                 logger.error(f"Failed to initialize PathAwareRanker: {e}")
         
         # 初始化新的无硬编码模块
-        calibration_path = config.get('calibration.path', 'calibration.json')
+        calibration_path = self._calibration_cfg.get('path', 'calibration.json')
         
         # 初始化可学习融合器
         try:
-            fusion_model_type = config.get('learned_fusion.model_type', 'linear')
+            fusion_model_type = self._learned_fusion_cfg.get('model_type', 'linear')
             self.learned_fusion = create_learned_fusion(
                 model_type=fusion_model_type,
                 calibration_path=calibration_path
             )
-            self.use_learned_fusion = config.get('learned_fusion.enabled', False)
+            self.use_learned_fusion = self._learned_fusion_cfg.get('enabled', False)
             logger.info(f"Learned fusion initialized: {fusion_model_type} model")
         except Exception as e:
             logger.warning(f"Failed to initialize learned fusion: {e}")
@@ -256,7 +288,7 @@ class QueryProcessor:
                 span_picker=self.span_picker,
                 calibration_path=calibration_path
             )
-            self.use_answer_verification = config.get('answer_verification.enabled', False)
+            self.use_answer_verification = self._answer_verification_cfg.get('enabled', False)
             logger.info("Answer verifier initialized")
         except Exception as e:
             logger.warning(f"Failed to initialize answer verifier: {e}")
@@ -273,9 +305,9 @@ class QueryProcessor:
         
         # 初始化ListT5重排序器
         try:
-            self.listt5 = create_listt5_reranker(config) if config.get('rerank.use_listt5', False) else None
+            self.listt5 = create_listt5_reranker(self.config) if self._rerank_cfg.get('use_listt5', False) else None
             if self.listt5:
-                logger.info(f"ListT5 reranker initialized: {config.get('rerank.listt5_model', 'default')}")
+                logger.info(f"ListT5 reranker initialized: {self._rerank_cfg.get('listt5_model', 'default')}")
             else:
                 logger.info("ListT5 reranker disabled")
         except Exception as e:
@@ -283,19 +315,17 @@ class QueryProcessor:
             self.listt5 = None
         
         # 检索守卫配置
-        guardrail_config = config.get('hybrid_search.retrieval_guardrail', {})
-        self.retrieval_guardrail_enabled = guardrail_config.get('enabled', True)
-        self.must_have_terms_config = guardrail_config.get('must_have_terms', {})
-        self.boost_entities_config = guardrail_config.get('boost_entities', {})
-        self.boost_predicates_config = guardrail_config.get('boost_predicates', {})
-        self.predicate_mappings = guardrail_config.get('predicate_mappings', {})
+        self.retrieval_guardrail_enabled = self._retrieval_guardrail_cfg.get('enabled', True)
+        self.must_have_terms_config = self._retrieval_guardrail_cfg.get('must_have_terms', {})
+        self.boost_entities_config = self._retrieval_guardrail_cfg.get('boost_entities', {})
+        self.boost_predicates_config = self._retrieval_guardrail_cfg.get('boost_predicates', {})
+        self.predicate_mappings = self._retrieval_guardrail_cfg.get('predicate_mappings', {})
         
         # 失败兜底策略配置
-        fallback_config = config.get('hybrid_search.fallback', {})
-        self.fallback_enabled = fallback_config.get('enabled', True)
-        self.fallback_sparse_boost = fallback_config.get('sparse_boost_factor', 1.5)
-        self.fallback_query_rewrite_enabled = fallback_config.get('query_rewrite_enabled', True)
-        self.fallback_max_retries = fallback_config.get('max_retries', 2)
+        self.fallback_enabled = self._fallback_cfg.get('enabled', True)
+        self.fallback_sparse_boost = self._fallback_cfg.get('sparse_boost_factor', 1.5)
+        self.fallback_query_rewrite_enabled = self._fallback_cfg.get('query_rewrite_enabled', True)
+        self.fallback_max_retries = self._fallback_cfg.get('max_retries', 2)
         
         # 初始化LLM查询改写器（用于失败兜底）
         if self.fallback_query_rewrite_enabled:
@@ -309,11 +339,10 @@ class QueryProcessor:
             self.llm_rewriter = None
         
         # 初始化DiversityScheduler（PathAware + Diversity联动）
-        diversity_config = config.get('diversity_scheduler', {})
-        self.diversity_scheduler_enabled = diversity_config.get('enabled', True)
+        self.diversity_scheduler_enabled = self._diversity_scheduler_cfg.get('enabled', True)
         if self.diversity_scheduler_enabled:
             try:
-                self.diversity_scheduler = DiversityScheduler(diversity_config)
+                self.diversity_scheduler = DiversityScheduler(self._diversity_scheduler_cfg)
                 logger.info(f"DiversityScheduler initialized with evidence quota: {self.diversity_scheduler.config.get('enable_evidence_quota', False)}")
             except Exception as e:
                 logger.error(f"Failed to initialize DiversityScheduler: {e}")
@@ -348,34 +377,30 @@ class QueryProcessor:
         
         # 加载新的配置项
         # 二跳扩展配置
-        two_hop_config = config.get('hybrid_search.two_hop_expansion', {})
-        self.two_hop_enabled = two_hop_config.get('enabled', True)
-        self.top_m_candidates = two_hop_config.get('top_m_candidates', 20)
-        self.entity_extraction_method = two_hop_config.get('entity_extraction_method', 'rule_based')
-        self.target_predicates = two_hop_config.get('target_predicates', ['founded_by', 'located_in', 'member_of', 'works_for', 'part_of', 'instance_of'])
-        self.max_second_hop_candidates = two_hop_config.get('max_second_hop_candidates', 15)
-        self.merge_strategy = two_hop_config.get('merge_strategy', 'weighted')
+        self.two_hop_enabled = self._twohop_cfg.get('enabled', True)
+        self.top_m_candidates = self._twohop_cfg.get('top_m_candidates', 20)
+        self.entity_extraction_method = self._twohop_cfg.get('entity_extraction_method', 'rule_based')
+        self.target_predicates = self._twohop_cfg.get('target_predicates', ['founded_by', 'located_in', 'member_of', 'works_for', 'part_of', 'instance_of'])
+        self.max_second_hop_candidates = self._twohop_cfg.get('max_second_hop_candidates', 15)
+        self.merge_strategy = self._twohop_cfg.get('merge_strategy', 'weighted')
         
         # 段域过滤配置
-        section_filter_config = config.get('hybrid_search.section_filtering', {})
-        self.section_filtering_enabled = section_filter_config.get('enabled', True)
-        self.section_filter_rule = section_filter_config.get('filter_rule', 'main_entity_related')
-        self.fallback_to_lexical = section_filter_config.get('fallback_to_lexical', True)
+        self.section_filtering_enabled = self._section_filtering_cfg.get('enabled', True)
+        self.section_filter_rule = self._section_filtering_cfg.get('filter_rule', 'main_entity_related')
+        self.fallback_to_lexical = self._section_filtering_cfg.get('fallback_to_lexical', True)
         
         # 词面保底配置
-        lexical_fallback_config = config.get('hybrid_search.lexical_fallback', {})
-        self.lexical_fallback_enabled = lexical_fallback_config.get('enabled', True)
-        self.must_have_terms_sources = lexical_fallback_config.get('must_have_terms_sources', ['main_entity', 'predicate_stems'])
-        self.miss_penalty = lexical_fallback_config.get('miss_penalty', 0.6)
-        self.blacklist_penalty = lexical_fallback_config.get('blacklist_penalty', 0.5)
-        self.noise_threshold = lexical_fallback_config.get('noise_threshold', 0.20)
+        self.lexical_fallback_enabled = self._lexical_fallback_cfg.get('enabled', True)
+        self.must_have_terms_sources = self._lexical_fallback_cfg.get('must_have_terms_sources', ['main_entity', 'predicate_stems'])
+        self.miss_penalty = self._lexical_fallback_cfg.get('miss_penalty', 0.6)
+        self.blacklist_penalty = self._lexical_fallback_cfg.get('blacklist_penalty', 0.5)
+        self.noise_threshold = self._lexical_fallback_cfg.get('noise_threshold', 0.20)
         
         # 命名空间过滤配置（四阶段）
-        namespace_config = config.get('hybrid_search.namespace_filtering', {})
-        self.namespace_filtering_enabled = namespace_config.get('enabled', True)
-        self.namespace_filter_stages = namespace_config.get('stages', ['initial_recall', 'post_fusion', 'post_two_hop', 'final_scheduling'])
-        self.same_namespace_bm25_fallback = namespace_config.get('same_namespace_bm25_fallback', True)
-        self.strict_mode = namespace_config.get('strict_mode', True)
+        self.namespace_filtering_enabled = self._namespace_filtering_cfg.get('enabled', True)
+        self.namespace_filter_stages = self._namespace_filtering_cfg.get('stages', ['initial_recall', 'post_fusion', 'post_two_hop', 'final_scheduling'])
+        self.same_namespace_bm25_fallback = self._namespace_filtering_cfg.get('same_namespace_bm25_fallback', True)
+        self.strict_mode = self._namespace_filtering_cfg.get('strict_mode', True)
         
         logger.info(f"Two-hop expansion: {'enabled' if self.two_hop_enabled else 'disabled'}")
         logger.info(f"Section filtering: {'enabled' if self.section_filtering_enabled else 'disabled'}")
@@ -383,8 +408,8 @@ class QueryProcessor:
         logger.info(f"Namespace filtering stages: {self.namespace_filter_stages}")
         
         # 图检索策略配置
-        legacy_graph_config = config.get('multi_hop', {}) or {}
-        retrieval_graph_config = config.get('retrieval.multi_hop', None)
+        legacy_graph_config = self._multi_hop_cfg or {}
+        retrieval_graph_config = self._retrieval_cfg.get('multi_hop', None)
         if isinstance(retrieval_graph_config, dict):
             graph_config = {**legacy_graph_config, **retrieval_graph_config}
         else:
@@ -409,19 +434,17 @@ class QueryProcessor:
         self.switch_threshold = hybrid_mode_config.get('switch_threshold', 3)
         
         # 新增：多跳扩展配置（支持3/4跳）
-        multi_hop_config = config.get('hybrid_search.multi_hop', {})
-        self.max_hops = multi_hop_config.get('max_hops', 4)
-        self.beam_width = multi_hop_config.get('beam_width', 8)
-        self.per_hop_keep_top_m = multi_hop_config.get('per_hop_keep_top_m', 5)
-        self.focused_weight_by_hop = multi_hop_config.get('focused_weight_by_hop', {
+        self.max_hops = self._multi_hop_search_cfg.get('max_hops', 4)
+        self.beam_width = self._multi_hop_search_cfg.get('beam_width', 8)
+        self.per_hop_keep_top_m = self._multi_hop_search_cfg.get('per_hop_keep_top_m', 5)
+        self.focused_weight_by_hop = self._multi_hop_search_cfg.get('focused_weight_by_hop', {
             1: 0.30, 2: 0.25, 3: 0.20, 4: 0.15
         })
-        self.hop_decay = multi_hop_config.get('hop_decay', 0.85)
-        self.multi_hop_lower_threshold = multi_hop_config.get('lower_threshold', 0.10)
+        self.hop_decay = self._multi_hop_search_cfg.get('hop_decay', 0.85)
+        self.multi_hop_lower_threshold = self._multi_hop_search_cfg.get('lower_threshold', 0.10)
         
         # 答案偏置配置
-        answer_bias_config = config.get('hybrid_search.answer_bias', {})
-        self.who_person_boost = answer_bias_config.get('who_person_boost', 1.10)
+        self.who_person_boost = self._answer_bias_cfg.get('who_person_boost', 1.10)
         
         logger.info(f"Graph retrieval strategy: {self.graph_strategy}")
         logger.info(f"Top-K seed: {'enabled' if self.top_k_seed_enabled else 'disabled'} (count: {self.seed_count})")
@@ -2216,6 +2239,19 @@ class QueryProcessor:
         for n in selected_notes:
             n['feedback_score'] = scores.get('relevance', 0)
 
+        # 写入final_recall.jsonl文件
+        from utils.file_utils import FileUtils
+        final_notes = selected_notes  # 最终集合
+        
+        # 获取运行目录，优先使用配置中的work_dir
+        from config import config
+        run_dir = config.get('storage.work_dir') or './result'
+        os.makedirs(run_dir, exist_ok=True)
+        
+        final_recall_path = os.path.join(run_dir, "final_recall.jsonl")
+        FileUtils.write_jsonl(final_notes, final_recall_path)
+        print(f"[CONTEXT] write {final_recall_path} sha1={FileUtils.sha1sum(final_recall_path)}")
+
         result = {
             'query': query,
             'rewrite': rewrite,
@@ -2223,6 +2259,7 @@ class QueryProcessor:
             'scores': scores,
             'notes': selected_notes,
             'predicted_support_idxs': predicted_support_idxs,
+            'final_recall_path': final_recall_path,
         }
         
         # 添加调度器特定的信息

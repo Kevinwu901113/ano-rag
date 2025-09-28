@@ -14,6 +14,8 @@ Entity-Focused Scoring and Answer selection (EFSA) Algorithm
 from typing import List, Dict, Any, Optional, Tuple
 from collections import defaultdict
 from loguru import logger
+import os
+from pathlib import Path
 
 
 def compute_cov_cons(note: Dict[str, Any], path_entities: List[str]) -> Tuple[float, int]:
@@ -142,26 +144,45 @@ def efsa_answer(candidates: List[Dict[str, Any]],
     return ans, support_idxs
 
 
-def efsa_answer_with_fallback(candidates: List[Dict[str, Any]], 
-                             query: str, 
+def efsa_answer_with_fallback(candidates: List[Dict[str, Any]] = None, 
+                             query: str = "", 
                              bridge_entity: Optional[str] = None, 
                              path_entities: Optional[List[str]] = None, 
                              topN: int = 20,
-                             fallback_func: Optional[callable] = None) -> Tuple[str, List[int]]:
+                             fallback_func: Optional[callable] = None,
+                             final_recall_path: Optional[str] = None) -> Tuple[str, List[int]]:
     """
     带回退机制的EFSA答案生成
     
     Args:
-        candidates: 候选笔记列表
+        candidates: 候选笔记列表（可选，如果提供final_recall_path则从文件读取）
         query: 查询问题
         bridge_entity: 桥接实体
         path_entities: 路径实体列表
         topN: 取前N个候选
         fallback_func: 回退函数，当EFSA无法找到实体答案时调用
+        final_recall_path: final_recall.jsonl文件路径，如果提供则从此文件读取candidates
         
     Returns:
         (predicted_answer, predicted_support_idxs) 元组
     """
+    # 如果提供了final_recall_path，从文件读取candidates
+    if final_recall_path and Path(final_recall_path).exists():
+        logger.info(f"Loading candidates from final_recall_path: {final_recall_path}")
+        try:
+            from utils.file_utils import FileUtils
+            candidates = FileUtils.read_jsonl(final_recall_path)
+            logger.info(f"Loaded {len(candidates)} candidates from {final_recall_path}")
+        except Exception as e:
+            logger.error(f"Failed to load candidates from {final_recall_path}: {e}")
+            if candidates is None:
+                candidates = []
+    
+    # 如果仍然没有candidates，返回默认答案
+    if not candidates:
+        logger.warning("No candidates available for EFSA processing")
+        return "No answer found", []
+    
     # 尝试EFSA
     answer, support_idxs = efsa_answer(candidates, query, bridge_entity, path_entities, topN)
     

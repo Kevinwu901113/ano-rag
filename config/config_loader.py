@@ -388,6 +388,11 @@ class ConfigLoader:
             self._config = merged
             _synchronize_aliases(self._config, self._raw_config)
             self.deprecated_keys = deprecated
+            
+            # Print unknown/ignored keys for configuration cleanup
+            if deprecated:
+                print(f"[CONFIG][IGNORED] {sorted(list(deprecated))[:50]}{'...' if len(deprecated) > 50 else ''}")
+            
             for key in deprecated:
                 print(f"[Config] deprecated field ignored: {key}")
         return self._config

@@ -343,18 +343,38 @@ class AnswerVerifier:
         overlap = self._compute_evidence_overlap(answer, evidence_text)
         return overlap
     
-    def finalize_answer(self, question: str, raw_answer: str, evidence_sentences: List[str]) -> str:
+    def finalize_answer(self, question: str, raw_answer: str, evidence_sentences: List[str] = None, 
+                       final_recall_path: Optional[str] = None) -> str:
         """
         Finalize answer using verification and correction.
         
         Args:
             question: The input question
             raw_answer: The generated answer
-            evidence_sentences: List of evidence sentences
+            evidence_sentences: List of evidence sentences (可选，如果提供final_recall_path则从文件读取)
+            final_recall_path: final_recall.jsonl文件路径，如果提供则从此文件读取evidence
             
         Returns:
             Final answer (either original or corrected)
         """
+        # 如果提供了final_recall_path，从文件读取evidence_sentences
+        if final_recall_path and Path(final_recall_path).exists():
+            logger.info(f"Loading evidence from final_recall_path: {final_recall_path}")
+            try:
+                import json
+                evidence_sentences = []
+                with open(final_recall_path, 'r', encoding='utf-8') as f:
+                    for line in f:
+                        note = json.loads(line.strip())
+                        content = note.get('content', '')
+                        if content:
+                            evidence_sentences.append(content)
+                logger.info(f"Loaded {len(evidence_sentences)} evidence sentences from {final_recall_path}")
+            except Exception as e:
+                logger.error(f"Failed to load evidence from {final_recall_path}: {e}")
+                if evidence_sentences is None:
+                    evidence_sentences = []
+        
         if not raw_answer or not evidence_sentences:
             return raw_answer
         
