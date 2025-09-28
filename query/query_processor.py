@@ -82,6 +82,8 @@ class QueryProcessor:
         self._diversity_scheduler_cfg = self._get_config_dict("diversity_scheduler")
         self._multi_hop_cfg = self._get_config_dict("multi_hop")
         self._retrieval_cfg = self._get_config_dict("retrieval")
+        self._context_cfg = self._get_config_dict("context")
+        self._ranking_cfg = self._get_config_dict("ranking")
         
         # 缓存 hybrid_search 子配置
         self._hybrid_search_cfg = hd
@@ -96,6 +98,43 @@ class QueryProcessor:
         self._namespace_filtering_cfg = hd.get("namespace_filtering", {})
         self._multi_hop_search_cfg = hd.get("multi_hop", {})
         self._answer_bias_cfg = hd.get("answer_bias", {})
+        
+        # 缓存关键的"条数/预算"配置项
+        # 初始召回
+        vector_cfg = self._retrieval_cfg.get("vector", {})
+        bm25_cfg = self._retrieval_cfg.get("bm25", {})
+        self.k_vec = int(vector_cfg.get("top_k", 50))
+        self.k_bm25 = int(bm25_cfg.get("top_k", 50))
+        
+        # 二跳补充
+        prf_bridge_cfg = self._hybrid_search_cfg.get("prf_bridge", {})
+        two_hop_cfg = self._hybrid_search_cfg.get("two_hop_expansion", {})
+        self.first_hop_topk = int(prf_bridge_cfg.get("first_hop_topk", 20))
+        self.prf_topk = int(prf_bridge_cfg.get("prf_topk", 10))
+        self.top_m_candidates = int(two_hop_cfg.get("top_m_candidates", 30))
+        
+        # 融合/衰减权重
+        weights_cfg = self._hybrid_search_cfg.get("weights", {})
+        ranking_cfg = self._ranking_cfg
+        self.dense_weight = float(weights_cfg.get("dense", ranking_cfg.get("dense_weight", 0.7)))
+        self.bm25_weight = float(weights_cfg.get("bm25", ranking_cfg.get("bm25_weight", 0.3)))
+        self.hop_decay = float(ranking_cfg.get("hop_decay", 0.8))
+        
+        # 安全/滤噪
+        safety_cfg = self._safety_cfg
+        self.per_hop_keep_top_m = int(safety_cfg.get("per_hop_keep_top_m", 50))
+        self.lower_threshold = float(safety_cfg.get("lower_threshold", 0.1))
+        
+        # 聚类配置
+        cluster_cfg = safety_cfg.get("cluster", {})
+        self.cluster_enabled = bool(cluster_cfg.get("enabled", False))
+        self.cos_threshold = float(cluster_cfg.get("cos_threshold", 0.85))
+        self.keep_per_cluster = int(cluster_cfg.get("keep_per_cluster", 3))
+        
+        # 打包上限
+        context_cfg = self._context_cfg
+        self.max_notes_for_llm = int(context_cfg.get("max_notes_for_llm", 20))
+        self.max_tokens = context_cfg.get("max_tokens")  # 可选
 
         # Query rewriter functionality has been removed
         self.vector_retriever = VectorRetriever()
@@ -148,10 +187,12 @@ class QueryProcessor:
             self.graph_index = GraphIndex()
             self.graph_index.build_index(graph, atomic_notes, embeddings)
 
-        multi_hop_enabled = config.get('retrieval.multi_hop.enabled', None)
+        # 缓存多跳相关配置
+        multi_hop_enabled = self.config.get('retrieval', {}).get('multi_hop', {}).get('enabled')
         if multi_hop_enabled is None:
-            multi_hop_enabled = config.get('multi_hop.enabled', False)
+            multi_hop_enabled = self.config.get('multi_hop', {}).get('enabled', False)
         self.multi_hop_enabled = bool(multi_hop_enabled)
+        
         if self.multi_hop_enabled:
             self.multi_hop_processor = MultiHopQueryProcessor(
                 atomic_notes,
@@ -160,15 +201,19 @@ class QueryProcessor:
                 graph_index=self.graph_index,
             )
 
+        # 缓存上下文调度器配置
+        context_dispatcher_cfg = self._get_config_dict("context_dispatcher")
+        k_hop = context_dispatcher_cfg.get('k_hop', 2)
+        
         # 初始化图谱检索器（无论是否使用multi_hop都需要）
-        self.graph_retriever = GraphRetriever(self.graph_index, k_hop=config.get('context_dispatcher.k_hop', 2))
+        self.graph_retriever = GraphRetriever(self.graph_index, k_hop=k_hop)
         
         # 初始化调度器
-        self.use_context_dispatcher = config.get('context_dispatcher.enabled', True)
+        self.use_context_dispatcher = context_dispatcher_cfg.get('enabled', True)
         
         if self.use_context_dispatcher:
             # 使用新的结构增强上下文调度器
-            self.context_dispatcher = ContextDispatcher(config, graph_index=self.graph_index, vector_retriever=self.vector_retriever)
+            self.context_dispatcher = ContextDispatcher(self.config, graph_index=self.graph_index, vector_retriever=self.vector_retriever)
             logger.info("Using ContextDispatcher for structure-enhanced retrieval")
         else:
             # 使用原有的调度器
@@ -2241,16 +2286,44 @@ class QueryProcessor:
 
         # 写入final_recall.jsonl文件
         from utils.file_utils import FileUtils
+        import hashlib
         final_notes = selected_notes  # 最终集合
         
         # 获取运行目录，优先使用配置中的work_dir
-        from config import config
-        run_dir = config.get('storage.work_dir') or './result'
+        run_dir = self.config.get('storage', {}).get('work_dir') or './result'
         os.makedirs(run_dir, exist_ok=True)
+        
+        # 确保每个note包含完整字段
+        for note in final_notes:
+            # 确保必要字段存在
+            if 'note_id' not in note:
+                note['note_id'] = note.get('id', f"note_{hash(note.get('content', ''))}")
+            if 'doc_id' not in note:
+                note['doc_id'] = note.get('document_id', 'unknown')
+            if 'paragraph_idxs' not in note:
+                note['paragraph_idxs'] = note.get('paragraph_indices', [])
+            if 'title' not in note:
+                note['title'] = note.get('document_title', '')
+            if 'content' not in note:
+                note['content'] = note.get('text', '')
+            if 'final_score' not in note:
+                note['final_score'] = note.get('score', note.get('similarity', 0.0))
+            if 'retrieval_method' not in note:
+                note['retrieval_method'] = note.get('method', 'hybrid')
+            if 'hop_no' not in note:
+                note['hop_no'] = note.get('hop_type', 'first_hop')
+            if 'bridge_entity' not in note:
+                note['bridge_entity'] = note.get('entities', [])
+            if 'bridge_path' not in note:
+                note['bridge_path'] = note.get('path', [])
         
         final_recall_path = os.path.join(run_dir, "final_recall.jsonl")
         FileUtils.write_jsonl(final_notes, final_recall_path)
-        print(f"[CONTEXT] write {final_recall_path} sha1={FileUtils.sha1sum(final_recall_path)}")
+        
+        # 计算并打印sha1
+        sha1_hash = FileUtils.sha1sum(final_recall_path)
+        print(f"[CONTEXT] write {final_recall_path} sha1={sha1_hash}")
+        logger.info(f"Final context written to {final_recall_path} with {len(final_notes)} notes, sha1={sha1_hash}")
 
         result = {
             'query': query,

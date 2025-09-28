@@ -251,13 +251,15 @@ class QueryTaskProcessor(TaskProcessor):
         atomic_notes = self.knowledge_base.get('atomic_notes', [])
         embeddings = self.knowledge_base.get('embeddings')
         graph_file = self.knowledge_base.get('graph_file')
+        cfg = self.knowledge_base.get('cfg')  # 从知识库获取配置
         
         # 创建查询处理器
         query_processor = QueryProcessor(
             atomic_notes=atomic_notes,
             embeddings=embeddings,
             graph_file=graph_file,
-            llm=llm
+            llm=llm,
+            cfg=cfg
         )
         
         # 执行查询

@@ -113,6 +113,7 @@ def query_mode(args):
         graph_file=graph_file if os.path.exists(graph_file) else None,
         vector_index_file=vector_index_file if vector_index_file and os.path.exists(vector_index_file) else None,
         llm=llm,
+        cfg=cfg,
     )
     output = processor.process(args.query)
     print(output['answer'])

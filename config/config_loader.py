@@ -222,6 +222,24 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "index_type": "IVFFlat",
         "similarity_metric": "cosine"
     },
+    "safety": {
+        "per_hop_keep_top_m": 5,
+        "lower_threshold": 0.1,
+        "cluster": {
+            "enabled": False,
+            "cos_threshold": 0.85,
+            "keep_per_cluster": 3
+        }
+    },
+    "context": {
+        "max_notes_for_llm": 20,
+        "max_tokens": None
+    },
+    "ranking": {
+        "dense_weight": 0.7,
+        "bm25_weight": 0.3,
+        "hop_decay": 0.8
+    }
 }
 
 
@@ -361,6 +379,38 @@ def _synchronize_aliases(config_data: Dict[str, Any], raw_data: Dict[str, Any] |
         merged_multi_hop = {"enabled": bool(merged_multi_hop)}
     _set_path(config_data, ("retrieval", "multi_hop"), deepcopy(merged_multi_hop))
     _set_path(config_data, ("multi_hop",), deepcopy(merged_multi_hop))
+
+    # 旧键到新键的映射 - 影响条数的配置项
+    # hybrid_search.multi_hop.per_hop_keep_top_m → safety.per_hop_keep_top_m
+    legacy_per_hop_keep = _get_path(raw_data, ("hybrid_search", "multi_hop", "per_hop_keep_top_m"))
+    if legacy_per_hop_keep is not None:
+        _set_path(config_data, ("safety", "per_hop_keep_top_m"), legacy_per_hop_keep)
+    
+    # hybrid_search.multi_hop.lower_threshold → safety.lower_threshold  
+    legacy_lower_threshold = _get_path(raw_data, ("hybrid_search", "multi_hop", "lower_threshold"))
+    if legacy_lower_threshold is not None:
+        _set_path(config_data, ("safety", "lower_threshold"), legacy_lower_threshold)
+    
+    # hybrid_search.safety.* → safety.*
+    legacy_safety = _get_path(raw_data, ("hybrid_search", "safety"))
+    if legacy_safety is not None:
+        current_safety = _get_path(config_data, ("safety",)) or {}
+        merged_safety = _deep_merge(current_safety, legacy_safety)
+        _set_path(config_data, ("safety",), merged_safety)
+    
+    # retrieval.vector.top_k ↔ vector_store.top_k (双向映射)
+    legacy_vector_top_k = _get_path(raw_data, ("retrieval", "vector", "top_k"))
+    new_vector_top_k = _get_path(raw_data, ("vector_store", "top_k"))
+    
+    if legacy_vector_top_k is not None:
+        _set_path(config_data, ("vector_store", "top_k"), legacy_vector_top_k)
+    if new_vector_top_k is not None:
+        _set_path(config_data, ("retrieval", "vector", "top_k"), new_vector_top_k)
+    
+    # retrieval.bm25.top_k → retrieval.bm25.top_k (保持一致性)
+    legacy_bm25_top_k = _get_path(raw_data, ("retrieval", "bm25", "top_k"))
+    if legacy_bm25_top_k is not None:
+        _set_path(config_data, ("retrieval", "bm25", "top_k"), legacy_bm25_top_k)
 
     _normalize_hybrid_branch(config_data)
 
