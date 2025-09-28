@@ -15,7 +15,15 @@ class GraphRetriever:
         self.k_hop = k_hop
         
         # 多跳推理配置
-        self.multi_hop_config = config.get('multi_hop', {})
+        legacy_multi_hop = config.get('multi_hop', {}) or {}
+        retrieval_multi_hop = config.get('retrieval.multi_hop', None)
+        if isinstance(retrieval_multi_hop, dict):
+            # Use retrieval-scoped settings while keeping legacy defaults for
+            # backward compatibility when values are missing.
+            merged = {**legacy_multi_hop, **retrieval_multi_hop}
+        else:
+            merged = legacy_multi_hop
+        self.multi_hop_config = merged
         self.max_hops = self.multi_hop_config.get('max_hops', 3)
         self.max_paths = self.multi_hop_config.get('max_paths', 10)
         self.min_path_score = self.multi_hop_config.get('min_path_score', 0.3)
