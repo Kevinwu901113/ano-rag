@@ -13,24 +13,66 @@ Musique数据集批量处理脚本
 """
 
 import argparse
+import concurrent.futures
 import json
 import os
 import shutil
-from typing import List, Dict, Any, Optional
-import concurrent.futures
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from tqdm import tqdm
-from loguru import logger
+from pathlib import Path
+from typing import Any, Dict, List, Optional
 
-from doc import DocumentProcessor
-from query import QueryProcessor
+import yaml
+from loguru import logger
+from tqdm import tqdm
+
 from config import config
-from utils import FileUtils, setup_logging
+from doc import DocumentProcessor
 from llm import LocalLLM
 from parallel import create_parallel_interface, ProcessingMode, ParallelStrategy
+from query import QueryProcessor
+from utils import FileUtils, setup_logging
 
 
-RESULT_ROOT = config.get('storage.result_root', 'result')
+def _result_root() -> str:
+    return config.get('storage.result_root', 'result')
+
+
+def _storage_overrides(work_dir: str) -> dict:
+    return {
+        "work_dir": work_dir,
+        "vector_db_path": os.path.join(work_dir, "vector_store"),
+        "graph_db_path": os.path.join(work_dir, "graph_store"),
+        "processed_docs_path": os.path.join(work_dir, "processed"),
+        "cache_path": os.path.join(work_dir, "cache"),
+        "vector_index_path": os.path.join(work_dir, "vector_index"),
+        "vector_store_path": os.path.join(work_dir, "vector_store"),
+        "embedding_cache_path": os.path.join(work_dir, "embeddings"),
+    }
+
+
+def _persist_effective_config(work_dir: str, diagnostics: str) -> None:
+    output_dir = Path(work_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    effective = config.to_dict()
+    effective_path = output_dir / "config.effective.yaml"
+    effective_path.write_text(
+        yaml.safe_dump(effective, allow_unicode=True, sort_keys=False),
+        encoding="utf-8",
+    )
+    (output_dir / "config.diagnostics.txt").write_text(diagnostics + "\n", encoding="utf-8")
+
+
+def _prepare_runtime_config(work_dir: str):
+    overrides = {
+        "storage": _storage_overrides(work_dir),
+        "eval": {"datasets_path": os.path.join(work_dir, "eval_datasets")},
+    }
+    config.update_config(overrides)
+    frozen = config.load_config()
+    diagnostics = config.diagnostics()
+    logger.info(diagnostics)
+    _persist_effective_config(work_dir, diagnostics)
+    return frozen
 
 
 def safe_config_defaults(params_dict: Dict[str, Any]) -> Dict[str, Any]:
@@ -63,8 +105,9 @@ def safe_config_defaults(params_dict: Dict[str, Any]) -> Dict[str, Any]:
 
 def get_latest_workdir() -> str:
     """获取最新的工作目录"""
-    os.makedirs(RESULT_ROOT, exist_ok=True)
-    subdirs = [d for d in os.listdir(RESULT_ROOT) if os.path.isdir(os.path.join(RESULT_ROOT, d))]
+    result_root = _result_root()
+    os.makedirs(result_root, exist_ok=True)
+    subdirs = [d for d in os.listdir(result_root) if os.path.isdir(os.path.join(result_root, d))]
     if not subdirs:
         return create_new_workdir()
     # 按数字排序而不是字符串排序，确保21排在9后面
@@ -74,15 +117,16 @@ def get_latest_workdir() -> str:
     else:
         # 如果没有纯数字目录，回退到字符串排序
         latest = sorted(subdirs)[-1]
-    return os.path.join(RESULT_ROOT, latest)
+    return os.path.join(result_root, latest)
 
 
 def create_new_workdir() -> str:
     """创建新的工作目录"""
-    os.makedirs(RESULT_ROOT, exist_ok=True)
-    existing = [int(d) for d in os.listdir(RESULT_ROOT) if d.isdigit()]
+    result_root = _result_root()
+    os.makedirs(result_root, exist_ok=True)
+    existing = [int(d) for d in os.listdir(result_root) if d.isdigit()]
     next_idx = max(existing) + 1 if existing else 1
-    work_dir = os.path.join(RESULT_ROOT, str(next_idx))
+    work_dir = os.path.join(result_root, str(next_idx))
     os.makedirs(work_dir, exist_ok=True)
     return work_dir
 
@@ -117,6 +161,7 @@ class MusiqueProcessor:
         self.max_workers = max_workers
         self.debug = debug  # 调试模式，不清理中间文件
         self.base_work_dir = work_dir or create_new_workdir()
+        self._runtime_config = _prepare_runtime_config(self.base_work_dir)
         if llm is None:
             raise ValueError("MusiqueProcessor requires a LocalLLM instance to be passed")
         self.llm = llm
@@ -226,7 +271,8 @@ class MusiqueProcessor:
                 embeddings,
                 graph_file=graph_file if os.path.exists(graph_file) else None,
                 vector_index_file=None,  # 不使用预构建的向量索引
-                llm=self.llm
+                llm=self.llm,
+                cfg=self._runtime_config,
             )
             
             # 4. 执行查询

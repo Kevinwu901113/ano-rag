@@ -1,59 +1,89 @@
 import argparse
 import os
-from datetime import datetime
 from glob import glob
+from pathlib import Path
+
 import numpy as np
-from doc import DocumentProcessor
-from config import config
-from query import QueryProcessor
-from utils import FileUtils, setup_logging
+import yaml
 from loguru import logger
+
+from config import config
+from doc import DocumentProcessor
 from llm import LocalLLM
 from parallel import create_parallel_interface, ProcessingMode, ParallelStrategy
+from query import QueryProcessor
+from utils import FileUtils, setup_logging
 
 
-RESULT_ROOT = config.get('storage.result_root', 'result')
+def _result_root() -> str:
+    return config.get('storage.result_root', 'result')
+
+
+def _storage_overrides(work_dir: str) -> dict:
+    return {
+        "work_dir": work_dir,
+        "vector_db_path": os.path.join(work_dir, "vector_store"),
+        "graph_db_path": os.path.join(work_dir, "graph_store"),
+        "processed_docs_path": os.path.join(work_dir, "processed"),
+        "cache_path": os.path.join(work_dir, "cache"),
+        "vector_index_path": os.path.join(work_dir, "vector_index"),
+        "vector_store_path": os.path.join(work_dir, "vector_store"),
+        "embedding_cache_path": os.path.join(work_dir, "embeddings"),
+    }
+
+
+def _persist_effective_config(work_dir: str, diagnostics: str) -> None:
+    effective_dir = Path(work_dir)
+    effective_dir.mkdir(parents=True, exist_ok=True)
+    effective_config = config.to_dict()
+    effective_path = effective_dir / "config.effective.yaml"
+    effective_yaml = yaml.safe_dump(effective_config, allow_unicode=True, sort_keys=False)
+    effective_path.write_text(effective_yaml, encoding="utf-8")
+    diagnostics_path = effective_dir / "config.diagnostics.txt"
+    diagnostics_path.write_text(diagnostics + "\n", encoding="utf-8")
+
+
+def _prepare_runtime_config(work_dir: str):
+    overrides = {
+        "storage": _storage_overrides(work_dir),
+        "eval": {"datasets_path": os.path.join(work_dir, "eval_datasets")},
+    }
+    config.update_config(overrides)
+    frozen = config.load_config()
+    diagnostics = config.diagnostics()
+    logger.info(diagnostics)
+    _persist_effective_config(work_dir, diagnostics)
+    return frozen
 
 
 def get_latest_workdir() -> str:
-    os.makedirs(RESULT_ROOT, exist_ok=True)
-    subdirs = [d for d in os.listdir(RESULT_ROOT) if os.path.isdir(os.path.join(RESULT_ROOT, d))]
+    result_root = _result_root()
+    os.makedirs(result_root, exist_ok=True)
+    subdirs = [d for d in os.listdir(result_root) if os.path.isdir(os.path.join(result_root, d))]
     if not subdirs:
         return create_new_workdir()
     latest = sorted(subdirs)[-1]
-    return os.path.join(RESULT_ROOT, latest)
+    return os.path.join(result_root, latest)
 
 
 def create_new_workdir() -> str:
-    os.makedirs(RESULT_ROOT, exist_ok=True)
-    existing = [int(d) for d in os.listdir(RESULT_ROOT) if d.isdigit()]
+    result_root = _result_root()
+    os.makedirs(result_root, exist_ok=True)
+    existing = [int(d) for d in os.listdir(result_root) if d.isdigit()]
     next_idx = max(existing) + 1 if existing else 1
-    work_dir = os.path.join(RESULT_ROOT, str(next_idx))
+    work_dir = os.path.join(result_root, str(next_idx))
     os.makedirs(work_dir, exist_ok=True)
     return work_dir
 
 
 def process_docs(args):
     work_dir = create_new_workdir() if args.new else get_latest_workdir()
-    # 更新配置中的工作目录和所有存储路径
-    cfg = config.load_config()
-    storage = cfg.setdefault('storage', {})
-    storage['work_dir'] = work_dir
-    # 设置所有存储路径到工作目录下
-    storage['vector_db_path'] = os.path.join(work_dir, 'vector_store')
-    storage['graph_db_path'] = os.path.join(work_dir, 'graph_store')
-    storage['processed_docs_path'] = os.path.join(work_dir, 'processed')
-    storage['cache_path'] = os.path.join(work_dir, 'cache')
-    storage['vector_index_path'] = os.path.join(work_dir, 'vector_index')
-    storage['vector_store_path'] = os.path.join(work_dir, 'vector_store')
-    storage['embedding_cache_path'] = os.path.join(work_dir, 'embeddings')
-    # 设置评估数据集路径
-    cfg.setdefault('eval', {})['datasets_path'] = os.path.join(work_dir, 'eval_datasets')
+    runtime_config = _prepare_runtime_config(work_dir)
     setup_logging(os.path.join(work_dir, 'ano-rag.log'))
     logger.info(f"Using work dir: {work_dir}")
 
     extensions = [".json", ".jsonl", ".docx"]
-    src_dir = cfg.get('storage', {}).get('source_docs_dir', 'data')
+    src_dir = runtime_config.get('storage.source_docs_dir', 'data')
     files = FileUtils.list_files(src_dir, extensions)
 
     # 检查是否使用并行处理
@@ -74,20 +104,7 @@ def process_docs(args):
 
 def query_mode(args):
     work_dir = args.work_dir or config.get('storage.work_dir') or get_latest_workdir()
-    # 确保配置中的工作目录和所有存储路径一致
-    cfg = config.load_config()
-    storage = cfg.setdefault('storage', {})
-    storage['work_dir'] = work_dir
-    # 设置所有存储路径到工作目录下
-    storage['vector_db_path'] = os.path.join(work_dir, 'vector_store')
-    storage['graph_db_path'] = os.path.join(work_dir, 'graph_store')
-    storage['processed_docs_path'] = os.path.join(work_dir, 'processed')
-    storage['cache_path'] = os.path.join(work_dir, 'cache')
-    storage['vector_index_path'] = os.path.join(work_dir, 'vector_index')
-    storage['vector_store_path'] = os.path.join(work_dir, 'vector_store')
-    storage['embedding_cache_path'] = os.path.join(work_dir, 'embeddings')
-    # 设置评估数据集路径
-    cfg.setdefault('eval', {})['datasets_path'] = os.path.join(work_dir, 'eval_datasets')
+    runtime_config = _prepare_runtime_config(work_dir)
     setup_logging(os.path.join(work_dir, 'ano-rag.log'))
     notes_file = os.path.join(work_dir, 'atomic_notes.json')
     if not os.path.exists(notes_file):
@@ -113,7 +130,7 @@ def query_mode(args):
         graph_file=graph_file if os.path.exists(graph_file) else None,
         vector_index_file=vector_index_file if vector_index_file and os.path.exists(vector_index_file) else None,
         llm=llm,
-        cfg=cfg,
+        cfg=runtime_config,
     )
     output = processor.process(args.query)
     print(output['answer'])
@@ -190,20 +207,7 @@ def process_docs_parallel(args, work_dir: str, files: list):
 def query_parallel(args):
     """并行查询处理"""
     work_dir = args.work_dir or config.get('storage.work_dir') or get_latest_workdir()
-    # 确保配置中的工作目录和所有存储路径一致
-    cfg = config.load_config()
-    storage = cfg.setdefault('storage', {})
-    storage['work_dir'] = work_dir
-    # 设置所有存储路径到工作目录下
-    storage['vector_db_path'] = os.path.join(work_dir, 'vector_store')
-    storage['graph_db_path'] = os.path.join(work_dir, 'graph_store')
-    storage['processed_docs_path'] = os.path.join(work_dir, 'processed')
-    storage['cache_path'] = os.path.join(work_dir, 'cache')
-    storage['vector_index_path'] = os.path.join(work_dir, 'vector_index')
-    storage['vector_store_path'] = os.path.join(work_dir, 'vector_store')
-    storage['embedding_cache_path'] = os.path.join(work_dir, 'embeddings')
-    # 设置评估数据集路径
-    cfg.setdefault('eval', {})['datasets_path'] = os.path.join(work_dir, 'eval_datasets')
+    runtime_config = _prepare_runtime_config(work_dir)
     setup_logging(os.path.join(work_dir, 'ano-rag.log'))
     
     notes_file = os.path.join(work_dir, 'atomic_notes.json')

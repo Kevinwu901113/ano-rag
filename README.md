@@ -9,6 +9,10 @@
   <img src="docs/images/system_flow.svg" alt="系统流程图" width="92%" />
 </p>
 
+## 配置与 IDE 补全
+- 仓库中的 `configs/schema.json` 由单一的 Pydantic Schema 自动导出，描述了所有配置键、类型与默认值。
+- 在 VSCode 等支持 YAML Schema 的编辑器中，可在 `config.yaml` 或 profile 文件头部声明 `# yaml-language-server: $schema=./configs/schema.json`，即可获得键名、枚举与取值范围的自动补全与校验。
+
 <p align="center">
   <img src="docs/images/module_relations.svg" alt="模块关系图" width="92%" />
 </p>
