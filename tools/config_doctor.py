@@ -50,31 +50,4 @@ def run_validate(profile: str | None, show_config: bool, strict_unknowns: bool |
 
 def run_print_schema(schema_path: str) -> None:
     schema = RootConfig.model_json_schema()
-    output = Path(schema_path)
-    output.parent.mkdir(parents=True, exist_ok=True)
-    output.write_text(json.dumps(schema, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-    print(f"Schema written to {output}")
-
-
-def run_doctor(profile: str | None, schema_path: str, show_config: bool, strict_unknowns: bool | None) -> None:
-    run_validate(profile=profile, show_config=show_config, strict_unknowns=strict_unknowns)
-    run_print_schema(schema_path)
-
-
-def main() -> None:
-    args = parse_args()
-    if args.command == "validate":
-        run_validate(profile=args.profile, show_config=args.show_config, strict_unknowns=args.strict_unknowns)
-    elif args.command == "print-schema":
-        run_print_schema(args.schema_path)
-    else:
-        run_doctor(
-            profile=args.profile,
-            schema_path=args.schema_path,
-            show_config=args.show_config,
-            strict_unknowns=args.strict_unknowns,
-        )
-
-
-if __name__ == "__main__":
-    main()
+    o

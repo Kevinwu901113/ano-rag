@@ -23,17 +23,24 @@ class ConfigLoader:
         strict_unknowns: bool | None = None,
     ):
         self.profile = profile
-        self._config_path = Path(config_path) if config_path else Path(__file__).resolve().parent.parent / "config.yaml"
+        # 如果未指定 config_path，则默认读取仓库根目录下的 config.yaml
+        self._config_path = (
+            Path(config_path)
+            if config_path
+            else Path(__file__).resolve().parent.parent / "config.yaml"
+        )
         self._overrides: Dict[str, Any] = {}
         self._frozen: Optional[FrozenConfig] = None
         self._normalized: Optional[Dict[str, Any]] = None
         self._layers: list[str] = []
         self.deprecated_keys: list[str] = []
+        # 支持通过 strict_unknowns 控制对未知配置键的处理方式
         self._strict_unknowns = strict_unknowns
 
     def load_config(self) -> FrozenConfig:
         if self._frozen is None:
             extra_layers = self._resolve_extra_layers()
+            # 将 strict_unknowns 传递给 load_config，以便控制未知键校验
             frozen, model, normalized, layers = load_config(
                 profile=self.profile,
                 extra_layers=extra_layers,
@@ -58,7 +65,7 @@ class ConfigLoader:
         return config.get(key, default)
 
     def set(self, key: str, value: Any) -> None:
-        set_path(self._overrides, tuple(key.split('.')), deepcopy(value))
+        set_path(self._overrides, tuple(key.split(".")), deepcopy(value))
         self._frozen = None
 
     def update_config(self, updates: Dict[str, Any]) -> None:
@@ -79,8 +86,11 @@ class ConfigLoader:
 
     def diagnostics(self) -> str:
         self.load_config()
-        diagnostics = self._normalized.get("_diagnostics", {}) if self._normalized else {}
+        diagnostics = (
+            self._normalized.get("_diagnostics", {}) if self._normalized else {}
+        )
         return format_diagnostics(diagnostics)
 
 
+# 默认实例，用于在其他模块中直接导入和使用
 config = ConfigLoader()

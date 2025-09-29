@@ -26,11 +26,29 @@ WILDCARD_PREFIXES: Tuple[Path, ...] = (
     ("rerank",),
 )
 
+# Back-compat / explicit allow-list additions:
+ALLOWED_PATHS.add(("hybrid_search", "rrf_k"))
+
 
 def validate_and_check_unknowns(cfg: Dict[str, Any], *, strict: bool | None = None) -> None:
+    """
+    Validate config keys against the allow-list, recording diagnostics and optionally failing.
+
+    strict:
+      - If True  -> raise on unknown keys.
+      - If False -> only record diagnostics and log a warning.
+      - If None  -> derive from environment:
+          * ANO_RAG_CONFIG_STRICT env var accepted values:
+              - falsey: {"0","false","no","off","lenient","warn","warning"} -> lenient
+              - truthy: {"1","true","yes","on","strict","fail","error"} -> strict
+          * Otherwise, use ANO_RAG_ENV/ENVIRONMENT:
+              - "production"/"prod"/"release" -> lenient
+              - anything else (default "development") -> strict
+    """
     unknown_paths = sorted({".".join(path) for path in _find_unknown_paths(cfg)})
     diagnostics = cfg.setdefault("_diagnostics", {})
     strict_mode = _determine_strict_mode(strict)
+
     if unknown_paths:
         diagnostics["unknown_keys"] = unknown_paths
         message = f"Unknown configuration keys detected: {unknown_paths}"
@@ -39,9 +57,6 @@ def validate_and_check_unknowns(cfg: Dict[str, Any], *, strict: bool | None = No
         logging.getLogger(__name__).warning(message)
     else:
         diagnostics.setdefault("unknown_keys", [])
-
-
-ALLOWED_PATHS.add(("hybrid_search", "rrf_k"))
 
 
 def _find_unknown_paths(data: Mapping[str, Any], prefix: Path = ()) -> Iterable[Path]:
@@ -76,5 +91,7 @@ def _determine_strict_mode(strict: bool | None) -> bool:
 
     runtime_env = (os.getenv("ANO_RAG_ENV") or os.getenv("ENVIRONMENT") or "development").lower()
     if runtime_env in {"production", "prod", "release"}:
+        # Production defaults to lenient to allow phased rollouts of new keys.
         return False
+    # Non-production defaults to strict to surface mistakes early.
     return True
