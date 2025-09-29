@@ -1,0 +1,4 @@
+# Copy to configs/local.yaml to override config for local development.
+# Example:
+# storage:
+#   work_dir: "./result/work-local"

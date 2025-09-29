@@ -1,4 +1,5 @@
 from typing import List, Dict, Any, Optional
+from collections.abc import Mapping
 from loguru import logger
 import os
 import numpy as np
@@ -585,12 +586,12 @@ class QueryProcessor:
 
     def _get_config_dict(self, *path: str) -> Dict[str, Any]:
         """Safely traverse the cached configuration and return a nested dict."""
-        cfg: Any = self.config if isinstance(self.config, dict) else {}
+        cfg: Any = self.config if isinstance(self.config, Mapping) else {}
         for key in path:
-            if not isinstance(cfg, dict):
+            if not isinstance(cfg, Mapping):
                 return {}
             cfg = cfg.get(key)
-        return cfg if isinstance(cfg, dict) else {}
+        return dict(cfg) if isinstance(cfg, Mapping) else {}
 
     @log_performance("QueryProcessor.process")
     def process(self, query: str, dataset: Optional[str] = None, qid: Optional[str] = None) -> Dict[str, Any]:

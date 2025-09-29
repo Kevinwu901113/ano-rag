@@ -1,0 +1,124 @@
+{
+  "additionalProperties": true,
+  "description": "Typed representation of the configuration tree backed by DEFAULT_CONFIG.",
+  "properties": {
+    "config_version": {
+      "default": 1,
+      "minimum": 1,
+      "title": "Config Version",
+      "type": "integer"
+    },
+    "system": {
+      "additionalProperties": true,
+      "title": "System",
+      "type": "object"
+    },
+    "document": {
+      "additionalProperties": true,
+      "title": "Document",
+      "type": "object"
+    },
+    "embedding": {
+      "additionalProperties": true,
+      "title": "Embedding",
+      "type": "object"
+    },
+    "vector_store": {
+      "additionalProperties": true,
+      "title": "Vector Store",
+      "type": "object"
+    },
+    "retrieval": {
+      "additionalProperties": true,
+      "title": "Retrieval",
+      "type": "object"
+    },
+    "path_aware": {
+      "additionalProperties": true,
+      "title": "Path Aware",
+      "type": "object"
+    },
+    "hybrid_search": {
+      "additionalProperties": true,
+      "title": "Hybrid Search",
+      "type": "object"
+    },
+    "dispatcher": {
+      "additionalProperties": true,
+      "title": "Dispatcher",
+      "type": "object"
+    },
+    "context_dispatcher": {
+      "additionalProperties": true,
+      "title": "Context Dispatcher",
+      "type": "object"
+    },
+    "graph": {
+      "additionalProperties": true,
+      "title": "Graph",
+      "type": "object"
+    },
+    "llm": {
+      "additionalProperties": true,
+      "title": "Llm",
+      "type": "object"
+    },
+    "notes_llm": {
+      "additionalProperties": true,
+      "title": "Notes Llm",
+      "type": "object"
+    },
+    "calibration": {
+      "additionalProperties": true,
+      "title": "Calibration",
+      "type": "object"
+    },
+    "safety": {
+      "additionalProperties": true,
+      "title": "Safety",
+      "type": "object"
+    },
+    "scheduler": {
+      "additionalProperties": true,
+      "title": "Scheduler",
+      "type": "object"
+    },
+    "multi_hop": {
+      "additionalProperties": true,
+      "title": "Multi Hop",
+      "type": "object"
+    },
+    "storage": {
+      "additionalProperties": true,
+      "title": "Storage",
+      "type": "object"
+    },
+    "guardrail": {
+      "additionalProperties": true,
+      "title": "Guardrail",
+      "type": "object"
+    },
+    "atomic_note_generation": {
+      "additionalProperties": true,
+      "title": "Atomic Note Generation",
+      "type": "object"
+    },
+    "enhanced_relation_extraction": {
+      "additionalProperties": true,
+      "title": "Enhanced Relation Extraction",
+      "type": "object"
+    },
+    "feature_switches": {
+      "additionalProperties": true,
+      "title": "Feature Switches",
+      "type": "object"
+    },
+    "rerank": {
+      "additionalProperties": true,
+      "title": "Rerank",
+      "type": "object"
+    }
+  },
+  "title": "RootConfig",
+  "type": "object"
+}
