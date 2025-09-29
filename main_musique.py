@@ -33,6 +33,34 @@ from parallel import create_parallel_interface, ProcessingMode, ParallelStrategy
 RESULT_ROOT = config.get('storage.result_root', 'result')
 
 
+def safe_config_defaults(params_dict: Dict[str, Any]) -> Dict[str, Any]:
+    """为配置参数添加安全默认值，防止 KeyError"""
+    if not isinstance(params_dict, dict):
+        params_dict = {}
+    
+    # 添加常用的默认值
+    defaults = {
+        'top_k': 20,
+        'top_m_candidates': 30,
+        'first_hop_topk': 20,
+        'prf_topk': 20,
+        'dense_weight': 0.7,
+        'bm25_weight': 0.3,
+        'hop_decay': 0.8,
+        'per_hop_keep_top_m': 6,
+        'lower_threshold': 0.1,
+        'max_notes_for_llm': 15,
+        'max_tokens': 1800,
+        'similarity_threshold': 0.15,
+        'batch_size': 64
+    }
+    
+    # 合并默认值，保留原有值
+    result = defaults.copy()
+    result.update(params_dict)
+    return result
+
+
 def get_latest_workdir() -> str:
     """获取最新的工作目录"""
     os.makedirs(RESULT_ROOT, exist_ok=True)

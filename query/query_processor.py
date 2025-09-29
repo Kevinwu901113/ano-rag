@@ -49,6 +49,69 @@ from retrieval.listt5_reranker import ListT5Reranker, create_listt5_reranker, fu
 
 class QueryProcessor:
     """High level query processing pipeline."""
+    
+    @staticmethod
+    def safe_config_get(config_dict: Dict[str, Any], key: str, default: Any = None) -> Any:
+        """
+        安全地从配置字典中获取值，防止 KeyError
+        
+        Args:
+            config_dict: 配置字典
+            key: 配置键
+            default: 默认值
+            
+        Returns:
+            配置值或默认值
+        """
+        if isinstance(config_dict, dict):
+            return config_dict.get(key, default)
+        return default
+    
+    @staticmethod
+    def ensure_config_params(params: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        确保配置参数包含必要的键，防止运行时 KeyError
+        
+        Args:
+            params: 原始参数字典
+            
+        Returns:
+            包含安全默认值的参数字典
+        """
+        safe_params = params.copy() if params else {}
+        
+        # 添加常用的默认配置
+        defaults = {
+            'top_k': 20,
+            'top_m_candidates': 20,
+            'max_hops': 3,
+            'beam_width': 8,
+            'per_hop_keep_top_m': 5,
+            'similarity_threshold': 0.5,
+            'temperature': 0.7,
+            'max_tokens': 512,
+            'timeout': 30,
+            'enabled': True,
+            'batch_size': 32,
+            'k1': 1.2,
+            'b': 0.75,
+            'rrf_k': 60,
+            'min_path_score': 0.3,
+            'hop_decay': 0.85,
+            'lower_threshold': 0.1
+        }
+        
+        for key, default_value in defaults.items():
+            if key not in safe_params:
+                safe_params[key] = default_value
+        
+        # 特殊处理：如果有 top_m_candidates 但没有 top_k，则映射过去
+        if 'top_m_candidates' in safe_params and 'top_k' not in safe_params:
+            safe_params['top_k'] = safe_params['top_m_candidates']
+        elif 'top_k' in safe_params and 'top_m_candidates' not in safe_params:
+            safe_params['top_m_candidates'] = safe_params['top_k']
+            
+        return safe_params
 
     def __init__(
         self,
@@ -101,39 +164,38 @@ class QueryProcessor:
         
         # 缓存关键的"条数/预算"配置项
         # 初始召回
-        vector_cfg = self._retrieval_cfg.get("vector", {})
-        bm25_cfg = self._retrieval_cfg.get("bm25", {})
-        self.k_vec = int(vector_cfg.get("top_k", 50))
-        self.k_bm25 = int(bm25_cfg.get("top_k", 50))
+        vector_store_cfg = self.config.get("vector_store", {})
+        self.k_vec = int(vector_store_cfg.get("top_k", 20))  # 默认值20
+        self.k_bm25 = int(self._retrieval_cfg.get("bm25_topk_hop1", 40))  # 默认值40
         
         # 二跳补充
         prf_bridge_cfg = self._hybrid_search_cfg.get("prf_bridge", {})
         two_hop_cfg = self._hybrid_search_cfg.get("two_hop_expansion", {})
-        self.first_hop_topk = int(prf_bridge_cfg.get("first_hop_topk", 20))
-        self.prf_topk = int(prf_bridge_cfg.get("prf_topk", 10))
-        self.top_m_candidates = int(two_hop_cfg.get("top_m_candidates", 30))
+        self.first_hop_topk = int(prf_bridge_cfg["first_hop_topk"])
+        self.prf_topk = int(prf_bridge_cfg["prf_topk"])
+        self.top_m_candidates = int(two_hop_cfg["top_m_candidates"])
         
         # 融合/衰减权重
         weights_cfg = self._hybrid_search_cfg.get("weights", {})
         ranking_cfg = self._ranking_cfg
-        self.dense_weight = float(weights_cfg.get("dense", ranking_cfg.get("dense_weight", 0.7)))
-        self.bm25_weight = float(weights_cfg.get("bm25", ranking_cfg.get("bm25_weight", 0.3)))
-        self.hop_decay = float(ranking_cfg.get("hop_decay", 0.8))
+        self.dense_weight = float(weights_cfg.get("dense", ranking_cfg["dense_weight"]))
+        self.bm25_weight = float(weights_cfg.get("bm25", ranking_cfg["bm25_weight"]))
+        self.hop_decay = float(ranking_cfg["hop_decay"])
         
         # 安全/滤噪
         safety_cfg = self._safety_cfg
-        self.per_hop_keep_top_m = int(safety_cfg.get("per_hop_keep_top_m", 50))
-        self.lower_threshold = float(safety_cfg.get("lower_threshold", 0.1))
+        self.per_hop_keep_top_m = int(safety_cfg["per_hop_keep_top_m"])
+        self.lower_threshold = float(safety_cfg["lower_threshold"])
         
         # 聚类配置
         cluster_cfg = safety_cfg.get("cluster", {})
         self.cluster_enabled = bool(cluster_cfg.get("enabled", False))
-        self.cos_threshold = float(cluster_cfg.get("cos_threshold", 0.85))
-        self.keep_per_cluster = int(cluster_cfg.get("keep_per_cluster", 3))
+        self.cos_threshold = float(cluster_cfg["cos_threshold"])
+        self.keep_per_cluster = int(cluster_cfg["keep_per_cluster"])
         
         # 打包上限
         context_cfg = self._context_cfg
-        self.max_notes_for_llm = int(context_cfg.get("max_notes_for_llm", 20))
+        self.max_notes_for_llm = int(context_cfg["max_notes_for_llm"])
         self.max_tokens = context_cfg.get("max_tokens")  # 可选
 
         # Query rewriter functionality has been removed
@@ -2309,11 +2371,35 @@ class QueryProcessor:
             if 'final_score' not in note:
                 note['final_score'] = note.get('score', note.get('similarity', 0.0))
             if 'retrieval_method' not in note:
-                note['retrieval_method'] = note.get('method', 'hybrid')
+                # 规范化retrieval_method为枚举值
+                method = note.get('method', 'hybrid')
+                # 标准化为预定义的枚举值
+                if method in ['dense', 'vector', 'semantic']:
+                    note['retrieval_method'] = 'dense'
+                elif method in ['bm25', 'sparse', 'lexical']:
+                    note['retrieval_method'] = 'bm25'
+                elif method in ['graph', 'graph_search']:
+                    note['retrieval_method'] = 'graph'
+                elif method == 'prf_bridge':
+                    note['retrieval_method'] = 'prf_bridge'
+                elif method in ['hybrid', 'fusion']:
+                    note['retrieval_method'] = 'hybrid'
+                else:
+                    note['retrieval_method'] = 'hybrid'  # 默认值
+            # hop_no：缺省一律回填为 1（整数）
             if 'hop_no' not in note:
-                note['hop_no'] = note.get('hop_type', 'first_hop')
+                hop_type = str(note.get('hop_type', '')).lower()
+                if 'second' in hop_type or '2' == hop_type:
+                    note['hop_no'] = 2
+                elif 'third' in hop_type or '3' == hop_type:
+                    note['hop_no'] = 3
+                else:
+                    note['hop_no'] = 1
+            
+            # bridge_entity：不要用整段 entities 兜底，保持为单实体或空
             if 'bridge_entity' not in note:
-                note['bridge_entity'] = note.get('entities', [])
+                path = note.get('path') or note.get('bridge_path') or []
+                note['bridge_entity'] = (path[-1] if isinstance(path, list) and path else None)
             if 'bridge_path' not in note:
                 note['bridge_path'] = note.get('path', [])
         

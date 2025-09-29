@@ -13,6 +13,59 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "max_length": 512,
         "normalize": True,
     },
+    # 添加存储配置默认值
+    "storage": {
+        "work_dir": "./result/work",
+        "vector_index_path": "./result/vector_index",
+        "embedding_cache_path": "./result/embedding_cache",
+        "vector_store_path": "./result/vector_store",
+        "processed_docs_path": "./result/processed_docs",
+        "result_root": "./result"
+    },
+    # 添加模型路径配置
+    "model_path": "./models/default_model",
+    # 添加并行策略配置
+    "parallel_strategy": "thread",
+    # 添加 LLM 配置的缺失键
+    "llm": {
+        "provider": "openai", 
+        "model": "gpt-3.5-turbo", 
+        "temperature": 0.7, 
+        "max_output_tokens": 512,
+        "openai": {
+            "api_key": "",
+            "base_url": "https://api.openai.com/v1"
+        },
+        "lmstudio": {
+            "base_url": "http://localhost:1234/v1"
+        },
+        "local_model": {
+            "temperature": 0.7,
+            "max_tokens": 512
+        },
+        "hybrid_llm": {
+            "mode": "task_division",
+            "light_tasks": {
+                "provider": "ollama",
+                "model": "qwen2.5:latest",
+                "base_url": "http://localhost:11434",
+                "timeout": 30
+            },
+            "heavy_tasks": {
+                "provider": "lmstudio",
+                "model": "openai/gpt-oss-20b",
+                "base_url": "http://localhost:1234/v1",
+                "instances": 2,
+                "timeout": 60
+            }
+        }
+    },
+    # 添加各种配置文件路径
+    "diversity_scheduler_config_file": "./config/diversity_scheduler.yaml",
+    "path_aware_ranker_config_file": "./config/path_aware_ranker.yaml",
+    "retrieval_guardrail_config_file": "./config/retrieval_guardrail.yaml",
+    "entity_predicate_normalizer_config_file": "./config/entity_predicate_normalizer.yaml",
+    "embedding_strategy_config_file": "./config/embedding_strategy.yaml",
     "retrieval": {
         "candidate_pool": 50,
         "hybrid": {
@@ -145,28 +198,6 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "bridge_policy": "keepalive",
         "bridge_boost_epsilon": 0.02,
         "debug_log": True,
-    },
-    "llm": {
-        "provider": "openai", 
-        "model": "gpt-3.5-turbo", 
-        "temperature": 0.7, 
-        "max_output_tokens": 512,
-        "hybrid_llm": {
-            "mode": "task_division",
-            "light_tasks": {
-                "provider": "ollama",
-                "model": "qwen2.5:latest",
-                "base_url": "http://localhost:11434",
-                "timeout": 30
-            },
-            "heavy_tasks": {
-                "provider": "lmstudio",
-                "model": "openai/gpt-oss-20b",
-                "base_url": "http://localhost:1234/v1",
-                "instances": 2,
-                "timeout": 60
-            }
-        }
     },
     "guardrail": {"enabled": True, "min_results": 1, "min_score": 0.0, "timeout_seconds": 30},
     "atomic_note_generation": {
