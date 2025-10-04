@@ -121,11 +121,27 @@ class MusiqueProcessor:
             raise ValueError("MusiqueProcessor requires a LocalLLM instance to be passed")
         self.llm = llm
         
+        # 更新配置中的工作目录和所有存储路径，确保文件生成在正确的工作目录内
+        cfg = config.load_config()
+        storage = cfg.setdefault('storage', {})
+        storage['work_dir'] = self.base_work_dir
+        # 设置所有存储路径到工作目录下
+        storage['vector_db_path'] = os.path.join(self.base_work_dir, 'vector_store')
+        storage['graph_db_path'] = os.path.join(self.base_work_dir, 'graph_store')
+        storage['processed_docs_path'] = os.path.join(self.base_work_dir, 'processed')
+        storage['cache_path'] = os.path.join(self.base_work_dir, 'cache')
+        storage['vector_index_path'] = os.path.join(self.base_work_dir, 'vector_index')
+        storage['vector_store_path'] = os.path.join(self.base_work_dir, 'vector_store')
+        storage['embedding_cache_path'] = os.path.join(self.base_work_dir, 'embedding_cache')
+        # 设置评估数据集路径
+        cfg.setdefault('eval', {})['datasets_path'] = os.path.join(self.base_work_dir, 'eval_datasets')
+        
         # 预初始化共享资源以避免并行处理时的竞争
         self._shared_embedding_manager = None
         self._init_shared_resources()
         
         logger.info(f"Using base work directory: {self.base_work_dir}")
+        logger.info(f"Storage paths configured to use work directory: {self.base_work_dir}")
     
     def _init_shared_resources(self):
         """预初始化共享资源，避免并行处理时的资源竞争"""
