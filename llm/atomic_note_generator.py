@@ -127,40 +127,23 @@ class AtomicNoteGenerator:
         system_prompt = self._get_atomic_note_system_prompt()
         
         def process_batch(batch):
-            # 检查batch是否是单个item（当batch_processor回退到单个处理时）
             if not isinstance(batch, list):
-                # 单个item处理，直接返回单个结果而不是列表
-                try:
-                    note = self._generate_single_atomic_note(batch, system_prompt)
-                    return note
-                except Exception as e:
-                    logger.error(f"Failed to generate atomic note: {e}")
-                    return self._create_fallback_note(batch)
-            
-            # 批处理多个items
+                batch = [batch]
+
             results = []
             for chunk_data in batch:
                 try:
-                    note = self._generate_single_atomic_note(chunk_data, system_prompt)
-                    results.append(note)
-                    
-                    # 检查是否有额外的原子笔记需要处理
-                    if '_additional_notes' in chunk_data:
-                        additional_notes = chunk_data.pop('_additional_notes')
-                        for additional_note_data in additional_notes:
-                            try:
-                                # 为每个额外的笔记创建完整的原子笔记
-                                additional_note = self._create_atomic_note_from_data(
-                                    additional_note_data, chunk_data
-                                )
-                                results.append(additional_note)
-                            except Exception as e:
-                                logger.error(f"Failed to process additional note: {e}")
-                                
+                    notes = self._generate_single_atomic_note(chunk_data, system_prompt)
+                    if isinstance(notes, list):
+                        results.extend(notes)
+                    elif notes:
+                        results.append(notes)
                 except Exception as e:
                     logger.error(f"Failed to generate atomic note: {e}")
-                    # 创建基本的原子笔记
-                    results.append(self._create_fallback_note(chunk_data))
+                    fallback_note = self._create_fallback_note(chunk_data)
+                    if fallback_note:
+                        results.append(fallback_note)
+                        self.processing_stats['total_notes_generated'] += 1
             return results
         
         atomic_notes = self.batch_processor.process_batches(
@@ -207,7 +190,7 @@ class AtomicNoteGenerator:
     def _generate_atomic_notes_concurrent(self, text_chunks: List[Dict[str, Any]], progress_tracker: Optional[Any] = None) -> List[Dict[str, Any]]:
         """并发生成原子笔记，利用多个LM Studio实例"""
         system_prompt = self._get_atomic_note_system_prompt()
-        atomic_notes = [None] * len(text_chunks)  # 预分配结果列表
+        chunk_notes: List[List[Dict[str, Any]]] = [[] for _ in range(len(text_chunks))]
         
         # 计算实际的并发工作线程数
         client = getattr(self.llm, 'lmstudio_client', None) or getattr(self.llm, 'client', None)
@@ -220,12 +203,12 @@ class AtomicNoteGenerator:
             """处理单个文本块并返回索引和结果"""
             chunk_data, index = chunk_index_pair
             try:
-                note = self._generate_single_atomic_note(chunk_data, system_prompt)
-                return index, note, None
+                notes = self._generate_single_atomic_note(chunk_data, system_prompt)
+                return index, notes, None
             except Exception as e:
                 logger.error(f"Failed to generate atomic note for chunk {index}: {e}")
                 fallback_note = self._create_fallback_note(chunk_data)
-                return index, fallback_note, e
+                return index, [fallback_note] if fallback_note else [], e
         
         # 创建索引化的任务列表
         indexed_chunks = [(chunk, i) for i, chunk in enumerate(text_chunks)]
@@ -242,12 +225,13 @@ class AtomicNoteGenerator:
             
             for future in as_completed(future_to_index):
                 try:
-                    index, note, error = future.result()
-                    atomic_notes[index] = note
-                    
+                    index, notes, error = future.result()
+                    chunk_notes[index] = notes if isinstance(notes, list) else ([notes] if notes else [])
+
                     if error:
                         error_count += 1
-                    
+                        self.processing_stats['total_notes_generated'] += len(chunk_notes[index])
+
                     completed_count += 1
                     
                     # 更新进度跟踪器
@@ -262,28 +246,29 @@ class AtomicNoteGenerator:
                     logger.error(f"Future execution failed for chunk {original_index}: {e}")
                     # 创建fallback note
                     if original_index < len(text_chunks):
-                        atomic_notes[original_index] = self._create_fallback_note(text_chunks[original_index])
+                        fallback_note = self._create_fallback_note(text_chunks[original_index])
+                        chunk_notes[original_index] = [fallback_note] if fallback_note else []
+                        if fallback_note:
+                            self.processing_stats['total_notes_generated'] += 1
                     error_count += 1
                     
                     # 更新进度跟踪器（即使出错也要更新）
                     if progress_tracker:
                         progress_tracker.update(1)
         
-        logger.info(f"Concurrent processing completed: {len(text_chunks)} notes generated, {error_count} errors")
-        
+        total_generated = sum(len(notes) for notes in chunk_notes)
+        logger.info(f"Concurrent processing completed: {total_generated} notes generated, {error_count} errors")
+
         # 后处理：添加ID和元数据
-        for i, note in enumerate(atomic_notes):
-            if note is None:
-                # 如果某个位置没有结果，创建fallback note
-                note = self._create_fallback_note(text_chunks[i] if i < len(text_chunks) else {'text': ''})
-                atomic_notes[i] = note
-            
-            # 确保note是字典类型
-            if not isinstance(note, dict):
-                logger.warning(f"Note at index {i} is not a dict, got {type(note)}: {note}")
-                note = {'content': str(note), 'error': True}
-                atomic_notes[i] = note
-            
+        flattened_notes: List[Dict[str, Any]] = []
+        for i, notes in enumerate(chunk_notes):
+            for note in notes:
+                if not isinstance(note, dict):
+                    logger.warning(f"Note at chunk {i} is not a dict, got {type(note)}: {note}")
+                    note = {'content': str(note), 'error': True}
+                flattened_notes.append(note)
+
+        for i, note in enumerate(flattened_notes):
             note['note_id'] = f"note_{i:06d}"
             note['created_at'] = self._get_timestamp()
         
@@ -293,14 +278,14 @@ class AtomicNoteGenerator:
                 from utils.summary_auditor import SummaryAuditor
                 logger.info("Starting summary audit for generated atomic notes")
                 auditor = SummaryAuditor(llm=self.llm)
-                atomic_notes = auditor.audit_atomic_notes(atomic_notes)
+                flattened_notes = auditor.audit_atomic_notes(flattened_notes)
             except Exception as e:
                 logger.error(f"Summary audit failed: {e}")
-        
-        return atomic_notes
+
+        return flattened_notes
     
-    def _generate_single_atomic_note(self, chunk_data: Union[Dict[str, Any], Any], system_prompt: str) -> Dict[str, Any]:
-        """生成单个原子笔记 - 使用新的优化流程"""
+    def _generate_single_atomic_note(self, chunk_data: Union[Dict[str, Any], Any], system_prompt: str) -> List[Dict[str, Any]]:
+        """生成指定文本块对应的原子笔记列表"""
         # 确保 chunk_data 是字典类型
         if not isinstance(chunk_data, dict):
             logger.warning(f"chunk_data is not a dict, got {type(chunk_data)}: {chunk_data}")
@@ -309,7 +294,9 @@ class AtomicNoteGenerator:
                 chunk_data = {'text': chunk_data}
             else:
                 logger.error(f"Unsupported chunk_data type: {type(chunk_data)}")
-                return self._create_fallback_note({'text': str(chunk_data)})
+                fallback_note = self._create_fallback_note({'text': str(chunk_data)})
+                self.processing_stats['total_notes_generated'] += 1
+                return [fallback_note] if fallback_note else []
         
         text = chunk_data.get('text', '')
         self.processing_stats['total_chunks_processed'] += 1
@@ -367,45 +354,117 @@ class AtomicNoteGenerator:
         parsed_notes, retry_metadata = retry_handler.process_chunk_with_retry(
             chunk_data, llm_generate_func, parse_func, system_prompt, prompt
         )
-        
+
         # 更新统计信息
         if retry_metadata.get('used_fallback', False):
             self.processing_stats['rule_fallback_rate'] += 1
-        
-        if not parsed_notes:
-            # 空结果
+
+        if parsed_notes is None:
+            fallback_note = self._create_fallback_note(chunk_data)
+            if fallback_note:
+                self.processing_stats['total_notes_generated'] += 1
+                return [fallback_note]
             self.processing_stats['notes_zero_count'] += 1
-            return None  # 返回None表示没有生成笔记
-        
+            return []
+
+        if len(parsed_notes) == 0:
+            self.processing_stats['notes_zero_count'] += 1
+            return []
+
         # 标准化笔记字段
         normalized_notes = [normalize_note_fields(note) for note in parsed_notes]
-        
+
+        # 对每条笔记执行后处理
+        post_processed_notes = []
+        for note in normalized_notes:
+            processed_note = self._post_process_llm_note(note, chunk_data)
+            if processed_note:
+                post_processed_notes.append(processed_note)
+
+        if not post_processed_notes:
+            self.processing_stats['notes_zero_count'] += 1
+            return []
+
         # 过滤有效笔记
-        valid_notes = filter_valid_notes(normalized_notes)
-        
+        valid_notes = filter_valid_notes(post_processed_notes)
+
         if not valid_notes:
             self.processing_stats['notes_zero_count'] += 1
-            return None
-        
+            return []
+
         # 质量过滤
         quality_filter = NotesQualityFilter()
-        filtered_notes, filter_stats = quality_filter.filter_notes(valid_notes)
-        
+        filtered_notes = quality_filter.filter_notes(valid_notes)
+
+        stats_logger = get_global_stats_logger()
+        if quality_filter.stats and stats_logger:
+            stats_logger.add_quality_filter_stats(quality_filter.stats)
+
         if not filtered_notes:
             self.processing_stats['notes_zero_count'] += 1
+            return []
+
+        # 转换为原有格式
+        atomic_notes = [self._convert_to_atomic_note_format(note, chunk_data) for note in filtered_notes]
+
+        self.processing_stats['total_notes_generated'] += len(atomic_notes)
+        return atomic_notes
+
+    def _post_process_llm_note(
+        self,
+        note: Dict[str, Any],
+        chunk_data: Dict[str, Any]
+    ) -> Optional[Dict[str, Any]]:
+        """对LLM生成的笔记进行统一的后处理"""
+        if not isinstance(note, dict):
             return None
-        
-        # 转换为原有格式（取第一个笔记，其余的存储在_additional_notes中）
-        primary_note = self._convert_to_atomic_note_format(filtered_notes[0], chunk_data)
-        
-        if len(filtered_notes) > 1:
-            # 存储额外的笔记
-            additional_notes = [self._convert_to_atomic_note_format(note, chunk_data) for note in filtered_notes[1:]]
-            chunk_data['_additional_notes'] = additional_notes
-        
-        self.processing_stats['total_notes_generated'] += len(filtered_notes)
-        return primary_note
-    
+
+        processed = note.copy()
+
+        raw_text = processed.get('text', '')
+        if not isinstance(raw_text, str):
+            raw_text = str(raw_text)
+        text = raw_text.strip()
+        if not text:
+            return None
+
+        sentences = TextUtils.split_by_sentence(text)
+        if sentences:
+            text = sentences[0]
+        else:
+            text = text.split('\n')[0].strip()
+
+        max_chars = config.get('notes_llm.max_note_chars', 200)
+        if len(text) > max_chars:
+            text = text[:max_chars].rstrip()
+
+        processed['text'] = text
+        processed['sent_count'] = 1
+
+        try:
+            salience = float(processed.get('salience', 0.5))
+        except (TypeError, ValueError):
+            salience = 0.5
+        processed['salience'] = max(0.0, min(1.0, salience))
+
+        list_fields = ['local_spans', 'entities', 'years', 'quality_flags']
+        for field in list_fields:
+            value = processed.get(field)
+            if value is None:
+                processed[field] = []
+                continue
+            if isinstance(value, list):
+                processed[field] = [v for v in value if v not in (None, '')]
+            elif value == "":
+                processed[field] = []
+            else:
+                processed[field] = [value]
+
+        if not processed.get('quality_flags'):
+            processed['quality_flags'] = ['OK']
+
+        return processed
+
     def _get_optimized_llm_params(self) -> Dict[str, Any]:
         """获取优化的LLM调用参数"""
         params = config.get('notes_llm.llm_params', {})
@@ -671,43 +730,36 @@ class AtomicNoteGenerator:
                 chunk_data = {'text': chunk_data}
             else:
                 chunk_data = {'text': str(chunk_data)}
-        
+
         text = chunk_data.get('text', '')
         primary_entity = chunk_data.get('primary_entity')
         entities = TextUtils.extract_entities(text)
         if not entities and primary_entity:
             entities = [primary_entity]
 
-        # 提取相关的paragraph idx信息
-        paragraph_idx_mapping = chunk_data.get('paragraph_idx_mapping', {})
-        base_text = chunk_data.get('text', '') or text  # 优先用chunk原文
-        relevant_idxs = self._extract_relevant_paragraph_idxs(base_text, paragraph_idx_mapping)
-        
-        # 兜底逻辑：当且仅当"每文件一个段落"时，直接赋该段落 idx
-        if not relevant_idxs:
-            para_info = chunk_data.get('paragraph_info') or []
-            if len(para_info) == 1 and isinstance(para_info[0].get('idx', None), int):
-                relevant_idxs = [para_info[0]['idx']]
-        
-        # 调试日志：记录空 paragraph_idxs 的情况
-        if not relevant_idxs:
-            logger.debug(f"paragraph_idxs empty | file={chunk_data.get('source_info',{}).get('file_name')} "
-                         f"| chunk_idx={chunk_data.get('chunk_index')} "
-                         f"| note_len={len(text)} | has_mapping={bool(paragraph_idx_mapping)}")
+        sentences = TextUtils.split_by_sentence(text)
+        if sentences:
+            fallback_text = sentences[0]
+        else:
+            fallback_text = text.strip()
 
-        return {
-            'original_text': text,
-            'content': text,
-            'keywords': [],
+        max_chars = config.get('notes_llm.max_note_chars', 200)
+        if len(fallback_text) > max_chars:
+            fallback_text = fallback_text[:max_chars].rstrip()
+
+        fallback_note_data = {
+            'text': fallback_text or text,
+            'sent_count': 1,
+            'salience': 0.5,
+            'local_spans': [],
             'entities': entities,
-            'concepts': [],
-            'importance_score': 0.5,
-            'note_type': 'fact',
-            'source_info': chunk_data.get('source_info', {}),
-            'chunk_index': chunk_data.get('chunk_index', 0),
-            'length': len(text),
-            'paragraph_idxs': relevant_idxs
+            'years': [],
+            'quality_flags': ['FALLBACK']
         }
+
+        atomic_note = self._convert_to_atomic_note_format(fallback_note_data, chunk_data)
+        atomic_note['quality_flags'] = ['FALLBACK']
+        return atomic_note
     
     def _get_atomic_note_system_prompt(self) -> str:
         """获取原子笔记生成的系统提示词"""
