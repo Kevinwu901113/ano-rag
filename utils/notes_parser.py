@@ -8,6 +8,8 @@ import re
 from typing import List, Dict, Any, Optional, Union
 from loguru import logger
 
+from utils.note_completeness import is_complete_sentence
+
 
 def parse_notes_response(raw: str, sentinel: str = "~") -> Optional[List[Dict[str, Any]]]:
     """
@@ -120,7 +122,13 @@ def validate_note_structure(note: Dict[str, Any]) -> bool:
         if not isinstance(salience, (int, float)) or not (0 <= salience <= 1):
             logger.debug(f"Invalid salience: {salience}")
             return False
-        
+
+        text = str(note.get('text', '')).strip()
+        entities = note.get('entities', [])
+        if not is_complete_sentence(text, entities):
+            logger.debug(f"Reject incomplete/fragment note: {text}")
+            return False
+
         return True
         
     except (KeyError, TypeError, ValueError) as e:

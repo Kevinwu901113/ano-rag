@@ -310,6 +310,29 @@ notes_llm:
     max_tokens: 128            # 限制输出长度，提高响应速度
     stop: ["\n\n", "~"]        # 停止标记，遇到双换行或哨兵字符时停止
 
+note_completeness:
+  require_sentence_terminal: true
+  allowed_sentence_terminals: ["。", ".", "!", "?"]
+
+  # 长度下限（避免标题/短片段）
+  min_word_count_en: 5
+  min_char_count_zh: 10
+
+  # 句子必须包含谓词（英文/中文动词线索）
+  verb_patterns_en:
+    - "\\b(is|are|was|were|has|have|had|includes?|included|include|acquired|founded|located|born|won|announced|reported|published|proposed|launched)\\b"
+  verb_patterns_zh:
+    - "(是|为|位于|属于|出生|成立|获得|提出|报道|宣布|包含|推出|发布)"
+
+  # 禁止以从属/介词等开头（英文/中文）
+  bad_starts_en:
+    - "^(in|on|at|by|because|due to|such as|including|with|without|after|before|when|where|which|that|therefore|thus)\\b"
+  bad_starts_zh:
+    - "^(因此|因为|由于|其中|包括|以及|和|但|并|而|则|在|于|对|从|当|若|如果|虽然|然而)"
+
+  # entities 字段要求
+  require_entities: true
+
 # 增强关系提取配置
 enhanced_relation_extraction:
   use_llm_extraction: true     # 是否启用LLM增强的语义关系提取
