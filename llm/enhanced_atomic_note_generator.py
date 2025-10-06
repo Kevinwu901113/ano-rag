@@ -11,8 +11,8 @@ from utils.enhanced_noise_filter import EnhancedNoiseFilter
 from utils.note_similarity import NoteSimilarityCalculator
 from config import config
 from .prompts import (
-    ATOMIC_NOTEGEN_SYSTEM_PROMPT,
-    ATOMIC_NOTEGEN_PROMPT,
+    MULTI_NOTEGEN_SYSTEM_PROMPT,
+    MULTI_NOTEGEN_PROMPT,
 )
 import json
 import re
@@ -100,14 +100,14 @@ class EnhancedAtomicNoteGenerator:
         logger.info("Phase 1: Generating base atomic notes")
         
         # 准备提示词模板
-        system_prompt = self._get_atomic_note_system_prompt()
+        system_prompt = self._get_multi_note_system_prompt()
         
         def process_batch(batch):
             results = []
             for chunk_data in batch:
                 try:
-                    note = self._generate_single_atomic_note(chunk_data, system_prompt)
-                    results.append(note)
+                    notes = self._generate_multi_atomic_notes(chunk_data, system_prompt)
+                    results.extend(notes)
                 except Exception as e:
                     logger.error(f"Failed to generate atomic note: {e}")
                     # 创建基本的原子笔记
@@ -426,7 +426,7 @@ class EnhancedAtomicNoteGenerator:
             'paragraph_idxs': relevant_idxs
         }
     
-    def _get_atomic_note_system_prompt(self) -> str:
+    def _get_multi_note_system_prompt(self) -> str:
         """获取原子笔记生成的系统提示词"""
         return ATOMIC_NOTEGEN_SYSTEM_PROMPT
     

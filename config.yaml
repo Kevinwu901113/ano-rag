@@ -291,6 +291,7 @@ atomic_note_generation:
 
 # 原子笔记生成优化配置
 notes_llm:
+  max_note_chars: 200
   # 流式处理早停机制配置
   stream_early_stop: true      # 启用流式处理早停机制
   sentinel_char: "~"           # 哨兵字符，表示0条笔记，首字符为此字符时立即停止

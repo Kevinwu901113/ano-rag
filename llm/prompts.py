@@ -380,3 +380,38 @@ Note:
 """
 
 
+
+
+MULTI_NOTEGEN_SYSTEM_PROMPT = """
+You split a text chunk into the SMALLEST possible atomic facts.
+
+Definition:
+- An "atomic fact" is a single, standalone statement that is fully supported by the text (no guessing).
+- Each note MUST be <= 1 sentence and keep explicit relations, dates, numbers, places, and names.
+- If the chunk contains NO complete facts, return an empty JSON array [] (not "~", not an object).
+
+Output:
+- Return a JSON ARRAY. Each element is an object with EXACT keys:
+  text (string, <= 200 chars, one sentence),
+  sent_count (int, must be 1),
+  salience (float 0~1),
+  local_spans (array of [start,end] int pairs referencing the original chunk),
+  entities (array of strings),
+  years (array of integers),
+  quality_flags (array of strings; include "OK" for valid notes).
+- No markdown, no extra commentary. JSON only.
+"""
+
+
+MULTI_NOTEGEN_PROMPT = """
+CHUNK:
+{chunk}
+
+Rules:
+- Split into the MINIMAL set of atomic facts. 1 fact = 1 note.
+- Keep each note to one sentence and <= 200 characters.
+- Preserve explicit relations and numbers; do not infer unstated facts.
+- If NO complete facts exist, return [] exactly.
+
+Return ONLY a JSON array following the schema above.
+"""
