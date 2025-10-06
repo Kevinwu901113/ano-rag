@@ -11,8 +11,8 @@ from utils.enhanced_noise_filter import EnhancedNoiseFilter
 from utils.note_similarity import NoteSimilarityCalculator
 from config import config
 from .prompts import (
-    MULTI_NOTEGEN_SYSTEM_PROMPT,
-    MULTI_NOTEGEN_PROMPT,
+    ATOMIC_NOTEGEN_PROMPT,
+    build_multi_note_prompts,
 )
 import json
 import re
@@ -101,7 +101,7 @@ class EnhancedAtomicNoteGenerator:
         
         # 准备提示词模板
         system_prompt = self._get_multi_note_system_prompt()
-        
+
         def process_batch(batch):
             results = []
             for chunk_data in batch:
@@ -140,11 +140,72 @@ class EnhancedAtomicNoteGenerator:
         
         logger.info(f"Generated {len(atomic_notes)} base atomic notes")
         return atomic_notes
-    
+
+    def _generate_multi_atomic_notes(self, chunk_data: Dict[str, Any], system_prompt: str) -> List[Dict[str, Any]]:
+        """调用LLM生成多条原子笔记并转为内部结构"""
+
+        if not isinstance(chunk_data, dict):
+            chunk_data = {'text': str(chunk_data)}
+
+        text = chunk_data.get('text', '') or ''
+        if not text.strip():
+            logger.debug("Empty chunk text received for multi-note generation")
+            return [self._create_fallback_note(chunk_data)]
+
+        _, user_prompt_template = build_multi_note_prompts()
+        user_prompt = user_prompt_template.format(chunk=text)
+
+        llm_params = config.get('notes_llm.llm_params', {}) or {}
+
+        try:
+            if self.is_hybrid_mode and self.hybrid_dispatcher:
+                response = self.hybrid_dispatcher.process_single(user_prompt, system_prompt, **llm_params)
+            else:
+                response = self.llm.generate(user_prompt, system_prompt, **llm_params)
+        except Exception as exc:
+            logger.error(f"LLM generation failed, fallback note will be used: {exc}")
+            return [self._create_fallback_note(chunk_data)]
+
+        cleaned_response = clean_control_characters(response)
+        json_payload = extract_json_from_response(cleaned_response) or cleaned_response.strip()
+
+        if not json_payload:
+            logger.warning("LLM returned empty payload for multi-note generation")
+            return [self._create_fallback_note(chunk_data)]
+
+        try:
+            parsed_notes = json.loads(json_payload)
+        except json.JSONDecodeError as exc:
+            logger.warning(f"Failed to parse LLM response into JSON: {exc}")
+            return [self._create_fallback_note(chunk_data)]
+
+        if isinstance(parsed_notes, dict):
+            parsed_notes = [parsed_notes]
+
+        if not isinstance(parsed_notes, list):
+            logger.warning(f"Unexpected LLM response type for notes: {type(parsed_notes)}")
+            return [self._create_fallback_note(chunk_data)]
+
+        atomic_notes: List[Dict[str, Any]] = []
+        for idx, note_data in enumerate(parsed_notes):
+            if not isinstance(note_data, dict):
+                logger.debug(f"Skipping non-dict note at index {idx}: {note_data}")
+                continue
+
+            built_note = self._build_note_from_llm(note_data, chunk_data)
+            if built_note:
+                atomic_notes.append(built_note)
+
+        if not atomic_notes:
+            logger.debug("All generated notes were invalid; using fallback note")
+            return [self._create_fallback_note(chunk_data)]
+
+        return atomic_notes
+
     def _enhance_entities(self, atomic_notes: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """增强实体提取"""
         logger.info("Phase 2: Enhancing entity extraction")
-        
+
         enhanced_notes = []
         for note in atomic_notes:
             # 确保note是字典类型
@@ -426,9 +487,117 @@ class EnhancedAtomicNoteGenerator:
             'paragraph_idxs': relevant_idxs
         }
     
+    def _build_note_from_llm(self, note_data: Dict[str, Any], chunk_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """将LLM的笔记结构转换为统一的原子笔记格式"""
+
+        text_value = clean_control_characters(str(note_data.get('text', '')).strip())
+        if not text_value:
+            return None
+
+        max_chars = int(config.get('notes_llm.max_note_chars', 200))
+        terminals = config.get('note_completeness.allowed_sentence_terminals', ["。", ".", "!", "?"])
+
+        try:
+            sent_count = int(note_data.get('sent_count', 1))
+        except (TypeError, ValueError):
+            sent_count = 1
+
+        if sent_count != 1:
+            split_regex = r"[" + "".join(map(re.escape, terminals)) + r"]"
+            first_sentence = re.split(split_regex, text_value, maxsplit=1)[0].strip()
+            if first_sentence:
+                text_value = first_sentence + (terminals[0] if terminals else '.')
+            sent_count = 1
+
+        if terminals and not any(text_value.endswith(ch) for ch in terminals):
+            text_value = text_value.rstrip("".join(terminals)).rstrip()
+            text_value = text_value + (terminals[0] if terminals else '.')
+
+        if len(text_value) > max_chars:
+            text_value = text_value[:max_chars].rstrip()
+            if terminals and not any(text_value.endswith(ch) for ch in terminals):
+                text_value = text_value.rstrip("".join(terminals)).rstrip()
+                text_value = text_value + (terminals[0] if terminals else '.')
+
+        entities = note_data.get('entities', [])
+        if not isinstance(entities, list):
+            entities = [str(entities).strip()] if entities else []
+        entities = self._clean_list(entities)
+
+        if not entities:
+            extracted_entities = TextUtils.extract_entities(chunk_data.get('text', text_value))
+            if extracted_entities:
+                entities = extracted_entities
+
+        quality_flags = note_data.get('quality_flags', [])
+        if isinstance(quality_flags, list):
+            quality_flags = [str(flag).strip() for flag in quality_flags if str(flag).strip()]
+        elif quality_flags:
+            quality_flags = [str(quality_flags).strip()]
+        else:
+            quality_flags = []
+        if "OK" not in quality_flags:
+            quality_flags.append("OK")
+
+        local_spans = note_data.get('local_spans', [])
+        if not isinstance(local_spans, list):
+            local_spans = []
+
+        years = note_data.get('years', [])
+        if not isinstance(years, list):
+            years = []
+
+        try:
+            salience = float(note_data.get('salience', 0.5))
+        except (TypeError, ValueError):
+            salience = 0.5
+
+        paragraph_idx_mapping = chunk_data.get('paragraph_idx_mapping', {})
+        base_text = chunk_data.get('text', '') or text_value
+        relevant_idxs = self._extract_relevant_paragraph_idxs(base_text, paragraph_idx_mapping)
+
+        if not relevant_idxs:
+            para_info = chunk_data.get('paragraph_info') or []
+            if len(para_info) == 1 and isinstance(para_info[0].get('idx', None), int):
+                relevant_idxs = [para_info[0]['idx']]
+
+        if not relevant_idxs:
+            logger.debug(
+                f"paragraph_idxs empty | file={chunk_data.get('source_info', {}).get('file_name')} "
+                f"| chunk_idx={chunk_data.get('chunk_index')} | note_len={len(text_value)} "
+                f"| has_mapping={bool(paragraph_idx_mapping)}"
+            )
+
+        title = self._extract_title_from_chunk(chunk_data)
+
+        return {
+            'original_text': chunk_data.get('text', ''),
+            'content': text_value,
+            'summary': text_value,
+            'title': title,
+            'raw_span': text_value,
+            'keywords': [],
+            'entities': entities,
+            'concepts': [],
+            'normalized_entities': [],
+            'normalized_predicates': [],
+            'importance_score': salience,
+            'note_type': 'fact',
+            'source_info': chunk_data.get('source_info', {}),
+            'chunk_index': chunk_data.get('chunk_index', 0),
+            'length': len(text_value),
+            'paragraph_idxs': relevant_idxs,
+            'sent_count': 1,
+            'salience': salience,
+            'local_spans': local_spans,
+            'years': years,
+            'quality_flags': quality_flags,
+        }
+
     def _get_multi_note_system_prompt(self) -> str:
         """获取原子笔记生成的系统提示词"""
-        return ATOMIC_NOTEGEN_SYSTEM_PROMPT
+        system_prompt, _ = build_multi_note_prompts()
+        return system_prompt
     
     def _clean_list(self, items: List[str]) -> List[str]:
         """清理列表，去除空值和重复项"""

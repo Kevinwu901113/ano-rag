@@ -8,6 +8,8 @@ from typing import List, Dict, Any, Set, Optional
 from loguru import logger
 from config import config
 
+from utils.note_completeness import is_complete_sentence
+
 
 class NotesQualityFilter:
     """原子笔记质量过滤器"""
@@ -42,6 +44,7 @@ class NotesQualityFilter:
         # 统计信息
         self.stats = {
             'total_input': 0,
+            'filtered_by_completeness': 0,
             'filtered_by_length': 0,
             'filtered_by_sent_count': 0,
             'filtered_by_salience': 0,
@@ -67,7 +70,10 @@ class NotesQualityFilter:
         
         self.stats['total_input'] = len(notes)
         logger.debug(f"Starting quality filtering for {len(notes)} notes")
-        
+
+        # 0. 完整性过滤
+        notes = self._filter_by_completeness(notes)
+
         # 1. 长度过滤
         notes = self._filter_by_length(notes)
         
@@ -90,6 +96,22 @@ class NotesQualityFilter:
         logger.info(f"Quality filtering completed: {self.stats['total_input']} -> {self.stats['final_output']} notes")
         
         return notes
+
+    def _filter_by_completeness(self, notes: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """按完整命题要求过滤"""
+
+        filtered: List[Dict[str, Any]] = []
+        for note in notes:
+            text = str(note.get('text') or '').strip()
+            entities = note.get('entities', [])
+
+            if text and is_complete_sentence(text, entities):
+                filtered.append(note)
+            else:
+                self.stats['filtered_by_completeness'] += 1
+                logger.debug(f"Filtered note by completeness: {text}")
+
+        return filtered
     
     def _filter_by_length(self, notes: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """按文本长度过滤"""
