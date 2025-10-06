@@ -135,7 +135,10 @@ class BatchProcessor:
                                 # 直接调用单个处理方法，传递系统提示词
                                 system_prompt = kwargs.get('system_prompt', process_func.__self__._get_atomic_note_system_prompt())
                                 item_result = process_func.__self__._generate_single_atomic_note(item, system_prompt)
-                                results.append(item_result)
+                                if isinstance(item_result, list):
+                                    results.extend(item_result)
+                                elif item_result:
+                                    results.append(item_result)
                             else:
                                 # 对于其他类型的处理函数，直接调用单个item处理
                                 item_result = process_func(item, **kwargs)

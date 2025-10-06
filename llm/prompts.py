@@ -45,40 +45,34 @@ EXTRACT_ENTITIES_PROMPT = """
 
 # AtomicNoteGenerator
 ATOMIC_NOTEGEN_SYSTEM_PROMPT = """
-You generate precise atomic notes from a given text.
+You are an expert fact extraction engine that converts a text chunk into minimal atomic notes.
 
-Quality requirements (generic; no hard-coded relation names):
-- Capture ALL explicit facts and relations expressed in the text (between any entities).
-- Do NOT omit any explicitly stated relation when writing the note.
-- Keep the note concise (one or two sentences) but do not drop explicit relations, dates, or places.
-- Do NOT invent or infer facts that are not explicitly supported by the text.
-- Prefer using the original wording for names and key facts.
-- Language: English.
+Extraction rules:
+- Identify every explicit, verifiable fact stated in the text. Each fact must stand on its own.
+- Each note must contain exactly ONE fact and be expressed as a single English sentence.
+- Keep wording faithful to the source; never speculate, merge multiple facts, or invent details.
+- Each sentence must be shorter than or equal to 200 characters after trimming.
+- If the chunk contains no complete fact, return an empty array.
 
-Output contract (STRICT, single object expected by downstream):
-- Return EXACTLY ONE single-line JSON object with these keys:
-  text (string), sent_count (positive int), salience (float 0~1),
-  local_spans (array), entities (array), years (array), quality_flags (array)
-- If the text has no usable atomic fact, still return ONE JSON object with
-  an empty "text" and quality_flags like ["SKIP"] (do NOT return a list or prose).
-- No extra prose, no markdown, no code blocks, no comments.
+Output contract (STRICT):
+- Always return a JSON array. Each element is an object with the keys:
+  text (string), sent_count (int), salience (float 0~1),
+  local_spans (array), entities (array), years (array), quality_flags (array).
+- sent_count must be 1 for every emitted note.
+- When no fact exists, return [] exactly.
+- Output raw JSON only (no prose, markdown, or comments).
 """
 
 ATOMIC_NOTEGEN_PROMPT = """
 TEXT:
 {text}
 
-Write ONE atomic note that preserves all explicit relations and key details.
-Return ONLY one line of JSON exactly with the following shape (keys and types must match):
-{{"text":"A concise English note that preserves all explicit relations present in the text.",
-  "sent_count":1,
-  "salience":0.8,
-  "local_spans":[],
-  "entities":["Entity A","Entity B"],
-  "years":[],
-  "quality_flags":["OK"]}}
-# If there is truly no usable note, still return ONE object, for example:
-# {{"text":"","sent_count":0,"salience":0.0,"local_spans":[],"entities":[],"years":[],"quality_flags":["SKIP"]}}
+Extract all explicit single-fact statements from the TEXT.
+Return ONLY a JSON array of objects with the shape:
+[
+  {{"text":"<one factual sentence>","sent_count":1,"salience":0.8,"local_spans":[],"entities":["Entity"],"years":[],"quality_flags":["OK"]}}
+]
+If the TEXT has no complete fact, respond with [].
 """
 
 # Query rewriting
