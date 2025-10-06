@@ -89,6 +89,19 @@ def build_multi_note_prompts() -> tuple[str, str]:
     terminals = completeness_cfg.get("allowed_sentence_terminals") or ["。", ".", "!", "?"]
     terminals_display = ", ".join(str(t) for t in terminals)
 
+    coverage_rules = []
+    prompt_cfg = config.get("notes_prompt", {}) or {}
+    if prompt_cfg.get("element_conservation", True):
+        coverage_rules.append(
+            "- Coverage invariants: keep every explicit element (subject/object, dates/years, locations, publishers/labels, quantities, etc.) inside the SAME sentence. If you must split a source sentence, emit a full proposition per element by repeating the subject and never leave modifiers dangling like \"in 2019...\" or \"including ...\"."
+        )
+    if prompt_cfg.get("enumeration_split", True):
+        coverage_rules.append(
+            "- Enumeration alignment: when a source sentence lists parallel items (e.g., \"X has markets in US, EU, China\"), duplicate the subject and produce one self-contained sentence for each item so every note stands alone."
+        )
+
+    coverage_rules_text = "\n".join(coverage_rules)
+
     system_prompt = textwrap.dedent(
         f"""
         You split a text chunk into minimal atomic facts.
@@ -96,6 +109,7 @@ def build_multi_note_prompts() -> tuple[str, str]:
         Rules (config-driven):
         - Each note MUST be a complete proposition (explicit subject + main verb).
         - Keep modifiers (time/place/quantity) inside the same note, do NOT split them.
+        {coverage_rules_text}
         - Exactly 1 sentence, end with one of [{terminals_display}].
         - Max length per note: {max_len} characters.
         - If NO complete facts, return [] (JSON array).

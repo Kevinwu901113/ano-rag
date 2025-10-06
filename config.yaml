@@ -310,6 +310,10 @@ notes_llm:
     max_tokens: 128            # 限制输出长度，提高响应速度
     stop: ["\n\n", "~"]        # 停止标记，遇到双换行或哨兵字符时停止
 
+notes_prompt:
+  element_conservation: true        # 启用显式要素守恒提示（主体/时间/地点等不可拆散）
+  enumeration_split: true           # 对枚举项重复主体拆分完整句
+
 note_completeness:
   require_sentence_terminal: true
   allowed_sentence_terminals: ["。", ".", "!", "?"]
@@ -332,6 +336,19 @@ note_completeness:
 
   # entities 字段要求
   require_entities: true
+
+note_recovery:
+  enable: true
+  jaccard_threshold: 0.6
+  merge_threshold: 0.35
+  max_merge_tokens: 30
+  max_new_notes: 3
+
+evaluation:
+  coverage_thresholds:
+    warning: 0.7
+    critical: 0.5
+  coverage_report_path: "debug/coverage_report.json"
 
 # 增强关系提取配置
 enhanced_relation_extraction:

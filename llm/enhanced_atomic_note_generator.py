@@ -1,4 +1,4 @@
-from typing import List, Dict, Any, Optional, Union
+from typing import List, Dict, Any, Optional, Union, Tuple
 from loguru import logger
 from .local_llm import LocalLLM
 from utils.batch_processor import BatchProcessor
@@ -16,6 +16,7 @@ from .prompts import (
 )
 import json
 import re
+import os
 from datetime import datetime
 
 class EnhancedAtomicNoteGenerator:
@@ -51,13 +52,18 @@ class EnhancedAtomicNoteGenerator:
         self.relation_extractor = EnhancedRelationExtractor(local_llm=llm)
         self.noise_filter = EnhancedNoiseFilter()
         self.similarity_calculator = NoteSimilarityCalculator()
-        
+
         # 功能开关
         self.enable_enhanced_ner = self.config.get('enable_enhanced_ner', True)
         self.enable_relation_extraction = self.config.get('enable_relation_extraction', True)
         self.enable_enhanced_noise_filter = self.config.get('enable_enhanced_noise_filter', True)
         self.enable_note_similarity = self.config.get('enable_note_similarity', False)  # Disabled due to network issues
-        
+
+        # 覆盖率监控配置
+        self.coverage_reports: List[Dict[str, Any]] = []
+        self.coverage_thresholds = config.get('evaluation.coverage_thresholds', {}) or {}
+        self.coverage_report_path = config.get('evaluation.coverage_report_path', 'debug/coverage_report.json')
+
         logger.info(f"Enhanced Atomic Note Generator initialized with features: "
                    f"NER={self.enable_enhanced_ner}, RE={self.enable_relation_extraction}, "
                    f"Noise={self.enable_enhanced_noise_filter}, Similarity={self.enable_note_similarity}")
@@ -65,7 +71,9 @@ class EnhancedAtomicNoteGenerator:
     def generate_atomic_notes(self, text_chunks: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """从文本块生成增强的原子笔记"""
         logger.info(f"Generating enhanced atomic notes for {len(text_chunks)} text chunks")
-        
+        # 重置覆盖率报告
+        self.coverage_reports = []
+
         # 阶段1: 基础原子笔记生成
         atomic_notes = self._generate_base_atomic_notes(text_chunks)
         
@@ -91,8 +99,9 @@ class EnhancedAtomicNoteGenerator:
         
         # 最终统计
         self._log_generation_statistics(atomic_notes)
-        
+
         logger.info(f"Enhanced atomic note generation completed: {len(atomic_notes)} notes")
+        self._export_coverage_report()
         return atomic_notes
     
     def _generate_base_atomic_notes(self, text_chunks: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -111,7 +120,8 @@ class EnhancedAtomicNoteGenerator:
                 except Exception as e:
                     logger.error(f"Failed to generate atomic note: {e}")
                     # 创建基本的原子笔记
-                    results.append(self._create_fallback_note(chunk_data))
+                    fallback = self._enforce_note_recovery(chunk_data, [self._create_fallback_note(chunk_data)])
+                    results.extend(fallback)
             return results
         
         atomic_notes = self.batch_processor.process_batches(
@@ -150,7 +160,7 @@ class EnhancedAtomicNoteGenerator:
         text = chunk_data.get('text', '') or ''
         if not text.strip():
             logger.debug("Empty chunk text received for multi-note generation")
-            return [self._create_fallback_note(chunk_data)]
+            return self._enforce_note_recovery(chunk_data, [self._create_fallback_note(chunk_data)])
 
         _, user_prompt_template = build_multi_note_prompts()
         user_prompt = user_prompt_template.format(chunk=text)
@@ -164,27 +174,27 @@ class EnhancedAtomicNoteGenerator:
                 response = self.llm.generate(user_prompt, system_prompt, **llm_params)
         except Exception as exc:
             logger.error(f"LLM generation failed, fallback note will be used: {exc}")
-            return [self._create_fallback_note(chunk_data)]
+            return self._enforce_note_recovery(chunk_data, [self._create_fallback_note(chunk_data)])
 
         cleaned_response = clean_control_characters(response)
         json_payload = extract_json_from_response(cleaned_response) or cleaned_response.strip()
 
         if not json_payload:
             logger.warning("LLM returned empty payload for multi-note generation")
-            return [self._create_fallback_note(chunk_data)]
+            return self._enforce_note_recovery(chunk_data, [self._create_fallback_note(chunk_data)])
 
         try:
             parsed_notes = json.loads(json_payload)
         except json.JSONDecodeError as exc:
             logger.warning(f"Failed to parse LLM response into JSON: {exc}")
-            return [self._create_fallback_note(chunk_data)]
+            return self._enforce_note_recovery(chunk_data, [self._create_fallback_note(chunk_data)])
 
         if isinstance(parsed_notes, dict):
             parsed_notes = [parsed_notes]
 
         if not isinstance(parsed_notes, list):
             logger.warning(f"Unexpected LLM response type for notes: {type(parsed_notes)}")
-            return [self._create_fallback_note(chunk_data)]
+            return self._enforce_note_recovery(chunk_data, [self._create_fallback_note(chunk_data)])
 
         atomic_notes: List[Dict[str, Any]] = []
         for idx, note_data in enumerate(parsed_notes):
@@ -198,9 +208,9 @@ class EnhancedAtomicNoteGenerator:
 
         if not atomic_notes:
             logger.debug("All generated notes were invalid; using fallback note")
-            return [self._create_fallback_note(chunk_data)]
+            return self._enforce_note_recovery(chunk_data, [self._create_fallback_note(chunk_data)])
 
-        return atomic_notes
+        return self._enforce_note_recovery(chunk_data, atomic_notes)
 
     def _enhance_entities(self, atomic_notes: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """增强实体提取"""
@@ -484,7 +494,8 @@ class EnhancedAtomicNoteGenerator:
             'source_info': chunk_data.get('source_info', {}),
             'chunk_index': chunk_data.get('chunk_index', 0),
             'length': len(text),
-            'paragraph_idxs': relevant_idxs
+            'paragraph_idxs': relevant_idxs,
+            'source_sentence_idx': None,
         }
     
     def _build_note_from_llm(self, note_data: Dict[str, Any], chunk_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -592,6 +603,7 @@ class EnhancedAtomicNoteGenerator:
             'local_spans': local_spans,
             'years': years,
             'quality_flags': quality_flags,
+            'source_sentence_idx': note_data.get('source_sentence_idx'),
         }
 
     def _get_multi_note_system_prompt(self) -> str:
@@ -603,16 +615,317 @@ class EnhancedAtomicNoteGenerator:
         """清理列表，去除空值和重复项"""
         if not isinstance(items, list):
             return []
-        
+
         cleaned = []
         for item in items:
             if isinstance(item, str) and item.strip():
                 cleaned_item = item.strip()
                 if cleaned_item not in cleaned:
                     cleaned.append(cleaned_item)
-        
+
         return cleaned
-    
+
+    def _enforce_note_recovery(self, chunk_data: Dict[str, Any], notes: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """对单个chunk执行覆盖率校验与缺失回补"""
+
+        if not isinstance(notes, list):
+            notes = list(notes) if notes else []
+
+        sentences = self._get_source_sentences(chunk_data)
+        recovery_cfg = config.get('note_recovery', {}) or {}
+        threshold = float(recovery_cfg.get('jaccard_threshold', 0.6))
+
+        alignment = self._analyze_sentence_coverage(sentences, notes, threshold)
+        recovery_details: List[Dict[str, Any]] = []
+
+        if recovery_cfg.get('enable', True) and alignment['missing_sentences']:
+            notes, recovery_details = self._recover_missing_sentences(
+                chunk_data,
+                notes,
+                alignment['missing_sentences'],
+                recovery_cfg,
+            )
+            # 重新评估覆盖率
+            alignment = self._analyze_sentence_coverage(sentences, notes, threshold)
+
+        coverage_record = {
+            'chunk_id': chunk_data.get('chunk_id'),
+            'chunk_index': chunk_data.get('chunk_index'),
+            'source_file': (chunk_data.get('source_info') or {}).get('file_name'),
+            'coverage_rate': alignment['coverage_rate'],
+            'total_sentences': len(sentences),
+            'covered_sentences': len(sentences) - len(alignment['missing_sentences']),
+            'missing_sentences': alignment['missing_sentences'],
+            'recovery_applied': bool(recovery_details),
+            'recovery_details': recovery_details,
+            'jaccard_threshold': threshold,
+        }
+
+        self._handle_coverage_logging(coverage_record)
+        self.coverage_reports.append(coverage_record)
+        return notes
+
+    def _get_source_sentences(self, chunk_data: Dict[str, Any]) -> List[str]:
+        sentences = chunk_data.get('sentences')
+        if isinstance(sentences, list) and sentences:
+            normalized = [str(s).strip() for s in sentences if str(s).strip()]
+            if normalized:
+                return normalized
+
+        text = str(chunk_data.get('text', '') or '')
+        if not text.strip():
+            return []
+
+        split_sentences = TextUtils.split_by_sentence(text)
+        chunk_data['sentences'] = split_sentences
+        return split_sentences
+
+    def _analyze_sentence_coverage(
+        self,
+        sentences: List[str],
+        notes: List[Dict[str, Any]],
+        threshold: float,
+    ) -> Dict[str, Any]:
+        if not sentences:
+            for note in notes:
+                note['source_sentence_idx'] = None
+            return {
+                'coverage_rate': 1.0,
+                'missing_sentences': [],
+                'note_matches': {},
+            }
+
+        sentence_tokens = [self._tokenize_for_jaccard(sentence) for sentence in sentences]
+        note_tokens = []
+        note_texts = []
+        for note in notes:
+            note_text = note.get('content') or note.get('raw_span') or note.get('text') or ''
+            note_texts.append(note_text)
+            note_tokens.append(self._tokenize_for_jaccard(note_text))
+            note['source_sentence_idx'] = None
+
+        note_matches: Dict[int, Dict[str, Any]] = {}
+        missing_sentences: List[Dict[str, Any]] = []
+
+        for idx, tokens in enumerate(sentence_tokens):
+            best_idx = None
+            best_score = 0.0
+            for note_idx, note_token in enumerate(note_tokens):
+                if not note_token:
+                    continue
+                score = self._jaccard_similarity(tokens, note_token)
+                if score > best_score:
+                    best_score = score
+                    best_idx = note_idx
+
+            if best_idx is not None and best_score >= threshold:
+                existing = note_matches.get(best_idx)
+                if existing is None or best_score > existing['score']:
+                    note_matches[best_idx] = {
+                        'sentence_idx': idx,
+                        'score': best_score,
+                    }
+            else:
+                missing_sentences.append({
+                    'sentence_idx': idx,
+                    'sentence': sentences[idx],
+                    'best_note_text': note_texts[best_idx] if best_idx is not None else '',
+                    'best_score': best_score,
+                    'best_note_idx': best_idx,
+                })
+
+        for note_idx, match in note_matches.items():
+            if 0 <= note_idx < len(notes):
+                notes[note_idx]['source_sentence_idx'] = match['sentence_idx']
+
+        covered = len(sentences) - len(missing_sentences)
+        coverage_rate = covered / len(sentences) if sentences else 1.0
+
+        return {
+            'coverage_rate': coverage_rate,
+            'missing_sentences': missing_sentences,
+            'note_matches': note_matches,
+        }
+
+    def _tokenize_for_jaccard(self, text: str) -> set:
+        if not text:
+            return set()
+        tokens = re.findall(r"[\w]+", text.lower())
+        if not tokens:
+            tokens = [ch for ch in text if not ch.isspace()]
+        return set(tokens)
+
+    def _jaccard_similarity(self, left: set, right: set) -> float:
+        if not left or not right:
+            return 0.0
+        intersection = left & right
+        union = left | right
+        if not union:
+            return 0.0
+        return len(intersection) / len(union)
+
+    def _recover_missing_sentences(
+        self,
+        chunk_data: Dict[str, Any],
+        notes: List[Dict[str, Any]],
+        missing_sentences: List[Dict[str, Any]],
+        recovery_cfg: Dict[str, Any],
+    ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+        details: List[Dict[str, Any]] = []
+        max_new_notes = int(recovery_cfg.get('max_new_notes', 0) or 0)
+        merge_threshold = float(recovery_cfg.get('merge_threshold', 0.35))
+        max_merge_tokens = int(recovery_cfg.get('max_merge_tokens', 30) or 30)
+        new_notes_added = 0
+
+        for missing in missing_sentences:
+            sentence = str(missing.get('sentence', '')).strip()
+            if not sentence:
+                continue
+
+            best_note_idx = missing.get('best_note_idx')
+            best_score = float(missing.get('best_score', 0.0) or 0.0)
+            merge_reason = None
+
+            if (
+                best_note_idx is not None
+                and 0 <= best_note_idx < len(notes)
+                and best_score >= merge_threshold
+            ):
+                existing_note = notes[best_note_idx]
+                existing_text = existing_note.get('content') or existing_note.get('raw_span') or ''
+                token_gap = self._token_count_difference(sentence, existing_text)
+
+                if token_gap <= max_merge_tokens:
+                    merged_note = self._build_note_from_llm({
+                        'text': sentence,
+                        'sent_count': 1,
+                        'salience': existing_note.get('salience', 0.5),
+                        'entities': existing_note.get('entities', []),
+                        'years': existing_note.get('years', []),
+                        'quality_flags': existing_note.get('quality_flags', []),
+                        'source_sentence_idx': missing['sentence_idx'],
+                    }, chunk_data)
+
+                    if merged_note:
+                        merged_flags = set(existing_note.get('quality_flags') or [])
+                        merged_flags.update(merged_note.get('quality_flags') or [])
+                        merged_flags.add('RECOVERED_MERGE')
+                        merged_note['quality_flags'] = list(merged_flags)
+                        merged_note['source_sentence_idx'] = missing['sentence_idx']
+                        notes[best_note_idx] = merged_note
+                        details.append({
+                            'action': 'merge',
+                            'sentence_idx': missing['sentence_idx'],
+                            'note_idx': best_note_idx,
+                            'best_score': best_score,
+                        })
+                        continue
+                    merge_reason = 'merge_build_failed'
+                else:
+                    merge_reason = 'exceeds_max_merge_tokens'
+
+            if new_notes_added >= max_new_notes:
+                details.append({
+                    'action': 'skipped',
+                    'sentence_idx': missing['sentence_idx'],
+                    'reason': merge_reason or 'max_new_notes_reached',
+                    'best_score': best_score,
+                })
+                continue
+
+            new_note = self._create_note_from_sentence(sentence, chunk_data)
+            if new_note:
+                flags = set(new_note.get('quality_flags') or [])
+                flags.add('RECOVERED_NEW')
+                new_note['quality_flags'] = list(flags)
+                new_note['source_sentence_idx'] = missing['sentence_idx']
+                notes.append(new_note)
+                new_notes_added += 1
+                details.append({
+                    'action': 'new_note',
+                    'sentence_idx': missing['sentence_idx'],
+                    'note_idx': len(notes) - 1,
+                    'best_score': best_score,
+                    'reason': merge_reason,
+                })
+            else:
+                details.append({
+                    'action': 'skipped',
+                    'sentence_idx': missing['sentence_idx'],
+                    'reason': 'note_build_failed',
+                    'best_score': best_score,
+                })
+
+        return notes, details
+
+    def _create_note_from_sentence(self, sentence: str, chunk_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        payload = {
+            'text': sentence,
+            'sent_count': 1,
+            'salience': 0.6,
+            'entities': TextUtils.extract_entities(sentence),
+            'years': self._extract_years(sentence),
+            'quality_flags': ['RECOVERED_NEW'],
+            'source_sentence_idx': None,
+        }
+        return self._build_note_from_llm(payload, chunk_data)
+
+    def _extract_years(self, sentence: str) -> List[int]:
+        years = re.findall(r'(1[89]\d{2}|20\d{2}|2100)', sentence)
+        unique_years = sorted({int(year) for year in years})
+        return unique_years
+
+    def _token_count_difference(self, sentence: str, existing_text: str) -> int:
+        return abs(self._rough_token_count(sentence) - self._rough_token_count(existing_text))
+
+    def _rough_token_count(self, text: str) -> int:
+        if not text:
+            return 0
+        tokens = re.findall(r"[\w]+", text)
+        if tokens:
+            return len(tokens)
+        return len([ch for ch in text if not ch.isspace()])
+
+    def _handle_coverage_logging(self, coverage_record: Dict[str, Any]):
+        warning_threshold = float(self.coverage_thresholds.get('warning', 0.7) or 0.7)
+        critical_threshold = float(self.coverage_thresholds.get('critical', 0.5) or 0.5)
+        rate = float(coverage_record.get('coverage_rate', 0.0) or 0.0)
+        chunk_label = coverage_record.get('chunk_id') or coverage_record.get('chunk_index')
+
+        if rate < critical_threshold:
+            logger.error(
+                f"[coverage:red] chunk={chunk_label} coverage={rate:.2f} (<{critical_threshold:.2f}) missing={len(coverage_record.get('missing_sentences', []))}"
+            )
+        elif rate < warning_threshold:
+            logger.warning(
+                f"[coverage:yellow] chunk={chunk_label} coverage={rate:.2f} (<{warning_threshold:.2f}) missing={len(coverage_record.get('missing_sentences', []))}"
+            )
+        else:
+            logger.debug(
+                f"[coverage:ok] chunk={chunk_label} coverage={rate:.2f} missing={len(coverage_record.get('missing_sentences', []))}"
+            )
+
+    def _export_coverage_report(self):
+        if not self.coverage_reports:
+            return
+
+        report_path = self.coverage_report_path or 'debug/coverage_report.json'
+        directory = os.path.dirname(report_path)
+        if directory and not os.path.exists(directory):
+            os.makedirs(directory, exist_ok=True)
+
+        payload = {
+            'generated_at': self._get_timestamp(),
+            'reports': self.coverage_reports,
+        }
+
+        try:
+            with open(report_path, 'w', encoding='utf-8') as fp:
+                json.dump(payload, fp, ensure_ascii=False, indent=2)
+            logger.info(f"Coverage report exported to {report_path}")
+        except Exception as exc:
+            logger.error(f"Failed to export coverage report to {report_path}: {exc}")
+
     def _extract_relevant_paragraph_idxs(self, text: str, paragraph_idx_mapping: Dict[str, int]) -> List[int]:
         """从文本中提取相关的paragraph idx"""
         relevant_idxs: List[int] = []
