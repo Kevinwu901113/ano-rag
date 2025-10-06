@@ -264,7 +264,7 @@ atomic_note_generation:
   # 任务分配配置（task_division策略）
   task_division:
     enabled: true               # 是否启用任务分配策略
-    allocation_method: "round_robin"  # 分配方法：round_robin轮询|batch_split批次分割
+    allocation_method: "batch_split"  # 分配方法：round_robin轮询|batch_split批次分割
     enable_fallback: true       # 是否启用失败回退机制
     fallback_timeout: 60        # 回退超时时间（秒）- 增加到60秒以避免超时错误
     
