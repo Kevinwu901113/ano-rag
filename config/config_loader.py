@@ -106,6 +106,11 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "hybrid_search": {
         "enabled": True,
         "fusion_method": "linear",
+        "prf_bridge": {
+            "enabled": True,
+            "first_hop_topk": 2,
+            "prf_topk": 20,
+        },
         "linear": {
             "vector_weight": 1.0,
             "bm25_weight": 0.5,
