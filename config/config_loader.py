@@ -238,17 +238,45 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "enable_fast_path": True,
         "retry_once_on_parse_error": True,
         "shorten_on_retry_chars": 1000,
-        "min_chars": 25,
+        "min_chars": 20,
         "max_chars": 400,
         "min_salience": 0.3,
-        "max_notes_per_chunk": 6,
+        "max_notes_per_chunk": 12,
         "enable_rule_fallback": True,
+        "entities_fallback": {
+            "enabled": True,
+            "min_len": 2,
+            "types": ["PERSON", "ORG", "GPE", "WORK_OF_ART", "EVENT"],
+        },
+        "limit": {
+            "strategy": "bucketed",
+            "bucket": {
+                "by": "paragraph_idx",
+                "quota_per_bucket": 1,
+            },
+        },
         "llm_params": {
             "temperature": 0,
             "top_p": 0,
             "max_tokens": 128,
             "stop": ["\n\n", "~"]
         }
+    },
+    "quality_filter": {
+        "require_entities": True,
+        "min_chars": 20,
+        "min_salience": 0.3,
+    },
+    "note_completeness": {
+        "require_sentence_terminal": True,
+        "allowed_sentence_terminals": ["。", ".", "!", "?"],
+        "min_word_count_en": 4,
+        "min_char_count_zh": 8,
+        "verb_patterns_en": [],
+        "verb_patterns_zh": [],
+        "bad_starts_en": [],
+        "bad_starts_zh": [],
+        "require_entities": False,
     },
     "vector_store": {
         "top_k": 20,

@@ -124,8 +124,7 @@ def validate_note_structure(note: Dict[str, Any]) -> bool:
             return False
 
         text = str(note.get('text', '')).strip()
-        entities = note.get('entities', [])
-        if not is_complete_sentence(text, entities):
+        if not is_complete_sentence(text, None):
             logger.debug(f"Reject incomplete/fragment note: {text}")
             return False
 

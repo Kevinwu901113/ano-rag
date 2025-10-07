@@ -10,6 +10,7 @@ from loguru import logger
 from config import config
 
 from utils.note_completeness import is_complete_sentence
+from utils.text_utils import TextUtils
 
 
 class NotesQualityFilter:
@@ -29,15 +30,16 @@ class NotesQualityFilter:
         quality_cfg = config.get('quality_filter', {}) or {}
         limit_cfg = notes_cfg.get('limit') if isinstance(notes_cfg.get('limit'), dict) else {}
 
-        self.min_chars = quality_cfg.get('min_chars', notes_cfg.get('min_chars', 25))
-        self.max_chars = notes_cfg.get('max_chars', 400)
-        self.min_salience = notes_cfg.get('min_salience', 0.3)
-        self.max_notes_per_chunk = notes_cfg.get('max_notes_per_chunk', 6)
-        self.require_entities = bool(quality_cfg.get('require_entities', False))
+        self.min_chars = int(quality_cfg.get('min_chars', notes_cfg.get('min_chars', 20)))
+        self.max_chars = int(notes_cfg.get('max_chars', 400))
+        self.min_salience = float(quality_cfg.get('min_salience', notes_cfg.get('min_salience', 0.3)))
+        self.max_notes_per_chunk = int(notes_cfg.get('max_notes_per_chunk', 12))
+        self.require_entities = bool(quality_cfg.get('require_entities', True))
         self.limit_strategy = (limit_cfg or {}).get('strategy', 'top_n')
         bucket_cfg = (limit_cfg or {}).get('bucket') if isinstance((limit_cfg or {}).get('bucket'), dict) else {}
         self.bucket_by = (bucket_cfg or {}).get('by', 'paragraph_idx')
         self.bucket_quota = int((bucket_cfg or {}).get('quota_per_bucket', 1))
+        self.entities_fallback_cfg = (notes_cfg.get('entities_fallback', {}) or {}).copy()
         
         # 无question时降低salience阈值
         if not question:
@@ -84,6 +86,12 @@ class NotesQualityFilter:
         # 0. 完整性过滤
         notes = self._filter_by_completeness(notes)
 
+        # 0.5 实体回补
+        notes = self._enrich_entities(notes)
+
+        # 0.6 实体要求
+        notes = self._enforce_entity_requirement(notes)
+
         # 1. 长度过滤
         notes = self._filter_by_length(notes)
         
@@ -116,14 +124,67 @@ class NotesQualityFilter:
             entities = note.get('entities', [])
 
             if text and is_complete_sentence(text, entities):
-                if self.require_entities and (not isinstance(entities, list) or not entities):
-                    self.stats['filtered_by_completeness'] += 1
-                    logger.debug(f"Filtered note for missing entities: {text}")
-                    continue
                 filtered.append(note)
             else:
                 self.stats['filtered_by_completeness'] += 1
                 logger.debug(f"Filtered note by completeness: {text}")
+
+        return filtered
+
+    def _enrich_entities(self, notes: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """缺失实体时尝试回补"""
+
+        if not notes or not self.require_entities:
+            return notes
+
+        if not self.entities_fallback_cfg.get('enabled', True):
+            return notes
+
+        min_len = int(self.entities_fallback_cfg.get('min_len', 2))
+        allow_types = self.entities_fallback_cfg.get(
+            'types', ['PERSON', 'ORG', 'GPE', 'WORK_OF_ART', 'EVENT']
+        )
+
+        for note in notes:
+            entities = note.get('entities')
+            if isinstance(entities, list) and any(str(e).strip() for e in entities):
+                continue
+
+            text = str(note.get('text') or '').strip()
+            if not text:
+                continue
+
+            try:
+                extracted = TextUtils.extract_entities_fallback(
+                    text,
+                    min_len=min_len,
+                    allow_types=allow_types,
+                ) or []
+            except Exception as err:
+                logger.debug(f"Entity fallback failed for note '{text[:50]}...': {err}")
+                extracted = []
+
+            if extracted:
+                deduped = [str(e) for e in dict.fromkeys(extracted) if str(e).strip()]
+                if deduped:
+                    note['entities'] = deduped
+
+        return notes
+
+    def _enforce_entity_requirement(self, notes: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """根据配置过滤缺失实体的笔记"""
+
+        if not self.require_entities:
+            return notes
+
+        filtered: List[Dict[str, Any]] = []
+        for note in notes:
+            entities = note.get('entities', [])
+            if isinstance(entities, list) and any(str(e).strip() for e in entities):
+                filtered.append(note)
+            else:
+                self.stats['filtered_by_completeness'] += 1
+                logger.debug(f"Filtered note for missing entities: {note.get('text', '')}")
 
         return filtered
     
@@ -261,25 +322,57 @@ class NotesQualityFilter:
         if self.limit_strategy != 'bucketed':
             limited_notes = sorted_notes[:self.max_notes_per_chunk]
         else:
-            buckets = defaultdict(list)
-            overflow: List[Dict[str, Any]] = []
-
+            buckets: Dict[Any, List[Dict[str, Any]]] = defaultdict(list)
             for note in sorted_notes:
                 bucket_key = self._resolve_bucket_key(note)
-                if len(buckets[bucket_key]) < max(1, self.bucket_quota):
-                    buckets[bucket_key].append(note)
-                else:
-                    overflow.append(note)
+                buckets[bucket_key].append(note)
 
+            quota = max(1, self.bucket_quota)
             limited_notes: List[Dict[str, Any]] = []
-            for bucket_notes in buckets.values():
-                for note in bucket_notes:
-                    if len(limited_notes) < self.max_notes_per_chunk:
-                        limited_notes.append(note)
+            selected_ids: Set[int] = set()
+            overflow: List[Dict[str, Any]] = []
 
-            if len(limited_notes) < self.max_notes_per_chunk and overflow:
-                slots = self.max_notes_per_chunk - len(limited_notes)
-                limited_notes.extend(overflow[:slots])
+            for bucket_notes in buckets.values():
+                bucket_sorted = sorted(bucket_notes, key=lambda x: x.get('salience', 0.0), reverse=True)
+                primary = bucket_sorted[:quota]
+                extra = bucket_sorted[quota:]
+
+                for note in primary:
+                    note_id = id(note)
+                    if note_id in selected_ids:
+                        continue
+                    limited_notes.append(note)
+                    selected_ids.add(note_id)
+
+                overflow.extend(extra)
+
+            if len(limited_notes) > self.max_notes_per_chunk:
+                limited_notes = sorted(
+                    limited_notes,
+                    key=lambda x: x.get('salience', 0.0),
+                    reverse=True,
+                )[: self.max_notes_per_chunk]
+                selected_ids = {id(note) for note in limited_notes}
+            elif len(limited_notes) < self.max_notes_per_chunk:
+                overflow_sorted = sorted(overflow, key=lambda x: x.get('salience', 0.0), reverse=True)
+                for note in overflow_sorted:
+                    if len(limited_notes) >= self.max_notes_per_chunk:
+                        break
+                    note_id = id(note)
+                    if note_id in selected_ids:
+                        continue
+                    limited_notes.append(note)
+                    selected_ids.add(note_id)
+
+                if len(limited_notes) < self.max_notes_per_chunk:
+                    for note in sorted_notes:
+                        if len(limited_notes) >= self.max_notes_per_chunk:
+                            break
+                        note_id = id(note)
+                        if note_id in selected_ids:
+                            continue
+                        limited_notes.append(note)
+                        selected_ids.add(note_id)
 
         filtered_count = max(0, len(notes) - len(limited_notes))
         self.stats['filtered_by_limit'] += filtered_count
@@ -308,20 +401,15 @@ class NotesQualityFilter:
             self.stats[key] = 0
 
 
-def apply_quality_filter(notes: List[Dict[str, Any]], question: Optional[str] = None, accumulated_notes: Optional[List[Dict[str, Any]]] = None) -> tuple[List[Dict[str, Any]], Dict[str, int]]:
-    """
-    便捷函数：对笔记应用质量过滤
-    
-    Args:
-        notes: 待过滤的笔记列表
-        question: 查询问题
-        accumulated_notes: 已累积的笔记列表
-        
-    Returns:
-        tuple: (过滤后的笔记列表, 统计信息)
-    """
+def apply_quality_filter(
+    notes: List[Dict[str, Any]],
+    question: Optional[str] = None,
+    accumulated_notes: Optional[List[Dict[str, Any]]] = None,
+) -> tuple[List[Dict[str, Any]], Dict[str, int]]:
+    """便捷函数：对笔记应用质量过滤"""
+
     filter_instance = NotesQualityFilter(question=question)
     filtered_notes = filter_instance.filter_notes(notes, accumulated_notes)
     stats = filter_instance.get_stats()
-    
+
     return filtered_notes, stats
