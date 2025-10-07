@@ -323,6 +323,7 @@ notes_prompt:
   element_conservation: true        # 启用显式要素守恒提示（主体/时间/地点等不可拆散）
   enumeration_split: true           # 对枚举项重复主体拆分完整句
   enforce_entity_slot: true         # 强制提醒实体字段补全
+  preserve_relationships: true      # 保留人物关系信息
 
 note_completeness:
   require_sentence_terminal: true
