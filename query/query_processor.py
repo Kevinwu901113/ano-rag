@@ -216,31 +216,32 @@ Prompt Length: {len(prompt)} characters
         # 二跳补充
         prf_bridge_cfg = self._hybrid_search_cfg.get("prf_bridge", {})
         two_hop_cfg = self._hybrid_search_cfg.get("two_hop_expansion", {})
-        self.first_hop_topk = int(prf_bridge_cfg["first_hop_topk"])
-        self.prf_topk = int(prf_bridge_cfg["prf_topk"])
-        self.top_m_candidates = int(two_hop_cfg["top_m_candidates"])
+        self.first_hop_topk = int(prf_bridge_cfg.get("first_hop_topk", 2))
+        self.prf_topk = int(prf_bridge_cfg.get("prf_topk", 20))
+        self.top_m_candidates = int(two_hop_cfg.get("top_m_candidates", 20))
         
         # 融合/衰减权重
         weights_cfg = self._hybrid_search_cfg.get("weights", {})
-        ranking_cfg = self._ranking_cfg
+        ranking_defaults = {"dense_weight": 0.7, "bm25_weight": 0.3, "hop_decay": 0.8}
+        ranking_cfg = {**ranking_defaults, **self._ranking_cfg}
         self.dense_weight = float(weights_cfg.get("dense", ranking_cfg["dense_weight"]))
         self.bm25_weight = float(weights_cfg.get("bm25", ranking_cfg["bm25_weight"]))
-        self.hop_decay = float(ranking_cfg["hop_decay"])
+        self.hop_decay = float(ranking_cfg.get("hop_decay", ranking_defaults["hop_decay"]))
         
         # 安全/滤噪
         safety_cfg = self._safety_cfg
-        self.per_hop_keep_top_m = int(safety_cfg["per_hop_keep_top_m"])
-        self.lower_threshold = float(safety_cfg["lower_threshold"])
+        self.per_hop_keep_top_m = int(safety_cfg.get("per_hop_keep_top_m", 6))
+        self.lower_threshold = float(safety_cfg.get("lower_threshold", 0.1))
         
         # 聚类配置
         cluster_cfg = safety_cfg.get("cluster", {})
         self.cluster_enabled = bool(cluster_cfg.get("enabled", False))
-        self.cos_threshold = float(cluster_cfg["cos_threshold"])
-        self.keep_per_cluster = int(cluster_cfg["keep_per_cluster"])
+        self.cos_threshold = float(cluster_cfg.get("cos_threshold", 0.9))
+        self.keep_per_cluster = int(cluster_cfg.get("keep_per_cluster", 2))
         
         # 打包上限
         context_cfg = self._context_cfg
-        self.max_notes_for_llm = int(context_cfg["max_notes_for_llm"])
+        self.max_notes_for_llm = int(context_cfg.get("max_notes_for_llm", 50))
         self.max_tokens = context_cfg.get("max_tokens")  # 可选
 
         # Query rewriter functionality has been removed
