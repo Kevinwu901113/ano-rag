@@ -4,9 +4,12 @@
 """
 
 import hashlib
+from collections import defaultdict
 from typing import List, Dict, Any, Set, Optional
 from loguru import logger
 from config import config
+
+from utils.note_completeness import is_complete_sentence
 
 
 class NotesQualityFilter:
@@ -22,10 +25,19 @@ class NotesQualityFilter:
         self.question = question
         
         # 从配置加载过滤参数
-        self.min_chars = config.get('notes_llm.min_chars', 25)
-        self.max_chars = config.get('notes_llm.max_chars', 400)
-        self.min_salience = config.get('notes_llm.min_salience', 0.3)
-        self.max_notes_per_chunk = config.get('notes_llm.max_notes_per_chunk', 6)
+        notes_cfg = config.get('notes_llm', {}) or {}
+        quality_cfg = config.get('quality_filter', {}) or {}
+        limit_cfg = notes_cfg.get('limit') if isinstance(notes_cfg.get('limit'), dict) else {}
+
+        self.min_chars = quality_cfg.get('min_chars', notes_cfg.get('min_chars', 25))
+        self.max_chars = notes_cfg.get('max_chars', 400)
+        self.min_salience = notes_cfg.get('min_salience', 0.3)
+        self.max_notes_per_chunk = notes_cfg.get('max_notes_per_chunk', 6)
+        self.require_entities = bool(quality_cfg.get('require_entities', False))
+        self.limit_strategy = (limit_cfg or {}).get('strategy', 'top_n')
+        bucket_cfg = (limit_cfg or {}).get('bucket') if isinstance((limit_cfg or {}).get('bucket'), dict) else {}
+        self.bucket_by = (bucket_cfg or {}).get('by', 'paragraph_idx')
+        self.bucket_quota = int((bucket_cfg or {}).get('quota_per_bucket', 1))
         
         # 无question时降低salience阈值
         if not question:
@@ -42,6 +54,7 @@ class NotesQualityFilter:
         # 统计信息
         self.stats = {
             'total_input': 0,
+            'filtered_by_completeness': 0,
             'filtered_by_length': 0,
             'filtered_by_sent_count': 0,
             'filtered_by_salience': 0,
@@ -67,7 +80,10 @@ class NotesQualityFilter:
         
         self.stats['total_input'] = len(notes)
         logger.debug(f"Starting quality filtering for {len(notes)} notes")
-        
+
+        # 0. 完整性过滤
+        notes = self._filter_by_completeness(notes)
+
         # 1. 长度过滤
         notes = self._filter_by_length(notes)
         
@@ -83,13 +99,33 @@ class NotesQualityFilter:
         # 5. 去重过滤
         notes = self._filter_duplicates(notes, accumulated_notes)
         
-        # 6. 限额过滤（按salience排序后取前N个）
+        # 6. 限额过滤（按配置策略）
         notes = self._apply_limit(notes)
         
         self.stats['final_output'] = len(notes)
         logger.info(f"Quality filtering completed: {self.stats['total_input']} -> {self.stats['final_output']} notes")
         
         return notes
+
+    def _filter_by_completeness(self, notes: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """按完整命题要求过滤"""
+
+        filtered: List[Dict[str, Any]] = []
+        for note in notes:
+            text = str(note.get('text') or '').strip()
+            entities = note.get('entities', [])
+
+            if text and is_complete_sentence(text, entities):
+                if self.require_entities and (not isinstance(entities, list) or not entities):
+                    self.stats['filtered_by_completeness'] += 1
+                    logger.debug(f"Filtered note for missing entities: {text}")
+                    continue
+                filtered.append(note)
+            else:
+                self.stats['filtered_by_completeness'] += 1
+                logger.debug(f"Filtered note by completeness: {text}")
+
+        return filtered
     
     def _filter_by_length(self, notes: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """按文本长度过滤"""
@@ -216,20 +252,51 @@ class NotesQualityFilter:
         return False
     
     def _apply_limit(self, notes: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """应用数量限制，按salience排序后取前N个"""
+        """应用数量限制，支持桶策略"""
         if len(notes) <= self.max_notes_per_chunk:
             return notes
-        
-        # 按salience降序排序
+
         sorted_notes = sorted(notes, key=lambda x: x.get('salience', 0.0), reverse=True)
-        
-        # 取前max_notes_per_chunk个
-        limited_notes = sorted_notes[:self.max_notes_per_chunk]
-        
-        self.stats['filtered_by_limit'] = len(notes) - len(limited_notes)
-        logger.debug(f"Applied limit: kept top {len(limited_notes)} notes out of {len(notes)}")
-        
+
+        if self.limit_strategy != 'bucketed':
+            limited_notes = sorted_notes[:self.max_notes_per_chunk]
+        else:
+            buckets = defaultdict(list)
+            overflow: List[Dict[str, Any]] = []
+
+            for note in sorted_notes:
+                bucket_key = self._resolve_bucket_key(note)
+                if len(buckets[bucket_key]) < max(1, self.bucket_quota):
+                    buckets[bucket_key].append(note)
+                else:
+                    overflow.append(note)
+
+            limited_notes: List[Dict[str, Any]] = []
+            for bucket_notes in buckets.values():
+                for note in bucket_notes:
+                    if len(limited_notes) < self.max_notes_per_chunk:
+                        limited_notes.append(note)
+
+            if len(limited_notes) < self.max_notes_per_chunk and overflow:
+                slots = self.max_notes_per_chunk - len(limited_notes)
+                limited_notes.extend(overflow[:slots])
+
+        filtered_count = max(0, len(notes) - len(limited_notes))
+        self.stats['filtered_by_limit'] += filtered_count
+        if filtered_count > 0:
+            logger.debug(
+                f"Applied {self.limit_strategy} limit: kept {len(limited_notes)} of {len(notes)} notes"
+            )
+
         return limited_notes
+
+    def _resolve_bucket_key(self, note: Dict[str, Any]) -> Any:
+        if self.bucket_by == 'paragraph_idx':
+            paragraph_idxs = note.get('paragraph_idxs') or []
+            if isinstance(paragraph_idxs, list) and paragraph_idxs:
+                return paragraph_idxs[0]
+            return f"chunk_{note.get('chunk_index')}"
+        return note.get(self.bucket_by)
     
     def get_stats(self) -> Dict[str, int]:
         """获取过滤统计信息"""

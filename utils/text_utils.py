@@ -108,6 +108,42 @@ class TextUtils:
                 filtered.append(ent_clean)
 
         return filtered
+
+    @staticmethod
+    def extract_entities_fallback(
+        text: str,
+        *,
+        min_len: int = 2,
+        allow_types: List[str] | None = None,
+    ) -> List[str]:
+        """轻量级实体回补，基于启发式正则匹配"""
+        if not text:
+            return []
+
+        # 使用现有的英文专有名词启发式
+        candidates = TextUtils.extract_entities(text, confidence_threshold=0.2)
+
+        seen = set()
+        entities: List[str] = []
+        for candidate in candidates:
+            normalized = candidate.strip()
+            if len(normalized) < max(1, min_len):
+                continue
+            if normalized.lower() in seen:
+                continue
+            seen.add(normalized.lower())
+            entities.append(normalized)
+
+        # 对中文大写字母不敏感，补充对专名的简单匹配
+        chinese_candidates = re.findall(r'[\u4e00-\u9fff]{%d,}' % max(1, min_len), text)
+        for candidate in chinese_candidates:
+            normalized = candidate.strip()
+            key = normalized.lower()
+            if key not in seen:
+                seen.add(key)
+                entities.append(normalized)
+
+        return entities
     
     @staticmethod
     def calculate_similarity_keywords(text1: str, text2: str) -> float:

@@ -3,12 +3,12 @@ from loguru import logger
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import threading
 import time
-import json
 from .atomic_note_generator import AtomicNoteGenerator
 from .local_llm import LocalLLM
 from .ollama_client import OllamaClient
 from .lmstudio_client import LMStudioClient
 from utils.json_utils import extract_json_from_response
+from utils.notes_parser import parse_notes_response
 from config import config
 from .prompts import (
     ATOMIC_NOTEGEN_SYSTEM_PROMPT,
@@ -57,7 +57,7 @@ class ParallelTaskAtomicNoteGenerator(AtomicNoteGenerator):
         """初始化并行处理客户端"""
         if not self.parallel_enabled or self.parallel_strategy != 'task_division':
             return
-            
+
         try:
             # 初始化Ollama客户端
             ollama_config = self.parallel_config.get('ollama', {})
@@ -81,6 +81,24 @@ class ParallelTaskAtomicNoteGenerator(AtomicNoteGenerator):
         except Exception as e:
             logger.error(f"Failed to initialize parallel clients: {e}")
             self.parallel_enabled = False
+
+    def _normalize_to_notes(self, note_data):
+        """dict -> [dict], list[dict] -> list[dict], "~"/None/"" -> []"""
+        if note_data is None:
+            return []
+        if isinstance(note_data, str):
+            s = note_data.strip()
+            if s in ("", "~"):
+                return []
+        if isinstance(note_data, dict):
+            return [note_data]
+        if isinstance(note_data, list):
+            return [x for x in note_data if isinstance(x, dict)]
+        return []
+
+    def _batch_convert(self, note_data, chunk_data):
+        notes_raw = self._normalize_to_notes(note_data)
+        return [self._convert_to_atomic_note_format(n, chunk_data) for n in notes_raw]
     
     def generate_atomic_notes(self, text_chunks: List[Dict[str, Any]], progress_tracker: Optional[Any] = None) -> List[Dict[str, Any]]:
         """生成原子笔记的主入口，支持并行任务分配"""
@@ -94,106 +112,131 @@ class ParallelTaskAtomicNoteGenerator(AtomicNoteGenerator):
     def _generate_atomic_notes_parallel_task_division(self, text_chunks: List[Dict[str, Any]], progress_tracker: Optional[Any] = None) -> List[Dict[str, Any]]:
         """使用任务分配策略并行生成原子笔记"""
         system_prompt = self._get_atomic_note_system_prompt()
-        atomic_notes = [None] * len(text_chunks)
-        
+        all_notes = []
+
         # 任务分配
         ollama_tasks, lmstudio_tasks = self._allocate_tasks(text_chunks)
-        
+
         logger.info(f"Task allocation: Ollama={len(ollama_tasks)}, LM Studio={len(lmstudio_tasks)}")
-        
+
         # 并行处理 - 减少并发数量以避免Ollama过载
         max_workers = min(4, len(text_chunks))  # 最多4个并发任务
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             futures = []
-            
+            future_to_meta = {}
+
             # 提交Ollama任务
             for chunk_data, index in ollama_tasks:
                 future = executor.submit(self._process_with_ollama, chunk_data, index, system_prompt)
-                futures.append((future, index, 'ollama'))
-            
+                futures.append(future)
+                future_to_meta[future] = (index, 'ollama', chunk_data)
+
             # 提交LM Studio任务
             for chunk_data, index in lmstudio_tasks:
                 future = executor.submit(self._process_with_lmstudio, chunk_data, index, system_prompt)
-                futures.append((future, index, 'lmstudio'))
-            
+                futures.append(future)
+                future_to_meta[future] = (index, 'lmstudio', chunk_data)
+
             # 收集结果
-            completed_count = 0
-            for future, index, client_type in futures:
+            timeout_value = self.fallback_timeout if self.enable_fallback else None
+            for future in as_completed(futures):
+                index, client_type, chunk_data = future_to_meta.get(future, (-1, 'unknown', {}))
                 try:
                     # 使用更长的超时时间，并添加详细的超时信息
-                    timeout_value = self.fallback_timeout if self.enable_fallback else None
                     logger.debug(f"Waiting for {client_type} task {index} with timeout {timeout_value}s")
-                    
-                    note = future.result(timeout=timeout_value)
-                    atomic_notes[index] = note
-                    
+
+                    batch = future.result(timeout=timeout_value)
+                    normalized_batch: List[Dict[str, Any]] = []
+                    if isinstance(batch, list):
+                        normalized_batch = [b for b in batch if isinstance(b, dict)]
+                    elif isinstance(batch, dict):
+                        normalized_batch = [batch]
+                    elif batch is not None:
+                        logger.warning(
+                            f"Unexpected batch type from {client_type} task {index}: {type(batch)}"
+                        )
+
+                    if normalized_batch:
+                        all_notes.extend(normalized_batch)
+
                     with self._stats_lock:
                         if client_type == 'ollama':
                             self.stats['ollama_success'] += 1
                         else:
                             self.stats['lmstudio_success'] += 1
-                    
-                    completed_count += 1
+
                     if progress_tracker:
                         progress_tracker.update(1)
-                        
+
                 except Exception as e:
                     # 获取详细的错误信息
                     error_type = type(e).__name__
                     error_msg = str(e) if str(e) else f"Unknown error in {client_type} processing"
-                    
+
                     # 特殊处理TimeoutError
                     if isinstance(e, TimeoutError):
                         error_msg = f"Task timeout after {self.fallback_timeout}s - consider increasing fallback_timeout in config"
                         logger.error(f"Task failed for index {index} using {client_type}: [{error_type}] {error_msg}")
                     else:
                         logger.error(f"Task failed for index {index} using {client_type}: [{error_type}] {error_msg}")
-                    
+
                     # 获取完整的traceback信息
                     import traceback
                     tb_str = traceback.format_exc()
                     logger.error(f"Full traceback for {client_type} task {index}:\n{tb_str}")
-                    
+
                     with self._stats_lock:
                         if client_type == 'ollama':
                             self.stats['ollama_errors'] += 1
                         else:
                             self.stats['lmstudio_errors'] += 1
-                    
+
                     # 失败回退处理
                     if self.enable_fallback:
                         try:
-                            fallback_note = self._fallback_process(text_chunks[index], system_prompt, client_type)
-                            atomic_notes[index] = fallback_note
-                            with self._stats_lock:
-                                self.stats['fallback_count'] += 1
+                            fallback_result = self._fallback_process(chunk_data, system_prompt, client_type)
                         except Exception as fallback_error:
                             logger.error(f"Fallback also failed for index {index}: {fallback_error}")
-                            atomic_notes[index] = self._create_fallback_note(text_chunks[index])
+                            fallback_result = []
+
+                        normalized_fallback: List[Dict[str, Any]] = []
+                        if isinstance(fallback_result, list):
+                            normalized_fallback = [item for item in fallback_result if isinstance(item, dict)]
+                        elif isinstance(fallback_result, dict):
+                            normalized_fallback = [fallback_result]
+                        elif fallback_result is not None:
+                            logger.warning(
+                                f"Unexpected fallback type for index {index}: {type(fallback_result)}"
+                            )
+
+                        if not normalized_fallback:
+                            normalized_fallback = [self._create_fallback_note(chunk_data)]
+
+                        all_notes.extend(normalized_fallback)
+                        with self._stats_lock:
+                            self.stats['fallback_count'] += 1
                     else:
-                        atomic_notes[index] = self._create_fallback_note(text_chunks[index])
-                    
-                    completed_count += 1
+                        all_notes.append(self._create_fallback_note(chunk_data))
                     if progress_tracker:
                         progress_tracker.update(1)
-        
+
         # 后处理
-        for i, note in enumerate(atomic_notes):
+        for i, note in enumerate(all_notes):
             if note is None:
-                atomic_notes[i] = self._create_fallback_note(text_chunks[i] if i < len(text_chunks) else {'text': ''})
-            
-            if not isinstance(note, dict):
-                atomic_notes[i] = {'content': str(note), 'error': True}
-            
-            atomic_notes[i]['note_id'] = f"note_{i:06d}"
-            atomic_notes[i]['created_at'] = self._get_timestamp()
-        
+                all_notes[i] = self._create_fallback_note({'text': ''})
+
+            if not isinstance(all_notes[i], dict):
+                all_notes[i] = {'content': str(note), 'error': True}
+
+            all_notes[i]['note_id'] = f"note_{i:06d}"
+            all_notes[i]['created_at'] = self._get_timestamp()
+
         # 记录统计信息
         if self.monitoring_enabled:
             self._log_performance_stats()
-        
-        logger.info(f"Parallel task division completed: {len(atomic_notes)} notes generated")
-        return atomic_notes
+
+        logger.info(f"Parallel task division completed: {len(all_notes)} notes generated")
+        return all_notes
     
     def _allocate_tasks(self, text_chunks: List[Dict[str, Any]]) -> tuple:
         """分配任务给Ollama和LM Studio"""
@@ -224,7 +267,7 @@ class ParallelTaskAtomicNoteGenerator(AtomicNoteGenerator):
         
         return ollama_tasks, lmstudio_tasks
     
-    def _process_with_ollama(self, chunk_data: Dict[str, Any], index: int, system_prompt: str) -> Dict[str, Any]:
+    def _process_with_ollama(self, chunk_data: Dict[str, Any], index: int, system_prompt: str) -> Union[List[Dict[str, Any]], Dict[str, Any]]:
         """使用Ollama处理单个任务"""
         start_time = time.time()
         try:
@@ -246,24 +289,31 @@ class ParallelTaskAtomicNoteGenerator(AtomicNoteGenerator):
             
             # 解析响应
             cleaned_response = extract_json_from_response(response)
-            if not cleaned_response:
-                logger.error(f"Ollama task {index}: No valid JSON in response: {response[:200]}...")
-                raise ValueError(f"No valid JSON found in Ollama response: {response[:200]}...")
-            
-            logger.debug(f"Ollama task {index}: Cleaned JSON: {cleaned_response[:300]}...")
-            
-            note_data = json.loads(cleaned_response)
-            if isinstance(note_data, list) and note_data:
-                note_data = note_data[0]
-            
-            result = self._create_atomic_note_from_data(note_data, chunk_data)
-            
+            parse_target = cleaned_response or response
+
+            logger.debug(
+                f"Ollama task {index}: Cleaned JSON candidate length: {len(parse_target)}"
+            )
+
+            parsed_notes = parse_notes_response(parse_target)
+            if parsed_notes is None:
+                logger.error(
+                    f"Ollama task {index}: No valid JSON in response: {response[:200]}..."
+                )
+                raise ValueError(
+                    f"No valid JSON found in Ollama response: {response[:200]}..."
+                )
+
+            results = self._batch_convert(parsed_notes, chunk_data)
+
             # Debug log the generated content
-            if result and 'content' in result:
-                content_length = len(result['content']) if result['content'] else 0
-                logger.debug(f"Ollama task {index}: Generated content length: {content_length}, preview: {result['content'][:100] if result['content'] else 'EMPTY'}")
+            if results:
+                first_note = results[0]
+                content = first_note.get('content') if isinstance(first_note, dict) else None
+                content_length = len(content) if content else 0
+                logger.debug(f"Ollama task {index}: Generated {len(results)} notes, first content length: {content_length}, preview: {content[:100] if content else 'EMPTY'}")
             else:
-                logger.debug(f"Ollama task {index}: No content field in result: {result}")
+                logger.debug(f"Ollama task {index}: No valid notes produced from response")
             
             # 记录处理时间
             processing_time = time.time() - start_time
@@ -271,7 +321,7 @@ class ParallelTaskAtomicNoteGenerator(AtomicNoteGenerator):
                 self.stats['ollama_total_time'] += processing_time
             
             logger.debug(f"Ollama task {index}: Completed in {processing_time:.2f}s")
-            return result
+            return results
             
         except Exception as e:
             processing_time = time.time() - start_time
@@ -291,7 +341,7 @@ class ParallelTaskAtomicNoteGenerator(AtomicNoteGenerator):
             
             raise e
     
-    def _process_with_lmstudio(self, chunk_data: Dict[str, Any], index: int, system_prompt: str) -> Dict[str, Any]:
+    def _process_with_lmstudio(self, chunk_data: Dict[str, Any], index: int, system_prompt: str) -> Union[List[Dict[str, Any]], Dict[str, Any]]:
         """使用LM Studio处理单个任务"""
         start_time = time.time()
         try:
@@ -312,31 +362,38 @@ class ParallelTaskAtomicNoteGenerator(AtomicNoteGenerator):
             
             # 解析响应
             cleaned_response = extract_json_from_response(response)
-            if not cleaned_response:
-                logger.error(f"LMStudio task {index}: No valid JSON in response: {response[:200]}...")
-                raise ValueError(f"No valid JSON found in LM Studio response: {response[:200]}...")
-            
-            logger.debug(f"LMStudio task {index}: Cleaned JSON: {cleaned_response[:300]}...")
-            
-            note_data = json.loads(cleaned_response)
-            if isinstance(note_data, list) and note_data:
-                note_data = note_data[0]
-            
-            result = self._create_atomic_note_from_data(note_data, chunk_data)
-            
+            parse_target = cleaned_response or response
+
+            logger.debug(
+                f"LMStudio task {index}: Cleaned JSON candidate length: {len(parse_target)}"
+            )
+
+            parsed_notes = parse_notes_response(parse_target)
+            if parsed_notes is None:
+                logger.error(
+                    f"LMStudio task {index}: No valid JSON in response: {response[:200]}..."
+                )
+                raise ValueError(
+                    f"No valid JSON found in LM Studio response: {response[:200]}..."
+                )
+
+            results = self._batch_convert(parsed_notes, chunk_data)
+
             # Debug log the generated content
-            if result and 'content' in result:
-                content_length = len(result['content']) if result['content'] else 0
-                logger.debug(f"LMStudio task {index}: Generated content length: {content_length}, preview: {result['content'][:100] if result['content'] else 'EMPTY'}")
+            if results:
+                first_note = results[0]
+                content = first_note.get('content') if isinstance(first_note, dict) else None
+                content_length = len(content) if content else 0
+                logger.debug(f"LMStudio task {index}: Generated {len(results)} notes, first content length: {content_length}, preview: {content[:100] if content else 'EMPTY'}")
             else:
-                logger.debug(f"LMStudio task {index}: No content field in result: {result}")
+                logger.debug(f"LMStudio task {index}: No valid notes produced from response")
             
             # 记录处理时间
             processing_time = time.time() - start_time
             with self._stats_lock:
                 self.stats['lmstudio_total_time'] += processing_time
             
-            return result
+            return results
             
         except Exception as e:
             processing_time = time.time() - start_time
@@ -344,7 +401,7 @@ class ParallelTaskAtomicNoteGenerator(AtomicNoteGenerator):
                 self.stats['lmstudio_total_time'] += processing_time
             raise e
     
-    def _process_chunk_lmstudio(self, chunk_data: Dict[str, Any], system_prompt: str) -> Dict[str, Any]:
+    def _process_chunk_lmstudio(self, chunk_data: Dict[str, Any], system_prompt: str) -> Union[List[Dict[str, Any]], Dict[str, Any]]:
         """使用LM Studio处理单个chunk"""
         try:
             text = chunk_data.get('text', '')
@@ -360,26 +417,35 @@ class ParallelTaskAtomicNoteGenerator(AtomicNoteGenerator):
             
             raw_response = response.get('content', '')
             logger.debug(f"LM Studio raw response for chunk: {raw_response[:200]}...")
-            
+
+            cleaned_response = extract_json_from_response(raw_response)
+
             # 解析响应
-            parsed_notes = parse_notes_response(raw_response)
-            logger.debug(f"Parsed {len(parsed_notes)} notes from LM Studio response")
-            
+            parsed_notes = parse_notes_response(cleaned_response or raw_response)
+            parsed_count = len(parsed_notes) if isinstance(parsed_notes, list) else 0
+            logger.debug(f"Parsed {parsed_count} notes from LM Studio response")
+
             if not parsed_notes:
                 logger.warning("No notes parsed from LM Studio response, creating fallback")
                 return self._create_fallback_note(chunk_data)
-            
+
             # 转换为原子笔记格式
-            atomic_note = self._convert_to_atomic_note_format(parsed_notes[0], chunk_data)
-            logger.debug(f"Generated atomic note content length: {len(atomic_note.get('content', ''))}")
-            
-            return atomic_note
+            results = self._batch_convert(parsed_notes, chunk_data)
+            if not results:
+                logger.warning("Parsed notes could not be converted, creating fallback")
+                return self._create_fallback_note(chunk_data)
+
+            first_note = results[0]
+            content = first_note.get('content') if isinstance(first_note, dict) else ''
+            logger.debug(f"Generated {len(results)} atomic notes, first content length: {len(content)}")
+
+            return results
             
         except Exception as e:
             logger.error(f"LM Studio processing failed: {e}")
             return self._create_fallback_note(chunk_data)
             
-    def _fallback_process(self, chunk_data: Dict[str, Any], system_prompt: str, failed_client: str) -> Dict[str, Any]:
+    def _fallback_process(self, chunk_data: Dict[str, Any], system_prompt: str, failed_client: str) -> Union[List[Dict[str, Any]], Dict[str, Any]]:
         """回退处理机制，包含重试逻辑"""
         logger.info(f"Attempting fallback for failed {failed_client} task")
         
@@ -412,24 +478,22 @@ class ParallelTaskAtomicNoteGenerator(AtomicNoteGenerator):
         logger.warning("All parallel clients failed, using original LLM")
         return self._fallback_to_original_llm(chunk_data, system_prompt)
     
-    def _fallback_to_original_llm(self, chunk_data: Dict[str, Any], system_prompt: str) -> Dict[str, Any]:
+    def _fallback_to_original_llm(self, chunk_data: Dict[str, Any], system_prompt: str) -> Union[List[Dict[str, Any]], Dict[str, Any]]:
         """使用原始LLM作为最终回退"""
         try:
             text = chunk_data.get('text', '')
             prompt = ATOMIC_NOTEGEN_PROMPT.format(text=text)
             
             response = self.llm.generate(prompt, system_prompt)
-            
+
             # 解析响应
             cleaned_response = extract_json_from_response(response)
-            if not cleaned_response:
-                raise ValueError(f"No valid JSON found in original LLM response")
-            
-            note_data = json.loads(cleaned_response)
-            if isinstance(note_data, list) and note_data:
-                note_data = note_data[0]
-            
-            return self._create_atomic_note_from_data(note_data, chunk_data)
+            parse_target = cleaned_response or response
+            parsed_notes = parse_notes_response(parse_target)
+            if parsed_notes is None:
+                raise ValueError("No valid JSON found in original LLM response")
+
+            return self._batch_convert(parsed_notes, chunk_data)
             
         except Exception as e:
             logger.error(f"Original LLM fallback also failed: {e}")

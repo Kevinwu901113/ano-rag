@@ -264,7 +264,7 @@ atomic_note_generation:
   # 任务分配配置（task_division策略）
   task_division:
     enabled: true               # 是否启用任务分配策略
-    allocation_method: "round_robin"  # 分配方法：round_robin轮询|batch_split批次分割
+    allocation_method: "batch_split"  # 分配方法：round_robin轮询|batch_split批次分割
     enable_fallback: true       # 是否启用失败回退机制
     fallback_timeout: 60        # 回退超时时间（秒）- 增加到60秒以避免超时错误
     
@@ -291,23 +291,84 @@ atomic_note_generation:
 
 # 原子笔记生成优化配置
 notes_llm:
+  max_note_chars: 200
   # 流式处理早停机制配置
   stream_early_stop: true      # 启用流式处理早停机制
   sentinel_char: "~"           # 哨兵字符，表示0条笔记，首字符为此字符时立即停止
   enable_fast_path: true       # 启用快速路径优化
   retry_once_on_parse_error: true  # 解析错误时重试一次
   shorten_on_retry_chars: 1000 # 重试时缩短chunk长度
-  min_chars: 25                # 笔记最小字符数
+  min_chars: 20                # 笔记最小字符数
   max_chars: 400               # 笔记最大字符数
   min_salience: 0.3            # 最小显著性阈值
-  max_notes_per_chunk: 6       # 每个chunk最大笔记数
+  max_notes_per_chunk: 12      # 每个chunk最大笔记数
   enable_rule_fallback: true   # 启用规则回退机制
+  entities_fallback:
+    enabled: true
+    min_len: 2
+    types: ["PERSON", "ORG", "GPE", "WORK_OF_ART", "EVENT"]
+  limit:
+    strategy: bucketed
+    bucket:
+      by: paragraph_idx
+      quota_per_bucket: 1
   # LLM调用参数优化
   llm_params:
     temperature: 0             # 生成温度设为0，确保确定性输出
     top_p: 0                   # top_p设为0，进一步确保确定性
     max_tokens: 128            # 限制输出长度，提高响应速度
     stop: ["\n\n", "~"]        # 停止标记，遇到双换行或哨兵字符时停止
+
+notes_prompt:
+  element_conservation: true        # 启用显式要素守恒提示（主体/时间/地点等不可拆散）
+  enumeration_split: true           # 对枚举项重复主体拆分完整句
+  enforce_entity_slot: true         # 强制提醒实体字段补全
+
+note_completeness:
+  require_sentence_terminal: true
+  allowed_sentence_terminals: ["。", ".", "!", "?"]
+
+  # 长度下限（避免标题/短片段）
+  min_word_count_en: 4
+  min_char_count_zh: 8
+
+  # 句子必须包含谓词（英文/中文动词线索）
+  verb_patterns_en:
+    - "\\b(is|are|was|were|has|have|had|includes?|included|include|acquired|founded|located|born|won|announced|reported|published|proposed|launched)\\b"
+  verb_patterns_zh:
+    - "(是|为|位于|属于|出生|成立|获得|提出|报道|宣布|包含|推出|发布)"
+
+  # 禁止以从属/介词等开头（英文/中文）
+  bad_starts_en:
+    - "^(because|due to|such as|including|with|without|after|before)\\b"
+  bad_starts_zh:
+    - "^(因为|由于|其中|包括|以及)"
+
+  # entities 字段要求
+  require_entities: false
+
+quality_filter:
+  require_entities: true
+  min_chars: 20
+
+note_recovery:
+  enable: true
+  jaccard_threshold: 0.6
+  merge_threshold: 0.35
+  max_merge_tokens: 30
+  max_new_notes: 3
+
+evaluation:
+  coverage_thresholds:
+    warning: 0.7
+    critical: 0.5
+  coverage_report_path: "debug/coverage_report.json"
+  coverage:
+    threshold: 0.6
+    critical_threshold: 0.5
+    min_sentence_tokens: 6
+    report_path: "debug/coverage_report.json"
+    missing_sentences_path: "debug/missing_sentences.jsonl"
 
 # 增强关系提取配置
 enhanced_relation_extraction:

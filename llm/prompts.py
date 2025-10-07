@@ -1,6 +1,9 @@
 """Centralized prompt templates used across the project."""
 
 from typing import Any, Dict, List
+import textwrap
+
+from config import config
 
 # Atomic note generation
 ATOMIC_NOTE_SYSTEM_PROMPT = """
@@ -45,60 +48,92 @@ EXTRACT_ENTITIES_PROMPT = """
 
 # AtomicNoteGenerator
 ATOMIC_NOTEGEN_SYSTEM_PROMPT = """
-你是一个专业的知识提取和整理专家。你的任务是将给定的文本转换为高质量的原子笔记。
+You are an expert fact extraction engine that converts a text chunk into minimal atomic notes.
 
-原子笔记的特点：
-1. 每个笔记包含一个独立、完整的知识点
-2. 内容简洁明了，避免冗余
-3. 保留关键信息和必要的上下文
-4. 便于后续的检索和组合
-5. 必须使用英文
+Extraction rules:
+- Identify every explicit, verifiable fact stated in the text. Each fact must stand on its own.
+- Each note must contain exactly ONE fact and be expressed as a single English sentence.
+- Keep wording faithful to the source; never speculate, merge multiple facts, or invent details.
+- Each sentence must be shorter than or equal to 200 characters after trimming.
+- If the chunk contains no complete fact, return an empty array.
 
-提取要求：
-1. content: 提取核心知识点，保持完整性和准确性，包含所有重要信息
-2. keywords: 提取3-5个关键词，有助于检索
-3. entities: 识别人名、地名、机构名、专业术语等
-4. concepts: 识别重要概念和理论
-5. importance_score: 评估内容重要性（0-1分）
-6. note_type: 分类为fact（事实）、concept（概念）、procedure（流程）、example（示例）
-
-DECISION RULES:
-- 若0条笔记：只输出一个字符~（或输出最短合法JSON[]），二选一；不得输出其他字符/空格/换行。
-- 若≥1条笔记：输出纯JSON数组，每个对象包含text,sent_count,salience,local_spans,entities,years,quality_flags；不得生成解释或Markdown。
-
-重要：你必须严格按照JSON格式返回结果，不要添加任何解释文字或markdown标记。只返回纯JSON对象。
+Output contract (STRICT):
+- Always return a JSON array. Each element is an object with the keys:
+  text (string), sent_count (int), salience (float 0~1),
+  local_spans (array), entities (array), years (array), quality_flags (array).
+- sent_count must be 1 for every emitted note.
+- When no fact exists, return [] exactly.
+- Output raw JSON only (no prose, markdown, or comments).
 """
 
 ATOMIC_NOTEGEN_PROMPT = """
-请将以下文本转换为原子笔记。每个原子笔记应该包含一个独立的知识点。
-
-文本内容：
+TEXT:
 {text}
 
-请严格按照以下JSON数组格式返回，每个对象包含以下字段：
+Extract all explicit single-fact statements from the TEXT.
+Return ONLY a JSON array of objects with the shape:
 [
-    {{
-        "text": "原子笔记的完整内容，包含所有重要信息",
-        "sent_count": 1,
-        "salience": 0.8,
-        "local_spans": [],
-        "entities": ["实体1", "实体2"],
-        "years": [],
-        "quality_flags": ["OK"]
-    }}
+  {{"text":"<one factual sentence>","sent_count":1,"salience":0.8,"local_spans":[],"entities":["Entity"],"years":[],"quality_flags":["OK"]}}
 ]
-
-注意：
-- text: 原子笔记的完整文本内容
-- sent_count: 句子数量（正整数）
-- salience: 重要性评分（0到1之间的数字）
-- local_spans: 本地文本片段（通常为空数组）
-- entities: 识别出的实体列表
-- years: 相关年份（如果有的话）
-- quality_flags: 质量标记，通常为["OK"]
-- 如果没有有效的原子笔记，返回空数组[]
-- 只返回JSON数组，不要包含markdown代码块标记
+If the TEXT has no complete fact, respond with [].
 """
+
+
+def build_multi_note_prompts() -> tuple[str, str]:
+    """Construct config-driven prompts for multi-note extraction."""
+
+    completeness_cfg = config.get("note_completeness", {}) or {}
+    notes_cfg = config.get("notes_llm", {}) or {}
+
+    max_len = int(notes_cfg.get("max_note_chars", 200))
+    terminals = completeness_cfg.get("allowed_sentence_terminals") or ["。", ".", "!", "?"]
+    terminals_display = ", ".join(str(t) for t in terminals)
+
+    coverage_rules = []
+    prompt_cfg = config.get("notes_prompt", {}) or {}
+    if prompt_cfg.get("element_conservation", True):
+        coverage_rules.append(
+            "- Element conservation: keep temporal/location/brand/quantity modifiers attached to the same sentence. If a source sentence must be split, repeat the subject so every clause is complete and never leave fragments like \"including ...\", \"in 2019 ...\", or the Chinese equivalents (因为/由于/其中)."
+        )
+    if prompt_cfg.get("enumeration_split", True):
+        coverage_rules.append(
+            "- Enumeration expansion: when the source enumerates parallel objects (e.g., \"X has A, B, C\"), duplicate the subject and emit one self-contained sentence per object."
+        )
+
+    if prompt_cfg.get("enforce_entity_slot", True):
+        coverage_rules.append(
+            "- Entities: populate the entities field with the main subject and key objects for every fact whenever they appear in the text."
+        )
+
+    coverage_rules_text = "\n".join(coverage_rules)
+
+    system_prompt = textwrap.dedent(
+        f"""
+        You split a text chunk into minimal atomic facts.
+
+        Rules (config-driven):
+        - Each note MUST be a complete proposition (explicit subject + main verb).
+        - Keep modifiers (time/place/quantity) inside the same note, do NOT split them.
+        {coverage_rules_text}
+        - Exactly 1 sentence, end with one of [{terminals_display}].
+        - Max length per note: {max_len} characters.
+        - If NO complete facts, return [] (JSON array).
+        - Output: JSON ARRAY of objects with keys:
+          text, sent_count(=1), salience(0..1), local_spans, entities, years, quality_flags.
+        - No markdown.
+        """
+    ).strip()
+
+    user_prompt = textwrap.dedent(
+        """
+        CHUNK:
+        {chunk}
+
+        Return ONLY the JSON array following the contract above.
+        """
+    ).strip()
+
+    return system_prompt, user_prompt
 
 # Query rewriting
 QUERY_ANALYSIS_SYSTEM_PROMPT = """
@@ -190,10 +225,16 @@ You are a precise open-domain QA assistant.
 
 Use ONLY the provided CONTEXT.
 
+CONTENT PRIORITY RULE:
+- The CONTEXT is ordered by relevance and importance
+- Content appearing EARLIER in the CONTEXT has HIGHER priority and weight
+- When multiple potential answers exist, PRIORITIZE information from earlier paragraphs
+- Earlier paragraphs should be considered more authoritative and reliable
+
 Hard rules:
 1) Final answer MUST be an exact substring from the CONTEXT (verbatim). Do not paraphrase.
 2) NEVER output: "Insufficient information", "No spouse mentioned", or any refusal phrase.
-3) If multiple candidates appear, choose the one that most directly answers the question.
+3) If multiple candidates appear, choose the one that most directly answers the question, with PREFERENCE for answers from earlier paragraphs.
 4) For lists, keep the order as it appears in CONTEXT and join with ", ".
 5) Keep original surface form for numbers/dates (units, punctuation).
 6) Output VALID JSON ONLY with fields:
@@ -202,6 +243,7 @@ Hard rules:
    - The FIRST id MUST be the paragraph that contains the final answer substring
    - The remaining ids are bridging paragraphs (may not contain the answer substring)
    - Do not repeat ids; prioritize paragraphs with high entity overlap with the question or answer paragraph
+   - When selecting support paragraphs, give preference to earlier paragraphs (lower P{idx} numbers)
 8) "support_idxs" MUST NOT be empty if the answer substring appears in any paragraph.
 9) support_idxs 只能来自上文 CONTEXT 中出现的 [P{idx}]。
 10) 禁止发明新的 id；如果不确定，请减少到已出现的 id。
@@ -256,6 +298,10 @@ def build_context_prompt_with_passages(notes: List[Dict[str, Any]], question: st
     Returns:
         (packed_text, passages_by_idx, packed_order): The formatted prompt, a dict mapping paragraph_idx to content, and the order of paragraphs in prompt
     """
+    import os
+    import json
+    from loguru import logger
+    
     context_parts: List[str] = []
     passages_by_idx: Dict[int, str] = {}
     packed_order: List[int] = []
@@ -285,6 +331,46 @@ def build_context_prompt_with_passages(notes: List[Dict[str, Any]], question: st
 
     packed_text = "\n\n".join(context_parts)
     prompt = FINAL_ANSWER_PROMPT.format(context=packed_text, query=question)
+    
+    # 记录实际进入 prompt 的 Pidx 列表
+    used_idx_list = packed_order.copy()
+    
+    # 写入 used_passages.json 到 debug 目录
+    try:
+        # 获取运行目录，优先使用环境变量或默认目录
+        run_dir = os.environ.get('ANORAG_WORK_DIR', './result')
+        
+        # 创建 debug 目录结构：./result/3/debug/2hop_xxx/
+        debug_dir = os.path.join(run_dir, "3", "debug", "2hop__" + str(int(__import__('time').time())))
+        os.makedirs(debug_dir, exist_ok=True)
+        
+        used_passages_path = os.path.join(debug_dir, "used_passages.json")
+        
+        # 统一转成字符串类型
+        used_idx_list_str = [str(idx) for idx in used_idx_list]
+        
+        # 构建记录数据
+        used_passages_data = {
+            "id": f"query_{int(__import__('time').time())}",
+            "used_idx_list": used_idx_list_str,
+            "count": len(used_idx_list_str),
+            "question": question,
+            "passages_by_idx": passages_by_idx,
+            "timestamp": __import__('time').time()
+        }
+        
+        # 写入文件
+        with open(used_passages_path, 'w', encoding='utf-8') as f:
+            json.dump(used_passages_data, f, ensure_ascii=False, indent=2)
+            
+        logger.info(f"Used passages written to {used_passages_path}")
+    except Exception as e:
+        logger.warning(f"Failed to write used_passages.json: {e}")
+    
+    # 在日志里打印完整列表
+    print(f"LLM prompt using Pidx={used_idx_list}")
+    logger.info(f"LLM prompt using Pidx={used_idx_list}")
+    
     return prompt, passages_by_idx, packed_order
 
 EVALUATE_ANSWER_SYSTEM_PROMPT = """
@@ -346,5 +432,3 @@ Note:
 - Each sub-question should be a complete English sentence
 - Number of sub-questions should be between 2-5
 """
-
-

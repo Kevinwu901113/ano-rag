@@ -50,6 +50,51 @@ from retrieval.listt5_reranker import ListT5Reranker, create_listt5_reranker, fu
 class QueryProcessor:
     """High level query processing pipeline."""
     
+    def _log_final_answer_prompt(self, prompt: str, query: str, log_dir: str = None):
+        """记录传入最终答案生成模块的完整prompt内容"""
+        try:
+            # 获取工作目录
+            if log_dir is None:
+                # 从配置中获取工作目录，与其他输出文件保持一致
+                log_dir = self.config.get('storage', {}).get('work_dir', './result')
+            
+            # 创建promptin.log文件路径
+            promptin_log_path = os.path.join(log_dir, "promptin.log")
+            
+            # 准备日志内容
+            timestamp = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
+            log_content = f"""
+========== FINAL ANSWER GENERATION PROMPT LOG ==========
+Timestamp: {timestamp}
+Query: {query}
+Prompt Length: {len(prompt)} characters
+
+========== FULL PROMPT CONTENT ==========
+{prompt}
+
+========== END OF PROMPT ==========
+
+"""
+            
+            # 写入日志文件
+            with open(promptin_log_path, 'a', encoding='utf-8') as f:
+                f.write(log_content)
+            
+            # 同时在控制台输出
+            logger.info(f"Final answer prompt logged to {promptin_log_path}")
+            logger.info(f"Prompt length: {len(prompt)} characters")
+            
+            # 在控制台显示prompt的前500个字符作为预览
+            preview = prompt[:500] + "..." if len(prompt) > 500 else prompt
+            print(f"\n=== FINAL ANSWER PROMPT PREVIEW ===")
+            print(f"Query: {query}")
+            print(f"Prompt Preview (first 500 chars): {preview}")
+            print(f"Full prompt logged to: {promptin_log_path}")
+            print("=" * 50)
+            
+        except Exception as e:
+            logger.error(f"Failed to log final answer prompt: {e}")
+    
     @staticmethod
     def safe_config_get(config_dict: Dict[str, Any], key: str, default: Any = None) -> Any:
         """
@@ -171,31 +216,32 @@ class QueryProcessor:
         # 二跳补充
         prf_bridge_cfg = self._hybrid_search_cfg.get("prf_bridge", {})
         two_hop_cfg = self._hybrid_search_cfg.get("two_hop_expansion", {})
-        self.first_hop_topk = int(prf_bridge_cfg["first_hop_topk"])
-        self.prf_topk = int(prf_bridge_cfg["prf_topk"])
-        self.top_m_candidates = int(two_hop_cfg["top_m_candidates"])
+        self.first_hop_topk = int(prf_bridge_cfg.get("first_hop_topk", 2))
+        self.prf_topk = int(prf_bridge_cfg.get("prf_topk", 20))
+        self.top_m_candidates = int(two_hop_cfg.get("top_m_candidates", 20))
         
         # 融合/衰减权重
         weights_cfg = self._hybrid_search_cfg.get("weights", {})
-        ranking_cfg = self._ranking_cfg
+        ranking_defaults = {"dense_weight": 0.7, "bm25_weight": 0.3, "hop_decay": 0.8}
+        ranking_cfg = {**ranking_defaults, **self._ranking_cfg}
         self.dense_weight = float(weights_cfg.get("dense", ranking_cfg["dense_weight"]))
         self.bm25_weight = float(weights_cfg.get("bm25", ranking_cfg["bm25_weight"]))
-        self.hop_decay = float(ranking_cfg["hop_decay"])
+        self.hop_decay = float(ranking_cfg.get("hop_decay", ranking_defaults["hop_decay"]))
         
         # 安全/滤噪
         safety_cfg = self._safety_cfg
-        self.per_hop_keep_top_m = int(safety_cfg["per_hop_keep_top_m"])
-        self.lower_threshold = float(safety_cfg["lower_threshold"])
+        self.per_hop_keep_top_m = int(safety_cfg.get("per_hop_keep_top_m", 6))
+        self.lower_threshold = float(safety_cfg.get("lower_threshold", 0.1))
         
         # 聚类配置
         cluster_cfg = safety_cfg.get("cluster", {})
         self.cluster_enabled = bool(cluster_cfg.get("enabled", False))
-        self.cos_threshold = float(cluster_cfg["cos_threshold"])
-        self.keep_per_cluster = int(cluster_cfg["keep_per_cluster"])
+        self.cos_threshold = float(cluster_cfg.get("cos_threshold", 0.9))
+        self.keep_per_cluster = int(cluster_cfg.get("keep_per_cluster", 2))
         
         # 打包上限
         context_cfg = self._context_cfg
-        self.max_notes_for_llm = int(context_cfg["max_notes_for_llm"])
+        self.max_notes_for_llm = int(context_cfg.get("max_notes_for_llm", 50))
         self.max_tokens = context_cfg.get("max_tokens")  # 可选
 
         # Query rewriter functionality has been removed
@@ -2296,6 +2342,11 @@ class QueryProcessor:
             
             # 为了保持一致性，仍然生成评分
             context = "\n".join(n.get('content','') for n in selected_notes)
+            
+            # 记录EFSA生成的上下文和答案信息
+            efsa_prompt = f"Query: {query}\nContext:\n{context}\nEFSA Generated Answer: {answer}"
+            self._log_final_answer_prompt(efsa_prompt, query)
+            
             scores = self.ollama.evaluate_answer(query, context, answer)
         else:
             # EFSA未找到实体答案，回退到原有的LLM句子型答案生成
@@ -2304,6 +2355,10 @@ class QueryProcessor:
             # 生成答案和评分
             # 使用新的 build_context_prompt_with_passages 函数生成带有 [P{idx}] 标签的上下文和passages字典
             prompt, passages_by_idx, packed_order = build_context_prompt_with_passages(selected_notes, query)
+            
+            # 记录传入最终答案生成模块的完整prompt内容
+            self._log_final_answer_prompt(prompt, query)
+            
             raw_answer = self.ollama.generate_final_answer(prompt)
             # 使用鲁棒的JSON解析器，带重试机制
             def retry_generate():
@@ -2338,6 +2393,46 @@ class QueryProcessor:
                 packed_order=packed_order
             )
             
+            # 生成后对齐检查：对比 support_idxs 与 used_idx_list
+            try:
+                # 读取 debug 目录下的 used_passages.json 获取 used_idx_list
+                run_dir = self.config.get('storage', {}).get('work_dir') or './result'
+                
+                # 查找最新的 debug 目录
+                debug_base_dir = os.path.join(run_dir, "3", "debug")
+                used_idx_list = []
+                
+                if os.path.exists(debug_base_dir):
+                    # 找到最新的 2hop__ 目录
+                    debug_dirs = [d for d in os.listdir(debug_base_dir) if d.startswith("2hop__")]
+                    if debug_dirs:
+                        latest_debug_dir = max(debug_dirs)  # 按字典序取最新
+                        used_passages_path = os.path.join(debug_base_dir, latest_debug_dir, "used_passages.json")
+                        
+                        if os.path.exists(used_passages_path):
+                            with open(used_passages_path, 'r', encoding='utf-8') as f:
+                                used_passages_data = json.load(f)
+                                used_idx_list = used_passages_data.get('used_idx_list', [])
+                
+                # 统一转成字符串进行对比（与 prompts.py 中保持一致）
+                support_chosen = [str(idx) for idx in predicted_support_idxs]
+                prompt_contained = [str(idx) for idx in used_idx_list]  # used_idx_list 已经是字符串类型
+                
+                # 找出不在 prompt 里的 support
+                missing_supports = [idx for idx in support_chosen if idx not in prompt_contained]
+                
+                # 按要求的格式打印对比日志
+                print(f"Support chosen: {support_chosen} ; Prompt contained: {prompt_contained} ; missing={missing_supports}")
+                logger.info(f"Support chosen: {support_chosen} ; Prompt contained: {prompt_contained} ; missing={missing_supports}")
+                
+                # 如果有 missing，额外警告
+                if missing_supports:
+                    logger.warning(f"LLM选择了不在prompt中的索引: {missing_supports} (可能是类型不一致或off-by-one问题)")
+                
+            except Exception as e:
+                logger.warning(f"Failed to perform support alignment check: {e}")
+            
+            
             # 评估答案质量
             context = "\n".join(n.get('content','') for n in selected_notes)
             scores = self.ollama.evaluate_answer(query, context, answer)
@@ -2349,6 +2444,7 @@ class QueryProcessor:
         # 写入final_recall.jsonl文件
         from utils.file_utils import FileUtils
         import hashlib
+        import json
         final_notes = selected_notes  # 最终集合
         
         # 获取运行目录，优先使用配置中的work_dir
@@ -2403,13 +2499,35 @@ class QueryProcessor:
             if 'bridge_path' not in note:
                 note['bridge_path'] = note.get('path', [])
         
+        # 计算写入前 selected_notes 的 SHA1 (使用JSONL序列化方式)
+        import io
+        selected_notes_buffer = io.StringIO()
+        for note in selected_notes:
+            selected_notes_buffer.write(json.dumps(note, ensure_ascii=False) + '\n')
+        selected_notes_jsonl = selected_notes_buffer.getvalue()
+        selected_notes_jsonl_sha1 = hashlib.sha1(selected_notes_jsonl.encode('utf-8')).hexdigest()
+        
         final_recall_path = os.path.join(run_dir, "final_recall.jsonl")
         FileUtils.write_jsonl(final_notes, final_recall_path)
         
-        # 计算并打印sha1
-        sha1_hash = FileUtils.sha1sum(final_recall_path)
-        print(f"[CONTEXT] write {final_recall_path} sha1={sha1_hash}")
-        logger.info(f"Final context written to {final_recall_path} with {len(final_notes)} notes, sha1={sha1_hash}")
+        # 读取刚写出的文件并计算 SHA1 (按字节内容)
+        final_recall_file_sha1 = FileUtils.sha1sum(final_recall_path)
+        
+        # 分两行打印SHA1
+        print(f"selected_notes_jsonl_sha1={selected_notes_jsonl_sha1}")
+        print(f"final_recall_file_sha1={final_recall_file_sha1}")
+        
+        # 断言两者相等
+        if selected_notes_jsonl_sha1 != final_recall_file_sha1:
+            logger.warning(f"SHA1 mismatch detected! selected_notes_jsonl_sha1={selected_notes_jsonl_sha1}, final_recall_file_sha1={final_recall_file_sha1}")
+            # dump 一份 selected_notes_snapshot.jsonl 以便比对差异
+            snapshot_path = os.path.join(run_dir, "selected_notes_snapshot.jsonl")
+            with open(snapshot_path, 'w', encoding='utf-8') as f:
+                f.write(selected_notes_jsonl)
+            logger.warning(f"Dumped selected_notes snapshot to {snapshot_path} for comparison")
+            assert False, f"SHA1 mismatch: selected_notes_jsonl={selected_notes_jsonl_sha1}, final_recall_file={final_recall_file_sha1}"
+        
+        logger.info(f"Final context written to {final_recall_path} with {len(final_notes)} notes, SHA1 verified: {final_recall_file_sha1}")
 
         result = {
             'query': query,
@@ -2490,6 +2608,10 @@ class QueryProcessor:
             # Step 5: Generate final answer using original query
             # 使用新的 build_context_prompt_with_passages 函数生成带有 [P{idx}] 标签的上下文和passages字典
             prompt, passages = build_context_prompt_with_passages(selected_notes, query)
+            
+            # 记录传入最终答案生成模块的完整prompt内容
+            self._log_final_answer_prompt(prompt, query)
+            
             raw_answer = self.ollama.generate_final_answer(prompt)
             
             # 使用鲁棒的JSON解析器，带重试机制
