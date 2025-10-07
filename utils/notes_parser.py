@@ -5,10 +5,144 @@
 
 import json
 import re
-from typing import List, Dict, Any, Optional, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 from loguru import logger
 
+from config import config
 from utils.note_completeness import is_complete_sentence
+
+REL_LEX: Optional[Dict[str, List[re.Pattern]]] = None
+TYPE_HINTS: Optional[Dict[str, List[str]]] = None
+NORMALIZE: Optional[Dict[str, Any]] = None
+
+
+def _load_lexicons() -> None:
+    """Load lexical resources for rule-based enrichment from configuration."""
+
+    global REL_LEX, TYPE_HINTS, NORMALIZE
+    if REL_LEX is None:
+        lex = config.get("note_keys.rel_lexicon", {}) or {}
+        REL_LEX = {
+            rel: [re.compile(r"\\b" + re.escape(pat) + r"\\b", re.IGNORECASE) for pat in (pats or [])]
+            for rel, pats in lex.items()
+        }
+    if TYPE_HINTS is None:
+        TYPE_HINTS = config.get(
+            "note_keys.type_hints",
+            {"album": ["(album)"], "song": ["(song)"], "person": ["(person)"]},
+        ) or {}
+    if NORMALIZE is None:
+        NORMALIZE = config.get(
+            "note_keys.normalize",
+            {"strip_quotes": True, "collapse_space": True, "lower": False},
+        ) or {}
+
+
+def _normalize_key(value: str) -> str:
+    """Normalize literal keys according to configured heuristics."""
+
+    if not value:
+        return value
+
+    result = value
+    if NORMALIZE.get("strip_quotes", True):
+        result = result.strip().strip("\"'“”‘’")
+    if NORMALIZE.get("collapse_space", True):
+        result = re.sub(r"\s+", " ", result).strip()
+    if NORMALIZE.get("lower", False):
+        result = result.lower()
+    return result
+
+
+def extract_rel(text: str) -> str:
+    """Extract relation keyword from text using configured lexicon."""
+
+    _load_lexicons()
+    for rel, patterns in (REL_LEX or {}).items():
+        for pattern in patterns:
+            if pattern.search(text):
+                return rel
+    return "related_to"
+
+
+def _infer_type(literal: str, rel: str) -> str:
+    """Infer a coarse entity type using literal hints and relation defaults."""
+
+    if not literal:
+        return ""
+
+    literal_lower = literal.lower()
+    for entity_type, hints in (TYPE_HINTS or {}).items():
+        for hint in hints or []:
+            if hint.lower() in literal_lower:
+                return entity_type
+
+    if rel in ("performed_by", "composed_by", "directed_by"):
+        return "album"
+    if rel in ("spouse_of", "partner_of", "born_in"):
+        return "person"
+    return ""
+
+
+def extract_keys_and_types(text: str, rel: str) -> Tuple[str, str, str, str]:
+    """Return head/tail literals and inferred types from text."""
+
+    _load_lexicons()
+
+    left = text
+    right = ""
+    match_obj = None
+
+    for pattern in (REL_LEX or {}).get(rel, []):
+        match_obj = pattern.search(text)
+        if match_obj:
+            left = text[: match_obj.start()].strip()
+            right = text[match_obj.end() :].strip()
+            break
+
+    if not match_obj:
+        match_obj = re.search(r"\\b(is|为|由|是由|是|in|of|by)\\b", text, re.IGNORECASE)
+        if match_obj:
+            left = text[: match_obj.start()].strip()
+            right = text[match_obj.end() :].strip()
+
+    head_key = _normalize_key(left)
+    tail_key = _normalize_key(right)
+
+    type_head = _infer_type(head_key, rel)
+    type_tail = _infer_type(tail_key, rel)
+
+    return head_key, tail_key, type_head, type_tail
+
+
+def enrich_note_keys(note: Dict[str, Any]) -> Dict[str, Any]:
+    """Deterministically enrich a note with relation and literal keys."""
+
+    if not isinstance(note, dict):
+        return note
+
+    text = str(note.get("text") or "").strip()
+    if not text:
+        return note
+
+    rel = note.get("rel") or extract_rel(text)
+    head_key = note.get("head_key")
+    tail_key = note.get("tail_key")
+    type_head = note.get("type_head")
+    type_tail = note.get("type_tail")
+
+    if not (head_key and tail_key):
+        extracted_head, extracted_tail, inferred_head, inferred_tail = extract_keys_and_types(text, rel)
+        note["head_key"] = head_key or extracted_head
+        note["tail_key"] = tail_key or extracted_tail
+        note["type_head"] = type_head or inferred_head
+        note["type_tail"] = type_tail or inferred_tail
+    else:
+        note["type_head"] = type_head or _infer_type(head_key, rel)
+        note["type_tail"] = type_tail or _infer_type(tail_key, rel)
+
+    note["rel"] = rel
+    return note
 
 
 def parse_notes_response(raw: str, sentinel: str = "~") -> Optional[List[Dict[str, Any]]]:

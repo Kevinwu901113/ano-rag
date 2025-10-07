@@ -8,7 +8,7 @@ from .local_llm import LocalLLM
 from .ollama_client import OllamaClient
 from .lmstudio_client import LMStudioClient
 from utils.json_utils import extract_json_from_response
-from utils.notes_parser import parse_notes_response
+from utils.notes_parser import enrich_note_keys, normalize_note_fields, parse_notes_response
 from config import config
 from .prompts import (
     ATOMIC_NOTEGEN_SYSTEM_PROMPT,
@@ -98,7 +98,9 @@ class ParallelTaskAtomicNoteGenerator(AtomicNoteGenerator):
 
     def _batch_convert(self, note_data, chunk_data):
         notes_raw = self._normalize_to_notes(note_data)
-        return [self._convert_to_atomic_note_format(n, chunk_data) for n in notes_raw]
+        normalized = [normalize_note_fields(n) for n in notes_raw]
+        enriched = [enrich_note_keys(n) for n in normalized]
+        return [self._convert_to_atomic_note_format(n, chunk_data) for n in enriched]
     
     def generate_atomic_notes(self, text_chunks: List[Dict[str, Any]], progress_tracker: Optional[Any] = None) -> List[Dict[str, Any]]:
         """生成原子笔记的主入口，支持并行任务分配"""

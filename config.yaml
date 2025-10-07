@@ -19,6 +19,44 @@ embedding:
   max_length: 512            # 最大token长度，超出部分会被截断
   normalize: true            # 是否对向量进行归一化，提高相似度计算准确性
 
+# 原子笔记字段归一化与词表
+note_keys:
+  rel_lexicon:
+    performed_by: ["performed by", "the performer is", "由", "演奏"]
+    spouse_of: ["spouse", "partner", "married to", "配偶", "伴侣"]
+    born_in: ["born in", "出生于", "出生在"]
+    released_in: ["released in", "发行于", "发行在"]
+    member_of: ["member of", "成员", "属于"]
+  type_hints:
+    album: ["(album)"]
+    song: ["(song)"]
+    film: ["(film)"]
+    person: ["(person)", "先生", "女士", "Dr."]
+  normalize:
+    strip_quotes: true
+    collapse_space: true
+    lower: false
+
+# 原子笔记图构建权重
+graph:
+  edge:
+    key_match_weight: 1.5
+    type_compat_weight: 1.0
+    same_paragraph_bonus: 0.3
+
+# Beam Search 多跳检索参数
+multi_hop:
+  max_hops: 4
+  beam_size: 8
+  branch_factor: 6
+
+# 关系链答案选择器
+answer_selector:
+  enabled: true
+  anchor_top_k: 5
+  use_candidate_pool: true
+  apply_before_llm: true
+
 # 向量存储配置
 vector_store:
   top_k: 20                 # 检索候选数量，影响召回率和计算开销

@@ -13,6 +13,40 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "max_length": 512,
         "normalize": True,
     },
+    "note_keys": {
+        "rel_lexicon": {
+            "performed_by": ["performed by", "the performer is", "由", "演奏"],
+            "spouse_of": ["spouse", "partner", "married to", "配偶", "伴侣"],
+            "born_in": ["born in", "出生于", "出生在"],
+            "released_in": ["released in", "发行于", "发行在"],
+            "member_of": ["member of", "成员", "属于"],
+        },
+        "type_hints": {
+            "album": ["(album)"],
+            "song": ["(song)"],
+            "film": ["(film)"],
+            "person": ["(person)", "先生", "女士", "Dr."],
+        },
+        "normalize": {"strip_quotes": True, "collapse_space": True, "lower": False},
+    },
+    "graph": {
+        "edge": {
+            "key_match_weight": 1.5,
+            "type_compat_weight": 1.0,
+            "same_paragraph_bonus": 0.3,
+        }
+    },
+    "multi_hop": {
+        "max_hops": 4,
+        "beam_size": 8,
+        "branch_factor": 6,
+    },
+    "answer_selector": {
+        "enabled": True,
+        "anchor_top_k": 5,
+        "use_candidate_pool": True,
+        "apply_before_llm": True,
+    },
     # 添加存储配置默认值
     "storage": {
         "work_dir": "./result/work",

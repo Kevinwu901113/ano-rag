@@ -8,7 +8,12 @@ from .local_llm import LocalLLM
 from utils.batch_processor import BatchProcessor
 from utils.text_utils import TextUtils
 from utils.json_utils import extract_json_from_response, clean_control_characters
-from utils.notes_parser import parse_notes_response, filter_valid_notes, normalize_note_fields
+from utils.notes_parser import (
+    enrich_note_keys,
+    filter_valid_notes,
+    normalize_note_fields,
+    parse_notes_response,
+)
 from utils.notes_quality_filter import NotesQualityFilter
 from utils.notes_retry_handler import NotesRetryHandler
 from utils.notes_stats_logger import get_global_stats_logger, log_notes_stats, finalize_notes_session
@@ -381,10 +386,11 @@ class AtomicNoteGenerator:
 
         # 标准化笔记字段
         normalized_notes = [normalize_note_fields(note) for note in parsed_notes]
+        enriched_notes = [enrich_note_keys(note) for note in normalized_notes]
 
         # 对每条笔记执行后处理
         post_processed_notes = []
-        for note in normalized_notes:
+        for note in enriched_notes:
             processed_note = self._post_process_llm_note(note, chunk_data)
             if processed_note:
                 post_processed_notes.append(processed_note)

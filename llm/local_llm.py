@@ -12,6 +12,7 @@ from .multi_model_client import MultiModelClient
 from .factory import LLMFactory
 from .prompts import (
     ATOMIC_NOTE_SYSTEM_PROMPT,
+    ATOMIC_NOTE_SYSTEM_PROMPT_V2,
     ATOMIC_NOTE_PROMPT,
     EXTRACT_ENTITIES_SYSTEM_PROMPT,
     EXTRACT_ENTITIES_PROMPT,
@@ -352,7 +353,9 @@ class LocalLLM:
     
     def generate_atomic_notes(self, text_chunks: List[str]) -> List[Dict[str, Any]]:
         """生成原子笔记"""
-        system_prompt = ATOMIC_NOTE_SYSTEM_PROMPT
+        notes_cfg = config.get('notes_llm', {}) or {}
+        use_v2 = bool(notes_cfg.get('use_v2_schema', True))
+        system_prompt = ATOMIC_NOTE_SYSTEM_PROMPT_V2 if use_v2 else ATOMIC_NOTE_SYSTEM_PROMPT
         
         def process_chunk(chunk):
             prompt = ATOMIC_NOTE_PROMPT.format(chunk=chunk)
