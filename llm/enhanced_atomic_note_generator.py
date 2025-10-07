@@ -11,7 +11,7 @@ from utils.enhanced_noise_filter import EnhancedNoiseFilter
 from utils.note_similarity import NoteSimilarityCalculator
 from config import config
 from .prompts import (
-    ATOMIC_NOTEGEN_PROMPT,
+    get_atomic_note_prompts,
     build_multi_note_prompts,
 )
 import json
@@ -26,6 +26,7 @@ class EnhancedAtomicNoteGenerator:
         if llm is None:
             raise ValueError("EnhancedAtomicNoteGenerator requires a LocalLLM instance to be passed")
         self.llm = llm
+        self._atomic_prompt_cache: Optional[Tuple[str, str]] = None
         
         # 检查是否为hybrid模式并初始化HybridLLMDispatcher
         self.is_hybrid_mode = getattr(llm, 'is_hybrid_mode', False)
@@ -64,10 +65,23 @@ class EnhancedAtomicNoteGenerator:
         self.coverage_thresholds = config.get('evaluation.coverage_thresholds', {}) or {}
         self.coverage_report_path = config.get('evaluation.coverage_report_path', 'debug/coverage_report.json')
 
-        logger.info(f"Enhanced Atomic Note Generator initialized with features: "
-                   f"NER={self.enable_enhanced_ner}, RE={self.enable_relation_extraction}, "
-                   f"Noise={self.enable_enhanced_noise_filter}, Similarity={self.enable_note_similarity}")
-    
+        logger.info(
+            "Enhanced Atomic Note Generator initialized with features: "
+            f"NER={self.enable_enhanced_ner}, RE={self.enable_relation_extraction}, "
+            f"Noise={self.enable_enhanced_noise_filter}, Similarity={self.enable_note_similarity}"
+        )
+
+    def _get_atomic_note_prompts(self) -> Tuple[str, str]:
+        if self._atomic_prompt_cache is None:
+            self._atomic_prompt_cache = get_atomic_note_prompts()
+        return self._atomic_prompt_cache
+
+    def _get_atomic_note_system_prompt(self) -> str:
+        return self._get_atomic_note_prompts()[0]
+
+    def _format_atomic_note_prompt(self, text: str) -> str:
+        return self._get_atomic_note_prompts()[1].format(text=text)
+
     def generate_atomic_notes(self, text_chunks: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """从文本块生成增强的原子笔记"""
         logger.info(f"Generating enhanced atomic notes for {len(text_chunks)} text chunks")
@@ -322,7 +336,7 @@ class EnhancedAtomicNoteGenerator:
         """生成单个原子笔记（基础版本）"""
         text = chunk_data.get('text', '')
         
-        prompt = ATOMIC_NOTEGEN_PROMPT.format(text=text)
+        prompt = self._format_atomic_note_prompt(text)
         
         # 根据模式选择生成器
         if self.is_hybrid_mode and self.hybrid_dispatcher:

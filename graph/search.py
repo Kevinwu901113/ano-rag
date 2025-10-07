@@ -1,5 +1,5 @@
 from dataclasses import dataclass, field
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
 from config import config
 
@@ -23,17 +23,32 @@ class Path:
         )
 
 
-def beam_search(graph, anchors: List[str], rel_chain: List[str]) -> List[Path]:
-    max_hops = int(config.get("multi_hop.max_hops", 4))
-    beam_size = int(config.get("multi_hop.beam_size", 8))
-    branch = int(config.get("multi_hop.branch_factor", 6))
+def _constraint_matches(rel: str, constraint: str) -> bool:
+    if not constraint or constraint == "*":
+        return True
+    options = [c.strip() for c in constraint.split("|") if c.strip()]
+    return rel in options
+
+
+def beam_search(
+    graph,
+    anchors: List[str],
+    rel_chain: Optional[Sequence[str]] = None,
+    max_hops: Optional[int] = None,
+    beam_size: Optional[int] = None,
+    branch: Optional[int] = None,
+) -> List[Path]:
+    config_hops = config.get("multi_hop", {}) or {}
+    max_hops = int(max_hops or config_hops.get("max_hops", 4))
+    beam_size = int(beam_size or config_hops.get("beam_size", 8))
+    branch = int(branch or config_hops.get("branch_factor", 6))
 
     valid_anchors = [a for a in anchors if a]
     if not valid_anchors:
         return []
 
     beams = [Path(keys=[anchor], notes=[], rels=[], score=0.0) for anchor in valid_anchors]
-    results: List[Path] = []
+    completed: List[Path] = []
 
     for hop in range(max_hops):
         next_candidates: List[Path] = []
@@ -43,15 +58,22 @@ def beam_search(graph, anchors: List[str], rel_chain: List[str]) -> List[Path]:
                 continue
             neighbors = graph.neighbors(current_key)
             for rel, nb_key, note_id, weight, _para in neighbors:
-                if rel_chain and hop < len(rel_chain):
-                    constraint = rel_chain[hop]
-                    if constraint not in ("*", rel):
+                rel_index = len(path.rels)
+                if rel_chain:
+                    if rel_index >= len(rel_chain):
+                        continue
+                    constraint = rel_chain[rel_index]
+                    if not _constraint_matches(rel, constraint):
                         continue
                 if nb_key in path.keys:
                     continue
-                next_candidates.append(path.extend(nb_key, rel, note_id, weight))
+                new_path = path.extend(nb_key, rel, note_id, weight)
+                if rel_chain and len(new_path.rels) >= len(rel_chain):
+                    completed.append(new_path)
+                    continue
+                next_candidates.append(new_path)
 
-        if not next_candidates:
+        if not next_candidates and not completed:
             break
 
         next_candidates.sort(key=lambda p: p.score, reverse=True)
@@ -71,9 +93,9 @@ def beam_search(graph, anchors: List[str], rel_chain: List[str]) -> List[Path]:
                 break
 
         beams = pruned
-        results.extend(pruned)
         if not beams:
             break
 
+    results = completed if completed else beams
     results.sort(key=lambda p: p.score, reverse=True)
     return results[:beam_size]

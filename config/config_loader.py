@@ -15,7 +15,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     },
     "note_keys": {
         "rel_lexicon": {
-            "performed_by": ["performed by", "the performer is", "由", "演奏"],
+            "performed_by": ["performed by", "the performer is", "由", "演奏", "演出"],
             "spouse_of": ["spouse", "partner", "married to", "配偶", "伴侣"],
             "born_in": ["born in", "出生于", "出生在"],
             "released_in": ["released in", "发行于", "发行在"],
@@ -27,19 +27,44 @@ DEFAULT_CONFIG: Dict[str, Any] = {
             "film": ["(film)"],
             "person": ["(person)", "先生", "女士", "Dr."],
         },
+        "relation_type_map": {
+            "performed_by": {"head": "song", "tail": "person"},
+            "released_in": {"head": "album", "tail": "year"},
+            "born_in": {"head": "person", "tail": "place"},
+            "spouse_of": {"head": "person", "tail": "person"},
+            "member_of": {"head": "person", "tail": "organization"},
+        },
+        "fallback_splitters": [
+            " is ",
+            " was ",
+            " were ",
+            " by ",
+            " in ",
+            " of ",
+            "于",
+            "在",
+            "是",
+        ],
+        "default_rel": "related_to",
         "normalize": {"strip_quotes": True, "collapse_space": True, "lower": False},
     },
     "graph": {
         "edge": {
+            "base_weight": 0.0,
             "key_match_weight": 1.5,
             "type_compat_weight": 1.0,
             "same_paragraph_bonus": 0.3,
+            "same_title_bonus": 0.2,
         }
     },
     "multi_hop": {
         "max_hops": 4,
         "beam_size": 8,
         "branch_factor": 6,
+    },
+    "answering": {
+        "rel_chains": [["performed_by", "spouse_of"]],
+        "relax_last_hop": ["spouse_of|partner_of"],
     },
     "answer_selector": {
         "enabled": True,
@@ -267,6 +292,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         }
     },
     "notes_llm": {
+        "use_v2_schema": True,
         "stream_early_stop": True,
         "sentinel_char": "~",
         "enable_fast_path": True,

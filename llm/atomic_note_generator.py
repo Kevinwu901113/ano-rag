@@ -1,4 +1,4 @@
-from typing import List, Dict, Any, Union, Optional
+from typing import List, Dict, Any, Union, Optional, Tuple
 from loguru import logger
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import threading
@@ -19,10 +19,7 @@ from utils.notes_retry_handler import NotesRetryHandler
 from utils.notes_stats_logger import get_global_stats_logger, log_notes_stats, finalize_notes_session
 from utils.note_coverage_eval import evaluate_note_coverage
 from config import config
-from .prompts import (
-    ATOMIC_NOTEGEN_SYSTEM_PROMPT,
-    ATOMIC_NOTEGEN_PROMPT,
-)
+from .prompts import get_atomic_note_prompts
 
 class AtomicNoteGenerator:
     """原子笔记生成器，专门用于文档处理阶段的原子笔记构建"""
@@ -31,6 +28,7 @@ class AtomicNoteGenerator:
         if llm is None:
             raise ValueError("AtomicNoteGenerator requires a LocalLLM instance to be passed")
         self.llm = llm
+        self._atomic_prompt_cache: Optional[Tuple[str, str]] = None
         
         # 检查是否为hybrid模式并使用单例HybridLLMDispatcher
         self.is_hybrid_mode = getattr(llm, 'is_hybrid_mode', False)
@@ -316,7 +314,7 @@ class AtomicNoteGenerator:
         
         # 准备LLM调用参数
         llm_params = self._get_optimized_llm_params()
-        prompt = ATOMIC_NOTEGEN_PROMPT.format(text=text)
+        prompt = self._format_atomic_note_prompt(text)
         
         # 定义LLM生成函数
         def llm_generate_func(user_prompt: str, sys_prompt: str) -> str:
@@ -823,9 +821,19 @@ class AtomicNoteGenerator:
         atomic_note['quality_flags'] = ['FALLBACK']
         return atomic_note
     
+    def _get_atomic_note_prompts(self) -> Tuple[str, str]:
+        if self._atomic_prompt_cache is None:
+            self._atomic_prompt_cache = get_atomic_note_prompts()
+        return self._atomic_prompt_cache
+
     def _get_atomic_note_system_prompt(self) -> str:
         """获取原子笔记生成的系统提示词"""
-        return ATOMIC_NOTEGEN_SYSTEM_PROMPT
+        return self._get_atomic_note_prompts()[0]
+
+    def _format_atomic_note_prompt(self, text: str) -> str:
+        """Format the user prompt according to the configured schema."""
+
+        return self._get_atomic_note_prompts()[1].format(text=text)
     
     def _clean_list(self, items: List[str]) -> List[str]:
         """清理列表，去除空值和重复项"""
