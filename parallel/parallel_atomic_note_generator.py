@@ -8,10 +8,7 @@ from llm.ollama_client import OllamaClient
 from llm.lmstudio_client import LMStudioClient
 from utils.json_utils import extract_json_from_response
 from config import config
-from llm.prompts import (
-    ATOMIC_NOTEGEN_SYSTEM_PROMPT,
-    ATOMIC_NOTEGEN_PROMPT,
-)
+from llm.prompts import get_atomic_note_prompts
 
 class ParallelAtomicNoteGenerator:
     """并行原子笔记生成器，同时调用Ollama qwen2.5和LM Studio qwen2.5提高效率"""
@@ -23,6 +20,7 @@ class ParallelAtomicNoteGenerator:
         self.timeout_seconds = self.config.get('timeout_seconds', 30)
         self.max_concurrent_chunks = self.config.get('max_concurrent_chunks', 4)
         self.batch_size = self.config.get('batch_size', 8)
+        self._atomic_prompt_cache: Optional[Tuple[str, str]] = None
         
         # 初始化客户端
         self.ollama_client = None
@@ -45,6 +43,17 @@ class ParallelAtomicNoteGenerator:
             'fallback_switches': 0
         }
         self._lock = threading.Lock()
+
+    def _get_atomic_note_prompts(self) -> Tuple[str, str]:
+        if self._atomic_prompt_cache is None:
+            self._atomic_prompt_cache = get_atomic_note_prompts()
+        return self._atomic_prompt_cache
+
+    def _get_atomic_note_system_prompt(self) -> str:
+        return self._get_atomic_note_prompts()[0]
+
+    def _format_atomic_note_prompt(self, text: str) -> str:
+        return self._get_atomic_note_prompts()[1].format(text=text)
     
     def _init_clients(self):
         """初始化Ollama和LM Studio客户端"""
@@ -120,8 +129,8 @@ class ParallelAtomicNoteGenerator:
     def _generate_single_note_parallel(self, chunk_data: Dict[str, Any], batch_index: int = 0) -> Dict[str, Any]:
         """为单个文本块并行生成原子笔记"""
         text = chunk_data.get('text', '')
-        prompt = ATOMIC_NOTEGEN_PROMPT.format(text=text)
-        system_prompt = ATOMIC_NOTEGEN_SYSTEM_PROMPT
+        prompt = self._format_atomic_note_prompt(text)
+        system_prompt = self._get_atomic_note_system_prompt()
         
         if self.parallel_strategy == 'fastest_wins':
             return self._fastest_wins_strategy(prompt, system_prompt, chunk_data)

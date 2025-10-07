@@ -1,6 +1,6 @@
 """Centralized prompt templates used across the project."""
 
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Tuple
 import textwrap
 
 from config import config
@@ -80,11 +80,19 @@ If the TEXT has no complete fact, respond with [].
 """
 
 
-ATOMIC_NOTE_SYSTEM_PROMPT_V2 = """
+ATOMIC_NOTEGEN_PROMPT_V2 = """
+TEXT:
+{text}
+
+逐条抽取完整的事实句，按照系统契约输出 JSON 数组。
+"""
+
+
+ATOMIC_NOTE_SYSTEM_PROMPT_V2_TEMPLATE = """
 你是一个事实抽取器。把给定文本块切成“最小事实”的单句原子笔记（sent_count=1）。
 每条笔记必须可连接：请给出关系、主语字面、宾语字面和类型提示。不要写解释。
 
-受控关系词表（rel）示例：performed_by, spouse_of, partner_of, member_of, born_in, released_in, located_in, has_title, has_year, wrote, composed_by, directed_by
+受控关系词表（rel）仅可取：{rel_list}
 
 输出契约（STRICT）：
 - 返回 JSON 数组；每个元素包含：
@@ -100,6 +108,45 @@ ATOMIC_NOTE_SYSTEM_PROMPT_V2 = """
 - 禁止输出“including/其中/因为/由于…”这类从属片段
 - head_key/tail_key 要从句面提取原文短语；若标题含括号如 "(album)"，请保留
 """
+
+
+def _build_rel_list_display() -> str:
+    lex = config.get("note_keys", {}).get("rel_lexicon", {}) or {}
+    if not lex:
+        return "related_to"
+    return ", ".join(sorted(lex.keys()))
+
+
+# Backwards compatibility: expose a materialized V2 system prompt at import time.
+ATOMIC_NOTE_SYSTEM_PROMPT_V2 = textwrap.dedent(
+    ATOMIC_NOTE_SYSTEM_PROMPT_V2_TEMPLATE.format(rel_list=_build_rel_list_display())
+).strip()
+
+
+def get_atomic_note_prompts() -> Tuple[str, str]:
+    """Return system/user prompts respecting the configured schema toggle."""
+
+    notes_cfg = config.get("notes_llm", {}) or {}
+    use_v2 = bool(notes_cfg.get("use_v2_schema", True))
+    if use_v2:
+        rel_list = _build_rel_list_display()
+        system_prompt = textwrap.dedent(
+            ATOMIC_NOTE_SYSTEM_PROMPT_V2_TEMPLATE.format(rel_list=rel_list)
+        ).strip()
+        globals()["ATOMIC_NOTE_SYSTEM_PROMPT_V2"] = system_prompt
+        return system_prompt, textwrap.dedent(ATOMIC_NOTEGEN_PROMPT_V2).strip()
+
+    return (
+        textwrap.dedent(ATOMIC_NOTEGEN_SYSTEM_PROMPT).strip(),
+        textwrap.dedent(ATOMIC_NOTEGEN_PROMPT).strip(),
+    )
+
+
+def build_atomic_note_prompt(text: str) -> str:
+    """Construct an atomic note prompt that optionally uses the V2 schema."""
+
+    system, user = get_atomic_note_prompts()
+    return system + "\n\n" + user.format(text=text)
 
 
 def build_multi_note_prompts() -> tuple[str, str]:

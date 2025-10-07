@@ -10,10 +10,6 @@ from .lmstudio_client import LMStudioClient
 from utils.json_utils import extract_json_from_response
 from utils.notes_parser import enrich_note_keys, normalize_note_fields, parse_notes_response
 from config import config
-from .prompts import (
-    ATOMIC_NOTEGEN_SYSTEM_PROMPT,
-    ATOMIC_NOTEGEN_PROMPT,
-)
 
 class ParallelTaskAtomicNoteGenerator(AtomicNoteGenerator):
     """并行任务分配原子笔记生成器，支持Ollama和LM Studio的任务分配处理"""
@@ -274,7 +270,7 @@ class ParallelTaskAtomicNoteGenerator(AtomicNoteGenerator):
         start_time = time.time()
         try:
             text = chunk_data.get('text', '')
-            prompt = ATOMIC_NOTEGEN_PROMPT.format(text=text)
+            prompt = self._format_atomic_note_prompt(text)
             
             logger.debug(f"Ollama processing task {index}, text length: {len(text)}")
             
@@ -348,7 +344,7 @@ class ParallelTaskAtomicNoteGenerator(AtomicNoteGenerator):
         start_time = time.time()
         try:
             text = chunk_data.get('text', '')
-            prompt = ATOMIC_NOTEGEN_PROMPT.format(text=text)
+            prompt = self._format_atomic_note_prompt(text)
             
             logger.debug(f"LMStudio processing task {index}, text length: {len(text)}")
             
@@ -407,7 +403,7 @@ class ParallelTaskAtomicNoteGenerator(AtomicNoteGenerator):
         """使用LM Studio处理单个chunk"""
         try:
             text = chunk_data.get('text', '')
-            prompt = ATOMIC_NOTEGEN_PROMPT.format(text=text)
+            prompt = self._format_atomic_note_prompt(text)
             
             # 调用LM Studio生成
             response = self.lmstudio_client.generate_response(
@@ -484,7 +480,7 @@ class ParallelTaskAtomicNoteGenerator(AtomicNoteGenerator):
         """使用原始LLM作为最终回退"""
         try:
             text = chunk_data.get('text', '')
-            prompt = ATOMIC_NOTEGEN_PROMPT.format(text=text)
+            prompt = self._format_atomic_note_prompt(text)
             
             response = self.llm.generate(prompt, system_prompt)
 
