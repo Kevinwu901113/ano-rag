@@ -3,12 +3,12 @@ from loguru import logger
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import threading
 import time
-import json
 from .atomic_note_generator import AtomicNoteGenerator
 from .local_llm import LocalLLM
 from .ollama_client import OllamaClient
 from .lmstudio_client import LMStudioClient
 from utils.json_utils import extract_json_from_response
+from utils.notes_parser import parse_notes_response
 from config import config
 from .prompts import (
     ATOMIC_NOTEGEN_SYSTEM_PROMPT,
@@ -146,13 +146,15 @@ class ParallelTaskAtomicNoteGenerator(AtomicNoteGenerator):
                     logger.debug(f"Waiting for {client_type} task {index} with timeout {timeout_value}s")
 
                     batch = future.result(timeout=timeout_value)
-                    normalized_batch = []
+                    normalized_batch: List[Dict[str, Any]] = []
                     if isinstance(batch, list):
                         normalized_batch = [b for b in batch if isinstance(b, dict)]
                     elif isinstance(batch, dict):
                         normalized_batch = [batch]
                     elif batch is not None:
-                        logger.warning(f"Unexpected batch type from {client_type} task {index}: {type(batch)}")
+                        logger.warning(
+                            f"Unexpected batch type from {client_type} task {index}: {type(batch)}"
+                        )
 
                     if normalized_batch:
                         all_notes.extend(normalized_batch)
@@ -193,28 +195,28 @@ class ParallelTaskAtomicNoteGenerator(AtomicNoteGenerator):
                     if self.enable_fallback:
                         try:
                             fallback_result = self._fallback_process(chunk_data, system_prompt, client_type)
-                            appended = False
-                            if isinstance(fallback_result, list):
-                                filtered = [item for item in fallback_result if isinstance(item, dict)]
-                                if filtered:
-                                    all_notes.extend(filtered)
-                                    appended = True
-                            elif isinstance(fallback_result, dict):
-                                all_notes.append(fallback_result)
-                                appended = True
-                            elif fallback_result is not None:
-                                logger.warning(f"Unexpected fallback type for index {index}: {type(fallback_result)}")
-
-                            if not appended:
-                                all_notes.append(self._create_fallback_note(chunk_data))
-                            with self._stats_lock:
-                                self.stats['fallback_count'] += 1
                         except Exception as fallback_error:
                             logger.error(f"Fallback also failed for index {index}: {fallback_error}")
-                            all_notes.append(self._create_fallback_note(chunk_data))
+                            fallback_result = []
+
+                        normalized_fallback: List[Dict[str, Any]] = []
+                        if isinstance(fallback_result, list):
+                            normalized_fallback = [item for item in fallback_result if isinstance(item, dict)]
+                        elif isinstance(fallback_result, dict):
+                            normalized_fallback = [fallback_result]
+                        elif fallback_result is not None:
+                            logger.warning(
+                                f"Unexpected fallback type for index {index}: {type(fallback_result)}"
+                            )
+
+                        if not normalized_fallback:
+                            normalized_fallback = [self._create_fallback_note(chunk_data)]
+
+                        all_notes.extend(normalized_fallback)
+                        with self._stats_lock:
+                            self.stats['fallback_count'] += 1
                     else:
                         all_notes.append(self._create_fallback_note(chunk_data))
-
                     if progress_tracker:
                         progress_tracker.update(1)
 
@@ -287,14 +289,22 @@ class ParallelTaskAtomicNoteGenerator(AtomicNoteGenerator):
             
             # 解析响应
             cleaned_response = extract_json_from_response(response)
-            if not cleaned_response:
-                logger.error(f"Ollama task {index}: No valid JSON in response: {response[:200]}...")
-                raise ValueError(f"No valid JSON found in Ollama response: {response[:200]}...")
-            
-            logger.debug(f"Ollama task {index}: Cleaned JSON: {cleaned_response[:300]}...")
-            
-            note_data = json.loads(cleaned_response)
-            results = self._batch_convert(note_data, chunk_data)
+            parse_target = cleaned_response or response
+
+            logger.debug(
+                f"Ollama task {index}: Cleaned JSON candidate length: {len(parse_target)}"
+            )
+
+            parsed_notes = parse_notes_response(parse_target)
+            if parsed_notes is None:
+                logger.error(
+                    f"Ollama task {index}: No valid JSON in response: {response[:200]}..."
+                )
+                raise ValueError(
+                    f"No valid JSON found in Ollama response: {response[:200]}..."
+                )
+
+            results = self._batch_convert(parsed_notes, chunk_data)
 
             # Debug log the generated content
             if results:
@@ -352,14 +362,22 @@ class ParallelTaskAtomicNoteGenerator(AtomicNoteGenerator):
             
             # 解析响应
             cleaned_response = extract_json_from_response(response)
-            if not cleaned_response:
-                logger.error(f"LMStudio task {index}: No valid JSON in response: {response[:200]}...")
-                raise ValueError(f"No valid JSON found in LM Studio response: {response[:200]}...")
+            parse_target = cleaned_response or response
 
-            logger.debug(f"LMStudio task {index}: Cleaned JSON: {cleaned_response[:300]}...")
+            logger.debug(
+                f"LMStudio task {index}: Cleaned JSON candidate length: {len(parse_target)}"
+            )
 
-            note_data = json.loads(cleaned_response)
-            results = self._batch_convert(note_data, chunk_data)
+            parsed_notes = parse_notes_response(parse_target)
+            if parsed_notes is None:
+                logger.error(
+                    f"LMStudio task {index}: No valid JSON in response: {response[:200]}..."
+                )
+                raise ValueError(
+                    f"No valid JSON found in LM Studio response: {response[:200]}..."
+                )
+
+            results = self._batch_convert(parsed_notes, chunk_data)
 
             # Debug log the generated content
             if results:
@@ -467,14 +485,15 @@ class ParallelTaskAtomicNoteGenerator(AtomicNoteGenerator):
             prompt = ATOMIC_NOTEGEN_PROMPT.format(text=text)
             
             response = self.llm.generate(prompt, system_prompt)
-            
+
             # 解析响应
             cleaned_response = extract_json_from_response(response)
-            if not cleaned_response:
-                raise ValueError(f"No valid JSON found in original LLM response")
-            
-            note_data = json.loads(cleaned_response)
-            return self._batch_convert(note_data, chunk_data)
+            parse_target = cleaned_response or response
+            parsed_notes = parse_notes_response(parse_target)
+            if parsed_notes is None:
+                raise ValueError("No valid JSON found in original LLM response")
+
+            return self._batch_convert(parsed_notes, chunk_data)
             
         except Exception as e:
             logger.error(f"Original LLM fallback also failed: {e}")

@@ -93,11 +93,16 @@ def build_multi_note_prompts() -> tuple[str, str]:
     prompt_cfg = config.get("notes_prompt", {}) or {}
     if prompt_cfg.get("element_conservation", True):
         coverage_rules.append(
-            "- Coverage invariants: keep every explicit element (subject/object, dates/years, locations, publishers/labels, quantities, etc.) inside the SAME sentence. If you must split a source sentence, emit a full proposition per element by repeating the subject and never leave modifiers dangling like \"in 2019...\" or \"including ...\"."
+            "- Element conservation: keep temporal/location/brand/quantity modifiers attached to the same sentence. If a source sentence must be split, repeat the subject so every clause is complete and never leave fragments like \"including ...\", \"in 2019 ...\", or the Chinese equivalents (因为/由于/其中)."
         )
     if prompt_cfg.get("enumeration_split", True):
         coverage_rules.append(
-            "- Enumeration alignment: when a source sentence lists parallel items (e.g., \"X has markets in US, EU, China\"), duplicate the subject and produce one self-contained sentence for each item so every note stands alone."
+            "- Enumeration expansion: when the source enumerates parallel objects (e.g., \"X has A, B, C\"), duplicate the subject and emit one self-contained sentence per object."
+        )
+
+    if prompt_cfg.get("enforce_entity_slot", True):
+        coverage_rules.append(
+            "- Entities: populate the entities field with the main subject and key objects for every fact whenever they appear in the text."
         )
 
     coverage_rules_text = "\n".join(coverage_rules)

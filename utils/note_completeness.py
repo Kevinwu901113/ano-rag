@@ -35,13 +35,13 @@ def _compiled_rules() -> Dict[str, Any]:
     rules = {
         "require_sentence_terminal": get_bool("require_sentence_terminal", True),
         "allowed_sentence_terminals": get_list("allowed_sentence_terminals") or ["。", ".", "!", "?"],
-        "min_word_count_en": get_int("min_word_count_en", 5),
-        "min_char_count_zh": get_int("min_char_count_zh", 10),
+        "min_word_count_en": get_int("min_word_count_en", 4),
+        "min_char_count_zh": get_int("min_char_count_zh", 8),
         "verb_patterns_en": [re.compile(pattern, re.I) for pattern in get_list("verb_patterns_en")],
         "verb_patterns_zh": [re.compile(pattern) for pattern in get_list("verb_patterns_zh")],
         "bad_starts_en": [re.compile(pattern, re.I) for pattern in get_list("bad_starts_en")],
         "bad_starts_zh": [re.compile(pattern) for pattern in get_list("bad_starts_zh")],
-        "require_entities": get_bool("require_entities", True),
+        "require_entities": get_bool("require_entities", False),
     }
 
     return rules

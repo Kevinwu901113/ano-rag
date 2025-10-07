@@ -12,6 +12,7 @@ from utils.notes_parser import parse_notes_response, filter_valid_notes, normali
 from utils.notes_quality_filter import NotesQualityFilter
 from utils.notes_retry_handler import NotesRetryHandler
 from utils.notes_stats_logger import get_global_stats_logger, log_notes_stats, finalize_notes_session
+from utils.note_coverage_eval import evaluate_note_coverage
 from config import config
 from .prompts import (
     ATOMIC_NOTEGEN_SYSTEM_PROMPT,
@@ -119,6 +120,13 @@ class AtomicNoteGenerator:
         session_summary = finalize_notes_session(processing_time)
         logger.info(f"Notes generation completed: {session_summary}")
         
+        coverage_cfg = config.get('evaluation', {}).get('coverage', {})
+        if coverage_cfg:
+            try:
+                evaluate_note_coverage(text_chunks, atomic_notes)
+            except Exception as coverage_error:
+                logger.warning(f"Coverage evaluation failed: {coverage_error}")
+
         return atomic_notes
     
     def _generate_atomic_notes_sequential(self, text_chunks: List[Dict[str, Any]], progress_tracker: Optional[Any] = None) -> List[Dict[str, Any]]:
@@ -497,12 +505,18 @@ class AtomicNoteGenerator:
     
     def _convert_to_atomic_note_format(self, note: Dict[str, Any], chunk_data: Dict[str, Any]) -> Dict[str, Any]:
         """将新格式的笔记转换为原有的原子笔记格式"""
-        text = note.get('text', '')
-        
+        text = (note.get('text', '') or '').strip()
+
         # 提取相关的paragraph idx信息
         paragraph_idx_mapping = chunk_data.get('paragraph_idx_mapping', {})
-        base_text = chunk_data.get('text', '') or text  # 优先用chunk原文
-        relevant_idxs = self._extract_relevant_paragraph_idxs(base_text, paragraph_idx_mapping)
+        explicit_idxs = note.get('paragraph_idxs')
+        relevant_idxs: List[int] = []
+        if isinstance(explicit_idxs, list) and explicit_idxs:
+            relevant_idxs = [idx for idx in explicit_idxs if isinstance(idx, int)]
+
+        if not relevant_idxs:
+            base_text = chunk_data.get('text', '') or text  # 优先用chunk原文
+            relevant_idxs = self._extract_relevant_paragraph_idxs(base_text, paragraph_idx_mapping)
         
         # 兜底逻辑：当且仅当"每文件一个段落"时，直接赋该段落 idx
         if not relevant_idxs:
@@ -521,7 +535,18 @@ class AtomicNoteGenerator:
         raw_span = text  # raw_span就是原始文本内容
         
         # 提取实体和关系信息
-        entities = note.get('entities', [])
+        entities = note.get('entities', []) or []
+        fallback_cfg = (config.get('notes_llm', {}) or {}).get('entities_fallback', {}) or {}
+        if (
+            (not entities)
+            and fallback_cfg.get('enabled', True)
+            and text
+        ):
+            entities = TextUtils.extract_entities_fallback(
+                text,
+                min_len=int(fallback_cfg.get('min_len', 2)),
+                allow_types=fallback_cfg.get('types', ['PERSON', 'ORG', 'GPE', 'WORK_OF_ART', 'EVENT'])
+            ) or []
         relations = []  # 新格式暂不包含relations
         
         # 生成raw_span_evidence
