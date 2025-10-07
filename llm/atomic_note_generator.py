@@ -475,6 +475,26 @@ class AtomicNoteGenerator:
             'stop': params.get('stop', ['\n\n', self.sentinel_char])
         }
     
+    def _normalize_to_notes(self, note_data: Any) -> List[Dict]:
+        """
+        将 LLM/上游解析结果统一归一化为 List[Dict]。
+        - dict -> [dict]
+        - list[dict] -> list[dict]
+        - "~" / "" / None -> []
+        - 其余类型 -> []
+        """
+        if note_data is None:
+            return []
+        if isinstance(note_data, str):
+            s = note_data.strip()
+            if s == "" or s == "~":
+                return []
+        if isinstance(note_data, dict):
+            return [note_data]
+        if isinstance(note_data, list):
+            return [x for x in note_data if isinstance(x, dict)]
+        return []
+    
     def _convert_to_atomic_note_format(self, note: Dict[str, Any], chunk_data: Dict[str, Any]) -> Dict[str, Any]:
         """将新格式的笔记转换为原有的原子笔记格式"""
         text = note.get('text', '')
