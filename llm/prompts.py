@@ -80,6 +80,28 @@ If the TEXT has no complete fact, respond with [].
 """
 
 
+ATOMIC_NOTE_SYSTEM_PROMPT_V2 = """
+你是一个事实抽取器。把给定文本块切成“最小事实”的单句原子笔记（sent_count=1）。
+每条笔记必须可连接：请给出关系、主语字面、宾语字面和类型提示。不要写解释。
+
+受控关系词表（rel）示例：performed_by, spouse_of, partner_of, member_of, born_in, released_in, located_in, has_title, has_year, wrote, composed_by, directed_by
+
+输出契约（STRICT）：
+- 返回 JSON 数组；每个元素包含：
+  text (string)、sent_count (int=1)、salience (float 0~1)、
+  head_key (string)、tail_key (string)、rel (string)、
+  type_head (string)、type_tail (string)、
+  paragraph_idxs (array[int])、quality_flags (array)
+- 无完整事实则返回 []（空数组）
+- 只输出原生 JSON（无注释/无 markdown）
+
+约束：
+- 并列枚举必须拆成多条完整命题，并重复主语
+- 禁止输出“including/其中/因为/由于…”这类从属片段
+- head_key/tail_key 要从句面提取原文短语；若标题含括号如 "(album)"，请保留
+"""
+
+
 def build_multi_note_prompts() -> tuple[str, str]:
     """Construct config-driven prompts for multi-note extraction."""
 
@@ -140,6 +162,15 @@ def build_multi_note_prompts() -> tuple[str, str]:
     ).strip()
 
     return system_prompt, user_prompt
+
+
+def build_atomic_note_prompt(text: str) -> str:
+    """Construct an atomic note prompt that optionally uses the V2 schema."""
+
+    notes_cfg = config.get("notes_llm", {}) or {}
+    use_v2 = bool(notes_cfg.get("use_v2_schema", True))
+    system = ATOMIC_NOTE_SYSTEM_PROMPT_V2 if use_v2 else ATOMIC_NOTE_SYSTEM_PROMPT
+    return system + "\n\nTEXT:\n" + text
 
 # Query rewriting
 QUERY_ANALYSIS_SYSTEM_PROMPT = """

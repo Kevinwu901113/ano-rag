@@ -46,7 +46,7 @@ from answer.verify_shell import create_answer_verifier
 from answer.efsa_answer import efsa_answer_with_fallback
 from context.packer import ContextPacker
 from retrieval.listt5_reranker import ListT5Reranker, create_listt5_reranker, fuse_scores, sort_desc
-from pipeline import EvidenceReranker, PathValidator
+from pipeline import EvidenceReranker, PathValidator, answer_question
 
 class QueryProcessor:
     """High level query processing pipeline."""
@@ -2337,128 +2337,171 @@ Prompt Length: {len(prompt)} characters
                 f"Final scheduling: {len(candidate_notes)} candidates -> {len(selected_notes)} selected: "
                 f"{[n.get('note_id') for n in selected_notes]}"
             )
-        # EFSA实体聚合答案生成（在LLM答案生成前尝试）
-        from answer.efsa_answer import efsa_answer_with_fallback
-        
-        # 提取桥接实体和路径实体信息
-        bridge_entities = []
-        path_entities = []
-        for note in selected_notes:
-            if note.get('bridge_entity'):
-                bridge_entities.append(note['bridge_entity'])
-            if note.get('bridge_path'):
-                path_entities.extend(note['bridge_path'])
-        
-        # 去重并取最后几个路径实体
-        bridge_entities = list(set(bridge_entities))
-        path_entities = list(set(path_entities))[-2:] if path_entities else []
-        
-        # 尝试EFSA实体答案生成
-        efsa_answer, efsa_support_idxs = efsa_answer_with_fallback(
-            candidates=selected_notes,
-            query=query,
-            bridge_entity=bridge_entities[0] if bridge_entities else None,
-            path_entities=path_entities,
-            topN=20
-        )
-        
-        if efsa_answer:
-            # EFSA成功生成实体答案
-            logger.info(f"EFSA generated entity answer: {efsa_answer}")
-            answer = efsa_answer
-            predicted_support_idxs = efsa_support_idxs
-            
-            # 为了保持一致性，仍然生成评分
-            context = "\n".join(n.get('content','') for n in selected_notes)
-            
-            # 记录EFSA生成的上下文和答案信息
-            efsa_prompt = f"Query: {query}\nContext:\n{context}\nEFSA Generated Answer: {answer}"
-            self._log_final_answer_prompt(efsa_prompt, query)
-            
-            scores = self.ollama.evaluate_answer(query, context, answer)
-        else:
-            # EFSA未找到实体答案，回退到原有的LLM句子型答案生成
-            logger.info("EFSA did not find entity answer, falling back to LLM-based answer generation")
-            
-            # 生成答案和评分
-            # 使用新的 build_context_prompt_with_passages 函数生成带有 [P{idx}] 标签的上下文和passages字典
-            prompt, passages_by_idx, packed_order = build_context_prompt_with_passages(selected_notes, query)
-            
-            # 记录传入最终答案生成模块的完整prompt内容
-            self._log_final_answer_prompt(prompt, query)
-            
-            raw_answer = self.ollama.generate_final_answer(prompt)
-            # 使用鲁棒的JSON解析器，带重试机制
-            def retry_generate():
-                return self.ollama.generate_final_answer(prompt)
-            
-            # 从配置获取重试参数
-            json_parsing_config = config.get('retrieval.json_parsing', {})
-            max_retries = json_parsing_config.get('max_retries', 3)
-            
-            answer, raw_support_idxs = extract_prediction_with_retry(
-                raw_answer, passages_by_idx, retry_func=retry_generate, max_retries=max_retries
-            )
-            
-            # 写盘前的最终合法性校验：再次过滤幽灵id并补齐
-            # 第二道兜底：确保最终结果没有幽灵id
-            filtered_support_idxs = [i for i in raw_support_idxs if i in passages_by_idx]
-            
-            # 若过滤后为空且上下文中存在任何包含答案子串的段，用其中一个合法id顶上第一位
-            if not filtered_support_idxs and answer:
-                for idx, content in passages_by_idx.items():
-                    if answer in content:
-                        filtered_support_idxs = [idx]
-                        break
-            
-            # 使用支持段落补齐模块对LLM输出进行结构化补齐/纠偏
-            from utils.support_fill import fill_support_idxs_noid
-            predicted_support_idxs = fill_support_idxs_noid(
-                question=query,
-                answer=answer, 
-                raw_support_idxs=filtered_support_idxs,  # 使用过滤后的合法id
-                passages_by_idx=passages_by_idx,
-                packed_order=packed_order
-            )
-            
-            # 生成后对齐检查：对比 support_idxs 与 used_idx_list
+        answer_selector_cfg = config.get('answer_selector', {}) or {}
+        selector_result: Dict[str, Any] = {}
+        if answer_selector_cfg.get('enabled', True):
             try:
-                # 读取 debug 目录下的 used_passages.json 获取 used_idx_list
-                run_dir = self.config.get('storage', {}).get('work_dir') or './result'
+                anchor_source = candidate_notes if answer_selector_cfg.get('use_candidate_pool', True) and candidate_notes else selected_notes
+                anchor_top_k = int(answer_selector_cfg.get('anchor_top_k', 5))
+                anchors: List[str] = []
+                for note in anchor_source or []:
+                    head_key = note.get('head_key')
+                    if head_key and head_key not in anchors:
+                        anchors.append(head_key)
+                    if len(anchors) >= anchor_top_k:
+                        break
+                graph_notes = selected_notes if selected_notes else candidate_notes
+                selector_result = answer_question(query, graph_notes or [], anchors)
+            except Exception as selector_error:
+                logger.warning(f"Answer selector failed: {selector_error}")
+                selector_result = {}
+
+        answer_selector_metadata = selector_result or {}
+        answer = ""
+        predicted_support_idxs: List[int] = []
+        scores: Dict[str, Any] = {}
+        selector_used = False
+
+        if selector_result.get('answer') and answer_selector_cfg.get('apply_before_llm', True):
+            selector_used = True
+            answer = selector_result['answer']
+            support_note_ids = selector_result.get('support_note_ids') or []
+            id_to_idx: Dict[str, int] = {}
+            for idx, note in enumerate(selected_notes):
+                note_id = note.get('note_id') or note.get('id')
+                if note_id:
+                    id_to_idx[str(note_id)] = idx
+            predicted_support_idxs = [id_to_idx[str(nid)] for nid in support_note_ids if str(nid) in id_to_idx]
+            context = "\n".join(n.get('content', '') for n in selected_notes)
+            if self.ollama:
+                scores = self.ollama.evaluate_answer(query, context, answer)
+            logger.info(
+                f"Answer selector produced direct answer via graph path: {selector_result.get('rels', [])}"
+            )
+
+        if not selector_used:
+            # EFSA实体聚合答案生成（在LLM答案生成前尝试）
+            from answer.efsa_answer import efsa_answer_with_fallback
+
+            # 提取桥接实体和路径实体信息
+            bridge_entities = []
+            path_entities = []
+            for note in selected_notes:
+                if note.get('bridge_entity'):
+                    bridge_entities.append(note['bridge_entity'])
+                if note.get('bridge_path'):
+                    path_entities.extend(note['bridge_path'])
+
+            # 去重并取最后几个路径实体
+            bridge_entities = list(set(bridge_entities))
+            path_entities = list(set(path_entities))[-2:] if path_entities else []
+
+            # 尝试EFSA实体答案生成
+            efsa_answer, efsa_support_idxs = efsa_answer_with_fallback(
+                candidates=selected_notes,
+                query=query,
+                bridge_entity=bridge_entities[0] if bridge_entities else None,
+                path_entities=path_entities,
+                topN=20
+            )
+
+            if efsa_answer:
+                # EFSA成功生成实体答案
+                logger.info(f"EFSA generated entity answer: {efsa_answer}")
+                answer = efsa_answer
+                predicted_support_idxs = efsa_support_idxs
+
+                # 为了保持一致性，仍然生成评分
+                context = "\n".join(n.get('content','') for n in selected_notes)
+
+                # 记录EFSA生成的上下文和答案信息
+                efsa_prompt = f"Query: {query}\nContext:\n{context}\nEFSA Generated Answer: {answer}"
+                self._log_final_answer_prompt(efsa_prompt, query)
+
+                scores = self.ollama.evaluate_answer(query, context, answer)
+            else:
+                # EFSA未找到实体答案，回退到原有的LLM句子型答案生成
+                logger.info("EFSA did not find entity answer, falling back to LLM-based answer generation")
+
+                # 生成答案和评分
+                # 使用新的 build_context_prompt_with_passages 函数生成带有 [P{idx}] 标签的上下文和passages字典
+                prompt, passages_by_idx, packed_order = build_context_prompt_with_passages(selected_notes, query)
+
+                # 记录传入最终答案生成模块的完整prompt内容
+                self._log_final_answer_prompt(prompt, query)
+
+                raw_answer = self.ollama.generate_final_answer(prompt)
+                # 使用鲁棒的JSON解析器，带重试机制
+                def retry_generate():
+                    return self.ollama.generate_final_answer(prompt)
+
+                # 从配置获取重试参数
+                json_parsing_config = config.get('retrieval.json_parsing', {})
+                max_retries = json_parsing_config.get('max_retries', 3)
+
+                answer, raw_support_idxs = extract_prediction_with_retry(
+                    raw_answer, passages_by_idx, retry_func=retry_generate, max_retries=max_retries
+                )
+
+                # 写盘前的最终合法性校验：再次过滤幽灵id并补齐
+                # 第二道兜底：确保最终结果没有幽灵id
+                filtered_support_idxs = [i for i in raw_support_idxs if i in passages_by_idx]
+
+                # 若过滤后为空且上下文中存在任何包含答案子串的段，用其中一个合法id顶上第一位
+                if not filtered_support_idxs and answer:
+                    for idx, content in passages_by_idx.items():
+                        if answer in content:
+                            filtered_support_idxs = [idx]
+                            break
+
+                # 使用支持段落补齐模块对LLM输出进行结构化补齐/纠偏
+                from utils.support_fill import fill_support_idxs_noid
+                predicted_support_idxs = fill_support_idxs_noid(
+                    question=query,
+                    answer=answer,
+                    raw_support_idxs=filtered_support_idxs,  # 使用过滤后的合法id
+                    passages_by_idx=passages_by_idx,
+                    packed_order=packed_order
+                )
+
+                # 生成后对齐检查：对比 support_idxs 与 used_idx_list
+                try:
+                    # 读取 debug 目录下的 used_passages.json 获取 used_idx_list
+                    run_dir = self.config.get('storage', {}).get('work_dir') or './result'
+
+                    # 查找最新的 debug 目录
+                    debug_base_dir = os.path.join(run_dir, "3", "debug")
+                    used_idx_list = []
+
+                    if os.path.exists(debug_base_dir):
+                        # 找到最新的 2hop__ 目录
+                        debug_dirs = [d for d in os.listdir(debug_base_dir) if d.startswith("2hop__")]
+                        if debug_dirs:
+                            latest_debug_dir = max(debug_dirs)  # 按字典序取最新
+                            used_passages_path = os.path.join(debug_base_dir, latest_debug_dir, "used_passages.json")
+
+                            if os.path.exists(used_passages_path):
+                                with open(used_passages_path, 'r', encoding='utf-8') as f:
+                                    used_passages_data = json.load(f)
+                                    used_idx_list = used_passages_data.get('used_idx_list', [])
                 
-                # 查找最新的 debug 目录
-                debug_base_dir = os.path.join(run_dir, "3", "debug")
-                used_idx_list = []
+                    # 统一转成字符串进行对比（与 prompts.py 中保持一致）
+                    support_chosen = [str(idx) for idx in predicted_support_idxs]
+                    prompt_contained = [str(idx) for idx in used_idx_list]  # used_idx_list 已经是字符串类型
+
+                    # 找出不在 prompt 里的 support
+                    missing_supports = [idx for idx in support_chosen if idx not in prompt_contained]
+
+                    # 按要求的格式打印对比日志
+                    print(f"Support chosen: {support_chosen} ; Prompt contained: {prompt_contained} ; missing={missing_supports}")
+                    logger.info(f"Support chosen: {support_chosen} ; Prompt contained: {prompt_contained} ; missing={missing_supports}")
+
+                    # 如果有 missing，额外警告
+                    if missing_supports:
+                        logger.warning(f"LLM选择了不在prompt中的索引: {missing_supports} (可能是类型不一致或off-by-one问题)")
                 
-                if os.path.exists(debug_base_dir):
-                    # 找到最新的 2hop__ 目录
-                    debug_dirs = [d for d in os.listdir(debug_base_dir) if d.startswith("2hop__")]
-                    if debug_dirs:
-                        latest_debug_dir = max(debug_dirs)  # 按字典序取最新
-                        used_passages_path = os.path.join(debug_base_dir, latest_debug_dir, "used_passages.json")
-                        
-                        if os.path.exists(used_passages_path):
-                            with open(used_passages_path, 'r', encoding='utf-8') as f:
-                                used_passages_data = json.load(f)
-                                used_idx_list = used_passages_data.get('used_idx_list', [])
-                
-                # 统一转成字符串进行对比（与 prompts.py 中保持一致）
-                support_chosen = [str(idx) for idx in predicted_support_idxs]
-                prompt_contained = [str(idx) for idx in used_idx_list]  # used_idx_list 已经是字符串类型
-                
-                # 找出不在 prompt 里的 support
-                missing_supports = [idx for idx in support_chosen if idx not in prompt_contained]
-                
-                # 按要求的格式打印对比日志
-                print(f"Support chosen: {support_chosen} ; Prompt contained: {prompt_contained} ; missing={missing_supports}")
-                logger.info(f"Support chosen: {support_chosen} ; Prompt contained: {prompt_contained} ; missing={missing_supports}")
-                
-                # 如果有 missing，额外警告
-                if missing_supports:
-                    logger.warning(f"LLM选择了不在prompt中的索引: {missing_supports} (可能是类型不一致或off-by-one问题)")
-                
-            except Exception as e:
-                logger.warning(f"Failed to perform support alignment check: {e}")
+                except Exception as e:
+                    logger.warning(f"Failed to perform support alignment check: {e}")
             
             
             # 评估答案质量
@@ -2565,6 +2608,7 @@ Prompt Length: {len(prompt)} characters
             'notes': selected_notes,
             'predicted_support_idxs': predicted_support_idxs,
             'final_recall_path': final_recall_path,
+            'answer_selector': answer_selector_metadata,
         }
         
         # 添加调度器特定的信息
@@ -2673,6 +2717,7 @@ Prompt Length: {len(prompt)} characters
                 'scores': scores,
                 'notes': selected_notes,
                 'predicted_support_idxs': predicted_support_idxs,
+                'answer_selector': None,
                 'subquestion_info': {
                     'sub_questions': sub_questions,
                     'subquestion_results': subquestion_results,
