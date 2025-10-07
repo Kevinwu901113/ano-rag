@@ -56,6 +56,7 @@ Extraction rules:
 - Keep wording faithful to the source; never speculate, merge multiple facts, or invent details.
 - Each sentence must be shorter than or equal to 200 characters after trimming.
 - If the chunk contains no complete fact, return an empty array.
+- PRESERVE RELATIONSHIPS: When extracting facts about people, always preserve and include their relationships to other people, organizations, or roles (e.g., "John is Mary's husband", "Alice works for Company X", "Bob is the CEO of Organization Y").
 
 Output contract (STRICT):
 - Always return a JSON array. Each element is an object with the keys:
@@ -103,6 +104,11 @@ def build_multi_note_prompts() -> tuple[str, str]:
     if prompt_cfg.get("enforce_entity_slot", True):
         coverage_rules.append(
             "- Entities: populate the entities field with the main subject and key objects for every fact whenever they appear in the text."
+        )
+    
+    if prompt_cfg.get("preserve_relationships", True):
+        coverage_rules.append(
+            "- Relationship preservation: When extracting facts about people, always preserve and include their relationships to other people, organizations, or roles (e.g., 'John is Mary's husband', 'Alice works for Company X', 'Bob is the CEO of Organization Y')."
         )
 
     coverage_rules_text = "\n".join(coverage_rules)

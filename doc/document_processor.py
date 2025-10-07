@@ -13,6 +13,7 @@ from llm.parallel_task_atomic_note_generator import ParallelTaskAtomicNoteGenera
 from utils import BatchProcessor, FileUtils, JSONLProgressTracker
 from utils.enhanced_ner import EnhancedNER
 from utils.consistency_checker import ConsistencyChecker
+from utils.note_jsonl_writer import get_global_note_writer
 from config import config
 from vector_store import EmbeddingManager
 from graph import GraphBuilder
@@ -299,6 +300,31 @@ class DocumentProcessor:
 
             # 增强笔记关系
             enhanced_notes = self.atomic_note_generator.enhance_notes_with_relations(valid_notes)
+            
+            # 写入JSONL文件
+            try:
+                # 使用工作目录作为JSONL文件的输出目录，与atomic_notes.json等文件保持一致
+                work_dir = config.get('storage.work_dir') or self.processed_docs_path
+                jsonl_writer = get_global_note_writer(work_dir)
+                for note in enhanced_notes:
+                    # 从source_info中获取问题ID
+                    source_info = note.get('source_info', {})
+                    question_id = (source_info.get('file_name', '') or 
+                                 source_info.get('document_id', '') or 
+                                 source_info.get('file_path', ''))
+                    
+                    # 获取段落索引位置，优先使用paragraph_idxs的第一个值
+                    paragraph_idxs = note.get('paragraph_idxs', [])
+                    if paragraph_idxs and len(paragraph_idxs) > 0:
+                        idx = paragraph_idxs[0]  # 使用第一个段落索引
+                    else:
+                        idx = note.get('chunk_index', 0)  # 回退到chunk_index
+                    
+                    jsonl_writer.write_note(note, question_id, idx)
+                
+                logger.info(f"Written {len(enhanced_notes)} notes to note.jsonl")
+            except Exception as e:
+                logger.error(f"Failed to write notes to JSONL: {e}")
             
             logger.info(f"Generated {len(enhanced_notes)} atomic notes")
             return enhanced_notes
