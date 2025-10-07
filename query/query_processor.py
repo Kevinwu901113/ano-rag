@@ -46,6 +46,7 @@ from answer.verify_shell import create_answer_verifier
 from answer.efsa_answer import efsa_answer_with_fallback
 from context.packer import ContextPacker
 from retrieval.listt5_reranker import ListT5Reranker, create_listt5_reranker, fuse_scores, sort_desc
+from pipeline import EvidenceReranker, PathValidator
 
 class QueryProcessor:
     """High level query processing pipeline."""
@@ -619,7 +620,11 @@ Prompt Length: {len(prompt)} characters
         except Exception as e:
             logger.error(f"Failed to build entity inverted index: {e}")
             self.entity_inverted_index = None
-        
+
+        # 证据后处理组件
+        self.evidence_reranker = EvidenceReranker()
+        self.path_validator = PathValidator()
+
         # 初始化结构化日志记录器
         self.structured_logger = StructuredLogger("QueryProcessor")
         self.structured_logger.info("QueryProcessor initialized successfully",
@@ -637,6 +642,26 @@ Prompt Length: {len(prompt)} characters
                 return {}
             cfg = cfg.get(key)
         return cfg if isinstance(cfg, dict) else {}
+
+    def _post_select_processing(
+        self,
+        selected_notes: List[Dict[str, Any]],
+        candidate_notes: Optional[List[Dict[str, Any]]],
+        query: str,
+    ) -> List[Dict[str, Any]]:
+        """Apply re-ranking and path validation to the selected evidence."""
+
+        if not selected_notes:
+            return selected_notes
+
+        processed = self.evidence_reranker.rerank(selected_notes, query)
+        processed = self.path_validator.ensure_valid_bundle(
+            processed,
+            candidate_notes=candidate_notes,
+            query=query,
+            target_size=len(processed),
+        )
+        return processed
 
     @log_performance("QueryProcessor.process")
     def process(self, query: str, dataset: Optional[str] = None, qid: Optional[str] = None) -> Dict[str, Any]:
@@ -1996,7 +2021,8 @@ Prompt Length: {len(prompt)} characters
             
             # 调用 ContextDispatcher 处理候选结果
             selected_notes = self.context_dispatcher.dispatch(candidate_notes, query=query)
-            
+            selected_notes = self._post_select_processing(selected_notes, candidate_notes, query)
+
             # 构建上下文
             context = "\n".join(n.get('content','') for n in selected_notes)
             
@@ -2269,7 +2295,9 @@ Prompt Length: {len(prompt)} characters
                 logger.info(f"After multi-hop safety filtering (non-multi-hop): {len(candidate_notes)} candidates")
                 
                 selected_notes = self.scheduler.schedule(candidate_notes)
-            
+
+            selected_notes = self._post_select_processing(selected_notes, candidate_notes, query)
+
             # 第四阶段命名空间过滤：最终调度后
             if self.namespace_filtering_enabled and 'final_scheduling' in self.namespace_filter_stages and dataset and qid:
                 try:
@@ -3250,7 +3278,8 @@ Prompt Length: {len(prompt)} characters
             }
         }
         
-        return dispatch_result['selected_notes']
+        selected = dispatch_result['selected_notes']
+        return self._post_select_processing(selected, merged_evidence, query)
     
     @log_performance("QueryProcessor._schedule_merged_evidence_traditional")
     def _schedule_merged_evidence_traditional(self, merged_evidence: List[Dict[str, Any]], query: str) -> List[Dict[str, Any]]:
@@ -3291,7 +3320,9 @@ Prompt Length: {len(prompt)} characters
                         if key not in note_dict:
                             note_dict[key] = value
                     selected_notes.append(note_dict)
-                
+
+                selected_notes = self._post_select_processing(selected_notes, merged_evidence, query)
+
                 # 记录多样性调度指标
                 log_diversity_metrics(
                     candidates_count=len(merged_evidence),
@@ -3316,11 +3347,13 @@ Prompt Length: {len(prompt)} characters
             reasoning_paths = []
             for evidence in merged_evidence:
                 reasoning_paths.extend(evidence.get('reasoning_paths', []))
-            
+
             selected_notes = self.scheduler.schedule_for_multi_hop(merged_evidence, reasoning_paths)
         else:
             selected_notes = self.scheduler.schedule(merged_evidence)
-        
+
+        selected_notes = self._post_select_processing(selected_notes, merged_evidence, query)
+
         self.structured_logger.debug("Traditional scheduler completed",
                                    selected_count=len(selected_notes),
                                    scheduler_type="multi_hop" if self.multi_hop_enabled else "standard")

@@ -512,7 +512,14 @@ class AtomicNoteGenerator:
         explicit_idxs = note.get('paragraph_idxs')
         relevant_idxs: List[int] = []
         if isinstance(explicit_idxs, list) and explicit_idxs:
-            relevant_idxs = [idx for idx in explicit_idxs if isinstance(idx, int)]
+            for idx in explicit_idxs:
+                if isinstance(idx, int):
+                    relevant_idxs.append(idx)
+                elif isinstance(idx, str):
+                    try:
+                        relevant_idxs.append(int(idx))
+                    except ValueError:
+                        logger.debug(f"Invalid paragraph idx value ignored: {idx}")
 
         if not relevant_idxs:
             base_text = chunk_data.get('text', '') or text  # 优先用chunk原文
@@ -537,16 +544,20 @@ class AtomicNoteGenerator:
         # 提取实体和关系信息
         entities = note.get('entities', []) or []
         fallback_cfg = (config.get('notes_llm', {}) or {}).get('entities_fallback', {}) or {}
-        if (
-            (not entities)
-            and fallback_cfg.get('enabled', True)
-            and text
-        ):
-            entities = TextUtils.extract_entities_fallback(
-                text,
-                min_len=int(fallback_cfg.get('min_len', 2)),
-                allow_types=fallback_cfg.get('types', ['PERSON', 'ORG', 'GPE', 'WORK_OF_ART', 'EVENT'])
-            ) or []
+        if (not entities) and fallback_cfg.get('enabled', True) and text:
+            try:
+                entities = TextUtils.extract_entities_fallback(
+                    text,
+                    min_len=int(fallback_cfg.get('min_len', 2)),
+                    allow_types=fallback_cfg.get('types', ['PERSON', 'ORG', 'GPE', 'WORK_OF_ART', 'EVENT'])
+                ) or []
+            except Exception as err:
+                logger.debug(f"entities fallback failed: {err}")
+                entities = []
+
+        if entities:
+            entities = [str(e).strip() for e in entities if str(e).strip()]
+            entities = list(dict.fromkeys(entities))
         relations = []  # 新格式暂不包含relations
         
         # 生成raw_span_evidence

@@ -2,7 +2,7 @@
 
 from functools import lru_cache
 import re
-from typing import Dict, List, Any
+from typing import Dict, List, Any, Optional
 
 from config import config
 
@@ -59,7 +59,7 @@ def _char_count_zh(text: str) -> int:
     return len(re.findall(r"[\u4e00-\u9fff]", text))
 
 
-def is_complete_sentence(text: str, entities: List[str]) -> bool:
+def is_complete_sentence(text: str, entities: Optional[List[str]]) -> bool:
     """Determine whether a note text qualifies as a complete proposition."""
 
     if not text:
