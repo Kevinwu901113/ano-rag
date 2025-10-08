@@ -10,6 +10,7 @@ from loguru import logger
 from config import config
 
 from utils.note_completeness import is_complete_sentence
+from utils.notes_parser import enrich_note_keys
 from utils.text_utils import TextUtils
 
 
@@ -83,14 +84,11 @@ class NotesQualityFilter:
         self.stats['total_input'] = len(notes)
         logger.debug(f"Starting quality filtering for {len(notes)} notes")
 
-        # 0. 完整性过滤
+        # 补充结构化键值，后续过滤不会因缺失 slot 直接拒绝
+        notes = [enrich_note_keys(note) for note in notes]
+
+        # 0. 完整性过滤（仅句式层面）
         notes = self._filter_by_completeness(notes)
-
-        # 0.5 实体回补
-        notes = self._enrich_entities(notes)
-
-        # 0.6 实体要求
-        notes = self._enforce_entity_requirement(notes)
 
         # 1. 长度过滤
         notes = self._filter_by_length(notes)
@@ -100,9 +98,13 @@ class NotesQualityFilter:
         
         # 3. 显著性过滤
         notes = self._filter_by_salience(notes)
-        
+
         # 4. 质量标志过滤
         notes = self._filter_by_quality_flags(notes)
+
+        # 4.5 实体回补与实体需求
+        notes = self._enrich_entities(notes)
+        notes = self._enforce_entity_requirement(notes)
         
         # 5. 去重过滤
         notes = self._filter_duplicates(notes, accumulated_notes)
@@ -121,9 +123,7 @@ class NotesQualityFilter:
         filtered: List[Dict[str, Any]] = []
         for note in notes:
             text = str(note.get('text') or '').strip()
-            entities = note.get('entities', [])
-
-            if text and is_complete_sentence(text, entities):
+            if text and is_complete_sentence(text, None):
                 filtered.append(note)
             else:
                 self.stats['filtered_by_completeness'] += 1

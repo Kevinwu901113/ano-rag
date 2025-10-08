@@ -302,6 +302,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "max_chars": 400,
         "min_salience": 0.3,
         "max_notes_per_chunk": 12,
+        "max_note_chars": 200,
         "enable_rule_fallback": True,
         "entities_fallback": {
             "enabled": True,
@@ -323,7 +324,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         }
     },
     "quality_filter": {
-        "require_entities": True,
+        "require_entities": False,
         "min_chars": 20,
         "min_salience": 0.3,
     },
@@ -337,6 +338,18 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "bad_starts_en": [],
         "bad_starts_zh": [],
         "require_entities": False,
+    },
+    "evidence_rerank": {
+        "enable": True,
+        "w_album": 0.5,
+        "w_song": -0.3,
+        "w_supporting": 0.4,
+        "w_q_performer_album": 0.3,
+        "album_tokens": ["(album)", " album"],
+        "song_tokens": ["(song)", " single", "(film)"],
+        "support_flag_keys": ["is_supporting", "supporting"],
+        "query_performer_terms": ["performer", "singer", "vocalist"],
+        "query_album_terms": ["album", "record", "ep"],
     },
     "vector_store": {
         "top_k": 20,

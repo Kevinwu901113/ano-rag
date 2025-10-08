@@ -88,28 +88,6 @@ TEXT:
 """
 
 
-ATOMIC_NOTE_SYSTEM_PROMPT_V2_TEMPLATE = """
-你是一个事实抽取器。把给定文本块切成“最小事实”的单句原子笔记（sent_count=1）。
-每条笔记必须可连接：请给出关系、主语字面、宾语字面和类型提示。不要写解释。
-
-受控关系词表（rel）仅可取：{rel_list}
-
-输出契约（STRICT）：
-- 返回 JSON 数组；每个元素包含：
-  text (string)、sent_count (int=1)、salience (float 0~1)、
-  head_key (string)、tail_key (string)、rel (string)、
-  type_head (string)、type_tail (string)、
-  paragraph_idxs (array[int])、quality_flags (array)
-- 无完整事实则返回 []（空数组）
-- 只输出原生 JSON（无注释/无 markdown）
-
-约束：
-- 并列枚举必须拆成多条完整命题，并重复主语
-- 禁止输出“including/其中/因为/由于…”这类从属片段
-- head_key/tail_key 要从句面提取原文短语；若标题含括号如 "(album)"，请保留
-"""
-
-
 def _build_rel_list_display() -> str:
     lex = config.get("note_keys", {}).get("rel_lexicon", {}) or {}
     if not lex:
@@ -118,9 +96,28 @@ def _build_rel_list_display() -> str:
 
 
 # Backwards compatibility: expose a materialized V2 system prompt at import time.
-ATOMIC_NOTE_SYSTEM_PROMPT_V2 = textwrap.dedent(
-    ATOMIC_NOTE_SYSTEM_PROMPT_V2_TEMPLATE.format(rel_list=_build_rel_list_display())
-).strip()
+def _build_v2_system_prompt() -> str:
+    rel_list = _build_rel_list_display()
+    return textwrap.dedent(
+        f"""
+        你是事实抽取器。将输入文本切分为“最小事实”的单句原子笔记（sent_count=1）。
+        每条笔记必须可被连接：输出关系、主语字面、宾语字面与类型提示。不得输出解释或多余文本。
+
+        受控关系词表（rel）：{rel_list}
+
+        严格输出 JSON 数组；每条记录包含字段：
+        text(string), sent_count(int=1), salience(float 0~1),
+        head_key(string), tail_key(string), rel(string),
+        type_head(string), type_tail(string),
+        paragraph_idxs(array[int]), quality_flags(array)
+
+        没有完整事实则返回 []（空数组）。
+        并列必须拆句且每条重复主语；禁止“including/其中/因为/由于…”等从属片段。
+        """
+    ).strip()
+
+
+ATOMIC_NOTE_SYSTEM_PROMPT_V2 = _build_v2_system_prompt()
 
 
 def get_atomic_note_prompts() -> Tuple[str, str]:
@@ -129,10 +126,7 @@ def get_atomic_note_prompts() -> Tuple[str, str]:
     notes_cfg = config.get("notes_llm", {}) or {}
     use_v2 = bool(notes_cfg.get("use_v2_schema", True))
     if use_v2:
-        rel_list = _build_rel_list_display()
-        system_prompt = textwrap.dedent(
-            ATOMIC_NOTE_SYSTEM_PROMPT_V2_TEMPLATE.format(rel_list=rel_list)
-        ).strip()
+        system_prompt = _build_v2_system_prompt()
         globals()["ATOMIC_NOTE_SYSTEM_PROMPT_V2"] = system_prompt
         return system_prompt, textwrap.dedent(ATOMIC_NOTEGEN_PROMPT_V2).strip()
 
