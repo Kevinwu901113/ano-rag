@@ -1,36 +1,13 @@
-from typing import Any, Dict, Iterable, List, Sequence
+from __future__ import annotations
+
+"""Answer selection using atomic-note graph search."""
+
+import re
+from typing import Any, Dict, Iterable, List
 
 from config import config
 from graph.index import NoteGraph
-from graph.search import Path, beam_search
-
-
-def extract_rel_chain(question: str) -> List[str]:
-    """Return a planned relation chain for the given question if available."""
-
-    _ = question  # Reserved for future question understanding logic
-    answer_cfg = config.get("answering", {}) or {}
-    chains = answer_cfg.get("rel_chains") or []
-    if not chains:
-        return []
-    first_chain = chains[0]
-    return list(first_chain) if isinstance(first_chain, (list, tuple)) else []
-
-
-def _path_to_answer(path: Path, extra: Dict[str, Any] | None = None) -> Dict[str, Any]:
-    if not path.keys:
-        return {}
-
-    payload: Dict[str, Any] = {
-        "answer": path.keys[-1],
-        "support_note_ids": path.notes,
-        "rels": path.rels,
-        "path_score": path.score,
-        "path_keys": path.keys,
-    }
-    if extra:
-        payload.update(extra)
-    return payload
+from graph.search import beam_search
 
 
 def _dedupe_preserve_order(values: Iterable[str]) -> List[str]:
@@ -44,61 +21,75 @@ def _dedupe_preserve_order(values: Iterable[str]) -> List[str]:
     return ordered
 
 
-def answer_question(question: str, notes: List[Dict[str, Any]], anchors: List[str]) -> Dict[str, Any]:
+def extract_rel_chain(question: str) -> List[str]:
+    """Infer an expected relation chain via configurable regex rules."""
+
+    answer_cfg = config.get("answering", {}) or {}
+    rules = answer_cfg.get("rel_chain_rules") or []
+    question_lower = (question or "").lower()
+
+    for rule in rules:
+        pattern = rule.get("pattern")
+        chain = rule.get("chain")
+        if not (pattern and chain):
+            continue
+        try:
+            if re.search(pattern, question_lower):
+                if isinstance(chain, (list, tuple)):
+                    return [str(rel) for rel in chain if rel]
+        except re.error:
+            continue
+
+    return []
+
+
+def answer_from_notes(
+    question: str,
+    notes: List[Dict[str, Any]],
+    anchor_keys: List[str],
+) -> Dict[str, Any]:
+    """Build a note graph and attempt to answer via multi-hop search."""
+
+    if not notes:
+        return {"answer": "", "support_note_ids": [], "rels": [], "path_score": 0.0}
+
     graph = NoteGraph()
     for note in notes:
         graph.add_note(note)
 
-    anchor_list = anchors or []
-    if not anchor_list:
-        anchor_list = [note.get("head_key") for note in notes if note.get("head_key")]
-    deduped_anchors = _dedupe_preserve_order(anchor_list)
+    anchors = _dedupe_preserve_order(anchor_keys or [])
+    if not anchors:
+        anchors = _dedupe_preserve_order(
+            [note.get("head_key") for note in notes if note.get("head_key")]
+        )
 
-    if not deduped_anchors:
-        return {}
+    if not anchors:
+        return {"answer": "", "support_note_ids": [], "rels": [], "path_score": 0.0}
 
-    answer_cfg = config.get("answering", {}) or {}
-    configured_chains = answer_cfg.get("rel_chains") or []
-    candidate_chains: List[Sequence[str]] = []
+    rel_chain = extract_rel_chain(question)
+    paths = beam_search(graph, anchors, rel_chain or None)
+    if not paths and rel_chain:
+        paths = beam_search(graph, anchors, None)
 
-    primary_chain = extract_rel_chain(question)
-    if primary_chain:
-        candidate_chains.append(tuple(primary_chain))
+    if not paths:
+        return {"answer": "", "support_note_ids": [], "rels": [], "path_score": 0.0}
 
-    for chain in configured_chains:
-        if isinstance(chain, (list, tuple)):
-            chain_tuple = tuple(chain)
-            if chain_tuple not in candidate_chains:
-                candidate_chains.append(chain_tuple)
+    path = paths[0]
+    if not path.notes or len(path.keys) <= 1:
+        return {"answer": "", "support_note_ids": [], "rels": [], "path_score": 0.0}
 
-    for chain in candidate_chains:
-        paths = beam_search(graph, deduped_anchors, list(chain))
-        if paths:
-            return _path_to_answer(paths[0], {
-                "relation_chain": list(chain),
-                "strategy": "planned",
-            })
+    answer = path.keys[-1] if path.keys else ""
 
-    relax_specs = answer_cfg.get("relax_last_hop") or []
-    if candidate_chains and relax_specs:
-        for chain in candidate_chains:
-            if not chain:
-                continue
-            base = list(chain)
-            for relax in relax_specs:
-                relaxed_chain = base[:-1] + [relax]
-                paths = beam_search(graph, deduped_anchors, relaxed_chain)
-                if paths:
-                    return _path_to_answer(paths[0], {
-                        "relation_chain": relaxed_chain,
-                        "strategy": "relaxed",
-                    })
+    return {
+        "answer": answer,
+        "support_note_ids": path.notes,
+        "rels": path.rels,
+        "path_score": path.score,
+        "path_keys": path.keys,
+    }
 
-    fallback_paths = beam_search(graph, deduped_anchors, None)
-    if fallback_paths:
-        return _path_to_answer(fallback_paths[0], {
-            "relation_chain": [],
-            "strategy": "fallback",
-        })
 
-    return {}
+def answer_question(question: str, notes: List[Dict[str, Any]], anchors: List[str]) -> Dict[str, Any]:
+    """Backward-compatible entry point used by the pipeline."""
+
+    return answer_from_notes(question, notes, anchors)

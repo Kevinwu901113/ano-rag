@@ -57,6 +57,18 @@ answer_selector:
   use_candidate_pool: true
   apply_before_llm: true
 
+evidence_rerank:
+  enable: true
+  w_album: 0.5
+  w_song: -0.3
+  w_supporting: 0.4
+  w_q_performer_album: 0.3
+  album_tokens: ["(album)", " album"]
+  song_tokens: ["(song)", " single", "(film)"]
+  support_flag_keys: ["is_supporting", "supporting"]
+  query_performer_terms: ["performer", "singer", "vocalist"]
+  query_album_terms: ["album", "record", "ep"]
+
 # 向量存储配置
 vector_store:
   top_k: 20                 # 检索候选数量，影响召回率和计算开销
@@ -329,6 +341,7 @@ atomic_note_generation:
 
 # 原子笔记生成优化配置
 notes_llm:
+  use_v2_schema: true
   max_note_chars: 200
   # 流式处理早停机制配置
   stream_early_stop: true      # 启用流式处理早停机制
@@ -387,7 +400,7 @@ note_completeness:
   require_entities: false
 
 quality_filter:
-  require_entities: true
+  require_entities: false
   min_chars: 20
 
 note_recovery:
