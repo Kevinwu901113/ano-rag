@@ -97,5 +97,10 @@ def beam_search(
             break
 
     results = completed if completed else beams
+    # Drop degenerate paths that never traversed an edge (no supporting notes).
+    results = [path for path in results if path.notes]
+    if not results:
+        return []
+
     results.sort(key=lambda p: p.score, reverse=True)
     return results[:beam_size]

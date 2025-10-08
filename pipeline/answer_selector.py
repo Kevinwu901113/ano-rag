@@ -23,7 +23,6 @@ def _dedupe_preserve_order(values: Iterable[str]) -> List[str]:
 
 def extract_rel_chain(question: str) -> List[str]:
     """Infer an expected relation chain via configurable regex rules."""
-
     answer_cfg = config.get("answering", {}) or {}
     rules = answer_cfg.get("rel_chain_rules") or []
     question_lower = (question or "").lower()
@@ -69,12 +68,18 @@ def answer_from_notes(
     rel_chain = extract_rel_chain(question)
     paths = beam_search(graph, anchors, rel_chain or None)
     if not paths and rel_chain:
+        # fallback: 放宽关系链约束再搜一遍
         paths = beam_search(graph, anchors, None)
 
     if not paths:
         return {"answer": "", "support_note_ids": [], "rels": [], "path_score": 0.0}
 
     path = paths[0]
+
+    # —— 保留 codex 分支的安全检查（避免返回空路径或仅包含起点的路径）——
+    if not path.notes or len(path.keys) <= 1:
+        return {"answer": "", "support_note_ids": [], "rels": [], "path_score": 0.0}
+
     answer = path.keys[-1] if path.keys else ""
 
     return {
@@ -86,7 +91,10 @@ def answer_from_notes(
     }
 
 
-def answer_question(question: str, notes: List[Dict[str, Any]], anchors: List[str]) -> Dict[str, Any]:
+def answer_question(
+    question: str,
+    notes: List[Dict[str, Any]],
+    anchors: List[str]
+) -> Dict[str, Any]:
     """Backward-compatible entry point used by the pipeline."""
-
     return answer_from_notes(question, notes, anchors)
