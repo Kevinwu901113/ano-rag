@@ -11,143 +11,107 @@ from loguru import logger
 from config import config
 from utils.note_completeness import is_complete_sentence
 
-REL_LEX: Optional[Dict[str, List[re.Pattern]]] = None
-TYPE_HINTS: Optional[Dict[str, List[str]]] = None
-NORMALIZE: Optional[Dict[str, Any]] = None
-REL_TYPE_MAP: Optional[Dict[str, Dict[str, str]]] = None
-SPLITTERS: Optional[List[re.Pattern]] = None
-DEFAULT_REL: str = "related_to"
+_REL_LEX: Optional[Dict[str, List[re.Pattern]]] = None
+_TYPE_HINTS: Optional[Dict[str, List[str]]] = None
+_NORM: Optional[Dict[str, Any]] = None
+_DEFAULT_REL: str = "related_to"
 
 
-def _compile_rel_pattern(pattern: str) -> re.Pattern:
-    """Compile a relation trigger pattern respecting CJK semantics."""
+def _load_lex() -> None:
+    """Lazy-load lexical resources for relation and type inference."""
 
-    if re.search(r"[\u4e00-\u9fff]", pattern):
-        return re.compile(re.escape(pattern))
-    return re.compile(r"\b" + re.escape(pattern) + r"\b", re.IGNORECASE)
-
-
-def _compile_splitter(token: str) -> re.Pattern:
-    """Compile a fallback splitter trigger."""
-
-    return re.compile(re.escape(token), re.IGNORECASE)
-
-
-def _load_lexicons() -> None:
-    """Load lexical resources for rule-based enrichment from configuration."""
-
-    global REL_LEX, TYPE_HINTS, NORMALIZE, REL_TYPE_MAP, SPLITTERS, DEFAULT_REL
+    global _REL_LEX, _TYPE_HINTS, _NORM, _DEFAULT_REL
     note_key_cfg = config.get("note_keys", {}) or {}
-    if REL_LEX is None:
+
+    if _REL_LEX is None:
         lex = note_key_cfg.get("rel_lexicon", {}) or {}
-        REL_LEX = {
-            rel: [_compile_rel_pattern(pat) for pat in (pats or []) if pat]
-            for rel, pats in lex.items()
-        }
-    if SPLITTERS is None:
-        raw_splitters = note_key_cfg.get("fallback_splitters", []) or []
-        SPLITTERS = [_compile_splitter(token) for token in raw_splitters if token]
-    if TYPE_HINTS is None:
-        TYPE_HINTS = note_key_cfg.get(
-            "type_hints",
-            {"album": ["(album)"], "song": ["(song)"], "person": ["(person)"]},
-        ) or {}
-    if REL_TYPE_MAP is None:
-        REL_TYPE_MAP = note_key_cfg.get("relation_type_map", {}) or {}
-    if NORMALIZE is None:
-        NORMALIZE = note_key_cfg.get(
+        compiled: Dict[str, List[re.Pattern]] = {}
+        for rel, pats in lex.items():
+            compiled[rel] = [
+                re.compile(r"\b" + re.escape(pat) + r"\b", re.IGNORECASE)
+                if not re.search(r"[\u4e00-\u9fff]", str(pat))
+                else re.compile(re.escape(str(pat)))
+                for pat in (pats or [])
+                if pat
+            ]
+        _REL_LEX = compiled
+
+    if _TYPE_HINTS is None:
+        _TYPE_HINTS = note_key_cfg.get("type_hints", {}) or {}
+
+    if _NORM is None:
+        _NORM = note_key_cfg.get(
             "normalize",
             {"strip_quotes": True, "collapse_space": True, "lower": False},
         ) or {}
+
     default_rel = note_key_cfg.get("default_rel")
     if isinstance(default_rel, str) and default_rel.strip():
-        DEFAULT_REL = default_rel.strip()
-    elif REL_LEX:
-        DEFAULT_REL = next(iter(REL_LEX.keys()))
+        _DEFAULT_REL = default_rel.strip()
 
 
-def _normalize_key(value: str) -> str:
-    """Normalize literal keys according to configured heuristics."""
-
+def _norm(value: str) -> str:
     if not value:
         return value
 
     result = value
-    if NORMALIZE.get("strip_quotes", True):
+    if _NORM.get("strip_quotes", True):
         result = result.strip().strip("\"'“”‘’")
-    if NORMALIZE.get("collapse_space", True):
+    if _NORM.get("collapse_space", True):
         result = re.sub(r"\s+", " ", result).strip()
-    if NORMALIZE.get("lower", False):
+    if _NORM.get("lower", False):
         result = result.lower()
     return result
 
 
-def extract_rel(text: str) -> str:
-    """Extract relation keyword from text using configured lexicon."""
-
-    _load_lexicons()
-    for rel, patterns in (REL_LEX or {}).items():
-        for pattern in patterns:
-            if pattern.search(text):
-                return rel
-    return DEFAULT_REL
+def _extract_rel(text: str) -> str:
+    _load_lex()
+    for rel, patterns in (_REL_LEX or {}).items():
+        if any(pat.search(text) for pat in patterns):
+            return rel
+    return _DEFAULT_REL
 
 
-def _infer_type(literal: str, rel: str, role: str) -> str:
-    """Infer a coarse entity type using literal hints and relation defaults."""
+def _split_by_rel(text: str, rel: str) -> Tuple[str, str]:
+    _load_lex()
+    for pat in (_REL_LEX or {}).get(rel, []):
+        match = pat.search(text)
+        if match:
+            left = text[: match.start()].strip()
+            right = text[match.end() :].strip()
+            return left, right
 
-    if not literal:
-        return ""
+    fallback_tokens = config.get("note_keys.fallback_splitters", []) or []
+    for token in fallback_tokens:
+        pattern = re.compile(re.escape(str(token)), re.IGNORECASE)
+        match = pattern.search(text)
+        if match:
+            return text[: match.start()].strip(), text[match.end() :].strip()
 
-    literal_lower = literal.lower()
-    for entity_type, hints in (TYPE_HINTS or {}).items():
-        for hint in hints or []:
-            if hint.lower() in literal_lower:
-                return entity_type
+    match = re.search(r"\b(is|为|由|是由|是|in|of|by)\b", text, re.IGNORECASE)
+    if match:
+        return text[: match.start()].strip(), text[match.end() :].strip()
 
-    if REL_TYPE_MAP and rel in REL_TYPE_MAP:
-        rel_hint = REL_TYPE_MAP.get(rel, {}) or {}
-        candidate = rel_hint.get(role)
-        if candidate:
-            return candidate
+    return text, ""
+
+
+def _infer_type(literal: str, rel: str) -> str:
+    literal_lower = (literal or "").lower()
+    if literal_lower:
+        for entity_type, hints in (_TYPE_HINTS or {}).items():
+            for hint in hints or []:
+                if str(hint).lower() in literal_lower:
+                    return entity_type
+
+    if rel in ("performed_by", "composed_by", "directed_by"):
+        return "album"
+    if rel in ("spouse_of", "partner_of", "born_in"):
+        return "person"
     return ""
 
 
-def extract_keys_and_types(text: str, rel: str) -> Tuple[str, str, str, str]:
-    """Return head/tail literals and inferred types from text."""
-
-    _load_lexicons()
-
-    left = text
-    right = ""
-    match_obj = None
-
-    for pattern in (REL_LEX or {}).get(rel, []):
-        match_obj = pattern.search(text)
-        if match_obj:
-            left = text[: match_obj.start()].strip()
-            right = text[match_obj.end() :].strip()
-            break
-
-    if not match_obj:
-        for splitter in SPLITTERS or []:
-            match_obj = splitter.search(text)
-            if match_obj:
-                left = text[: match_obj.start()].strip()
-                right = text[match_obj.end() :].strip()
-                break
-
-    head_key = _normalize_key(left)
-    tail_key = _normalize_key(right)
-
-    type_head = _infer_type(head_key, rel, "head")
-    type_tail = _infer_type(tail_key, rel, "tail")
-
-    return head_key, tail_key, type_head, type_tail
-
-
 def enrich_note_keys(note: Dict[str, Any]) -> Dict[str, Any]:
-    """Deterministically enrich a note with relation and literal keys."""
+    """Deterministically backfill relation and literal keys from text."""
 
     if not isinstance(note, dict):
         return note
@@ -156,32 +120,31 @@ def enrich_note_keys(note: Dict[str, Any]) -> Dict[str, Any]:
     if not text:
         return note
 
-    _load_lexicons()
-    candidate_rel = str(note.get("rel") or "").strip()
-    rel_candidates = REL_LEX or {}
-    rel = candidate_rel if candidate_rel in rel_candidates else extract_rel(text)
-    head_key = note.get("head_key")
-    tail_key = note.get("tail_key")
-    type_head = note.get("type_head")
-    type_tail = note.get("type_tail")
+    _load_lex()
+    rel = str(note.get("rel") or "").strip() or _extract_rel(text)
+    if rel not in (_REL_LEX or {}):
+        rel = _extract_rel(text)
+
+    head_key = note.get("head_key") or ""
+    tail_key = note.get("tail_key") or ""
 
     if not (head_key and tail_key):
-        extracted_head, extracted_tail, inferred_head, inferred_tail = extract_keys_and_types(text, rel)
-        head_key = head_key or extracted_head
-        tail_key = tail_key or extracted_tail
-        type_head = type_head or inferred_head
-        type_tail = type_tail or inferred_tail
+        left, right = _split_by_rel(text, rel)
+        head_key = head_key or _norm(left)
+        tail_key = tail_key or _norm(right)
 
-    if head_key and not type_head:
-        type_head = _infer_type(head_key, rel, "head")
-    if tail_key and not type_tail:
-        type_tail = _infer_type(tail_key, rel, "tail")
+    type_head = note.get("type_head") or _infer_type(head_key, rel)
+    type_tail = note.get("type_tail") or _infer_type(tail_key, rel)
 
-    note["head_key"] = head_key
-    note["tail_key"] = tail_key
-    note["type_head"] = type_head
-    note["type_tail"] = type_tail
-    note["rel"] = rel
+    note.update(
+        {
+            "rel": rel,
+            "head_key": head_key,
+            "tail_key": tail_key,
+            "type_head": type_head,
+            "type_tail": type_tail,
+        }
+    )
     return note
 
 

@@ -50,7 +50,7 @@ def beam_search(
     beams = [Path(keys=[anchor], notes=[], rels=[], score=0.0) for anchor in valid_anchors]
     completed: List[Path] = []
 
-    for hop in range(max_hops):
+    for _hop in range(max_hops):
         next_candidates: List[Path] = []
         for path in beams:
             current_key = path.last_key()
@@ -97,5 +97,10 @@ def beam_search(
             break
 
     results = completed if completed else beams
+    # Drop degenerate paths that never traversed an edge (no supporting notes).
+    results = [path for path in results if path.notes]
+    if not results:
+        return []
+
     results.sort(key=lambda p: p.score, reverse=True)
     return results[:beam_size]
