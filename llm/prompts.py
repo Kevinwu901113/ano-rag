@@ -74,7 +74,7 @@ TEXT:
 Extract all explicit single-fact statements from the TEXT.
 Return ONLY a JSON array of objects with the shape:
 [
-  {{"text":"<one factual sentence>","sent_count":1,"salience":0.8,"local_spans":[],"entities":["Entity"],"years":[],"quality_flags":["OK"]}}
+  {"text":"<one factual sentence>","sent_count":1,"salience":0.8,"local_spans":[],"entities":["Entity"],"years":[],"quality_flags":["OK"]}
 ]
 If the TEXT has no complete fact, respond with [].
 """
@@ -100,7 +100,7 @@ _SENTENCE_ANCHOR_CONSTRAINTS = textwrap.dedent(
     你是一个知识提取器。严格遵守以下约束：
     - 仅从提供的句子编号（SENT_IDS）对应的文本中提取知识点；
     - 每条笔记必须包含 source_sent_ids（整数数组），且必须是 SENT_IDS 的子集；
-    - 不要对同一事实进行改写重复输出；同一 source_sent_ids 的事实仅输出一次；
+    - 不要对同一事实进行改写重复输出；同一 source_sent_ids 的事实仅输出一次（例如：“A 是 B 的首都”与“B 的首都是 A”视为重复，只保留一条）；
     - 每条笔记只包含一个独立知识点；
     - 输出 JSON 数组，元素字段至少包含：text, rel(可空), head_key(可空), tail_key(可空), source_sent_ids（必填）。
     """
@@ -527,13 +527,13 @@ Please decompose the following complex question into multiple independent sub-qu
 Original question: {query}
 
 Please return strictly in the following JSON format, do not add any other text or explanation:
-{{
+{
     "sub_questions": [
         "Sub-question 1",
         "Sub-question 2",
         "Sub-question 3"
     ]
-}}
+}
 
 Note:
 - Only return JSON object, do not include markdown code block markers

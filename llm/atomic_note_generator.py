@@ -876,6 +876,9 @@ class AtomicNoteGenerator:
             fallback_note_data['source_sent_ids'] = []
 
         atomic_note = self._convert_to_atomic_note_format(fallback_note_data, chunk_data)
+        if not atomic_note:
+            return None
+
         atomic_note['quality_flags'] = ['FALLBACK']
         return atomic_note
     

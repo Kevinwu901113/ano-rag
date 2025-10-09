@@ -54,7 +54,7 @@ class DocumentChunker:
             # 提取文本内容
             text_content = self._extract_text_content(content, file_path)
             
-            # === 新增：当有段落信息时，按段落切块并写入 paragraph_idx ===
+            # === 当有段落信息时，按段落切块并写入 paragraph_idx ===
             if paragraph_info:
                 chunks = []
                 global_idx = 0  # 跨全文的 chunk 序号
@@ -99,7 +99,7 @@ class DocumentChunker:
                 logger.info(f"Document chunked by paragraph: {len(chunks)} chunks")
                 return chunks
 
-            # 分块处理
+            # 分块处理（无段落信息时走老路径）
             chunks = self._chunk_text_content(text_content, file_path, source_info)
 
             # 为每个chunk添加paragraph_idx_mapping和paragraph_info信息
@@ -305,13 +305,21 @@ class DocumentChunker:
         if not chunks_for_para:
             return []
 
-        return self._build_chunks_from_text(cleaned_para, chunks_for_para, source_info)
+        # 句子对齐切块：避免改变首句文本（禁用主语回填）
+        return self._build_chunks_from_text(
+            cleaned_para,
+            chunks_for_para,
+            source_info,
+            preserve_original_text=True,
+        )
 
     def _build_chunks_from_text(
         self,
         cleaned_text: str,
         text_chunks: List[Dict[str, Any]],
         source_info: Dict[str, Any],
+        *,
+        preserve_original_text: bool = False,
     ) -> List[Dict[str, Any]]:
         """统一构建 chunk 数据结构，复用上下文与实体提取逻辑"""
 
@@ -335,11 +343,12 @@ class DocumentChunker:
 
             final_text = original_text
             primary_entity = None
-            if not chunk_entities and pre_entities:
-                primary_entity = pre_entities[-1]
-                final_text = f"{primary_entity} {original_text}"
-            elif chunk_entities:
+            if chunk_entities:
                 primary_entity = chunk_entities[0]
+            elif pre_entities:
+                primary_entity = pre_entities[-1]
+                if not preserve_original_text:
+                    final_text = f"{primary_entity} {original_text}"
 
             chunk = {
                 'text': final_text,

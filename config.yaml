@@ -10,7 +10,7 @@ system:
 # 文档处理配置
 document:
   chunk_size: 512          # 文档分块大小（字符数），影响检索粒度
-  overlap: 256             # 分块间重叠字符数，保证语义连续性
+  overlap: 0               # 句级分块后禁用重叠，避免重复事实
 
 # 嵌入模型配置
 embedding:
