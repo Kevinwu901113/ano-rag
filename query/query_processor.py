@@ -2397,7 +2397,7 @@ Prompt Length: {len(prompt)} characters
             path_entities = list(set(path_entities))[-2:] if path_entities else []
 
             # 尝试EFSA实体答案生成
-            efsa_answer, efsa_support_idxs = efsa_answer_with_fallback(
+            efsa_answer, efsa_support_idxs, efsa_score = efsa_answer_with_fallback(
                 candidates=selected_notes,
                 query=query,
                 bridge_entity=bridge_entities[0] if bridge_entities else None,
@@ -2407,7 +2407,7 @@ Prompt Length: {len(prompt)} characters
 
             if efsa_answer:
                 # EFSA成功生成实体答案
-                logger.info(f"EFSA generated entity answer: {efsa_answer}")
+                logger.info(f"EFSA generated entity answer: {efsa_answer} (score={efsa_score:.3f})")
                 answer = efsa_answer
                 predicted_support_idxs = efsa_support_idxs
 
@@ -2415,7 +2415,7 @@ Prompt Length: {len(prompt)} characters
                 context = "\n".join(n.get('content','') for n in selected_notes)
 
                 # 记录EFSA生成的上下文和答案信息
-                efsa_prompt = f"Query: {query}\nContext:\n{context}\nEFSA Generated Answer: {answer}"
+                efsa_prompt = f"Query: {query}\nContext:\n{context}"
                 self._log_final_answer_prompt(efsa_prompt, query)
 
                 scores = self.ollama.evaluate_answer(query, context, answer)

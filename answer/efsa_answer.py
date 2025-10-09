@@ -44,11 +44,11 @@ def compute_cov_cons(note: Dict[str, Any], path_entities: List[str]) -> Tuple[fl
     return float(cov), int(cons)
 
 
-def efsa_answer(candidates: List[Dict[str, Any]], 
-                query: str, 
-                bridge_entity: Optional[str] = None, 
-                path_entities: Optional[List[str]] = None, 
-                topN: int = 20) -> Tuple[Optional[str], List[int]]:
+def efsa_answer(candidates: List[Dict[str, Any]],
+                query: str,
+                bridge_entity: Optional[str] = None,
+                path_entities: Optional[List[str]] = None,
+                topN: int = 20) -> Tuple[Optional[str], List[int], float]:
     """
     EFSA核心算法：实体聚合打分和答案选择
     
@@ -60,8 +60,8 @@ def efsa_answer(candidates: List[Dict[str, Any]],
         topN: 取前N个候选进行处理
         
     Returns:
-        (predicted_answer, predicted_support_idxs) 元组
-        如果没有找到合适的实体答案，返回 (None, [])
+        (predicted_answer, predicted_support_idxs, score) 元组
+        如果没有找到合适的实体答案，返回 (None, [], 0.0)
     """
     logger.info(f"EFSA processing {len(candidates)} candidates with topN={topN}")
     
@@ -72,7 +72,7 @@ def efsa_answer(candidates: List[Dict[str, Any]],
     
     if not C:
         logger.warning("No candidates provided to EFSA")
-        return None, []
+        return None, [], 0.0
     
     # 2) 聚合实体证据
     score = defaultdict(float)
@@ -108,7 +108,7 @@ def efsa_answer(candidates: List[Dict[str, Any]],
     
     if not score:
         logger.warning("No valid entities found after filtering bridge entities")
-        return None, []  # 回退到原有的句子型答案
+        return None, [], 0.0  # 回退到原有的句子型答案
     
     # 3) 文档多样性轻奖励
     for e in score:
@@ -140,17 +140,18 @@ def efsa_answer(candidates: List[Dict[str, Any]],
     # 去重支持段
     support_idxs = list(dict.fromkeys(support_idxs))  # 保持顺序的去重
     
-    logger.info(f"EFSA result: answer='{ans}', support_idxs={support_idxs}")
-    return ans, support_idxs
+    score_value = float(final_score)
+    logger.info(f"EFSA result: answer='{ans}', support_idxs={support_idxs}, score={score_value:.3f}")
+    return ans, support_idxs, score_value
 
 
-def efsa_answer_with_fallback(candidates: List[Dict[str, Any]] = None, 
-                             query: str = "", 
-                             bridge_entity: Optional[str] = None, 
-                             path_entities: Optional[List[str]] = None, 
+def efsa_answer_with_fallback(candidates: List[Dict[str, Any]] = None,
+                             query: str = "",
+                             bridge_entity: Optional[str] = None,
+                             path_entities: Optional[List[str]] = None,
                              topN: int = 20,
                              fallback_func: Optional[callable] = None,
-                             final_recall_path: Optional[str] = None) -> Tuple[str, List[int]]:
+                             final_recall_path: Optional[str] = None) -> Tuple[str, List[int], float]:
     """
     带回退机制的EFSA答案生成
     
@@ -164,7 +165,7 @@ def efsa_answer_with_fallback(candidates: List[Dict[str, Any]] = None,
         final_recall_path: final_recall.jsonl文件路径，如果提供则从此文件读取candidates
         
     Returns:
-        (predicted_answer, predicted_support_idxs) 元组
+        (predicted_answer, predicted_support_idxs, score) 元组
     """
     # 如果提供了final_recall_path，从文件读取candidates
     if final_recall_path and Path(final_recall_path).exists():
@@ -181,30 +182,31 @@ def efsa_answer_with_fallback(candidates: List[Dict[str, Any]] = None,
     # 如果仍然没有candidates，返回默认答案
     if not candidates:
         logger.warning("No candidates available for EFSA processing")
-        return "No answer found", []
+        return None, [], 0.0
     
     # 尝试EFSA
-    answer, support_idxs = efsa_answer(candidates, query, bridge_entity, path_entities, topN)
-    
+    answer, support_idxs, score = efsa_answer(candidates, query, bridge_entity, path_entities, topN)
+
     if answer is not None:
-        return answer, support_idxs
+        return answer, support_idxs, score
     
     # 回退到原有逻辑
     logger.info("EFSA failed to find entity answer, falling back to original method")
     if fallback_func:
-        return fallback_func(candidates, query)
+        fb_answer, fb_support = fallback_func(candidates, query)
+        return fb_answer, fb_support, 0.0
     else:
         # 简单回退：返回第一个候选的内容片段
         if candidates:
             first_candidate = candidates[0]
             content = first_candidate.get('content', '')
             # 简单截取前50个字符作为答案
-            fallback_answer = content[:50].strip() if content else "No answer found"
+            fallback_answer = content[:50].strip() if content else None
             paragraph_idxs = first_candidate.get('paragraph_idxs', [])
             fallback_support = paragraph_idxs[:1] if paragraph_idxs else []
-            return fallback_answer, fallback_support
+            return fallback_answer, fallback_support, 0.0
         else:
-            return "No answer found", []
+            return None, [], 0.0
 
 
 def extract_bridge_info_from_candidates(candidates: List[Dict[str, Any]]) -> Tuple[Optional[str], List[str]]:
