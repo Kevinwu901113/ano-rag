@@ -313,12 +313,8 @@ class DocumentProcessor:
                                  source_info.get('document_id', '') or 
                                  source_info.get('file_path', ''))
                     
-                    # 获取段落索引位置，优先使用paragraph_idxs的第一个值
-                    paragraph_idxs = note.get('paragraph_idxs', [])
-                    if paragraph_idxs and len(paragraph_idxs) > 0:
-                        idx = paragraph_idxs[0]  # 使用第一个段落索引
-                    else:
-                        idx = note.get('chunk_index', 0)  # 回退到chunk_index
+                    # 直接使用笔记中已设置的idx字段
+                    idx = note.get('idx', note.get('chunk_index', 0))
                     
                     jsonl_writer.write_note(note, question_id, idx)
                 

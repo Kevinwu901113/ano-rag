@@ -587,6 +587,8 @@ class AtomicNoteGenerator:
             'chunk_index': chunk_data.get('chunk_index', 0),
             'length': len(text),
             'paragraph_idxs': relevant_idxs,
+            # 在笔记构建时直接设置idx字段，优先使用段落索引
+            'idx': relevant_idxs[0] if relevant_idxs else chunk_data.get('chunk_index', 0),
             # 新增字段
             'sent_count': note.get('sent_count', 1),
             'salience': note.get('salience', 0.5),
