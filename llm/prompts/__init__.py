@@ -4,31 +4,15 @@ from typing import Any, Dict, List, Tuple, Optional
 import textwrap
 
 from config import config
+from .atomic_note import ATOMIC_NOTE_SYSTEM_PROMPT, ATOMIC_NOTE_USER_PROMPT
 
 # Atomic note generation
-ATOMIC_NOTE_SYSTEM_PROMPT = """
-你是一个专业的知识提取专家。请将给定的文本块转换为原子笔记。
 
-原子笔记要求：
-1. 每个笔记包含一个独立的知识点
-2. 内容简洁明了，易于理解
-3. 保留关键信息和上下文
-4. 使用结构化的格式
-5. 必须使用英文
-
-请以JSON格式返回，包含以下字段：
-- content: 笔记内容
-- keywords: 关键词列表
-- entities: 实体列表
-"""
-
-ATOMIC_NOTE_PROMPT = """
-请将以下文本转换为原子笔记：
-
-{chunk}
-
-请返回JSON格式的原子笔记：
-"""
+ATOMIC_NOTE_PROMPT = (
+    ATOMIC_NOTE_USER_PROMPT
+    .replace("{chunk_text}", "{chunk}")
+    .replace("{entity_card_json}", "{}")
+)
 
 EXTRACT_ENTITIES_SYSTEM_PROMPT = """
 你是一个专业的实体关系提取专家。请从给定文本中提取实体和它们之间的关系。
