@@ -54,18 +54,55 @@ class DocumentChunker:
             # 提取文本内容
             text_content = self._extract_text_content(content, file_path)
             
+            # === 新增：当有段落信息时，按段落切块并写入 paragraph_idx ===
+            if paragraph_info:
+                chunks = []
+                global_idx = 0  # 跨全文的 chunk 序号
+
+                for para in paragraph_info:
+                    para_text = (para.get('paragraph_text') or '').strip()
+                    if not para_text:
+                        continue
+
+                    sub_chunks = self._chunk_text_content(para_text, file_path, source_info)
+
+                    mapped_idx = para.get('idx')
+                    try:
+                        mapped_idx = int(str(mapped_idx).strip()) if mapped_idx is not None else None
+                    except Exception:
+                        mapped_idx = None
+
+                    local_key = TextUtils.clean_text(para_text)[:100]
+                    local_mapping = {local_key: mapped_idx} if mapped_idx is not None else {}
+
+                    for j, sc in enumerate(sub_chunks):
+                        sc['chunk_index'] = global_idx
+                        sc['para_local_chunk_index'] = j
+                        sc['paragraph_idx'] = mapped_idx
+                        sc['paragraph_info'] = [para]
+                        sc['paragraph_idx_mapping'] = local_mapping
+                        sc['chunk_id'] = (
+                            f"{source_info.get('file_name', 'unknown')}"
+                            f"_p{mapped_idx if mapped_idx is not None else 'x'}_{j:03d}"
+                        )
+                        chunks.append(sc)
+                        global_idx += 1
+
+                logger.info(f"Document chunked by paragraph: {len(chunks)} chunks")
+                return chunks
+
             # 分块处理
             chunks = self._chunk_text_content(text_content, file_path, source_info)
-            
+
             # 为每个chunk添加paragraph_idx_mapping和paragraph_info信息
             if paragraph_idx_mapping:
                 for chunk in chunks:
                     chunk['paragraph_idx_mapping'] = paragraph_idx_mapping
-            
+
             if paragraph_info:
                 for chunk in chunks:
                     chunk['paragraph_info'] = paragraph_info
-            
+
             logger.info(f"Document chunked into {len(chunks)} chunks")
             return chunks
             
