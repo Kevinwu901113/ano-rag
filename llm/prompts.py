@@ -74,7 +74,7 @@ TEXT:
 Extract all explicit single-fact statements from the TEXT.
 Return ONLY a JSON array of objects with the shape:
 [
-  {{"text":"<one factual sentence>","sent_count":1,"salience":0.8,"local_spans":[],"entities":["Entity"],"years":[],"quality_flags":["OK"]}}
+  {"text":"<one factual sentence>","sent_count":1,"salience":0.8,"local_spans":[],"entities":["Entity"],"years":[],"quality_flags":["OK"]}
 ]
 If the TEXT has no complete fact, respond with [].
 """
@@ -527,13 +527,13 @@ Please decompose the following complex question into multiple independent sub-qu
 Original question: {query}
 
 Please return strictly in the following JSON format, do not add any other text or explanation:
-{{
+{
     "sub_questions": [
         "Sub-question 1",
         "Sub-question 2",
         "Sub-question 3"
     ]
-}}
+}
 
 Note:
 - Only return JSON object, do not include markdown code block markers

@@ -54,7 +54,7 @@ class DocumentChunker:
             # 提取文本内容
             text_content = self._extract_text_content(content, file_path)
             
-            # === 新增：当有段落信息时，按段落切块并写入 paragraph_idx ===
+            # === 当有段落信息时，按段落切块并写入 paragraph_idx ===
             if paragraph_info:
                 chunks = []
                 global_idx = 0  # 跨全文的 chunk 序号
@@ -99,7 +99,7 @@ class DocumentChunker:
                 logger.info(f"Document chunked by paragraph: {len(chunks)} chunks")
                 return chunks
 
-            # 分块处理
+            # 分块处理（无段落信息时走老路径）
             chunks = self._chunk_text_content(text_content, file_path, source_info)
 
             # 为每个chunk添加paragraph_idx_mapping和paragraph_info信息
@@ -305,6 +305,7 @@ class DocumentChunker:
         if not chunks_for_para:
             return []
 
+        # 句子对齐切块：避免改变首句文本（禁用主语回填）
         return self._build_chunks_from_text(
             cleaned_para,
             chunks_for_para,
