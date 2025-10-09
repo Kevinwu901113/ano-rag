@@ -586,6 +586,10 @@ class AtomicNoteGenerator:
         # 生成raw_span_evidence
         raw_span_evidence = self._generate_raw_span_evidence(entities, relations, text)
         
+        # 同步回原始 note 字段，确保段落索引优先
+        note['paragraph_idxs'] = relevant_idxs
+        note['idx'] = (relevant_idxs[0] if relevant_idxs else note.get('idx'))
+
         # 构建原子笔记
         atomic_note = {
             'original_text': chunk_data.get('text', ''),

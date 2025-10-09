@@ -66,11 +66,13 @@ class NoteJSONLWriter:
             
             # 尝试从不同字段获取idx
             if idx is None:
-                idx = (note.get('idx')
-                       or note.get('chunk_index')
-                       or (note.get('paragraph_idxs', [0])[0] if note.get('paragraph_idxs') else None)
-                       or note.get('paragraph_idx')
-                       or 0)
+                idx = (
+                    (note.get('paragraph_idxs', [None])[0] if note.get('paragraph_idxs') else None)
+                    or note.get('paragraph_idx')
+                    or note.get('idx')
+                    or note.get('chunk_index')
+                    or 0
+                )
             
             # 构建JSONL记录
             jsonl_record = {
@@ -116,11 +118,13 @@ class NoteJSONLWriter:
                                          note.get('source_info', {}).get('document_id', ''))
                 
                 # 尝试从不同字段获取idx
-                idx = (note.get('idx')
-                       or note.get('chunk_index')
-                       or (note.get('paragraph_idxs', [i])[0] if note.get('paragraph_idxs') else None)
-                       or note.get('paragraph_idx')
-                       or i)
+                idx = (
+                    (note.get('paragraph_idxs', [None])[0] if note.get('paragraph_idxs') else None)
+                    or note.get('paragraph_idx')
+                    or note.get('idx')
+                    or note.get('chunk_index')
+                    or i
+                )
                 
                 # 构建JSONL记录
                 jsonl_record = {
