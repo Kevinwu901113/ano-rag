@@ -25,8 +25,10 @@ from loguru import logger
 from doc import DocumentProcessor
 from query import QueryProcessor
 from config import config
+from graph.index import NoteGraph
 from utils import FileUtils, setup_logging
 from llm import LocalLLM
+from llm.cor_controller import chain_of_retrieval
 from parallel import create_parallel_interface, ProcessingMode, ParallelStrategy
 
 
@@ -113,13 +115,21 @@ def create_item_workdir(base_work_dir: str, item_id: str, debug_mode: bool = Fal
 class MusiqueProcessor:
     """Musique数据集处理器"""
 
-    def __init__(self, max_workers: int = 4, debug: bool = False, work_dir: str = None, llm: Optional[LocalLLM] = None):
+    def __init__(
+        self,
+        max_workers: int = 4,
+        debug: bool = False,
+        work_dir: Optional[str] = None,
+        llm: Optional[LocalLLM] = None,
+        enable_cor: bool = False,
+    ):
         self.max_workers = max_workers
         self.debug = debug  # 调试模式，不清理中间文件
         self.base_work_dir = work_dir or create_new_workdir()
         if llm is None:
             raise ValueError("MusiqueProcessor requires a LocalLLM instance to be passed")
         self.llm = llm
+        self.enable_cor = enable_cor
         
         # 更新配置中的工作目录和所有存储路径，确保文件生成在正确的工作目录内
         cfg = config.load_config()
@@ -214,6 +224,22 @@ class MusiqueProcessor:
             
             # 3. 查询处理
             atomic_notes = process_result['atomic_notes']
+
+            cor_result = None
+            if self.enable_cor:
+                try:
+                    note_graph = NoteGraph.from_config(config)
+                    for note in atomic_notes:
+                        note_graph.add_note(note)
+                    cor_result = chain_of_retrieval(question=question, graph=note_graph)
+                    logger.debug(
+                        "CoR controller finished for %s with confidence %.2f",
+                        item_id,
+                        cor_result.confidence,
+                    )
+                except Exception as exc:
+                    logger.warning(f"CoR controller failed for {item_id}: {exc}")
+                    cor_result = None
             
             # 在debug模式下，保存原子笔记到单独的文件
             if self.debug:
@@ -247,11 +273,23 @@ class MusiqueProcessor:
             
             # 4. 执行查询
             query_result = query_processor.process(question)
-            
+
             # 5. 提取结果
             predicted_answer = query_result.get('answer', 'No answer found')
             predicted_support_idxs = query_result.get('predicted_support_idxs', [])
-            
+
+            cor_metadata: Dict[str, Any] = {}
+            if cor_result is not None:
+                if cor_result.answer:
+                    predicted_answer = cor_result.answer
+                if cor_result.evidence_note_ids:
+                    cor_metadata['evidence_note_ids'] = cor_result.evidence_note_ids
+                cor_metadata['confidence'] = cor_result.confidence
+                if cor_result.missing_entities:
+                    cor_metadata['missing_entities'] = list(cor_result.missing_entities)
+                if cor_result.covered_entities:
+                    cor_metadata['covered_entities'] = list(cor_result.covered_entities)
+
             # 调试模式下保留临时文件
             if not self.debug:
                 for p in paragraph_files:
@@ -287,13 +325,17 @@ class MusiqueProcessor:
                 }
                 atomic_notes_info['recalled_atomic_notes'].append(note_info)
             
-            result = {
+            result: Dict[str, Any] = {
                 'id': item_id,
                 'predicted_answer': predicted_answer,
                 'predicted_support_idxs': predicted_support_idxs,
                 'predicted_answerable': True
             }
-            
+
+            if cor_metadata:
+                result['cor_metadata'] = cor_metadata
+                atomic_notes_info['cor_metadata'] = cor_metadata
+
             logger.info(f"Completed processing item {item_id}")
             return result, atomic_notes_info
             
@@ -600,7 +642,7 @@ def main():
     parser.add_argument('--serial', action='store_true', help='使用串行处理而非并行处理')
     parser.add_argument('--use-engine-parallel', action='store_true', help='使用并行引擎进行处理')
     parser.add_argument('--parallel-workers', type=int, default=4, help='并行引擎工作进程数（默认：4）')
-    parser.add_argument('--parallel-strategy', choices=['copy', 'split', 'dispatch', 'hybrid'], 
+    parser.add_argument('--parallel-strategy', choices=['copy', 'split', 'dispatch', 'hybrid'],
                        default='hybrid', help='并行处理策略（默认：hybrid）')
     parser.add_argument('--log-file', help='日志文件路径')
     parser.add_argument('--atomic-notes-file', default='atomic_notes_recall.jsonl', help='保存召回原子文档的文件路径，默认：atomic_notes_recall.jsonl')
@@ -609,6 +651,7 @@ def main():
     parser.add_argument('--new', action='store_true', help='强制创建新的工作目录')
     parser.add_argument('--test-auditor', action='store_true', help='测试摘要校验器功能')
     parser.add_argument('--audit-file', help='指定要审核的原子笔记文件路径')
+    parser.add_argument('--enable-cor', action='store_true', help='启用轻量多轮检索控制器')
     
     args = parser.parse_args()
     
@@ -710,7 +753,8 @@ def main():
         max_workers=args.workers,
         debug=args.debug,
         work_dir=work_dir,
-        llm=shared_llm
+        llm=shared_llm,
+        enable_cor=args.enable_cor,
     )
     
     # 确定是否为继续模式（非new且工作目录已存在且输出文件已存在）
