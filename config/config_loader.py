@@ -65,7 +65,10 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "answering": {
         "rel_chains": [["performed_by", "spouse_of"]],
         "relax_last_hop": ["spouse_of|partner_of"],
+        "strict_person": {"enabled": True},
     },
+    "retry": {"max_times": 1},
+    "validator": {"allow_partial": True},
     "answer_selector": {
         "enabled": True,
         "anchor_top_k": 5,

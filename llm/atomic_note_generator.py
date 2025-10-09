@@ -1,9 +1,13 @@
 from typing import List, Dict, Any, Union, Optional, Tuple, Set
+import json
 from loguru import logger
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import threading
 import re
 import time
+from validators.note_validator import validate_notes
+from llm.prompts.atomic_note import ATOMIC_NOTE_SYSTEM_PROMPT, ATOMIC_NOTE_USER_PROMPT
+from llm.retry_middleware import retry_if_invalid_person
 from .local_llm import LocalLLM
 from utils.batch_processor import BatchProcessor
 from utils.text_utils import TextUtils
@@ -20,6 +24,74 @@ from utils.notes_stats_logger import get_global_stats_logger, log_notes_stats, f
 from utils.note_coverage_eval import evaluate_note_coverage
 from config import config
 from .prompts import get_atomic_note_prompts
+
+
+def _generate_atomic_notes_once(
+    chunk_text: str,
+    entity_card: Optional[Dict[str, Any]],
+    llm: Any,
+    *,
+    allow_partial: bool,
+    strict_person: bool,
+) -> Dict[str, Any]:
+    """Call the LLM once and validate the raw output."""
+
+    entity_card_json = json.dumps(entity_card or {}, ensure_ascii=False)
+    user_prompt = ATOMIC_NOTE_USER_PROMPT.format(
+        chunk_text=chunk_text,
+        entity_card_json=entity_card_json,
+    )
+    raw = llm.chat(system=ATOMIC_NOTE_SYSTEM_PROMPT, user=user_prompt)
+
+    is_valid, partitioned, metrics = validate_notes(raw, allow_partial=allow_partial)
+    notes_valid = partitioned.get("valid", []) if partitioned else []
+    notes_invalid = partitioned.get("invalid", []) if partitioned else []
+
+    result = {
+        "raw": raw,
+        "valid": is_valid if strict_person else True,
+        "qc": metrics,
+    }
+    result["notes"] = notes_valid
+    result["notes_valid"] = notes_valid
+    result["notes_invalid"] = notes_invalid
+    result["invalid_person"] = strict_person and bool(notes_invalid)
+    return result
+
+
+def generate_atomic_notes(
+    chunk_text: str,
+    entity_card: Optional[Dict[str, Any]],
+    llm: Any,
+    *,
+    max_retry: Optional[int] = None,
+) -> Dict[str, Any]:
+    """Generate validated atomic notes with optional retry on person violations."""
+
+    strict_person = bool(config.get("answering.strict_person.enabled", True))
+    allow_partial = bool(config.get("validator.allow_partial", True))
+    retry_budget = max_retry if max_retry is not None else int(config.get("retry.max_times", 1) or 0)
+
+    first_result = _generate_atomic_notes_once(
+        chunk_text,
+        entity_card,
+        llm,
+        allow_partial=allow_partial,
+        strict_person=strict_person,
+    )
+
+    if not strict_person or retry_budget <= 0 or not first_result.get("invalid_person"):
+        return first_result
+
+    return retry_if_invalid_person(
+        chunk_text,
+        entity_card,
+        llm,
+        first_result,
+        max_retry=retry_budget,
+        allow_partial=allow_partial,
+        strict_person=strict_person,
+    )
 
 class AtomicNoteGenerator:
     """原子笔记生成器，专门用于文档处理阶段的原子笔记构建"""
