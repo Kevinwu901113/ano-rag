@@ -525,16 +525,35 @@ class AtomicNoteGenerator:
                     except ValueError:
                         logger.debug(f"Invalid paragraph idx value ignored: {idx}")
 
+        # 1) 优先读取 chunk 上的单值 paragraph_idx
+        if not relevant_idxs:
+            pid = chunk_data.get('paragraph_idx')
+            try:
+                if isinstance(pid, (int, str)) and str(pid).strip() != '':
+                    relevant_idxs = [int(str(pid).strip())]
+            except (ValueError, TypeError):
+                pass
+
         if not relevant_idxs:
             base_text = chunk_data.get('text', '') or text  # 优先用chunk原文
             relevant_idxs = self._extract_relevant_paragraph_idxs(base_text, paragraph_idx_mapping)
-        
+
         # 兜底逻辑：当且仅当"每文件一个段落"时，直接赋该段落 idx
         if not relevant_idxs:
             para_info = chunk_data.get('paragraph_info') or []
-            if len(para_info) == 1 and isinstance(para_info[0].get('idx', None), int):
-                relevant_idxs = [para_info[0]['idx']]
-        
+            extracted: List[int] = []
+            for p in para_info:
+                if not isinstance(p, dict):
+                    continue
+                if 'idx' not in p:
+                    continue
+                try:
+                    extracted.append(int(str(p['idx']).strip()))
+                except (ValueError, TypeError):
+                    continue
+            if extracted:
+                relevant_idxs = sorted(set(extracted))
+
         # 调试日志：记录空 paragraph_idxs 的情况
         if not relevant_idxs:
             logger.debug(f"paragraph_idxs empty | file={chunk_data.get('source_info',{}).get('file_name')} "
