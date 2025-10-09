@@ -95,6 +95,32 @@ def _split_by_rel(text: str, rel: str) -> Tuple[str, str]:
     return text, ""
 
 
+def _normalize_source_sent_ids_field(notes: List[Any]) -> List[Dict[str, Any]]:
+    normalized: List[Dict[str, Any]] = []
+
+    for note in notes or []:
+        if not isinstance(note, dict):
+            continue
+
+        raw_ids = note.get('source_sent_ids', [])
+        if isinstance(raw_ids, int):
+            raw_ids = [raw_ids]
+        elif not isinstance(raw_ids, (list, tuple, set)):
+            raw_ids = []
+
+        cleaned: List[int] = []
+        for value in raw_ids:
+            try:
+                cleaned.append(int(str(value).strip()))
+            except Exception:
+                continue
+
+        note['source_sent_ids'] = sorted(set(cleaned))
+        normalized.append(note)
+
+    return normalized
+
+
 def _infer_type(literal: str, rel: str) -> str:
     literal_lower = (literal or "").lower()
     if literal_lower:
@@ -180,11 +206,11 @@ def parse_notes_response(raw: str, sentinel: str = "~") -> Optional[List[Dict[st
         obj = json.loads(s)
         if isinstance(obj, list):
             logger.debug(f"Successfully parsed JSON array with {len(obj)} items")
-            return obj
+            return _normalize_source_sent_ids_field(obj)
         elif isinstance(obj, dict):
             # 如果是单个对象，包装成列表
             logger.debug("Parsed single JSON object, wrapping in list")
-            return [obj]
+            return _normalize_source_sent_ids_field([obj])
     except json.JSONDecodeError as e:
         logger.debug(f"Standard JSON parsing failed: {e}")
     except Exception as e:
@@ -197,7 +223,7 @@ def parse_notes_response(raw: str, sentinel: str = "~") -> Optional[List[Dict[st
             obj = json.loads(json_match.group(0))
             if isinstance(obj, list):
                 logger.debug(f"Successfully extracted JSON array from text tail with {len(obj)} items")
-                return obj
+                return _normalize_source_sent_ids_field(obj)
         except json.JSONDecodeError as e:
             logger.debug(f"Extracted JSON parsing failed: {e}")
         except Exception as e:
@@ -210,7 +236,7 @@ def parse_notes_response(raw: str, sentinel: str = "~") -> Optional[List[Dict[st
             obj = json.loads(json_obj_match.group(0))
             if isinstance(obj, dict):
                 logger.debug("Successfully extracted single JSON object from text")
-                return [obj]
+                return _normalize_source_sent_ids_field([obj])
         except json.JSONDecodeError as e:
             logger.debug(f"Extracted JSON object parsing failed: {e}")
         except Exception as e:
