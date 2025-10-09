@@ -8,7 +8,19 @@ from dataclasses import dataclass, field
 from enum import Enum
 import subprocess
 import psutil
-import GPUtil
+try:
+    import GPUtil  # type: ignore
+except ModuleNotFoundError:  # pragma: no cover - fallback when optional dep missing
+    class _GPUtilFallback:
+        """Minimal fallback GPUtil implementation returning no GPUs."""
+
+        @staticmethod
+        def getGPUs():  # noqa: D401 - simple stub method
+            """Return an empty list when GPUtil is unavailable."""
+
+            return []
+
+    GPUtil = _GPUtilFallback()  # type: ignore
 
 import openai
 import requests
