@@ -61,6 +61,15 @@ multi_hop:
   beam_size: 8
   branch_factor: 6
 
+answering:
+  efsa_hint:
+    enabled: true        # 允许把 EFSA 作为“可疑线索”传入
+    threshold: 0.70      # EFSA 置信度低于阈值时不传给最终生成
+    multi_candidate: 2   # 最多保留的候选名数（含 EFSA 自身）
+  final_evidence_first: true
+  require_verbatim_spans: true
+  force_insufficient_if_no_spans: true
+
 # 关系链答案选择器
 answer_selector:
   enabled: true
