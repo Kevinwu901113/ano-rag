@@ -1,4 +1,4 @@
-from typing import List, Dict, Any, Union, Optional, Tuple
+from typing import List, Dict, Any, Union, Optional, Tuple, Set
 from loguru import logger
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import threading
@@ -309,12 +309,11 @@ class AtomicNoteGenerator:
                 self.processing_stats['total_notes_generated'] += 1
                 return [fallback_note] if fallback_note else []
         
-        text = chunk_data.get('text', '')
         self.processing_stats['total_chunks_processed'] += 1
-        
+
         # 准备LLM调用参数
         llm_params = self._get_optimized_llm_params()
-        prompt = self._format_atomic_note_prompt(text)
+        prompt = self._format_atomic_note_prompt(chunk_data)
         
         # 定义LLM生成函数
         def llm_generate_func(user_prompt: str, sys_prompt: str) -> str:
@@ -378,6 +377,8 @@ class AtomicNoteGenerator:
             self.processing_stats['notes_zero_count'] += 1
             return []
 
+        parsed_notes = self._enforce_sentence_id_constraints(parsed_notes, chunk_data)
+
         if len(parsed_notes) == 0:
             self.processing_stats['notes_zero_count'] += 1
             return []
@@ -417,7 +418,11 @@ class AtomicNoteGenerator:
             return []
 
         # 转换为原有格式
-        atomic_notes = [self._convert_to_atomic_note_format(note, chunk_data) for note in filtered_notes]
+        atomic_notes: List[Dict[str, Any]] = []
+        for note in filtered_notes:
+            converted = self._convert_to_atomic_note_format(note, chunk_data)
+            if converted:
+                atomic_notes.append(converted)
 
         self.processing_stats['total_notes_generated'] += len(atomic_notes)
         return atomic_notes
@@ -507,9 +512,25 @@ class AtomicNoteGenerator:
             return [x for x in note_data if isinstance(x, dict)]
         return []
     
-    def _convert_to_atomic_note_format(self, note: Dict[str, Any], chunk_data: Dict[str, Any]) -> Dict[str, Any]:
+    def _convert_to_atomic_note_format(self, note: Dict[str, Any], chunk_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """将新格式的笔记转换为原有的原子笔记格式"""
         text = (note.get('text', '') or '').strip()
+
+        allowed_raw = chunk_data.get('sentence_ids')
+        allowed_set = None
+        if isinstance(allowed_raw, (list, tuple, set)) and allowed_raw:
+            allowed_set = {int(str(v).strip()) for v in allowed_raw if str(v).strip().isdigit()}
+
+        source_sent_ids = self._normalize_source_sent_ids(note)
+        if not source_sent_ids:
+            logger.debug("Skip note without normalized source_sent_ids")
+            return None
+
+        if allowed_set is not None and not set(source_sent_ids).issubset(allowed_set):
+            logger.debug(
+                f"Skip note during conversion: source_sent_ids {source_sent_ids} not subset of {allowed_set}"
+            )
+            return None
 
         # 提取相关的paragraph idx信息
         paragraph_idx_mapping = chunk_data.get('paragraph_idx_mapping', {})
@@ -618,9 +639,10 @@ class AtomicNoteGenerator:
             'salience': note.get('salience', 0.5),
             'local_spans': note.get('local_spans', []),
             'years': note.get('years', []),
-            'quality_flags': note.get('quality_flags', ['OK'])
+            'quality_flags': note.get('quality_flags', ['OK']),
+            'source_sent_ids': source_sent_ids,
         }
-        
+
         return atomic_note
 
     def _generate_raw_span_evidence(self, entities: List[str], relations: List[Any], text: str) -> str:
@@ -843,7 +865,20 @@ class AtomicNoteGenerator:
             'quality_flags': ['FALLBACK']
         }
 
+        sentence_ids = chunk_data.get('sentence_ids') if isinstance(chunk_data, dict) else None
+        if isinstance(sentence_ids, (list, tuple, set)) and sentence_ids:
+            try:
+                first_sid = int(str(next(iter(sentence_ids))).strip())
+                fallback_note_data['source_sent_ids'] = [first_sid]
+            except Exception:
+                fallback_note_data['source_sent_ids'] = []
+        else:
+            fallback_note_data['source_sent_ids'] = []
+
         atomic_note = self._convert_to_atomic_note_format(fallback_note_data, chunk_data)
+        if not atomic_note:
+            return None
+
         atomic_note['quality_flags'] = ['FALLBACK']
         return atomic_note
     
@@ -856,10 +891,103 @@ class AtomicNoteGenerator:
         """获取原子笔记生成的系统提示词"""
         return self._get_atomic_note_prompts()[0]
 
-    def _format_atomic_note_prompt(self, text: str) -> str:
-        """Format the user prompt according to the configured schema."""
+    def _format_atomic_note_prompt(self, chunk: Dict[str, Any]) -> str:
+        """Format the user prompt with chunk text and sentence anchors."""
 
-        return self._get_atomic_note_prompts()[1].format(text=text)
+        template = self._get_atomic_note_prompts()[1]
+        chunk_text = chunk.get('text', '') if isinstance(chunk, dict) else str(chunk)
+        formatted_ids = self._format_sent_ids(chunk.get('sentence_ids'))
+        return template.format(chunk_text=chunk_text, sent_ids=formatted_ids)
+
+    @staticmethod
+    def _format_sent_ids(sent_ids: Any) -> str:
+        ids = []
+        if isinstance(sent_ids, (list, tuple, set)):
+            iterable = sent_ids
+        elif sent_ids is None:
+            iterable = []
+        else:
+            iterable = [sent_ids]
+
+        for value in iterable:
+            try:
+                ids.append(int(str(value).strip()))
+            except Exception:
+                continue
+
+        return f"[{', '.join(str(x) for x in ids)}]" if ids else "[]"
+
+    @staticmethod
+    def _normalize_source_sent_ids(note: Dict[str, Any]) -> List[int]:
+        raw_ids = note.get('source_sent_ids', [])
+        if isinstance(raw_ids, int):
+            raw_ids = [raw_ids]
+        elif not isinstance(raw_ids, (list, tuple, set)):
+            raw_ids = []
+
+        cleaned: List[int] = []
+        for value in raw_ids:
+            try:
+                cleaned.append(int(str(value).strip()))
+            except Exception:
+                continue
+
+        unique_sorted = sorted(set(cleaned))
+        note['source_sent_ids'] = unique_sorted
+        return unique_sorted
+
+    def _enforce_sentence_id_constraints(
+        self,
+        notes: Optional[List[Dict[str, Any]]],
+        chunk_data: Dict[str, Any],
+    ) -> List[Dict[str, Any]]:
+        if not notes:
+            return []
+
+        allowed_raw = chunk_data.get('sentence_ids')
+        allowed_set = None
+        if isinstance(allowed_raw, (list, tuple, set)) and allowed_raw:
+            allowed_set = {int(str(v).strip()) for v in allowed_raw if str(v).strip().isdigit()}
+
+        max_notes_cfg = int(config.get('notes_llm.max_notes_per_chunk', 12))
+        if max_notes_cfg <= 0:
+            max_notes_cfg = 12
+
+        limit = max_notes_cfg
+        if allowed_set is not None:
+            limit = min(limit, len(allowed_set)) if allowed_set else 0
+
+        used_sent_ids: Set[int] = set()
+        filtered_notes: List[Dict[str, Any]] = []
+
+        for note in notes:
+            if not isinstance(note, dict):
+                continue
+
+            src_ids = set(self._normalize_source_sent_ids(note))
+            if not src_ids:
+                logger.debug("Drop note without source_sent_ids")
+                continue
+
+            if allowed_set is not None and not src_ids.issubset(allowed_set):
+                logger.debug(
+                    f"Drop note: source_sent_ids {src_ids} not subset of chunk sentence ids {allowed_set}"
+                )
+                continue
+
+            if src_ids & used_sent_ids:
+                logger.debug(
+                    f"Drop note: source_sent_ids {src_ids} overlaps with already used ids {used_sent_ids}"
+                )
+                continue
+
+            used_sent_ids.update(src_ids)
+            filtered_notes.append(note)
+
+            if limit and len(filtered_notes) >= limit:
+                break
+
+        return filtered_notes
     
     def _clean_list(self, items: List[str]) -> List[str]:
         """清理列表，去除空值和重复项"""

@@ -1,6 +1,6 @@
 """Centralized prompt templates used across the project."""
 
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Tuple, Optional
 import textwrap
 
 from config import config
@@ -95,26 +95,55 @@ def _build_rel_list_display() -> str:
     return ", ".join(sorted(lex.keys()))
 
 
+_SENTENCE_ANCHOR_CONSTRAINTS = textwrap.dedent(
+    """
+    你是一个知识提取器。严格遵守以下约束：
+    - 仅从提供的句子编号（SENT_IDS）对应的文本中提取知识点；
+    - 每条笔记必须包含 source_sent_ids（整数数组），且必须是 SENT_IDS 的子集；
+    - 不要对同一事实进行改写重复输出；同一 source_sent_ids 的事实仅输出一次（例如：“A 是 B 的首都”与“B 的首都是 A”视为重复，只保留一条）；
+    - 每条笔记只包含一个独立知识点；
+    - 输出 JSON 数组，元素字段至少包含：text, rel(可空), head_key(可空), tail_key(可空), source_sent_ids（必填）。
+    """
+).strip()
+
+
+def _format_sent_ids_for_prompt(sent_ids: List[Any]) -> str:
+    formatted: List[str] = []
+    for sid in sent_ids:
+        try:
+            formatted.append(str(int(str(sid).strip())))
+        except Exception:
+            continue
+    return f"[{', '.join(formatted)}]" if formatted else "[]"
+
+
 # Backwards compatibility: expose a materialized V2 system prompt at import time.
 def _build_v2_system_prompt() -> str:
     rel_list = _build_rel_list_display()
-    return textwrap.dedent(
+    base_rules = textwrap.dedent(
         f"""
         你是事实抽取器。将输入文本切分为“最小事实”的单句原子笔记（sent_count=1）。
-        每条笔记必须可被连接：输出关系、主语字面、宾语字面与类型提示。不得输出解释或多余文本。
+        保持事实原文表达，禁止改写或合并多个事实。
 
         受控关系词表（rel）：{rel_list}
 
-        严格输出 JSON 数组；每条记录包含字段：
-        text(string), sent_count(int=1), salience(float 0~1),
-        head_key(string), tail_key(string), rel(string),
-        type_head(string), type_tail(string),
-        paragraph_idxs(array[int]), quality_flags(array)
+        输出 JSON 数组。每条记录至少包含以下字段（允许附加字段）：
+        - text(string)
+        - sent_count(int=1)
+        - salience(float 0~1)
+        - head_key(string，可空)
+        - tail_key(string，可空)
+        - rel(string，可空，优先使用受控词表)
+        - source_sent_ids(array[int]，必须来自 SENT_IDS)
+        - paragraph_idxs(array[int]，可空)
+        - quality_flags(array)
 
-        没有完整事实则返回 []（空数组）。
+        同一 source_sent_ids 只允许输出一条笔记；禁止输出解释性文字或多余说明。
         并列必须拆句且每条重复主语；禁止“including/其中/因为/由于…”等从属片段。
+        没有完整事实则返回 []（空数组）。
         """
     ).strip()
+    return f"{_SENTENCE_ANCHOR_CONSTRAINTS}\n\n{base_rules}"
 
 
 ATOMIC_NOTE_SYSTEM_PROMPT_V2 = _build_v2_system_prompt()
@@ -128,19 +157,21 @@ def get_atomic_note_prompts() -> Tuple[str, str]:
     if use_v2:
         system_prompt = _build_v2_system_prompt()
         globals()["ATOMIC_NOTE_SYSTEM_PROMPT_V2"] = system_prompt
-        return system_prompt, textwrap.dedent(ATOMIC_NOTEGEN_PROMPT_V2).strip()
+    else:
+        base_system = textwrap.dedent(ATOMIC_NOTEGEN_SYSTEM_PROMPT).strip()
+        system_prompt = f"{_SENTENCE_ANCHOR_CONSTRAINTS}\n\n{base_system}"
 
-    return (
-        textwrap.dedent(ATOMIC_NOTEGEN_SYSTEM_PROMPT).strip(),
-        textwrap.dedent(ATOMIC_NOTEGEN_PROMPT).strip(),
-    )
+    user_prompt = textwrap.dedent(
+        """
+        【文本】:
+        {chunk_text}
 
+        【SENT_IDS】：{sent_ids}
+        请从这些句子中提取 0~N 条原子笔记，严格遵守约束。
+        """
+    ).strip()
 
-def build_atomic_note_prompt(text: str) -> str:
-    """Construct an atomic note prompt that optionally uses the V2 schema."""
-
-    system, user = get_atomic_note_prompts()
-    return system + "\n\n" + user.format(text=text)
+    return system_prompt, user_prompt
 
 
 def build_multi_note_prompts() -> tuple[str, str]:
@@ -205,13 +236,12 @@ def build_multi_note_prompts() -> tuple[str, str]:
     return system_prompt, user_prompt
 
 
-def build_atomic_note_prompt(text: str) -> str:
-    """Construct an atomic note prompt that optionally uses the V2 schema."""
+def build_atomic_note_prompt(chunk_text: str, sent_ids: Optional[List[Any]] = None) -> str:
+    """Construct an atomic note prompt that includes sentence id anchors."""
 
-    notes_cfg = config.get("notes_llm", {}) or {}
-    use_v2 = bool(notes_cfg.get("use_v2_schema", True))
-    system = ATOMIC_NOTE_SYSTEM_PROMPT_V2 if use_v2 else ATOMIC_NOTE_SYSTEM_PROMPT
-    return system + "\n\nTEXT:\n" + text
+    system, user = get_atomic_note_prompts()
+    formatted_ids = _format_sent_ids_for_prompt(sent_ids or [])
+    return system + "\n\n" + user.format(chunk_text=chunk_text, sent_ids=formatted_ids)
 
 # Query rewriting
 QUERY_ANALYSIS_SYSTEM_PROMPT = """

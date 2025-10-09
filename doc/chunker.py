@@ -59,12 +59,20 @@ class DocumentChunker:
                 chunks = []
                 global_idx = 0  # 跨全文的 chunk 序号
 
+                effective_source_info = source_info or {
+                    'file_path': file_path,
+                    'file_name': os.path.basename(file_path),
+                    'file_hash': FileUtils.get_file_hash(file_path) if hasattr(FileUtils, 'get_file_hash') else 'unknown'
+                }
+
                 for para in paragraph_info:
                     para_text = (para.get('paragraph_text') or '').strip()
                     if not para_text:
                         continue
 
-                    sub_chunks = self._chunk_text_content(para_text, file_path, source_info)
+                    sentence_chunks = self._chunk_paragraph_by_sentence(para_text, effective_source_info)
+                    if not sentence_chunks:
+                        continue
 
                     mapped_idx = para.get('idx')
                     try:
@@ -75,14 +83,14 @@ class DocumentChunker:
                     local_key = TextUtils.clean_text(para_text)[:100]
                     local_mapping = {local_key: mapped_idx} if mapped_idx is not None else {}
 
-                    for j, sc in enumerate(sub_chunks):
+                    for j, sc in enumerate(sentence_chunks):
                         sc['chunk_index'] = global_idx
                         sc['para_local_chunk_index'] = j
                         sc['paragraph_idx'] = mapped_idx
                         sc['paragraph_info'] = [para]
                         sc['paragraph_idx_mapping'] = local_mapping
                         sc['chunk_id'] = (
-                            f"{source_info.get('file_name', 'unknown')}"
+                            f"{effective_source_info.get('file_name', 'unknown')}"
                             f"_p{mapped_idx if mapped_idx is not None else 'x'}_{j:03d}"
                         )
                         chunks.append(sc)
@@ -214,7 +222,7 @@ class DocumentChunker:
         """对文本内容进行分块"""
         # 清理文本
         cleaned_text = TextUtils.clean_text(text)
-        
+
         if not cleaned_text.strip():
             logger.warning(f"No text content found in {file_path}")
             return []
@@ -238,14 +246,90 @@ class DocumentChunker:
                 overlap=self.overlap
             )
 
-        search_pos = 0  # 用于在原文中定位每个块的起始位置
-        
-        # 创建分块数据结构
-        chunks = []
-        for i, chunk_data in enumerate(text_chunks):
-            original_text = chunk_data['text']
+        return self._build_chunks_from_text(cleaned_text, text_chunks, source_info)
 
-            # 在全文中定位当前块的起始位置
+    def _chunk_paragraph_by_sentence(self, para_text: str, source_info: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """基于句子序列的段内分句分块（无重叠）"""
+
+        cleaned_para = TextUtils.clean_text(para_text)
+        if not cleaned_para:
+            return []
+
+        sentences = TextUtils.split_by_sentence(para_text)
+        if not sentences:
+            sentences = [cleaned_para]
+
+        filtered = [s for s in sentences if len(s.strip()) >= 10]
+        if filtered:
+            sentences = filtered
+
+        try:
+            budget = int(config.get('document.chunk_size', self.chunk_size))
+        except Exception:
+            budget = self.chunk_size or 512
+        if not budget or budget <= 0:
+            budget = 512
+
+        chunks_for_para: List[Dict[str, Any]] = []
+        cur_sents: List[str] = []
+        cur_ids: List[int] = []
+        cur_len = 0
+
+        for sid, sentence in enumerate(sentences):
+            sentence_clean = TextUtils.clean_text(sentence)
+            if not sentence_clean:
+                continue
+
+            sentence_len = len(sentence_clean)
+            if cur_sents and cur_len + sentence_len > budget:
+                chunks_for_para.append({
+                    'text': " ".join(cur_sents).strip(),
+                    'length': sum(len(s) for s in cur_sents),
+                    'sentence_ids': cur_ids.copy(),
+                })
+                cur_sents = []
+                cur_ids = []
+                cur_len = 0
+
+            cur_sents.append(sentence_clean)
+            cur_ids.append(sid)
+            cur_len += sentence_len
+
+        if cur_sents:
+            chunks_for_para.append({
+                'text': " ".join(cur_sents).strip(),
+                'length': sum(len(s) for s in cur_sents),
+                'sentence_ids': cur_ids.copy(),
+            })
+
+        if not chunks_for_para:
+            return []
+
+        return self._build_chunks_from_text(
+            cleaned_para,
+            chunks_for_para,
+            source_info,
+            preserve_original_text=True,
+        )
+
+    def _build_chunks_from_text(
+        self,
+        cleaned_text: str,
+        text_chunks: List[Dict[str, Any]],
+        source_info: Dict[str, Any],
+        *,
+        preserve_original_text: bool = False,
+    ) -> List[Dict[str, Any]]:
+        """统一构建 chunk 数据结构，复用上下文与实体提取逻辑"""
+
+        search_pos = 0
+        chunks: List[Dict[str, Any]] = []
+
+        for i, chunk_data in enumerate(text_chunks):
+            original_text = TextUtils.clean_text(chunk_data.get('text', ''))
+            if not original_text:
+                continue
+
             start_idx = cleaned_text.find(original_text, search_pos)
             if start_idx == -1:
                 start_idx = search_pos
@@ -258,29 +342,32 @@ class DocumentChunker:
 
             final_text = original_text
             primary_entity = None
-            if not chunk_entities and pre_entities:
-                primary_entity = pre_entities[-1]
-                final_text = f"{primary_entity} {original_text}"
-            elif chunk_entities:
+            if chunk_entities:
                 primary_entity = chunk_entities[0]
+            elif pre_entities:
+                primary_entity = pre_entities[-1]
+                if not preserve_original_text:
+                    final_text = f"{primary_entity} {original_text}"
 
             chunk = {
                 'text': final_text,
                 'chunk_index': i,
                 'chunk_id': f"{source_info.get('file_name', 'unknown')}_{i:04d}",
-                'length': chunk_data['length'],
+                'length': chunk_data.get('length', len(original_text)),
                 'source_info': source_info.copy(),
                 'created_at': self._get_timestamp(),
                 'primary_entity': primary_entity
             }
 
-            # 添加上下文信息
+            sentence_ids = chunk_data.get('sentence_ids')
+            if sentence_ids is not None:
+                chunk['sentence_ids'] = list(sentence_ids)
+
             chunk['context'] = self._extract_context_info(final_text, cleaned_text, i)
 
             search_pos = start_idx + len(original_text)
-
             chunks.append(chunk)
-        
+
         return chunks
     
     def _event_aware_chunking(self, text: str) -> List[Dict[str, Any]]:

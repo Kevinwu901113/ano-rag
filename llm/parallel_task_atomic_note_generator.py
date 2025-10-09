@@ -94,9 +94,20 @@ class ParallelTaskAtomicNoteGenerator(AtomicNoteGenerator):
 
     def _batch_convert(self, note_data, chunk_data):
         notes_raw = self._normalize_to_notes(note_data)
-        normalized = [normalize_note_fields(n) for n in notes_raw]
+        filtered = self._enforce_sentence_id_constraints(notes_raw, chunk_data)
+        if not filtered:
+            return []
+
+        normalized = [normalize_note_fields(n) for n in filtered]
         enriched = [enrich_note_keys(n) for n in normalized]
-        return [self._convert_to_atomic_note_format(n, chunk_data) for n in enriched]
+
+        converted: List[Dict[str, Any]] = []
+        for note in enriched:
+            converted_note = self._convert_to_atomic_note_format(note, chunk_data)
+            if converted_note:
+                converted.append(converted_note)
+
+        return converted
     
     def generate_atomic_notes(self, text_chunks: List[Dict[str, Any]], progress_tracker: Optional[Any] = None) -> List[Dict[str, Any]]:
         """生成原子笔记的主入口，支持并行任务分配"""
@@ -276,7 +287,7 @@ class ParallelTaskAtomicNoteGenerator(AtomicNoteGenerator):
         start_time = time.time()
         try:
             text = chunk_data.get('text', '')
-            prompt = self._format_atomic_note_prompt(text)
+            prompt = self._format_atomic_note_prompt(chunk_data)
             
             logger.debug(f"Ollama processing task {index}, text length: {len(text)}")
             
@@ -350,7 +361,7 @@ class ParallelTaskAtomicNoteGenerator(AtomicNoteGenerator):
         start_time = time.time()
         try:
             text = chunk_data.get('text', '')
-            prompt = self._format_atomic_note_prompt(text)
+            prompt = self._format_atomic_note_prompt(chunk_data)
             
             logger.debug(f"LMStudio processing task {index}, text length: {len(text)}")
             
@@ -409,7 +420,7 @@ class ParallelTaskAtomicNoteGenerator(AtomicNoteGenerator):
         """使用LM Studio处理单个chunk"""
         try:
             text = chunk_data.get('text', '')
-            prompt = self._format_atomic_note_prompt(text)
+            prompt = self._format_atomic_note_prompt(chunk_data)
             
             # 调用LM Studio生成
             response = self.lmstudio_client.generate_response(
@@ -486,7 +497,7 @@ class ParallelTaskAtomicNoteGenerator(AtomicNoteGenerator):
         """使用原始LLM作为最终回退"""
         try:
             text = chunk_data.get('text', '')
-            prompt = self._format_atomic_note_prompt(text)
+            prompt = self._format_atomic_note_prompt(chunk_data)
             
             response = self.llm.generate(prompt, system_prompt)
 
