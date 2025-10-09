@@ -79,8 +79,29 @@ class EnhancedAtomicNoteGenerator:
     def _get_atomic_note_system_prompt(self) -> str:
         return self._get_atomic_note_prompts()[0]
 
-    def _format_atomic_note_prompt(self, text: str) -> str:
-        return self._get_atomic_note_prompts()[1].format(text=text)
+    def _format_atomic_note_prompt(self, chunk: Dict[str, Any]) -> str:
+        template = self._get_atomic_note_prompts()[1]
+        chunk_text = chunk.get('text', '') if isinstance(chunk, dict) else str(chunk)
+        formatted_ids = self._format_sent_ids(chunk.get('sentence_ids') if isinstance(chunk, dict) else None)
+        return template.format(chunk_text=chunk_text, sent_ids=formatted_ids)
+
+    @staticmethod
+    def _format_sent_ids(sent_ids: Any) -> str:
+        if isinstance(sent_ids, (list, tuple, set)):
+            iterable = sent_ids
+        elif sent_ids is None:
+            iterable = []
+        else:
+            iterable = [sent_ids]
+
+        cleaned: List[str] = []
+        for value in iterable:
+            try:
+                cleaned.append(str(int(str(value).strip())))
+            except Exception:
+                continue
+
+        return f"[{', '.join(cleaned)}]" if cleaned else "[]"
 
     def generate_atomic_notes(self, text_chunks: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """从文本块生成增强的原子笔记"""
@@ -336,7 +357,7 @@ class EnhancedAtomicNoteGenerator:
         """生成单个原子笔记（基础版本）"""
         text = chunk_data.get('text', '')
         
-        prompt = self._format_atomic_note_prompt(text)
+        prompt = self._format_atomic_note_prompt(chunk_data)
         
         # 根据模式选择生成器
         if self.is_hybrid_mode and self.hybrid_dispatcher:
