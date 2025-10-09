@@ -30,9 +30,6 @@ def _generate_atomic_notes_once(
     chunk_text: str,
     entity_card: Optional[Dict[str, Any]],
     llm: Any,
-    *,
-    allow_partial: bool,
-    strict_person: bool,
 ) -> Dict[str, Any]:
     """Call the LLM once and validate the raw output."""
 
@@ -43,19 +40,14 @@ def _generate_atomic_notes_once(
     )
     raw = llm.chat(system=ATOMIC_NOTE_SYSTEM_PROMPT, user=user_prompt)
 
-    is_valid, partitioned, metrics = validate_notes(raw, allow_partial=allow_partial)
-    notes_valid = partitioned.get("valid", []) if partitioned else []
-    notes_invalid = partitioned.get("invalid", []) if partitioned else []
-
+    is_valid, notes, metrics = validate_notes(raw)
     result = {
         "raw": raw,
-        "valid": is_valid if strict_person else True,
+        "valid": is_valid,
         "qc": metrics,
     }
-    result["notes"] = notes_valid
-    result["notes_valid"] = notes_valid
-    result["notes_invalid"] = notes_invalid
-    result["invalid_person"] = strict_person and bool(notes_invalid)
+    result["notes"] = notes if is_valid else []
+    result["invalid_person"] = not is_valid
     return result
 
 
@@ -64,34 +56,15 @@ def generate_atomic_notes(
     entity_card: Optional[Dict[str, Any]],
     llm: Any,
     *,
-    max_retry: Optional[int] = None,
+    max_retry: int = 1,
 ) -> Dict[str, Any]:
     """Generate validated atomic notes with optional retry on person violations."""
 
-    strict_person = bool(config.get("answering.strict_person.enabled", True))
-    allow_partial = bool(config.get("validator.allow_partial", True))
-    retry_budget = max_retry if max_retry is not None else int(config.get("retry.max_times", 1) or 0)
-
-    first_result = _generate_atomic_notes_once(
-        chunk_text,
-        entity_card,
-        llm,
-        allow_partial=allow_partial,
-        strict_person=strict_person,
-    )
-
-    if not strict_person or retry_budget <= 0 or not first_result.get("invalid_person"):
+    first_result = _generate_atomic_notes_once(chunk_text, entity_card, llm)
+    if max_retry <= 0:
         return first_result
 
-    return retry_if_invalid_person(
-        chunk_text,
-        entity_card,
-        llm,
-        first_result,
-        max_retry=retry_budget,
-        allow_partial=allow_partial,
-        strict_person=strict_person,
-    )
+    return retry_if_invalid_person(chunk_text, entity_card, llm, first_result, max_retry=max_retry)
 
 class AtomicNoteGenerator:
     """原子笔记生成器，专门用于文档处理阶段的原子笔记构建"""
