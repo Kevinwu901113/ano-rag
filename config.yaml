@@ -44,6 +44,17 @@ graph:
     type_compat_weight: 1.0
     same_paragraph_bonus: 0.3
 
+cor:
+  max_rounds: 2
+  tau_conf: 0.80
+  eps_cov: 0.05
+  hard_ce_cap: 250
+  k0: 40
+  beam_width: 8
+  neighbor_cap: 8
+  bi_top_m: 60
+  ce_top_n: 20
+
 # Beam Search 多跳检索参数
 multi_hop:
   max_hops: 4
