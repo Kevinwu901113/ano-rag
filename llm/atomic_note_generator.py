@@ -513,46 +513,47 @@ class AtomicNoteGenerator:
 
         # 提取相关的paragraph idx信息
         paragraph_idx_mapping = chunk_data.get('paragraph_idx_mapping', {})
-        explicit_idxs = note.get('paragraph_idxs')
-        relevant_idxs: List[int] = []
-        if isinstance(explicit_idxs, list) and explicit_idxs:
-            for idx in explicit_idxs:
-                if isinstance(idx, int):
-                    relevant_idxs.append(idx)
-                elif isinstance(idx, str):
-                    try:
-                        relevant_idxs.append(int(idx))
-                    except ValueError:
-                        logger.debug(f"Invalid paragraph idx value ignored: {idx}")
 
-        # 1) 优先读取 chunk 上的单值 paragraph_idx
-        if not relevant_idxs:
-            pid = chunk_data.get('paragraph_idx')
-            try:
-                if isinstance(pid, (int, str)) and str(pid).strip() != '':
-                    relevant_idxs = [int(str(pid).strip())]
-            except (ValueError, TypeError):
-                pass
-
-        if not relevant_idxs:
-            base_text = chunk_data.get('text', '') or text  # 优先用chunk原文
-            relevant_idxs = self._extract_relevant_paragraph_idxs(base_text, paragraph_idx_mapping)
-
-        # 兜底逻辑：当且仅当"每文件一个段落"时，直接赋该段落 idx
-        if not relevant_idxs:
-            para_info = chunk_data.get('paragraph_info') or []
-            extracted: List[int] = []
-            for p in para_info:
-                if not isinstance(p, dict):
-                    continue
-                if 'idx' not in p:
-                    continue
+        # === 统一优先级：始终以 chunk.paragraph_idx 为首位 ===
+        def _to_int_list(xs: Optional[List[Any]]) -> List[int]:
+            out: List[int] = []
+            for x in xs or []:
                 try:
-                    extracted.append(int(str(p['idx']).strip()))
-                except (ValueError, TypeError):
+                    out.append(int(str(x).strip()))
+                except Exception:
                     continue
-            if extracted:
-                relevant_idxs = sorted(set(extracted))
+            return out
+
+        cur = _to_int_list(note.get('paragraph_idxs'))
+
+        pid_raw = chunk_data.get('paragraph_idx')
+        pid: Optional[int] = None
+        try:
+            if isinstance(pid_raw, (int, str)) and str(pid_raw).strip().isdigit():
+                pid = int(str(pid_raw).strip())
+        except Exception:
+            pid = None
+
+        if pid is not None:
+            if pid in cur:
+                cur = [pid] + [i for i in cur if i != pid]
+            else:
+                cur = [pid] + cur
+
+        if not cur:
+            base_text = chunk_data.get('text') or text  # 优先用chunk原文
+            cur = _to_int_list(self._extract_relevant_paragraph_idxs(base_text, paragraph_idx_mapping))
+
+        if not cur:
+            extracted: List[int] = []
+            for p in (chunk_data.get('paragraph_info') or []):
+                try:
+                    extracted.append(int(str(p.get('idx', '')).strip()))
+                except Exception:
+                    continue
+            cur = sorted(set(extracted)) if extracted else []
+
+        relevant_idxs = cur
 
         # 调试日志：记录空 paragraph_idxs 的情况
         if not relevant_idxs:

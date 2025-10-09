@@ -226,6 +226,12 @@ class ParallelTaskAtomicNoteGenerator(AtomicNoteGenerator):
             if not isinstance(all_notes[i], dict):
                 all_notes[i] = {'content': str(note), 'error': True}
 
+            if isinstance(all_notes[i], dict):
+                all_notes[i]['idx'] = (
+                    (all_notes[i].get('paragraph_idxs', [None])[0]
+                     if all_notes[i].get('paragraph_idxs') else all_notes[i].get('idx'))
+                )
+
             all_notes[i]['note_id'] = f"note_{i:06d}"
             all_notes[i]['created_at'] = self._get_timestamp()
 
