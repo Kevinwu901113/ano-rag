@@ -198,3 +198,5 @@ vector_db/
 *.swp
 *.swo
 *~
+
+nq_dev_rag_raw/
