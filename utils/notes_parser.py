@@ -121,17 +121,30 @@ def _normalize_source_sent_ids_field(notes: List[Any]) -> List[Dict[str, Any]]:
     return normalized
 
 
+def _as_str(x) -> str:
+    """将任意标量安全转为字符串；None -> ''。"""
+    if x is None:
+        return ""
+    if isinstance(x, (int, float, bool)):
+        return str(x)
+    return str(x)
+
+
 def _infer_type(literal: str, rel: str) -> str:
-    literal_lower = (literal or "").lower()
+    literal_lower = _as_str(literal).lower()
+    rel_lower = _as_str(rel).lower()
     if literal_lower:
         for entity_type, hints in (_TYPE_HINTS or {}).items():
             for hint in hints or []:
                 if str(hint).lower() in literal_lower:
                     return entity_type
 
-    if rel in ("performed_by", "composed_by", "directed_by"):
+    if re.fullmatch(r"\d{1,4}", literal_lower or ""):
+        return "number"
+
+    if rel_lower in ("performed_by", "composed_by", "directed_by"):
         return "album"
-    if rel in ("spouse_of", "partner_of", "born_in"):
+    if rel_lower in ("spouse_of", "partner_of", "born_in"):
         return "person"
     return ""
 
@@ -142,17 +155,17 @@ def enrich_note_keys(note: Dict[str, Any]) -> Dict[str, Any]:
     if not isinstance(note, dict):
         return note
 
-    text = str(note.get("text") or "").strip()
+    text = _as_str(note.get("text")).strip()
     if not text:
         return note
 
     _load_lex()
-    rel = str(note.get("rel") or "").strip() or _extract_rel(text)
+    rel = _as_str(note.get("rel")).strip() or _extract_rel(text)
     if rel not in (_REL_LEX or {}):
         rel = _extract_rel(text)
 
-    head_key = note.get("head_key") or ""
-    tail_key = note.get("tail_key") or ""
+    head_key = _as_str(note.get("head_key"))
+    tail_key = _as_str(note.get("tail_key"))
 
     if not (head_key and tail_key):
         left, right = _split_by_rel(text, rel)
@@ -160,7 +173,9 @@ def enrich_note_keys(note: Dict[str, Any]) -> Dict[str, Any]:
         tail_key = tail_key or _norm(right)
 
     type_head = note.get("type_head") or _infer_type(head_key, rel)
-    type_tail = note.get("type_tail") or _infer_type(tail_key, rel)
+    type_tail = note.get("type_tail")
+    if not isinstance(type_tail, str) or not type_tail:
+        type_tail = _infer_type(tail_key, rel)
 
     note.update(
         {
