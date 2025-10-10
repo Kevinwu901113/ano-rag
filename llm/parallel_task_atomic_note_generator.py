@@ -99,7 +99,20 @@ class ParallelTaskAtomicNoteGenerator(AtomicNoteGenerator):
             return []
 
         normalized = [normalize_note_fields(n) for n in filtered]
-        enriched = [enrich_note_keys(n) for n in normalized]
+
+        # 统一将核心键转为字符串，避免下游 .lower() 出错
+        for n in normalized:
+            for k in ("head", "tail", "rel", "type_head", "type_tail", "content"):
+                if k in n and n[k] is not None and not isinstance(n[k], str):
+                    n[k] = str(n[k])
+
+        enriched = []
+        for i, n in enumerate(normalized):
+            try:
+                enriched.append(enrich_note_keys(n))
+            except Exception as e:
+                logger.warning(f"[notes_parser] skip bad note at idx={i}: {e}; note={n}")
+                continue
 
         converted: List[Dict[str, Any]] = []
         for note in enriched:
