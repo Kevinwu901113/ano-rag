@@ -28,21 +28,6 @@ def _load_dataset(path: str) -> List[Dict[str, Any]]:
     return data
 
 
-def _compose_retrieved_doc_ids(
-    qid: str, ranked_paragraphs: List[Dict[str, Any]], topk: int = 20
-) -> List[str]:
-    out: List[str] = []
-    for item in ranked_paragraphs[:topk]:
-        idx = item.get("idx") if isinstance(item, dict) else None
-        if idx is None:
-            continue
-        try:
-            out.append(f"{qid}_{int(idx)}")
-        except (TypeError, ValueError):
-            continue
-    return out
-
-
 def _support_contexts(support: List[Dict[str, Any]]) -> List[str]:
     contexts: List[str] = []
     for entry in support:
@@ -63,17 +48,23 @@ def process_item(
     question = item.get("question", "")
     paragraphs = item.get("paragraphs", [])
 
-    ranked = retriever.rank(question, paragraphs)
-    retrieved_doc_ids = _compose_retrieved_doc_ids(qid, ranked, topk=topk)
+    ranked = retriever.rank(question, paragraphs) or []
+    retrieved_doc_ids: List[str] = []
+    for r in ranked[:topk]:
+        try:
+            retrieved_doc_ids.append(f"{qid}_{int(r['idx'])}")
+        except (KeyError, TypeError, ValueError):
+            continue
 
     support = ranked[: min(3, len(ranked))]
     predicted_support_idxs: List[int] = []
-    for i, s in enumerate(support):
-        idx = s.get("idx") if isinstance(s, dict) else None
+    for s in support:
         try:
-            predicted_support_idxs.append(int(idx if idx is not None else i))
-        except (TypeError, ValueError):
-            predicted_support_idxs.append(i)
+            predicted_support_idxs.append(int(s["idx"]))
+        except (KeyError, TypeError, ValueError):
+            continue
+    if not predicted_support_idxs and support:
+        predicted_support_idxs = list(range(len(support)))
 
     efsa_candidate, conf_scores, support_sents = efsa.produce(
         question=question,
