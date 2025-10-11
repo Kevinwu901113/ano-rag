@@ -4,9 +4,24 @@
 """
 
 import os
+import re
 import sys
-from typing import List, Dict, Any, Iterable
+from typing import List, Dict, Any
 from loguru import logger
+
+
+def _tok(s: str):
+    return [t for t in re.findall(r"\w+", (s or "").lower()) if t]
+
+
+def _overlap_score(q: str, t: str) -> float:
+    qset, tset = set(_tok(q)), set(_tok(t))
+    if not qset or not tset:
+        return 0.0
+    inter = len(qset & tset)
+    # 用 Jaccard 或归一化交集都行，这里选 Jaccard
+    uni = len(qset | tset)
+    return inter / uni if uni else 0.0
 
 # 添加项目根目录到路径
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -23,57 +38,28 @@ class HybridRetriever:
     只需替换 ``rank`` 方法即可。
     """
 
-    def __init__(self, top_k: int = 20):
-        self.top_k = top_k
-
-    @staticmethod
-    def _tokenize(text: str) -> Iterable[str]:
-        if not text:
-            return []
-        return [t for t in "".join(ch if ch.isalnum() else " " for ch in text.lower()).split() if t]
-
-    @staticmethod
-    def _extract_text(paragraph: Any) -> str:
-        if isinstance(paragraph, str):
-            return paragraph
-        if not isinstance(paragraph, dict):
-            return ""
-        for key in ("text", "paragraph", "content"):
-            if paragraph.get(key):
-                return str(paragraph[key])
-        sentences = paragraph.get("sentences") or paragraph.get("lines")
-        if isinstance(sentences, list):
-            return " ".join(str(x) for x in sentences)
-        return ""
+    def __init__(self, *args, **kwargs):
+        # 如果你有真 BM25/向量检索，在这里初始化；保留为空也能跑 fallback 排序
+        pass
 
     def rank(self, question: str, paragraphs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        q_tokens = set(self._tokenize(question))
-        results: List[Dict[str, Any]] = []
-
-        for i, para in enumerate(paragraphs or []):
-            idx = i
-            if isinstance(para, dict):
-                try:
-                    idx = int(para.get("idx", i))
-                except (TypeError, ValueError):
-                    idx = i
-            text = self._extract_text(para)
-            if not text:
+        """
+        兼容 musique 风格的段落输入：
+        paragraphs: [{"idx": int, "title": "", "paragraph_text": "..."}]
+        返回列表元素需包含：{"idx": int, "text": str, "score": float}
+        """
+        ranked = []
+        if not paragraphs:
+            return ranked
+        for p in paragraphs:
+            idx = p.get("idx")
+            text = p.get("paragraph_text") or p.get("text") or ""
+            if idx is None:
                 continue
-            p_tokens = set(self._tokenize(text))
-            if not p_tokens:
-                score = 0.0
-            else:
-                overlap = len(q_tokens & p_tokens)
-                score = overlap / max(len(q_tokens) or 1, 1)
-            results.append({
-                "idx": idx,
-                "text": text,
-                "score": float(score),
-            })
-
-        results.sort(key=lambda x: x["score"], reverse=True)
-        return results[: self.top_k]
+            score = _overlap_score(question, text)
+            ranked.append({"idx": int(idx), "text": text, "score": float(score)})
+        ranked.sort(key=lambda x: x["score"], reverse=True)
+        return ranked
 
 def quick_test():
     """快速测试 BM25 混合检索核心功能"""
