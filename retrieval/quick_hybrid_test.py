@@ -44,9 +44,8 @@ class HybridRetriever:
 
     def rank(self, question: str, paragraphs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """
-        兼容 musique 风格的段落输入：
         paragraphs: [{"idx": int, "title": "", "paragraph_text": "..."}]
-        返回列表元素需包含：{"idx": int, "text": str, "score": float}
+        return: [{"idx": int, "text": str, "score": float}, ...]
         """
         ranked = []
         if not paragraphs:

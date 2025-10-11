@@ -9,6 +9,7 @@
 import os
 import json
 import shutil
+from concurrent.futures import ThreadPoolExecutor
 from typing import List, Dict, Any, Optional, Union, Callable
 from loguru import logger
 
@@ -464,11 +465,29 @@ class MusiqueTaskProcessor(TaskProcessor):
         aggregated = best_result.copy()
         aggregated['predicted_support_idxs'] = list(all_support_idxs)
         aggregated['aggregated_from'] = len(results)
-        
+
         return aggregated
 
 
-def create_parallel_interface(max_workers: int = 4, 
+class ParallelProcessor:
+    """轻量级并行处理器，用于简单的函数映射场景。"""
+
+    def __init__(self, max_workers: int = 4):
+        self.max_workers = max_workers
+
+    def map(self, func: Callable[[Any], Any], items: List[Any]):
+        """对输入序列执行并行 map，保持输入顺序。"""
+        if self.max_workers <= 1:
+            for item in items:
+                yield func(item)
+            return
+
+        with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+            for result in executor.map(func, items):
+                yield result
+
+
+def create_parallel_interface(max_workers: int = 4,
                              processing_mode: ProcessingMode = ProcessingMode.AUTO,
                              strategy: ParallelStrategy = ParallelStrategy.HYBRID,
                              debug: bool = False) -> ParallelInterface:
