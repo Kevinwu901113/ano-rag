@@ -5,13 +5,75 @@
 
 import os
 import sys
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Iterable
 from loguru import logger
 
 # 添加项目根目录到路径
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from utils.bm25_search import build_bm25_corpus, bm25_scores
+
+
+class HybridRetriever:
+    """非常轻量的段落检索器，供 NQ/MuSiQue 入口脚本复用。
+
+    项目完整的混合检索流水线依赖大量配置和索引，
+    这里提供一个基于词重叠的简化实现，便于在纯 JSONL
+    输入上快速跑通端到端链路。后续若接入真实检索器，
+    只需替换 ``rank`` 方法即可。
+    """
+
+    def __init__(self, top_k: int = 20):
+        self.top_k = top_k
+
+    @staticmethod
+    def _tokenize(text: str) -> Iterable[str]:
+        if not text:
+            return []
+        return [t for t in "".join(ch if ch.isalnum() else " " for ch in text.lower()).split() if t]
+
+    @staticmethod
+    def _extract_text(paragraph: Any) -> str:
+        if isinstance(paragraph, str):
+            return paragraph
+        if not isinstance(paragraph, dict):
+            return ""
+        for key in ("text", "paragraph", "content"):
+            if paragraph.get(key):
+                return str(paragraph[key])
+        sentences = paragraph.get("sentences") or paragraph.get("lines")
+        if isinstance(sentences, list):
+            return " ".join(str(x) for x in sentences)
+        return ""
+
+    def rank(self, question: str, paragraphs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        q_tokens = set(self._tokenize(question))
+        results: List[Dict[str, Any]] = []
+
+        for i, para in enumerate(paragraphs or []):
+            idx = i
+            if isinstance(para, dict):
+                try:
+                    idx = int(para.get("idx", i))
+                except (TypeError, ValueError):
+                    idx = i
+            text = self._extract_text(para)
+            if not text:
+                continue
+            p_tokens = set(self._tokenize(text))
+            if not p_tokens:
+                score = 0.0
+            else:
+                overlap = len(q_tokens & p_tokens)
+                score = overlap / max(len(q_tokens) or 1, 1)
+            results.append({
+                "idx": idx,
+                "text": text,
+                "score": float(score),
+            })
+
+        results.sort(key=lambda x: x["score"], reverse=True)
+        return results[: self.top_k]
 
 def quick_test():
     """快速测试 BM25 混合检索核心功能"""
