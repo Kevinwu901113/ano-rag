@@ -15,6 +15,7 @@ from typing import List, Dict, Any, Optional, Tuple
 from collections import defaultdict
 from loguru import logger
 import os
+import re
 from pathlib import Path
 
 
@@ -237,3 +238,76 @@ def extract_bridge_info_from_candidates(candidates: List[Dict[str, Any]]) -> Tup
     
     logger.debug(f"Extracted bridge_entity='{bridge_entity}', path_entities={path_entities}")
     return bridge_entity, path_entities
+
+
+class EfsaAnswer:
+    """轻量化的 EFSA 答案生成封装。
+
+    原项目中的 EFSA 依赖原子笔记及多跳图谱信息，这里提供一个
+    仅基于段落文本的近似实现，方便在 NQ/MuSiQue JSON 输入上跑通。
+    """
+
+    def __init__(self, top_sentences: int = 3):
+        self.top_sentences = top_sentences
+
+    @staticmethod
+    def _tokenize(text: str) -> List[str]:
+        if not text:
+            return []
+        cleaned = "".join(ch if ch.isalnum() else " " for ch in text.lower())
+        return [tok for tok in cleaned.split() if tok]
+
+    @staticmethod
+    def _split_sentences(text: str) -> List[str]:
+        if not text:
+            return []
+        pieces = re.split(r"(?<=[.!?。！？])\s+", text)
+        sentences = [p.strip() for p in pieces if p and p.strip()]
+        return sentences if sentences else [text.strip()]
+
+    def produce(
+        self,
+        question: str,
+        contexts: Optional[List[str]] = None,
+    ) -> Tuple[str, Dict[str, float], List[str]]:
+        contexts = contexts or []
+        question_tokens = set(self._tokenize(question))
+
+        candidates: List[Tuple[str, int, float]] = []  # (sentence, ctx_idx, score)
+        for ctx_idx, ctx in enumerate(contexts):
+            for sent in self._split_sentences(ctx):
+                sent_tokens = set(self._tokenize(sent))
+                if not sent_tokens:
+                    score = 0.0
+                else:
+                    overlap = len(question_tokens & sent_tokens)
+                    score = overlap / max(len(question_tokens) or 1, 1)
+                candidates.append((sent.strip(), ctx_idx, float(score)))
+
+        if not candidates:
+            empty_scores = {
+                "answer_conf": 0.0,
+                "support_conf": 0.0,
+                "coverage": 0.0,
+                "entailment": -1.0,
+            }
+            return "", empty_scores, []
+
+        candidates.sort(key=lambda x: x[2], reverse=True)
+        top = candidates[: max(1, self.top_sentences)]
+        answer_text = top[0][0]
+        support_sents = [sent for sent, _, _ in top]
+
+        contributing_ctx = {ctx_idx for _, ctx_idx, score in top if score > 0}
+        coverage = len(contributing_ctx) / max(len(contexts) or 1, 1)
+        avg_support = sum(score for _, _, score in top) / len(top)
+        answer_conf = top[0][2]
+
+        conf_scores = {
+            "answer_conf": float(answer_conf),
+            "support_conf": float(avg_support),
+            "coverage": float(coverage),
+            "entailment": float(answer_conf - 0.25),
+        }
+
+        return answer_text, conf_scores, support_sents

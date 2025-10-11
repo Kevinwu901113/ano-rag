@@ -545,3 +545,30 @@ def create_answer_verifier(span_picker=None, calibration_path: Optional[str] = N
         AnswerVerifier instance
     """
     return AnswerVerifier(span_picker=span_picker, calibration_path=calibration_path)
+
+
+class Verifier:
+    """Minimal entailment scorer used by the NQ pipeline."""
+
+    def __init__(self) -> None:
+        pass
+
+    @staticmethod
+    def _tokenize(text: str) -> List[str]:
+        if not text:
+            return []
+        cleaned = "".join(ch if ch.isalnum() else " " for ch in text.lower())
+        return [tok for tok in cleaned.split() if tok]
+
+    def infer(self, premise: str, hypothesis: str) -> float:
+        """Return a lexical overlap score approximating entailment strength."""
+
+        premise_tokens = set(self._tokenize(premise))
+        hyp_tokens = set(self._tokenize(hypothesis))
+        if not premise_tokens or not hyp_tokens:
+            return -1.0
+        overlap = len(premise_tokens & hyp_tokens)
+        denom = max(len(hyp_tokens), 1)
+        score = overlap / denom
+        # 压缩到 [-1, 1] 区间，便于后续比较
+        return float(2 * score - 1)
