@@ -3,5 +3,11 @@
 from .answer_selector import answer_question
 from .evidence_rerank import EvidenceReranker
 from .path_validator import PathValidator
+from .processor_bridge import AnoragProcessorBridge
 
-__all__ = ["EvidenceReranker", "PathValidator", "answer_question"]
+__all__ = [
+    "EvidenceReranker",
+    "PathValidator",
+    "answer_question",
+    "AnoragProcessorBridge",
+]
