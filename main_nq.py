@@ -10,6 +10,7 @@ from answer.efsa_answer import EfsaAnswer
 from answer.verify_shell import Verifier
 from answer.nq_answer import decide_nq_answer
 from utils.nq_normalize import normalize_text
+from answer.final_answer_generator import generate_final_answer
 from parallel.parallel_interface import ParallelProcessor  # 若不想用并行，可注释并改为串行
 from pipeline.processor_bridge import AnoragProcessorBridge
 
@@ -112,54 +113,70 @@ def process_item_anorag(item: Dict[str, Any],
     if bridge is None:
         raise ValueError("AnoragProcessorBridge is required when engine is 'anorag'")
 
-    raw = bridge.process_one(item)
+    r = bridge.process_one(item) or {}
     qid = str(item["id"])
-
-    retrieved_doc_ids = list(raw.get("retrieved_doc_ids", []) or [])
-    retrieved_doc_ids = retrieved_doc_ids[:topk]
-
-    raw_support = raw.get("predicted_support_idxs", []) or []
-    normalized_support_idxs: List[int] = []
+    retrieved_doc_ids = (r.get("retrieved_doc_ids") or [])[:topk]
+    raw_support = r.get("predicted_support_idxs") or []
+    support_idxs: List[int] = []
     for idx in raw_support:
+        if len(support_idxs) >= topk_support:
+            break
         try:
-            normalized_support_idxs.append(int(idx))
+            support_idxs.append(int(idx))
         except (TypeError, ValueError):
             continue
-    predicted_support_idxs = normalized_support_idxs[:topk_support]
+    pred_answer = r.get("predicted_answer", "") or ""
 
-    predicted_answer = raw.get("predicted_answer", "") or ""
-    predicted_answerable = raw.get("predicted_answerable")
+    para_map: Dict[int, str] = {}
+    for para in item.get("paragraphs", []):
+        idx = para.get("idx")
+        if idx is None:
+            continue
+        try:
+            para_idx = int(idx)
+        except (TypeError, ValueError):
+            continue
+        para_map[para_idx] = para.get("paragraph_text") or para.get("text") or ""
+    support_texts = [para_map.get(i, "") for i in support_idxs if i in para_map]
 
-    if not predicted_answer:
-        para_map: Dict[int, str] = {}
-        for i, para in enumerate(item.get("paragraphs", [])):
-            idx = para.get("idx", i)
-            try:
-                para_map[int(idx)] = para.get("paragraph_text") or para.get("text") or ""
-            except (TypeError, ValueError):
-                continue
+    pred_answerable = bool(pred_answer)
 
-        support_texts = [para_map.get(idx, "") for idx in predicted_support_idxs]
-        conf_scores = {"answer_conf": 0.0, "support_conf": 0.0, "coverage": 0.0, "entailment": 0.0}
-        efsa_candidate = ""
-        predicted_answer, predicted_answerable = decide_nq_answer(
+    if not pred_answer:
+        try:
+            fa = generate_final_answer(
+                question=item["question"],
+                raw_context_lines=support_texts,
+                efsa_output=None,
+                llm=None,
+            ) or {}
+            obj = fa.get("output") or {}
+            ans = normalize_text(obj.get("answer", "") or "")
+            if ans and ans != "insufficient":
+                pred_answer = ans
+                pred_answerable = True
+        except Exception:
+            pass
+
+    if not pred_answer:
+        pa, _ = decide_nq_answer(
             example=item,
-            efsa_candidate=efsa_candidate,
+            efsa_candidate="",
             support_sents=support_texts,
-            conf_scores=conf_scores,
+            conf_scores={"answer_conf": 0.0, "support_conf": 0.0, "coverage": 0.0, "entailment": 0.0},
             verifier=None,
         )
-        if not predicted_answer and support_texts:
-            predicted_answer = normalize_text(" ".join(support_texts[0].split()[:6]))
-            predicted_answerable = True
-    elif predicted_answerable is None:
-        predicted_answerable = True
+        pred_answer = normalize_text(pa or "")
+        pred_answerable = bool(pred_answer)
+
+    if not pred_answer:
+        pred_answer = ""
+        pred_answerable = False
 
     return {
         "id": qid,
-        "predicted_answer": predicted_answer or "",
-        "predicted_answerable": bool(predicted_answerable),
-        "predicted_support_idxs": predicted_support_idxs,
+        "predicted_answer": pred_answer,
+        "predicted_answerable": bool(pred_answerable),
+        "predicted_support_idxs": support_idxs,
         "retrieved_doc_ids": retrieved_doc_ids,
     }
 

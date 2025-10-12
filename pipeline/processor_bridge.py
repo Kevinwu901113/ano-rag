@@ -59,12 +59,27 @@ class AnoragProcessorBridge:
         finally:
             self._cleanup_dir(item_work_dir)
 
-        predicted_answer = result.get("predicted_answer", "")
-        predicted_support_idxs = result.get("predicted_support_idxs", []) or []
+        result = result or {}
+        if isinstance(atomic_notes_info, dict):
+            result = dict(result)
+            result.setdefault("atomic_notes_info", atomic_notes_info)
+
+        atomic_notes_info = result.get("atomic_notes_info", {}) or {}
+        recalled_notes: List[Dict[str, Any]] = atomic_notes_info.get("recalled_atomic_notes", [])
+        if not isinstance(recalled_notes, list):
+            recalled_notes = []
+
+        try:
+            recalled_notes = sorted(
+                recalled_notes,
+                key=lambda n: float(n.get("similarity_score", 0.0)),
+                reverse=True,
+            )
+        except Exception:
+            pass
+
         retrieved_doc_ids: List[str] = []
         seen: set[str] = set()
-
-        recalled_notes = atomic_notes_info.get("recalled_atomic_notes", []) if isinstance(atomic_notes_info, dict) else []
         for note in recalled_notes:
             paragraph_idxs = note.get("paragraph_idxs") or []
             for idx in paragraph_idxs:
@@ -78,11 +93,10 @@ class AnoragProcessorBridge:
 
         return {
             "id": qid,
-            "predicted_answer": predicted_answer,
-            "predicted_support_idxs": predicted_support_idxs,
+            "predicted_answer": result.get("predicted_answer", ""),
+            "predicted_support_idxs": result.get("predicted_support_idxs", []),
             "retrieved_doc_ids": retrieved_doc_ids,
             "extra": {
-                "raw_result": result,
-                "atomic_notes_info": atomic_notes_info,
+                "raw": result,
             },
         }
