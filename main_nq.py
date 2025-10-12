@@ -11,6 +11,7 @@ from answer.verify_shell import Verifier
 from answer.nq_answer import decide_nq_answer
 from utils.nq_normalize import normalize_text
 from parallel.parallel_interface import ParallelProcessor  # 若不想用并行，可注释并改为串行
+from pipeline.processor_bridge import AnoragProcessorBridge
 
 logger = logging.getLogger("main_nq")
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
@@ -40,12 +41,12 @@ def _fallback_short_answer(question: str, support_texts: List[str]) -> str:
     return normalize_text(" ".join(tokens[:6])) if tokens else ""
 
 # ---------- 核心处理：单条样本 ----------
-def process_item(item: Dict[str, Any],
-                 retriever: HybridRetriever,
-                 efsa: EfsaAnswer,
-                 verifier: Verifier,
-                 topk: int = 20,
-                 topk_support: int = 3) -> Dict[str, Any]:
+def process_item_fallback(item: Dict[str, Any],
+                          retriever: HybridRetriever,
+                          efsa: EfsaAnswer,
+                          verifier: Verifier,
+                          topk: int = 20,
+                          topk_support: int = 3) -> Dict[str, Any]:
     qid = str(item["id"])
     question = item["question"]
     paragraphs = item.get("paragraphs", [])
@@ -103,6 +104,65 @@ def process_item(item: Dict[str, Any],
         "retrieved_doc_ids": retrieved_doc_ids
     }
 
+
+def process_item_anorag(item: Dict[str, Any],
+                        bridge: AnoragProcessorBridge,
+                        topk: int = 20,
+                        topk_support: int = 3) -> Dict[str, Any]:
+    if bridge is None:
+        raise ValueError("AnoragProcessorBridge is required when engine is 'anorag'")
+
+    raw = bridge.process_one(item)
+    qid = str(item["id"])
+
+    retrieved_doc_ids = list(raw.get("retrieved_doc_ids", []) or [])
+    retrieved_doc_ids = retrieved_doc_ids[:topk]
+
+    raw_support = raw.get("predicted_support_idxs", []) or []
+    normalized_support_idxs: List[int] = []
+    for idx in raw_support:
+        try:
+            normalized_support_idxs.append(int(idx))
+        except (TypeError, ValueError):
+            continue
+    predicted_support_idxs = normalized_support_idxs[:topk_support]
+
+    predicted_answer = raw.get("predicted_answer", "") or ""
+    predicted_answerable = raw.get("predicted_answerable")
+
+    if not predicted_answer:
+        para_map: Dict[int, str] = {}
+        for i, para in enumerate(item.get("paragraphs", [])):
+            idx = para.get("idx", i)
+            try:
+                para_map[int(idx)] = para.get("paragraph_text") or para.get("text") or ""
+            except (TypeError, ValueError):
+                continue
+
+        support_texts = [para_map.get(idx, "") for idx in predicted_support_idxs]
+        conf_scores = {"answer_conf": 0.0, "support_conf": 0.0, "coverage": 0.0, "entailment": 0.0}
+        efsa_candidate = ""
+        predicted_answer, predicted_answerable = decide_nq_answer(
+            example=item,
+            efsa_candidate=efsa_candidate,
+            support_sents=support_texts,
+            conf_scores=conf_scores,
+            verifier=None,
+        )
+        if not predicted_answer and support_texts:
+            predicted_answer = normalize_text(" ".join(support_texts[0].split()[:6]))
+            predicted_answerable = True
+    elif predicted_answerable is None:
+        predicted_answerable = True
+
+    return {
+        "id": qid,
+        "predicted_answer": predicted_answer or "",
+        "predicted_answerable": bool(predicted_answerable),
+        "predicted_support_idxs": predicted_support_idxs,
+        "retrieved_doc_ids": retrieved_doc_ids,
+    }
+
 # ---------- I/O ----------
 def _load_dataset(path: str) -> List[Dict[str, Any]]:
     data = []
@@ -119,6 +179,8 @@ def main():
     ap.add_argument("--workers", type=int, default=4)
     ap.add_argument("--topk", type=int, default=20, help="检索候选写入 retrieved_doc_ids 的上限")
     ap.add_argument("--topk_support", type=int, default=3, help="用于生成/验证的支持段落数")
+    ap.add_argument("--engine", choices=["anorag", "fallback"], default="anorag",
+                    help="anorag: 走项目完整流水线；fallback: 轻量词面基线")
     args = ap.parse_args()
 
     logger.info("[INFO] loading dataset from %s", args.input_file)
@@ -127,9 +189,14 @@ def main():
     os.makedirs(os.path.dirname(args.output_file), exist_ok=True)
 
     # 初始化组件（可替换成你真实实现）
-    retriever = HybridRetriever()
-    efsa = EfsaAnswer()
-    verifier = Verifier()
+    if args.engine == "fallback":
+        retriever = HybridRetriever()
+        efsa = EfsaAnswer()
+        verifier = Verifier()
+        bridge = None
+    else:
+        retriever = efsa = verifier = None
+        bridge = AnoragProcessorBridge(max_workers=args.workers)
 
     # 逐行独立 + 并行
     proc = ParallelProcessor(max_workers=args.workers)
@@ -139,8 +206,21 @@ def main():
     n_nonempty_answer = 0
 
     def _task(item):
-        res = process_item(item, retriever, efsa, verifier, topk=args.topk, topk_support=args.topk_support)
-        return res
+        if args.engine == "fallback":
+            return process_item_fallback(
+                item,
+                retriever,
+                efsa,
+                verifier,
+                topk=args.topk,
+                topk_support=args.topk_support,
+            )
+        return process_item_anorag(
+            item,
+            bridge,
+            topk=args.topk,
+            topk_support=args.topk_support,
+        )
 
     results: List[Dict[str, Any]] = []
     for res in proc.map(_task, data):
