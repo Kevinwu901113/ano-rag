@@ -74,12 +74,18 @@ class LMStudioClient:
         self.max_tokens = config.get("llm.lmstudio.max_tokens", 4096)
         self.timeout = config.get("llm.lmstudio.timeout", 60)
         self.max_retries = config.get("llm.lmstudio.max_retries", 3)
+        self.top_p = config.get("llm.lmstudio.top_p")
+        self.stop_sequences = config.get("llm.lmstudio.stop")
         
         # 默认选项
         self.default_options = {
             "temperature": self.temperature,
             "max_tokens": self.max_tokens,
         }
+        if self.top_p is not None:
+            self.default_options["top_p"] = self.top_p
+        if self.stop_sequences:
+            self.default_options["stop"] = self.stop_sequences
         
         # 初始化单一LM Studio连接
         self._init_connection(base_url, model, port)
@@ -138,10 +144,11 @@ class LMStudioClient:
         """生成单个响应"""
         try:
             # 提取system_prompt参数，避免传递给OpenAI API
-            options = {**self.default_options}
+            options = {k: v for k, v in self.default_options.items() if v is not None}
             for key, value in kwargs.items():
-                if key != 'system_prompt':
-                    options[key] = value
+                if key == 'system_prompt' or value is None:
+                    continue
+                options[key] = value
             
             # 准备消息
             messages = []
@@ -171,7 +178,11 @@ class LMStudioClient:
         """生成流式响应"""
         try:
             # 合并默认选项和传入的参数
-            options = {**self.default_options, **kwargs}
+            options = {k: v for k, v in self.default_options.items() if v is not None}
+            for key, value in kwargs.items():
+                if value is None:
+                    continue
+                options[key] = value
             
             # 准备消息
             messages = []
