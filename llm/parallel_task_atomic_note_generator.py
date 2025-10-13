@@ -292,7 +292,13 @@ class ParallelTaskAtomicNoteGenerator(AtomicNoteGenerator):
             logger.debug(f"Ollama processing task {index}, text length: {len(text)}")
             
             # 添加超时控制
-            response = self.ollama_client.generate(prompt, system_prompt, timeout=30)
+            llm_params = self._get_optimized_llm_params()
+            response = self.ollama_client.generate(
+                prompt,
+                system_prompt,
+                timeout=30,
+                **llm_params,
+            )
             
             # 检查响应是否为空
             if not response or response.strip() == "":
@@ -365,7 +371,12 @@ class ParallelTaskAtomicNoteGenerator(AtomicNoteGenerator):
             
             logger.debug(f"LMStudio processing task {index}, text length: {len(text)}")
             
-            response = self.lmstudio_client.generate(prompt, system_prompt)
+            llm_params = self._get_optimized_llm_params()
+            response = self.lmstudio_client.generate(
+                prompt,
+                system_prompt,
+                **llm_params,
+            )
             
             # 检查响应是否为空
             if not response or response.strip() == "":
