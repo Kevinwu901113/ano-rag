@@ -122,6 +122,11 @@ def _normalize_source_sent_ids_field(notes: List[Any]) -> List[Dict[str, Any]]:
 
 
 def _infer_type(literal: str, rel: str) -> str:
+    # Handle case where literal might be a list instead of string
+    if isinstance(literal, list):
+        # If it's a list, join the elements or take the first element
+        literal = " ".join(str(item) for item in literal) if literal else ""
+    
     literal_lower = (literal or "").lower()
     if literal_lower:
         for entity_type, hints in (_TYPE_HINTS or {}).items():
