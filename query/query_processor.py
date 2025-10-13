@@ -27,6 +27,7 @@ from utils.dataset_guard import filter_notes_by_namespace, assert_namespace_or_r
 from utils.bm25_search import build_bm25_corpus, bm25_scores
 from retrieval.path_aware_ranker import PathAwareRanker, create_path_aware_ranker
 from config import config
+from utils import FileUtils
 
 # 导入多跳推理组件
 from graph.multi_hop_query_processor import MultiHopQueryProcessor
@@ -57,7 +58,7 @@ class QueryProcessor:
             # 获取工作目录
             if log_dir is None:
                 # 从配置中获取工作目录，与其他输出文件保持一致
-                log_dir = self.config.get('storage', {}).get('work_dir', './result')
+                log_dir = self.work_dir or self.config.get('storage', {}).get('work_dir', './result')
             
             # 创建promptin.log文件路径
             promptin_log_path = os.path.join(log_dir, "promptin.log")
@@ -167,9 +168,19 @@ Prompt Length: {len(prompt)} characters
         vector_index_file: Optional[str] = None,
         llm: Optional[LocalLLM] = None,
         cfg: Optional[dict] = None,
+        work_dir: Optional[str] = None,
     ):
         # 如果外部没传，才加载一次
         self.config = cfg if cfg is not None else config.load_config()
+
+        if work_dir:
+            self.work_dir = os.path.abspath(work_dir)
+        else:
+            default_dir = self.config.get('storage', {}).get('work_dir')
+            self.work_dir = os.path.abspath(default_dir) if default_dir else None
+
+        if self.work_dir:
+            os.makedirs(self.work_dir, exist_ok=True)
 
         # 强化：常用旋钮在 __init__ 缓存成成员，后面只读这些
         hd = self._get_config_dict("hybrid_search")
@@ -247,6 +258,13 @@ Prompt Length: {len(prompt)} characters
 
         # Query rewriter functionality has been removed
         self.vector_retriever = VectorRetriever()
+        if self.work_dir:
+            vector_store_dir = os.path.join(self.work_dir, 'vector_store')
+            vector_index_dir = os.path.join(self.work_dir, 'vector_index')
+            FileUtils.ensure_dir(vector_store_dir)
+            FileUtils.ensure_dir(vector_index_dir)
+            self.vector_retriever.data_dir = vector_store_dir
+            self.vector_retriever.vector_index.index_dir = vector_index_dir
         if vector_index_file and os.path.exists(vector_index_file):
             try:
                 # adjust storage directories
@@ -280,7 +298,6 @@ Prompt Length: {len(prompt)} characters
             self.graph_index = GraphIndex()
             try:
                 # 加载图数据
-                from utils import FileUtils
                 from networkx.readwrite import json_graph
                 data = FileUtils.read_json(graph_file)
                 graph = json_graph.node_link_graph(data, edges="links")
@@ -1938,14 +1955,15 @@ Prompt Length: {len(prompt)} characters
             'query_type': 'simple',
             'enhancements': []
         }
-        
+
+        candidate_notes: List[Dict[str, Any]] = []
+
         if self.use_context_dispatcher:
             # 使用新的结构增强上下文调度器
             # 首先进行向量检索获取候选结果
             vector_results = self.vector_retriever.search(queries)
-            
+
             # 合并结果并去重
-            candidate_notes = []
             seen_note_ids = set()
             for sub in vector_results:
                 for note in sub:
@@ -2467,7 +2485,7 @@ Prompt Length: {len(prompt)} characters
                 # 生成后对齐检查：对比 support_idxs 与 used_idx_list
                 try:
                     # 读取 debug 目录下的 used_passages.json 获取 used_idx_list
-                    run_dir = self.config.get('storage', {}).get('work_dir') or './result'
+                    run_dir = self.work_dir or self.config.get('storage', {}).get('work_dir') or './result'
 
                     # 查找最新的 debug 目录
                     debug_base_dir = os.path.join(run_dir, "3", "debug")
@@ -2519,7 +2537,7 @@ Prompt Length: {len(prompt)} characters
         final_notes = selected_notes  # 最终集合
         
         # 获取运行目录，优先使用配置中的work_dir
-        run_dir = self.config.get('storage', {}).get('work_dir') or './result'
+        run_dir = self.work_dir or self.config.get('storage', {}).get('work_dir') or './result'
         os.makedirs(run_dir, exist_ok=True)
         
         # 确保每个note包含完整字段
@@ -2609,6 +2627,7 @@ Prompt Length: {len(prompt)} characters
             'predicted_support_idxs': predicted_support_idxs,
             'final_recall_path': final_recall_path,
             'answer_selector': answer_selector_metadata,
+            'candidate_notes': candidate_notes,
         }
         
         # 添加调度器特定的信息
@@ -2718,6 +2737,7 @@ Prompt Length: {len(prompt)} characters
                 'notes': selected_notes,
                 'predicted_support_idxs': predicted_support_idxs,
                 'answer_selector': None,
+                'candidate_notes': merged_evidence,
                 'subquestion_info': {
                     'sub_questions': sub_questions,
                     'subquestion_results': subquestion_results,

@@ -303,8 +303,8 @@ class DocumentProcessor:
             
             # 写入JSONL文件
             try:
-                # 使用工作目录作为JSONL文件的输出目录，与atomic_notes.json等文件保持一致
-                work_dir = config.get('storage.work_dir') or self.processed_docs_path
+                # 使用当前处理目录作为JSONL文件的输出目录，与atomic_notes.json等文件保持一致
+                work_dir = self.processed_docs_path or config.get('storage.work_dir')
                 jsonl_writer = get_global_note_writer(work_dir)
                 for note in enhanced_notes:
                     # 从source_info中获取问题ID
