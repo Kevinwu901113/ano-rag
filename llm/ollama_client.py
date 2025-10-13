@@ -23,6 +23,8 @@ class OllamaClient:
         self.model = model or config.get("llm.ollama.model", "gpt-oss:latest")
         self.temperature = config.get("llm.ollama.temperature", 0.7)
         self.max_tokens = config.get("llm.ollama.max_tokens", 4096)
+        self.top_p = config.get("llm.ollama.top_p")
+        self.stop_sequences = config.get("llm.ollama.stop")
         
         # LightRAG-inspired configuration
         self.num_ctx = config.get("llm.ollama.num_ctx", 32768)  # Context window size
@@ -38,6 +40,10 @@ class OllamaClient:
             "temperature": self.temperature,
             "num_predict": self.max_tokens,
         }
+        if self.top_p is not None:
+            self.default_options["top_p"] = self.top_p
+        if self.stop_sequences:
+            self.default_options["stop"] = self.stop_sequences
 
     def generate(
         self,
@@ -51,11 +57,29 @@ class OllamaClient:
         """Generate text from a prompt with improved error handling."""
         # Merge default options with kwargs
         options = self.default_options.copy()
-        options.update({
-            "temperature": kwargs.get("temperature", self.temperature),
-            "num_predict": kwargs.get("max_tokens", self.max_tokens),
-            "num_ctx": kwargs.get("num_ctx", self.num_ctx),
-        })
+
+        option_key_map = {
+            "temperature": "temperature",
+            "max_tokens": "num_predict",
+            "num_predict": "num_predict",
+            "num_ctx": "num_ctx",
+            "top_p": "top_p",
+            "top_k": "top_k",
+            "repeat_penalty": "repeat_penalty",
+            "presence_penalty": "presence_penalty",
+            "frequency_penalty": "frequency_penalty",
+            "stop": "stop",
+        }
+
+        for key, target in option_key_map.items():
+            value = kwargs.get(key)
+            if value is not None:
+                options[target] = value
+
+        for key, value in kwargs.items():
+            if value is None or key in option_key_map:
+                continue
+            options[key] = value
         
         # Use provided timeout or default
         request_timeout = timeout or self.timeout
