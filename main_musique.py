@@ -15,7 +15,6 @@ Musique数据集批量处理脚本
 import argparse
 import json
 import os
-import shutil
 from typing import List, Dict, Any, Optional
 import concurrent.futures
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -89,25 +88,43 @@ def create_new_workdir() -> str:
     return work_dir
 
 
-def create_item_workdir(base_work_dir: str, item_id: str, debug_mode: bool = False) -> str:
+def _sanitize_identifier(identifier: str) -> str:
+    """将任意字符串转为安全的文件夹名称"""
+    if not identifier:
+        return "unknown"
+    safe_chars = []
+    for ch in identifier:
+        if ch.isalnum() or ch in {"_", "-"}:
+            safe_chars.append(ch)
+        else:
+            safe_chars.append("_")
+    sanitized = "".join(safe_chars).strip("._")
+    return sanitized or "unknown"
+
+
+def create_item_workdir(base_work_dir: str, item_id: str, index: int, debug_mode: bool = False) -> str:
     """为单个item创建工作目录
-    
+
     Args:
         base_work_dir: 基础工作目录
         item_id: 项目ID
+        index: 数据集中该item的顺序索引
         debug_mode: 是否为debug模式，如果是则创建debug子文件夹
-    
+
     Returns:
         工作目录路径
     """
+    safe_id = _sanitize_identifier(item_id)
+    item_folder_name = f"{index:03d}_{safe_id}" if safe_id else f"{index:03d}"
+
     if debug_mode:
-        # debug模式：/results/数字/debug/item_id/
+        # debug模式：/results/数字/debug/{i:03d}_item_id/
         debug_dir = os.path.join(base_work_dir, "debug")
-        item_work_dir = os.path.join(debug_dir, item_id)
+        item_work_dir = os.path.join(debug_dir, item_folder_name)
     else:
-        # 非debug模式：直接在base_work_dir下创建临时目录
-        item_work_dir = os.path.join(base_work_dir, f"temp_{item_id}")
-    
+        # 非debug模式：/results/数字/{i:03d}_item_id/
+        item_work_dir = os.path.join(base_work_dir, item_folder_name)
+
     os.makedirs(item_work_dir, exist_ok=True)
     return item_work_dir
 
@@ -268,7 +285,8 @@ class MusiqueProcessor:
                 embeddings,
                 graph_file=graph_file if os.path.exists(graph_file) else None,
                 vector_index_file=None,  # 不使用预构建的向量索引
-                llm=self.llm
+                llm=self.llm,
+                work_dir=work_dir
             )
             
             # 4. 执行查询
@@ -302,29 +320,60 @@ class MusiqueProcessor:
                 logger.info(f"Debug mode: all process artifacts saved in {work_dir}")
             
             # 6. 收集召回的原子文档信息
-            recalled_notes = query_result.get('notes', [])
+            candidate_notes = query_result.get('candidate_notes') or []
+            recalled_notes = candidate_notes if candidate_notes else query_result.get('notes', [])
+            selected_notes = query_result.get('notes', [])
             atomic_notes_info = {
                 'id': item_id,
                 'question': question,
-                'recalled_atomic_notes': []
+                'candidate_count': len(recalled_notes),
+                'selected_count': len(selected_notes),
+                'recalled_atomic_notes': [],
+                'selected_atomic_notes': [],
+                'final_recall_path': query_result.get('final_recall_path')
             }
-            
-            for note in recalled_notes:
-                # 获取检索信息
+
+            def build_note_info(note: Dict[str, Any]) -> Dict[str, Any]:
                 retrieval_info = note.get('retrieval_info', {})
-                
-                note_info = {
+                return {
                     'note_id': note.get('note_id', ''),
                     'content': note.get('content', ''),
                     'paragraph_idxs': note.get('paragraph_idxs', []),
-                    'similarity_score': retrieval_info.get('similarity', 0.0),
-                    # 添加检索方法信息
-                    'retrieval_method': retrieval_info.get('retrieval_method', 'unknown'),
+                    'similarity_score': retrieval_info.get('similarity', note.get('similarity', 0.0)),
+                    'retrieval_method': retrieval_info.get('retrieval_method', note.get('retrieval_method', 'unknown')),
                     'subq_source': note.get('tags', {}).get('subq_source', 'unknown'),
-                    'source_tag': note.get('tags', {}).get('source', 'unknown')
+                    'source_tag': note.get('tags', {}).get('source', 'unknown'),
+                    'hop_no': note.get('hop_no', 1),
+                    'bridge_entity': note.get('bridge_entity'),
+                    'final_score': note.get('final_score', note.get('score')),
                 }
-                atomic_notes_info['recalled_atomic_notes'].append(note_info)
-            
+
+            for note in recalled_notes:
+                atomic_notes_info['recalled_atomic_notes'].append(build_note_info(note))
+
+            for note in selected_notes:
+                atomic_notes_info['selected_atomic_notes'].append(build_note_info(note))
+
+            # 将召回详情写入单独的文件，便于逐样本排查
+            recall_log_path = os.path.join(work_dir, 'atomic_notes_recall.jsonl')
+            with open(recall_log_path, 'w', encoding='utf-8') as recall_file:
+                for note_info in atomic_notes_info['recalled_atomic_notes']:
+                    record = {'id': item_id, **note_info}
+                    recall_file.write(json.dumps(record, ensure_ascii=False) + '\n')
+
+            atomic_notes_info['recalled_atomic_notes_path'] = recall_log_path
+
+            selected_log_path = os.path.join(work_dir, 'selected_atomic_notes.jsonl')
+            with open(selected_log_path, 'w', encoding='utf-8') as selected_file:
+                for note_info in atomic_notes_info['selected_atomic_notes']:
+                    record = {'id': item_id, **note_info}
+                    selected_file.write(json.dumps(record, ensure_ascii=False) + '\n')
+
+            atomic_notes_info['selected_atomic_notes_path'] = selected_log_path
+
+            # 不需要在最终结果中重复存储候选明细，避免输出文件过大
+            query_result.pop('candidate_notes', None)
+
             result: Dict[str, Any] = {
                 'id': item_id,
                 'predicted_answer': predicted_answer,
@@ -438,9 +487,9 @@ class MusiqueProcessor:
             with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
                 # 为每个item创建独立的工作目录
                 futures = []
-                for i, item in enumerate(items):
+                for i, item in enumerate(items, start=1):
                     item_id = item.get('id', f'item_{i}')
-                    work_dir = create_item_workdir(self.base_work_dir, item_id, debug_mode=self.debug)
+                    work_dir = create_item_workdir(self.base_work_dir, item_id, i, debug_mode=self.debug)
                     future = executor.submit(self.process_single_item, item, work_dir)
                     futures.append((future, work_dir, item_id))
                 
@@ -509,20 +558,14 @@ class MusiqueProcessor:
                                 with open(atomic_notes_file, 'a', encoding='utf-8') as f:
                                     f.write(json.dumps(error_atomic_notes, ensure_ascii=False) + '\n')
                         finally:
-                            # 调试模式下保留工作目录
-                            if not self.debug:
-                                try:
-                                    shutil.rmtree(work_dir)
-                                except:
-                                    pass
-                            else:
+                            if self.debug:
                                 logger.info(f"Debug mode: keeping work directory {work_dir}")
                             pbar.update(1)
         else:
             # 串行处理
-            for i, item in enumerate(tqdm(items, desc="Processing items")):
+            for i, item in enumerate(tqdm(items, desc="Processing items"), start=1):
                 item_id = item.get('id', f'item_{i}')
-                work_dir = create_item_workdir(self.base_work_dir, item_id, debug_mode=self.debug)
+                work_dir = create_item_workdir(self.base_work_dir, item_id, i, debug_mode=self.debug)
                 try:
                     result, atomic_notes_info = self.process_single_item(item, work_dir)
                     results.append(result)
@@ -558,13 +601,7 @@ class MusiqueProcessor:
                         with open(atomic_notes_file, 'a', encoding='utf-8') as f:
                             f.write(json.dumps(error_atomic_notes, ensure_ascii=False) + '\n')
                 finally:
-                    # 调试模式下保留工作目录
-                    if not self.debug:
-                        try:
-                            shutil.rmtree(work_dir)
-                        except:
-                            pass
-                    else:
+                    if self.debug:
                         logger.info(f"Debug mode: keeping work directory {work_dir}")
         
         # 结果已实时写入，无需再次保存
