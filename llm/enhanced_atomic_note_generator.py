@@ -21,13 +21,14 @@ from datetime import datetime
 
 class EnhancedAtomicNoteGenerator:
     """增强的原子笔记生成器，集成了NER优化、关系抽取、去噪机制和笔记联动功能"""
-    
-    def __init__(self, llm: LocalLLM = None, enable_validation: bool = True, config_override: Optional[Dict[str, Any]] = None):
+
+    def __init__(self, llm: LocalLLM = None, enable_validation: bool = True, config_override: Optional[Dict[str, Any]] = None,
+                 max_workers: Optional[int] = None):
         if llm is None:
             raise ValueError("EnhancedAtomicNoteGenerator requires a LocalLLM instance to be passed")
         self.llm = llm
         self._atomic_prompt_cache: Optional[Tuple[str, str]] = None
-        
+
         # 检查是否为hybrid模式并初始化HybridLLMDispatcher
         self.is_hybrid_mode = getattr(llm, 'is_hybrid_mode', False)
         self.hybrid_dispatcher = None
@@ -35,9 +36,15 @@ class EnhancedAtomicNoteGenerator:
             from .multi_model_client import HybridLLMDispatcher
             self.hybrid_dispatcher = HybridLLMDispatcher()
             logger.info("EnhancedAtomicNoteGenerator initialized in hybrid_llm mode")
-        
+
+        default_max_workers = config.get('document.concurrent_processing.max_workers', 4)
+        self.max_workers = max_workers if max_workers is not None else default_max_workers
+        if self.max_workers is None or self.max_workers < 1:
+            self.max_workers = 1
+
         self.batch_processor = BatchProcessor(
             batch_size=config.get('document.batch_size', 32),
+            max_workers=self.max_workers,
             use_gpu=config.get('performance.use_gpu', True)
         )
         
