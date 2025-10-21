@@ -667,21 +667,27 @@ class MirageRunner:
                 'dataset_path': self.config.dataset_path,
                 'dataset_size': len(self.dataset),
                 'dataset_hash': self.calculate_file_hash(self.config.dataset_path),
+                'dataset_file_size_bytes': FileUtils.get_file_size_bytes(self.config.dataset_path),
+                'dataset_line_count': FileUtils.count_file_lines(self.config.dataset_path),
                 'doc_pool_path': self.config.doc_pool_path,
                 'doc_pool_size': len(self.doc_pool),
                 'doc_pool_hash': self.calculate_file_hash(self.config.doc_pool_path),
+                'doc_pool_file_size_bytes': FileUtils.get_file_size_bytes(self.config.doc_pool_path),
+                'doc_pool_line_count': FileUtils.count_file_lines(self.config.doc_pool_path),
             },
             'statistics': self.stats,
             'output_files': {
                 'predictions': 'predictions.jsonl',
-                'logs': ['logs/run.log', 'logs/error.log'],
+                'logs': ['logs/run.log', 'logs/run_error.log'],
                 'manifest': 'manifest.json'
             }
         }
-        
+
         if self.config.mode == "oracle":
             manifest['data_info']['oracle_path'] = self.config.oracle_path
             manifest['data_info']['oracle_hash'] = self.calculate_file_hash(self.config.oracle_path)
+            manifest['data_info']['oracle_file_size_bytes'] = FileUtils.get_file_size_bytes(self.config.oracle_path)
+            manifest['data_info']['oracle_line_count'] = FileUtils.count_file_lines(self.config.oracle_path)
         
         # Add notes and graph artifacts if present
         notes_path = self.run_dir / "notes" / "atomic_notes.jsonl"
@@ -1076,21 +1082,27 @@ class MirageRunner:
                 'dataset_path': self.config.dataset_path,
                 'dataset_size': len(self.dataset),
                 'dataset_hash': self.calculate_file_hash(self.config.dataset_path),
+                'dataset_file_size_bytes': FileUtils.get_file_size_bytes(self.config.dataset_path),
+                'dataset_line_count': FileUtils.count_file_lines(self.config.dataset_path),
                 'doc_pool_path': self.config.doc_pool_path,
                 'doc_pool_size': len(self.doc_pool),
                 'doc_pool_hash': self.calculate_file_hash(self.config.doc_pool_path),
+                'doc_pool_file_size_bytes': FileUtils.get_file_size_bytes(self.config.doc_pool_path),
+                'doc_pool_line_count': FileUtils.count_file_lines(self.config.doc_pool_path),
             },
             'statistics': self.stats,
             'output_files': {
                 'predictions': 'predictions.jsonl',
-                'logs': ['logs/run.log', 'logs/error.log'],
+                'logs': ['logs/run.log', 'logs/run_error.log'],
                 'manifest': 'manifest.json'
             }
         }
-        
+
         if self.config.mode == "oracle":
             manifest['data_info']['oracle_path'] = self.config.oracle_path
             manifest['data_info']['oracle_hash'] = self.calculate_file_hash(self.config.oracle_path)
+            manifest['data_info']['oracle_file_size_bytes'] = FileUtils.get_file_size_bytes(self.config.oracle_path)
+            manifest['data_info']['oracle_line_count'] = FileUtils.count_file_lines(self.config.oracle_path)
         
         # Add notes and graph artifacts if present
         notes_path = self.run_dir / "notes" / "atomic_notes.jsonl"
