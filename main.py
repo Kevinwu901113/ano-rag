@@ -3,16 +3,33 @@ import os
 from datetime import datetime
 from glob import glob
 import numpy as np
+from typing import Optional
 from doc import DocumentProcessor
 from config import config
 from query import QueryProcessor
-from utils import FileUtils, setup_logging
+from utils import FileUtils, setup_logging, setup_storage_paths
 from loguru import logger
 from llm import LocalLLM
-from parallel import create_parallel_interface, ProcessingMode, ParallelStrategy
+from parallel import (
+    create_parallel_interface,
+    ProcessingMode,
+    ParallelStrategy,
+    resolve_parallel_strategy,
+)
 
 
 RESULT_ROOT = config.get('storage.result_root', 'result')
+
+_LLM_INSTANCE: Optional[LocalLLM] = None
+
+
+def get_local_llm() -> LocalLLM:
+    """Return a shared ``LocalLLM`` instance for CLI commands."""
+
+    global _LLM_INSTANCE
+    if _LLM_INSTANCE is None:
+        _LLM_INSTANCE = LocalLLM()
+    return _LLM_INSTANCE
 
 
 def get_latest_workdir() -> str:
@@ -36,19 +53,7 @@ def create_new_workdir() -> str:
 def process_docs(args):
     work_dir = create_new_workdir() if args.new else get_latest_workdir()
     # 更新配置中的工作目录和所有存储路径
-    cfg = config.load_config()
-    storage = cfg.setdefault('storage', {})
-    storage['work_dir'] = work_dir
-    # 设置所有存储路径到工作目录下
-    storage['vector_db_path'] = os.path.join(work_dir, 'vector_store')
-    storage['graph_db_path'] = os.path.join(work_dir, 'graph_store')
-    storage['processed_docs_path'] = os.path.join(work_dir, 'processed')
-    storage['cache_path'] = os.path.join(work_dir, 'cache')
-    storage['vector_index_path'] = os.path.join(work_dir, 'vector_index')
-    storage['vector_store_path'] = os.path.join(work_dir, 'vector_store')
-    storage['embedding_cache_path'] = os.path.join(work_dir, 'embeddings')
-    # 设置评估数据集路径
-    cfg.setdefault('eval', {})['datasets_path'] = os.path.join(work_dir, 'eval_datasets')
+    cfg = setup_storage_paths(work_dir)
     setup_logging(os.path.join(work_dir, 'ano-rag.log'))
     logger.info(f"Using work dir: {work_dir}")
 
@@ -60,8 +65,7 @@ def process_docs(args):
     if getattr(args, 'parallel', False):
         process_docs_parallel(args, work_dir, files)
     else:
-        llm = LocalLLM()
-        processor = DocumentProcessor(output_dir=work_dir, llm=llm)
+        processor = DocumentProcessor(output_dir=work_dir, llm=get_local_llm())
         result = processor.process_documents(files, force_reprocess=args.force, output_dir=work_dir)
         FileUtils.write_json(result.get('atomic_notes', []), os.path.join(work_dir, 'atomic_notes.json'))
         stats = result.get('processing_stats', {})
@@ -75,19 +79,7 @@ def process_docs(args):
 def query_mode(args):
     work_dir = args.work_dir or config.get('storage.work_dir') or get_latest_workdir()
     # 确保配置中的工作目录和所有存储路径一致
-    cfg = config.load_config()
-    storage = cfg.setdefault('storage', {})
-    storage['work_dir'] = work_dir
-    # 设置所有存储路径到工作目录下
-    storage['vector_db_path'] = os.path.join(work_dir, 'vector_store')
-    storage['graph_db_path'] = os.path.join(work_dir, 'graph_store')
-    storage['processed_docs_path'] = os.path.join(work_dir, 'processed')
-    storage['cache_path'] = os.path.join(work_dir, 'cache')
-    storage['vector_index_path'] = os.path.join(work_dir, 'vector_index')
-    storage['vector_store_path'] = os.path.join(work_dir, 'vector_store')
-    storage['embedding_cache_path'] = os.path.join(work_dir, 'embeddings')
-    # 设置评估数据集路径
-    cfg.setdefault('eval', {})['datasets_path'] = os.path.join(work_dir, 'eval_datasets')
+    cfg = setup_storage_paths(work_dir)
     setup_logging(os.path.join(work_dir, 'ano-rag.log'))
     notes_file = os.path.join(work_dir, 'atomic_notes.json')
     if not os.path.exists(notes_file):
@@ -106,13 +98,12 @@ def query_mode(args):
         except Exception as e:
             logger.warning(f'Failed to load embeddings: {e}')
 
-    llm = LocalLLM()
     processor = QueryProcessor(
         notes,
         embeddings,
         graph_file=graph_file if os.path.exists(graph_file) else None,
         vector_index_file=vector_index_file if vector_index_file and os.path.exists(vector_index_file) else None,
-        llm=llm,
+        llm=get_local_llm(),
         cfg=cfg,
     )
     output = processor.process(args.query)
@@ -127,17 +118,10 @@ def process_docs_parallel(args, work_dir: str, files: list):
     max_workers = getattr(args, 'workers', 4)
     strategy = getattr(args, 'strategy', 'hybrid')
     
-    strategy_map = {
-        'copy': ParallelStrategy.DATA_COPY,
-        'split': ParallelStrategy.DATA_SPLIT,
-        'dispatch': ParallelStrategy.TASK_DISPATCH,
-        'hybrid': ParallelStrategy.HYBRID
-    }
-    
     parallel_interface = create_parallel_interface(
         max_workers=max_workers,
         processing_mode=ProcessingMode.AUTO,
-        strategy=strategy_map.get(strategy, ParallelStrategy.HYBRID),
+        strategy=resolve_parallel_strategy(strategy, ParallelStrategy.HYBRID),
         debug=getattr(args, 'debug', False)
     )
     
@@ -191,19 +175,7 @@ def query_parallel(args):
     """并行查询处理"""
     work_dir = args.work_dir or config.get('storage.work_dir') or get_latest_workdir()
     # 确保配置中的工作目录和所有存储路径一致
-    cfg = config.load_config()
-    storage = cfg.setdefault('storage', {})
-    storage['work_dir'] = work_dir
-    # 设置所有存储路径到工作目录下
-    storage['vector_db_path'] = os.path.join(work_dir, 'vector_store')
-    storage['graph_db_path'] = os.path.join(work_dir, 'graph_store')
-    storage['processed_docs_path'] = os.path.join(work_dir, 'processed')
-    storage['cache_path'] = os.path.join(work_dir, 'cache')
-    storage['vector_index_path'] = os.path.join(work_dir, 'vector_index')
-    storage['vector_store_path'] = os.path.join(work_dir, 'vector_store')
-    storage['embedding_cache_path'] = os.path.join(work_dir, 'embeddings')
-    # 设置评估数据集路径
-    cfg.setdefault('eval', {})['datasets_path'] = os.path.join(work_dir, 'eval_datasets')
+    cfg = setup_storage_paths(work_dir)
     setup_logging(os.path.join(work_dir, 'ano-rag.log'))
     
     notes_file = os.path.join(work_dir, 'atomic_notes.json')
@@ -235,17 +207,10 @@ def query_parallel(args):
     max_workers = getattr(args, 'workers', 4)
     strategy = getattr(args, 'strategy', 'hybrid')
     
-    strategy_map = {
-        'copy': ParallelStrategy.DATA_COPY,
-        'split': ParallelStrategy.DATA_SPLIT,
-        'dispatch': ParallelStrategy.TASK_DISPATCH,
-        'hybrid': ParallelStrategy.HYBRID
-    }
-    
     parallel_interface = create_parallel_interface(
         max_workers=max_workers,
         processing_mode=ProcessingMode.AUTO,
-        strategy=strategy_map.get(strategy, ParallelStrategy.HYBRID),
+        strategy=resolve_parallel_strategy(strategy, ParallelStrategy.HYBRID),
         debug=getattr(args, 'debug', False)
     )
     

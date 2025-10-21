@@ -5,6 +5,7 @@ from collections import defaultdict, Counter
 from loguru import logger
 from utils import TextUtils, GPUUtils, BatchProcessor
 from config import config
+from vector_store.embedding_manager import EmbeddingManager
 
 class RelationExtractor:
     """统一的关系提取器，支持基础关系提取和LLM增强的语义关系提取"""
@@ -769,9 +770,7 @@ class RelationExtractor:
     def _compute_similarity_matrix(self, embeddings: np.ndarray) -> np.ndarray:
         """计算相似度矩阵"""
         # 归一化嵌入
-        norms = np.linalg.norm(embeddings, axis=1, keepdims=True)
-        norms = np.where(norms == 0, 1, norms)
-        normalized_embeddings = embeddings / norms
+        normalized_embeddings = EmbeddingManager.normalize_embeddings(embeddings)
         
         # 计算余弦相似度
         similarity_matrix = np.dot(normalized_embeddings, normalized_embeddings.T)

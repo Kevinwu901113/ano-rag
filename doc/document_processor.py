@@ -10,7 +10,13 @@ from .clustering import TopicClustering
 from .incremental_processor import IncrementalProcessor
 from llm import AtomicNoteGenerator, LocalLLM
 from llm.parallel_task_atomic_note_generator import ParallelTaskAtomicNoteGenerator
-from utils import BatchProcessor, FileUtils, JSONLProgressTracker
+from utils import (
+    BatchProcessor,
+    FileUtils,
+    JSONLProgressTracker,
+    get_storage_path,
+    resolve_cache_dir,
+)
 from utils.enhanced_ner import EnhancedNER
 from utils.consistency_checker import ConsistencyChecker
 from utils.note_jsonl_writer import get_global_note_writer
@@ -25,17 +31,7 @@ class DocumentProcessor:
         # 初始化组件
         self.chunker = DocumentChunker()
         self.clustering = TopicClustering()
-        # 增量处理缓存目录放在工作目录下
-        cache_dir = None
-        if output_dir:
-            cache_dir = os.path.join(output_dir, 'cache')
-        else:
-            work_dir = config.get('storage.work_dir')
-            if work_dir:
-                cache_dir = os.path.join(work_dir, 'cache')
-            else:
-                # 默认缓存目录
-                cache_dir = './cache'
+        cache_dir = resolve_cache_dir(preferred_base=output_dir)
         self.incremental_processor = IncrementalProcessor(cache_dir=cache_dir)
         if llm is None:
             raise ValueError("DocumentProcessor requires a LocalLLM instance to be passed")
@@ -58,7 +54,10 @@ class DocumentProcessor:
         self.graph_builder = GraphBuilder(llm=self.llm)
         
         # 存储路径，默认使用配置中的工作目录
-        self.processed_docs_path = output_dir or config.get('storage.work_dir') or config.get('storage.processed_docs_path') or './data/processed'
+        if output_dir:
+            self.processed_docs_path = output_dir
+        else:
+            self.processed_docs_path = get_storage_path('processed_docs_path', 'processed_docs')
         FileUtils.ensure_dir(self.processed_docs_path)
         
     def process_documents(self, file_paths: List[str], force_reprocess: bool = False, output_dir: Optional[str] = None) -> Dict[str, Any]:

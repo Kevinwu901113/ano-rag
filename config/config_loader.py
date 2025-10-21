@@ -86,11 +86,14 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     # 添加存储配置默认值
     "storage": {
         "work_dir": "./result/work",
-        "vector_index_path": "./result/vector_index",
-        "embedding_cache_path": "./result/embedding_cache",
-        "vector_store_path": "./result/vector_store",
+        "result_root": "./result",
+        "vector_db_path": "./result/vector_store",
+        "graph_db_path": "./result/graph_store",
         "processed_docs_path": "./result/processed_docs",
-        "result_root": "./result"
+        "cache_path": "./result/cache",
+        "vector_index_path": "./result/vector_index",
+        "vector_store_path": "./result/vector_store",
+        "embedding_cache_path": "./result/embedding_cache"
     },
     # 添加模型路径配置
     "model_path": "./models/default_model",

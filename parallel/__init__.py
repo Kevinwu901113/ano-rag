@@ -30,6 +30,25 @@ from .parallel_interface import (
     create_parallel_interface
 )
 
+PARALLEL_STRATEGY_MAP = {
+    'copy': ParallelStrategy.DATA_COPY,
+    'split': ParallelStrategy.DATA_SPLIT,
+    'dispatch': ParallelStrategy.TASK_DISPATCH,
+    'hybrid': ParallelStrategy.HYBRID,
+}
+
+
+def resolve_parallel_strategy(
+    strategy_name,
+    default: ParallelStrategy = ParallelStrategy.HYBRID,
+):
+    """Resolve string identifiers to :class:`ParallelStrategy` values."""
+
+    if not strategy_name:
+        return default
+
+    return PARALLEL_STRATEGY_MAP.get(str(strategy_name).lower(), default)
+
 __all__ = [
     # 核心引擎
     'ParallelEngine',
@@ -47,9 +66,11 @@ __all__ = [
     # 接口和处理器
     'ParallelInterface',
     'DocumentTaskProcessor',
-    'QueryTaskProcessor', 
+    'QueryTaskProcessor',
     'MusiqueTaskProcessor',
-    'create_parallel_interface'
+    'create_parallel_interface',
+    'PARALLEL_STRATEGY_MAP',
+    'resolve_parallel_strategy'
 ]
 
 # 版本信息

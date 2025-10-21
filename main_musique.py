@@ -25,10 +25,10 @@ from doc import DocumentProcessor
 from query import QueryProcessor
 from config import config
 from graph.index import NoteGraph
-from utils import FileUtils, setup_logging
+from utils import FileUtils, setup_logging, setup_storage_paths
 from llm import LocalLLM
 from llm.cor_controller import chain_of_retrieval
-from parallel import create_parallel_interface, ProcessingMode, ParallelStrategy
+from parallel import create_parallel_interface, ProcessingMode, ParallelStrategy, resolve_parallel_strategy
 
 
 RESULT_ROOT = config.get('storage.result_root', 'result')
@@ -148,20 +148,7 @@ class MusiqueProcessor:
         self.llm = llm
         self.enable_cor = enable_cor
         
-        # 更新配置中的工作目录和所有存储路径，确保文件生成在正确的工作目录内
-        cfg = config.load_config()
-        storage = cfg.setdefault('storage', {})
-        storage['work_dir'] = self.base_work_dir
-        # 设置所有存储路径到工作目录下
-        storage['vector_db_path'] = os.path.join(self.base_work_dir, 'vector_store')
-        storage['graph_db_path'] = os.path.join(self.base_work_dir, 'graph_store')
-        storage['processed_docs_path'] = os.path.join(self.base_work_dir, 'processed')
-        storage['cache_path'] = os.path.join(self.base_work_dir, 'cache')
-        storage['vector_index_path'] = os.path.join(self.base_work_dir, 'vector_index')
-        storage['vector_store_path'] = os.path.join(self.base_work_dir, 'vector_store')
-        storage['embedding_cache_path'] = os.path.join(self.base_work_dir, 'embedding_cache')
-        # 设置评估数据集路径
-        cfg.setdefault('eval', {})['datasets_path'] = os.path.join(self.base_work_dir, 'eval_datasets')
+        setup_storage_paths(self.base_work_dir)
         
         # 预初始化共享资源以避免并行处理时的竞争
         self._shared_embedding_manager = None
@@ -632,43 +619,40 @@ class MusiqueProcessor:
             logger.info(f"  - Each item directory contains: atomic_notes.json, graph.json, embeddings.npy, chunks.jsonl, etc.")
             logger.info(f"  - Process artifacts structure: /results/<number>/debug/<item_id>/atomic_notes.json")
     
-    def _process_with_parallel_engine(self, items: List[Dict[str, Any]], 
-                                      parallel_workers: int, parallel_strategy: str) -> List[Dict[str, Any]]:
-         """使用并行引擎处理Musique数据集"""
-         logger.info(f"Starting parallel engine processing with {len(items)} items")
-         
-         # 策略映射
-         strategy_map = {
-             'copy': ParallelStrategy.DATA_COPY,
-             'split': ParallelStrategy.DATA_SPLIT,
-             'dispatch': ParallelStrategy.TASK_DISPATCH,
-             'hybrid': ParallelStrategy.HYBRID
-         }
-         
-         # 创建并行接口
-         parallel_interface = create_parallel_interface(
-             max_workers=parallel_workers,
-             processing_mode=ProcessingMode.AUTO,
-             strategy=strategy_map.get(parallel_strategy, ParallelStrategy.HYBRID),
-             debug=self.debug
-         )
-         
-         try:
-             # 使用并行引擎处理Musique数据集
-             results = parallel_interface.process_musique_dataset(
-                 items=items,
-                 base_work_dir=self.base_work_dir
-             )
-             
-             # 获取性能统计
-             perf_stats = parallel_interface.get_performance_stats()
-             if perf_stats:
-                 logger.info(f"Parallel engine stats: {perf_stats}")
-             
-             return results
-             
-         finally:
-             parallel_interface.cleanup()
+    def _process_with_parallel_engine(
+        self,
+        items: List[Dict[str, Any]],
+        parallel_workers: int,
+        parallel_strategy: str,
+    ) -> List[Dict[str, Any]]:
+        """使用并行引擎处理Musique数据集"""
+
+        logger.info(f"Starting parallel engine processing with {len(items)} items")
+
+        # 创建并行接口
+        parallel_interface = create_parallel_interface(
+            max_workers=parallel_workers,
+            processing_mode=ProcessingMode.AUTO,
+            strategy=resolve_parallel_strategy(parallel_strategy, ParallelStrategy.HYBRID),
+            debug=self.debug,
+        )
+
+        try:
+            # 使用并行引擎处理Musique数据集
+            results = parallel_interface.process_musique_dataset(
+                items=items,
+                base_work_dir=self.base_work_dir,
+            )
+
+            # 获取性能统计
+            perf_stats = parallel_interface.get_performance_stats()
+            if perf_stats:
+                logger.info(f"Parallel engine stats: {perf_stats}")
+
+            return results
+
+        finally:
+            parallel_interface.cleanup()
 
 
 def main():

@@ -5,6 +5,7 @@ from .batch_processor import BatchProcessor
 from .context_scheduler import ContextScheduler
 from .context_dispatcher import ContextDispatcher
 from .logging_utils import setup_logging
+from .path_utils import setup_storage_paths, get_storage_path, resolve_cache_dir
 from .json_utils import clean_control_characters, extract_json_from_response
 from .summary_auditor import SummaryAuditor
 from .entity_predicate_normalizer import (
@@ -36,6 +37,9 @@ __all__ = [
     'ContextScheduler',
     'ContextDispatcher',
     'setup_logging',
+    'setup_storage_paths',
+    'get_storage_path',
+    'resolve_cache_dir',
     'clean_control_characters',
     'extract_json_from_response',
     'SummaryAuditor',

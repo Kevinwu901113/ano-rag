@@ -11,6 +11,7 @@ try:
     from utils.batch_processor import BatchProcessor
     from utils.gpu_utils import GPUUtils
     from utils.file_utils import FileUtils
+    from utils.path_utils import get_storage_path
 except ImportError:
     # 如果导入失败，定义简单的替代类
     class BatchProcessor:
@@ -18,16 +19,22 @@ except ImportError:
         def process_in_batches(items, batch_size, process_func):
             for i in range(0, len(items), batch_size):
                 yield process_func(items[i:i+batch_size])
-    
+
     class GPUUtils:
         @staticmethod
         def get_optimal_device():
             return 'cuda' if torch.cuda.is_available() else 'cpu'
-    
+
     class FileUtils:
         @staticmethod
         def ensure_dir(path):
             os.makedirs(path, exist_ok=True)
+
+    def get_storage_path(key, fallback_subdir):
+        work_dir = config.get('storage.work_dir')
+        if work_dir:
+            return os.path.join(work_dir, fallback_subdir)
+        return os.path.join('.', fallback_subdir)
 
 # 导入模型一致性模块
 try:
@@ -97,15 +104,7 @@ class EmbeddingManager:
             )
             
             # 缓存路径
-            self.cache_dir = config.get('storage.embedding_cache_path')
-            if not self.cache_dir:
-                work_dir = config.get('storage.work_dir')
-                if work_dir:
-                    self.cache_dir = os.path.join(work_dir, 'embeddings')
-                else:
-                    # 使用临时目录避免在项目根目录创建data文件夹
-                    import tempfile
-                    self.cache_dir = os.path.join(tempfile.gettempdir(), 'anorag_embeddings')
+            self.cache_dir = get_storage_path('embedding_cache_path', 'embedding_cache')
             FileUtils.ensure_dir(self.cache_dir)
             
             # 初始化模型一致性检查器
@@ -598,12 +597,8 @@ class EmbeddingManager:
                 if embeddings2.ndim == 1:
                     embeddings2 = embeddings2.reshape(1, -1)
                 
-                # 归一化
-                norm1 = np.linalg.norm(embeddings1, axis=1, keepdims=True)
-                norm2 = np.linalg.norm(embeddings2, axis=1, keepdims=True)
-                
-                embeddings1_norm = embeddings1 / (norm1 + 1e-8)
-                embeddings2_norm = embeddings2 / (norm2 + 1e-8)
+                embeddings1_norm = self.normalize_embeddings(embeddings1)
+                embeddings2_norm = self.normalize_embeddings(embeddings2)
                 
                 # 计算相似度
                 similarity = np.dot(embeddings1_norm, embeddings2_norm.T)
@@ -777,3 +772,20 @@ class EmbeddingManager:
         except Exception as e:
             logger.error(f"Error during model consistency validation: {e}")
             return False, str(e)
+    @staticmethod
+    def normalize_embeddings(
+        embeddings: np.ndarray,
+        axis: int = 1,
+        epsilon: float = 1e-8,
+    ) -> np.ndarray:
+        """Normalize embeddings safely to unit length."""
+
+        if embeddings.size == 0:
+            return embeddings
+
+        norms = np.linalg.norm(embeddings, axis=axis, keepdims=True)
+        if epsilon is not None:
+            norms = np.maximum(norms, epsilon)
+        else:
+            norms = np.where(norms == 0, 1.0, norms)
+        return embeddings / norms

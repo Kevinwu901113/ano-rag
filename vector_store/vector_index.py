@@ -5,6 +5,7 @@ from loguru import logger
 import faiss
 from utils import GPUUtils, FileUtils
 from config import config
+from .embedding_manager import EmbeddingManager
 
 class VectorIndex:
     """向量索引类，负责构建和管理FAISS索引"""
@@ -274,11 +275,8 @@ class VectorIndex:
         
         # 余弦相似度需要归一化
         if self.similarity_metric == 'cosine':
-            norms = np.linalg.norm(vectors, axis=1, keepdims=True)
-            # 避免除零
-            norms = np.where(norms == 0, 1, norms)
-            vectors = vectors / norms
-        
+            vectors = EmbeddingManager.normalize_embeddings(vectors)
+
         return vectors
     
     def save_index(self, filename: str = None) -> str:
