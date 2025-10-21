@@ -124,6 +124,12 @@ class MirageRunner:
         self.llm_client: Optional[Union[LocalLLM, LMStudioClient]] = None
         self.note_generator: Optional[AtomicNoteGenerator] = None
         self.query_processor: Optional[QueryProcessor] = None
+
+        # Doc pool indexes for reliable remapping
+        self.doc_pool_index_by_chunk_id: Dict[str, int] = {}
+        self.doc_pool_index_by_hash: Dict[str, List[int]] = {}
+        self.doc_pool_offset_index: Dict[Tuple[str, int, int], int] = {}
+        self._doc_chunk_embeddings: Optional[Any] = None
         
         # Statistics
         self.stats = {
@@ -164,7 +170,8 @@ class MirageRunner:
             # Load doc_pool - it's already in the correct format as a list
             self.doc_pool = load_json(self.config.doc_pool_path)
             self.logger.info(f"Loaded {len(self.doc_pool)} documents from doc_pool")
-            
+            self._build_doc_pool_indexes()
+
             # Load oracle data if needed
             if self.config.mode == "oracle":
                 self.oracle_data = load_json(self.config.oracle_path)
@@ -226,25 +233,200 @@ class MirageRunner:
     def convert_doc_pool_to_notes(self) -> List[Dict[str, Any]]:
         """Convert doc_pool entries to atomic notes format for indexing"""
         atomic_notes = []
-        
+
         for idx, doc in enumerate(self.doc_pool):
+            chunk_id, doc_hash, offsets = self._prepare_doc_metadata(doc, idx)
             note = {
-                'note_id': f"{doc.get('doc_name', f'doc_{idx}')}#{idx}",
+                'note_id': chunk_id,
                 'content': doc.get('doc_chunk', ''),
                 'doc_name': doc.get('doc_name', ''),
-                'chunk_id': f"{doc.get('doc_name', f'doc_{idx}')}#{idx}",
-                'doc_hash': hashlib.sha1(doc.get('doc_chunk', '').encode()).hexdigest(),
-                'offsets': [0, len(doc.get('doc_chunk', ''))],  # Full chunk
+                'chunk_id': chunk_id,
+                'doc_hash': doc_hash,
+                'offsets': offsets,
                 'original_index': idx,
                 'metadata': {
                     'source': 'doc_pool',
                     'mapped_id': doc.get('mapped_id'),
-                    'support': doc.get('support', False)
+                    'support': doc.get('support', False),
+                    'chunk_id': chunk_id,
+                    'doc_hash': doc_hash,
+                    'offsets': offsets,
+                    'doc_name': doc.get('doc_name', ''),
+                    'original_index': idx
                 }
             }
             atomic_notes.append(note)
-        
+
         return atomic_notes
+
+    def _prepare_doc_metadata(self, doc: Dict[str, Any], index: int) -> Tuple[str, str, List[int]]:
+        """Ensure doc chunk metadata is normalized and return identifiers."""
+        chunk_id = self._extract_chunk_id(doc, index)
+        doc_chunk = doc.get('doc_chunk', '') or ''
+        doc_hash = doc.get('doc_hash') or self._compute_doc_hash(doc_chunk)
+
+        offsets = doc.get('offsets')
+        if not self._is_valid_offset(offsets):
+            offsets = [0, len(doc_chunk)]
+
+        # Persist normalized metadata back to doc for downstream use
+        doc['chunk_id'] = chunk_id
+        doc['doc_hash'] = doc_hash
+        doc['offsets'] = list(offsets)
+
+        return chunk_id, doc_hash, list(offsets)
+
+    @staticmethod
+    def _compute_doc_hash(content: str) -> str:
+        return hashlib.sha1((content or '').encode()).hexdigest()
+
+    @staticmethod
+    def _is_valid_offset(offsets: Any) -> bool:
+        return isinstance(offsets, (list, tuple)) and len(offsets) == 2 and all(
+            isinstance(x, (int, float)) for x in offsets
+        )
+
+    def _extract_chunk_id(self, doc: Dict[str, Any], index: int) -> str:
+        chunk_id = (
+            doc.get('chunk_id')
+            or doc.get('metadata', {}).get('chunk_id')
+            or f"{doc.get('doc_name', f'doc_{index}')}#{index}"
+        )
+        return str(chunk_id)
+
+    def _build_doc_pool_indexes(self) -> None:
+        """Create indexes to quickly locate doc_pool chunks by metadata."""
+        self.doc_pool_index_by_chunk_id.clear()
+        self.doc_pool_index_by_hash.clear()
+        self.doc_pool_offset_index.clear()
+        self._doc_chunk_embeddings = None
+
+        for idx, doc in enumerate(self.doc_pool):
+            chunk_id, doc_hash, offsets = self._prepare_doc_metadata(doc, idx)
+
+            if chunk_id:
+                self.doc_pool_index_by_chunk_id[chunk_id] = idx
+
+            if doc_hash:
+                self.doc_pool_index_by_hash.setdefault(doc_hash, []).append(idx)
+
+            if self._is_valid_offset(offsets):
+                doc_name = doc.get('doc_name', '')
+                self.doc_pool_offset_index[(doc_name, int(offsets[0]), int(offsets[1]))] = idx
+
+    def _ensure_doc_pool_indexes(self) -> None:
+        if not self.doc_pool_index_by_chunk_id and self.doc_pool:
+            self._build_doc_pool_indexes()
+
+    def _lookup_by_offsets(self, doc_name: str, offsets: Optional[List[int]]) -> Optional[int]:
+        if not self._is_valid_offset(offsets):
+            return None
+
+        offset_tuple = (doc_name or '', int(offsets[0]), int(offsets[1]))
+        return self.doc_pool_offset_index.get(offset_tuple)
+
+    def _verify_doc_match(
+        self,
+        doc: Dict[str, Any],
+        expected_chunk_id: Optional[str],
+        expected_hash: Optional[str],
+        expected_offsets: Optional[List[int]]
+    ) -> bool:
+        if expected_chunk_id and str(doc.get('chunk_id')) != str(expected_chunk_id):
+            return False
+
+        if expected_hash:
+            doc_hash = doc.get('doc_hash') or self._compute_doc_hash(doc.get('doc_chunk', ''))
+            if doc_hash != expected_hash:
+                return False
+
+        if self._is_valid_offset(expected_offsets):
+            doc_offsets = doc.get('offsets')
+            if not self._is_valid_offset(doc_offsets) or [int(doc_offsets[0]), int(doc_offsets[1])] != [
+                int(expected_offsets[0]), int(expected_offsets[1])
+            ]:
+                return False
+
+        return True
+
+    def _ensure_doc_embeddings(self) -> Optional[Any]:
+        if self._doc_chunk_embeddings is not None:
+            return self._doc_chunk_embeddings
+
+        if not self.retriever or not getattr(self.retriever, 'embedding_manager', None):
+            return None
+
+        contents = [doc.get('doc_chunk', '') or '' for doc in self.doc_pool]
+        if not contents:
+            return None
+
+        try:
+            embeddings = self.retriever.embedding_manager.encode_texts(contents)
+            self._doc_chunk_embeddings = embeddings
+            return embeddings
+        except Exception as exc:  # pragma: no cover - safety net
+            if self.config.debug:
+                self.logger.debug(f"Failed to encode doc_pool chunks for embeddings: {exc}")
+            return None
+
+    def _find_chunk_by_embedding(self, content: str) -> Optional[Tuple[Dict[str, Any], int]]:
+        if not content or not content.strip():
+            return None
+
+        embeddings = self._ensure_doc_embeddings()
+        if embeddings is None:
+            return None
+
+        try:
+            note_embedding = self.retriever.embedding_manager.encode_texts([content])
+        except Exception as exc:  # pragma: no cover - safety net
+            if self.config.debug:
+                self.logger.debug(f"Failed to encode note content for embedding remap: {exc}")
+            return None
+
+        try:
+            import numpy as np
+
+            doc_matrix = np.array(embeddings, dtype=float)
+            note_vector = np.array(note_embedding, dtype=float)
+
+            if note_vector.ndim == 1:
+                note_vector = note_vector.reshape(1, -1)
+
+            if doc_matrix.ndim == 1:
+                doc_matrix = doc_matrix.reshape(len(self.doc_pool), -1)
+
+            if doc_matrix.size == 0 or note_vector.size == 0:
+                return None
+
+            note_norm = np.linalg.norm(note_vector, axis=1, keepdims=True)
+            doc_norm = np.linalg.norm(doc_matrix, axis=1, keepdims=False)
+
+            if not note_norm.size or not doc_norm.size or float(note_norm.max()) == 0.0:
+                return None
+
+            similarities = (doc_matrix @ note_vector.T).reshape(-1) / (
+                (doc_norm * note_norm.squeeze()) + 1e-8
+            )
+
+            if similarities.size == 0:
+                return None
+
+            best_idx = int(similarities.argmax())
+            best_score = float(similarities[best_idx])
+
+            if best_score < 0.6:
+                return None
+
+            return self.doc_pool[best_idx], best_idx
+        except Exception as exc:  # pragma: no cover - numerical safety
+            if self.config.debug:
+                self.logger.debug(f"Embedding remap failed: {exc}")
+            return None
+
+    @staticmethod
+    def _get_chunk_key(doc: Dict[str, Any], index: int) -> str:
+        return str(doc.get('chunk_id') or f"{doc.get('doc_name', '')}#{index}")
     
     def generate_atomic_notes(self) -> bool:
         """Generate atomic notes from doc_pool (optional)"""
@@ -586,64 +768,39 @@ class MirageRunner:
         """Remap retrieved notes back to original doc_pool chunks"""
         contexts = []
         seen_chunks = set()
-        
+
+        self._ensure_doc_pool_indexes()
+
         for result in retrieval_results:
             try:
-                # Extract chunk information
-                note_id = result.get('note_id', '')
-                original_index = result.get('original_index')
-                
-                # Method 1: Direct index mapping (most reliable)
-                if original_index is not None and 0 <= original_index < len(self.doc_pool):
-                    doc = self.doc_pool[original_index]
-                    chunk_key = f"{doc.get('doc_name', '')}#{original_index}"
-                    
-                    if chunk_key not in seen_chunks:
-                        contexts.append({
-                            'title': doc.get('doc_name', ''),
-                            'text': doc.get('doc_chunk', '')
-                        })
-                        seen_chunks.add(chunk_key)
-                        continue
-                
-                # Method 2: Parse note_id for chunk mapping
-                if '#' in note_id:
-                    try:
-                        doc_name, chunk_idx = note_id.rsplit('#', 1)
-                        idx = int(chunk_idx)
-                        if 0 <= idx < len(self.doc_pool):
-                            doc = self.doc_pool[idx]
-                            # Verify doc_name matches
-                            if doc.get('doc_name', '') == doc_name:
-                                chunk_key = f"{doc.get('doc_name', '')}#{idx}"
-                                
-                                if chunk_key not in seen_chunks:
-                                    contexts.append({
-                                        'title': doc.get('doc_name', ''),
-                                        'text': doc.get('doc_chunk', '')
-                                    })
-                                    seen_chunks.add(chunk_key)
-                                    continue
-                    except (ValueError, IndexError):
-                        pass
-                
-                # Method 3: Content-based matching (fallback)
-                content = result.get('content', '')
-                if content:
-                    best_match = self.find_best_chunk_match(content)
-                    if best_match:
-                        chunk_key = f"{best_match.get('doc_name', '')}#{best_match.get('index', 0)}"
-                        if chunk_key not in seen_chunks:
-                            contexts.append({
-                                'title': best_match.get('doc_name', ''),
-                                'text': best_match.get('doc_chunk', '')
-                            })
-                            seen_chunks.add(chunk_key)
-                
-                # If we have enough contexts, stop
+                resolved = self._resolve_chunk_from_result(result)
+
+                if not resolved:
+                    if self.config.debug:
+                        self.logger.debug(
+                            f"Failed to resolve note '{result.get('note_id')}' back to doc chunk"
+                        )
+                    continue
+
+                doc, idx = resolved
+                chunk_key = self._get_chunk_key(doc, idx)
+
+                if chunk_key in seen_chunks:
+                    if self.config.debug:
+                        self.logger.debug(
+                            f"Skipping duplicate chunk {chunk_key} for note {result.get('note_id')}"
+                        )
+                    continue
+
+                contexts.append({
+                    'title': doc.get('doc_name', ''),
+                    'text': doc.get('doc_chunk', '')
+                })
+                seen_chunks.add(chunk_key)
+
                 if len(contexts) >= self.config.topk:
                     break
-                
+
             except Exception as e:
                 self.logger.warning(f"Failed to remap result: {e}")
                 continue
@@ -660,8 +817,66 @@ class MirageRunner:
             
             with open(mapping_file, 'a') as f:
                 f.write(json.dumps(mapping_info) + '\n')
-        
+
         return contexts[:self.config.topk]
+
+    def _resolve_chunk_from_result(self, result: Dict[str, Any]) -> Optional[Tuple[Dict[str, Any], int]]:
+        metadata = result.get('metadata', {}) or {}
+        note_id = result.get('note_id') or metadata.get('note_id') or ''
+        chunk_id = result.get('chunk_id') or metadata.get('chunk_id') or note_id
+        doc_hash = result.get('doc_hash') or metadata.get('doc_hash')
+        offsets = result.get('offsets') or metadata.get('offsets')
+        doc_name = result.get('doc_name') or metadata.get('doc_name')
+
+        original_index = result.get('original_index', metadata.get('original_index'))
+        if isinstance(original_index, str):
+            try:
+                original_index = int(original_index)
+            except ValueError:
+                original_index = None
+
+        # 1. direct index mapping
+        if original_index is not None and 0 <= original_index < len(self.doc_pool):
+            doc = self.doc_pool[original_index]
+            if self._verify_doc_match(doc, chunk_id, doc_hash, offsets):
+                return doc, original_index
+
+        # 2. chunk_id mapping (with metadata verification)
+        if chunk_id:
+            idx = self.doc_pool_index_by_chunk_id.get(str(chunk_id))
+            if idx is not None:
+                doc = self.doc_pool[idx]
+                if self._verify_doc_match(doc, chunk_id, doc_hash, offsets):
+                    return doc, idx
+
+        # 3. doc_hash mapping
+        if doc_hash:
+            candidate_indexes = self.doc_pool_index_by_hash.get(doc_hash, [])
+            for idx in candidate_indexes:
+                doc = self.doc_pool[idx]
+                if doc_name and doc.get('doc_name') != doc_name:
+                    continue
+                if self._verify_doc_match(doc, None, doc_hash, offsets):
+                    return doc, idx
+
+        # 4. offsets mapping
+        offset_idx = self._lookup_by_offsets(doc_name, offsets)
+        if offset_idx is not None and 0 <= offset_idx < len(self.doc_pool):
+            return self.doc_pool[offset_idx], offset_idx
+
+        # 5. embedding-based fallback
+        embedding_match = self._find_chunk_by_embedding(result.get('content', ''))
+        if embedding_match:
+            return embedding_match
+
+        # 6. substring fallback
+        content = result.get('content', '')
+        if content:
+            best_match = self.find_best_chunk_match(content)
+            if best_match and 'index' in best_match:
+                return best_match, best_match['index']
+
+        return None
     
     def find_best_chunk_match(self, content: str) -> Optional[Dict[str, Any]]:
         """Find best matching chunk in doc_pool using content similarity"""
