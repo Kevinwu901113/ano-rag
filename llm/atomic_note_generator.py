@@ -68,13 +68,13 @@ def generate_atomic_notes(
 
 class AtomicNoteGenerator:
     """原子笔记生成器，专门用于文档处理阶段的原子笔记构建"""
-    
-    def __init__(self, llm: LocalLLM = None):
+
+    def __init__(self, llm: LocalLLM = None, max_workers: Optional[int] = None):
         if llm is None:
             raise ValueError("AtomicNoteGenerator requires a LocalLLM instance to be passed")
         self.llm = llm
         self._atomic_prompt_cache: Optional[Tuple[str, str]] = None
-        
+
         # 检查是否为hybrid模式并使用单例HybridLLMDispatcher
         self.is_hybrid_mode = getattr(llm, 'is_hybrid_mode', False)
         self.hybrid_dispatcher = None
@@ -82,17 +82,22 @@ class AtomicNoteGenerator:
             from .multi_model_client import HybridLLMDispatcher
             self.hybrid_dispatcher = HybridLLMDispatcher()  # 单例模式，自动重用实例
             logger.info("AtomicNoteGenerator using HybridLLMDispatcher singleton instance")
-        
+
+        default_max_workers = config.get('document.concurrent_processing.max_workers', 4)
+        self.max_concurrent_workers = max_workers if max_workers is not None else default_max_workers
+        if self.max_concurrent_workers is None or self.max_concurrent_workers < 1:
+            self.max_concurrent_workers = 1
+
         self.batch_processor = BatchProcessor(
             batch_size=config.get('document.batch_size', 32),
+            max_workers=self.max_concurrent_workers,
             use_gpu=config.get('performance.use_gpu', True)
         )
         # 摘要校验器将在需要时动态导入，避免循环导入
         self.summary_auditor = None
-        
+
         # 并发处理配置
         self.concurrent_enabled = config.get('document.concurrent_processing.enabled', True)
-        self.max_concurrent_workers = config.get('document.concurrent_processing.max_workers', 4)
         self._lock = threading.Lock()
         
         # 检查LLM是否支持并发处理（包括多模型并行）
@@ -245,14 +250,18 @@ class AtomicNoteGenerator:
     
     def _generate_atomic_notes_concurrent(self, text_chunks: List[Dict[str, Any]], progress_tracker: Optional[Any] = None) -> List[Dict[str, Any]]:
         """并发生成原子笔记，利用多个LM Studio实例"""
+        if not text_chunks:
+            return []
         system_prompt = self._get_atomic_note_system_prompt()
         chunk_notes: List[List[Dict[str, Any]]] = [[] for _ in range(len(text_chunks))]
-        
+
         # 计算实际的并发工作线程数
         client = getattr(self.llm, 'lmstudio_client', None) or getattr(self.llm, 'client', None)
         instance_count = len(getattr(client, 'model_instances', getattr(client, 'instances', []))) if client else 1
         max_workers = min(self.max_concurrent_workers, instance_count, len(text_chunks))
-        
+        if max_workers < 1:
+            max_workers = 1
+
         logger.info(f"Starting concurrent processing with {max_workers} workers for {len(text_chunks)} chunks")
         
         def process_chunk_with_index(chunk_index_pair):

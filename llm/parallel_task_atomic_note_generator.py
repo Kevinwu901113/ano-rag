@@ -13,10 +13,10 @@ from config import config
 
 class ParallelTaskAtomicNoteGenerator(AtomicNoteGenerator):
     """并行任务分配原子笔记生成器，支持Ollama和LM Studio的任务分配处理"""
-    
-    def __init__(self, llm: LocalLLM = None):
-        super().__init__(llm)
-        
+
+    def __init__(self, llm: LocalLLM = None, max_workers: Optional[int] = None):
+        super().__init__(llm, max_workers=max_workers)
+
         # 加载并行处理配置
         self.parallel_config = config.get('atomic_note_generation', {})
         self.parallel_enabled = self.parallel_config.get('parallel_enabled', False)
@@ -120,6 +120,8 @@ class ParallelTaskAtomicNoteGenerator(AtomicNoteGenerator):
     
     def _generate_atomic_notes_parallel_task_division(self, text_chunks: List[Dict[str, Any]], progress_tracker: Optional[Any] = None) -> List[Dict[str, Any]]:
         """使用任务分配策略并行生成原子笔记"""
+        if not text_chunks:
+            return []
         system_prompt = self._get_atomic_note_system_prompt()
         all_notes = []
 
@@ -129,7 +131,9 @@ class ParallelTaskAtomicNoteGenerator(AtomicNoteGenerator):
         logger.info(f"Task allocation: Ollama={len(ollama_tasks)}, LM Studio={len(lmstudio_tasks)}")
 
         # 并行处理 - 减少并发数量以避免Ollama过载
-        max_workers = min(4, len(text_chunks))  # 最多4个并发任务
+        max_workers = min(self.max_concurrent_workers, len(text_chunks))
+        if max_workers < 1:
+            max_workers = 1
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             futures = []
             future_to_meta = {}

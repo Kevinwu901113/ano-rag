@@ -256,15 +256,24 @@ class MirageRunner:
             
             # Prefer parallel task generator when enabled in config
             try:
-                self.note_generator = ParallelTaskAtomicNoteGenerator(llm=llm)
+                self.note_generator = ParallelTaskAtomicNoteGenerator(
+                    llm=llm,
+                    max_workers=self.config.max_workers_note
+                )
                 self.logger.info("Using ParallelTaskAtomicNoteGenerator")
             except Exception:
                 # Fallback to enhanced or baseline generators
                 try:
-                    self.note_generator = EnhancedAtomicNoteGenerator(llm=llm)
+                    self.note_generator = EnhancedAtomicNoteGenerator(
+                        llm=llm,
+                        max_workers=self.config.max_workers_note
+                    )
                     self.logger.info("Using EnhancedAtomicNoteGenerator")
                 except Exception:
-                    self.note_generator = AtomicNoteGenerator(llm=llm)
+                    self.note_generator = AtomicNoteGenerator(
+                        llm=llm,
+                        max_workers=self.config.max_workers_note
+                    )
                     self.logger.info("Using AtomicNoteGenerator")
             
             # Convert doc_pool to text_chunks format
