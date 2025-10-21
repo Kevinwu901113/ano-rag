@@ -446,7 +446,7 @@ class MirageRunner:
     def save_predictions(self, results: List[Dict[str, Any]]):
         """Save predictions to JSONL format"""
         predictions_file = self.run_dir / "predictions.jsonl"
-        
+
         # Clean results for output (remove error field)
         clean_results = []
         for result in results:
@@ -456,8 +456,10 @@ class MirageRunner:
                 'retrieved_contexts': result['retrieved_contexts']
             }
             clean_results.append(clean_result)
-        
-        FileUtils.write_jsonl(clean_results, str(predictions_file))
+
+        predictions_file.unlink(missing_ok=True)
+        for clean_result in clean_results:
+            FileUtils.append_jsonl_atomic(str(predictions_file), clean_result)
         self.logger.info(f"Predictions saved to {predictions_file}")
 
     def save_manifest(self):
@@ -500,7 +502,7 @@ class MirageRunner:
             }
         
         manifest_file = self.run_dir / "manifest.json"
-        FileUtils.write_json(manifest, str(manifest_file))
+        FileUtils.write_manifest(str(manifest_file), manifest)
         self.logger.info(f"Manifest saved to {manifest_file}")
 
     def retrieve_contexts(self, query_data: Dict[str, Any], query_dir: Path) -> List[Dict[str, str]]:
@@ -820,7 +822,7 @@ class MirageRunner:
     def save_predictions(self, results: List[Dict[str, Any]]):
         """Save predictions to JSONL format"""
         predictions_file = self.run_dir / "predictions.jsonl"
-        
+
         # Clean results for output (remove error field)
         clean_results = []
         for result in results:
@@ -830,8 +832,10 @@ class MirageRunner:
                 'retrieved_contexts': result['retrieved_contexts']
             }
             clean_results.append(clean_result)
-        
-        FileUtils.write_jsonl(clean_results, str(predictions_file))
+
+        predictions_file.unlink(missing_ok=True)
+        for clean_result in clean_results:
+            FileUtils.append_jsonl_atomic(str(predictions_file), clean_result)
         self.logger.info(f"Predictions saved to {predictions_file}")
     
     def save_manifest(self):
@@ -874,7 +878,7 @@ class MirageRunner:
             }
         
         manifest_file = self.run_dir / "manifest.json"
-        FileUtils.write_json(manifest, str(manifest_file))
+        FileUtils.write_manifest(str(manifest_file), manifest)
         self.logger.info(f"Manifest saved to {manifest_file}")
     
     def calculate_file_hash(self, filepath: str) -> str:
@@ -945,15 +949,12 @@ def generate_run_id(new_run: bool, result_dir: str) -> str:
     if new_run:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         return f"mirage_run_{timestamp}"
-    
+
     # Find most recent run
-    result_path = Path(result_dir)
-    if result_path.exists():
-        run_dirs = [d for d in result_path.iterdir() if d.is_dir() and d.name.startswith("mirage_run_")]
-        if run_dirs:
-            latest_run = max(run_dirs, key=lambda x: x.stat().st_mtime)
-            return latest_run.name
-    
+    latest_run = FileUtils.get_latest_run_dir(result_dir, "mirage_run_")
+    if latest_run:
+        return latest_run.name
+
     # No existing runs, create new one
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     return f"mirage_run_{timestamp}"

@@ -1,5 +1,6 @@
 import os
 import json
+import fcntl
 import jsonlines
 import hashlib
 import numpy as np
@@ -10,7 +11,31 @@ from loguru import logger
 
 class FileUtils:
     """文件处理工具类，用于处理不同格式的文档"""
-    
+
+    @staticmethod
+    def _convert_numpy_types(obj: Any) -> Any:
+        """递归转换numpy类型为Python原生类型"""
+        if isinstance(obj, np.integer):
+            return int(obj)
+        if isinstance(obj, np.floating):
+            return float(obj)
+        if isinstance(obj, np.ndarray):
+            return obj.tolist()
+        if isinstance(obj, dict):
+            converted_dict = {}
+            for key, value in obj.items():
+                if isinstance(key, np.integer):
+                    converted_key = int(key)
+                elif isinstance(key, np.floating):
+                    converted_key = float(key)
+                else:
+                    converted_key = key
+                converted_dict[converted_key] = FileUtils._convert_numpy_types(value)
+            return converted_dict
+        if isinstance(obj, list):
+            return [FileUtils._convert_numpy_types(item) for item in obj]
+        return obj
+
     @staticmethod
     def read_json(file_path: str) -> Dict[str, Any]:
         """读取JSON文件"""
@@ -52,37 +77,9 @@ class FileUtils:
     @staticmethod
     def write_json(data: Dict[str, Any], file_path: str):
         """写入JSON文件"""
-        
-        def convert_numpy_types(obj):
-            """递归转换numpy类型为Python原生类型"""
-            if isinstance(obj, np.integer):
-                return int(obj)
-            elif isinstance(obj, np.floating):
-                return float(obj)
-            elif isinstance(obj, np.ndarray):
-                return obj.tolist()
-            elif isinstance(obj, dict):
-                # 转换字典的键和值
-                converted_dict = {}
-                for key, value in obj.items():
-                    # 转换键的类型
-                    if isinstance(key, np.integer):
-                        converted_key = int(key)
-                    elif isinstance(key, np.floating):
-                        converted_key = float(key)
-                    else:
-                        converted_key = key
-                    # 转换值的类型
-                    converted_dict[converted_key] = convert_numpy_types(value)
-                return converted_dict
-            elif isinstance(obj, list):
-                return [convert_numpy_types(item) for item in obj]
-            else:
-                return obj
-        
         # 转换数据中的numpy类型
-        converted_data = convert_numpy_types(data)
-        
+        converted_data = FileUtils._convert_numpy_types(data)
+
         # 确保父目录存在
         Path(file_path).parent.mkdir(parents=True, exist_ok=True)
         with open(file_path, 'w', encoding='utf-8') as f:
@@ -166,3 +163,38 @@ class FileUtils:
         """读取纯文本文件"""
         with open(file_path, 'r', encoding='utf-8') as f:
             return f.read()
+
+    @staticmethod
+    def get_latest_run_dir(result_root: str, prefix: str) -> Optional[Path]:
+        """获取指定前缀下最新的运行目录"""
+        root_path = Path(result_root)
+        if not root_path.exists():
+            return None
+
+        run_dirs = [d for d in root_path.iterdir() if d.is_dir() and d.name.startswith(prefix)]
+        if not run_dirs:
+            return None
+
+        return max(run_dirs, key=lambda d: d.stat().st_mtime)
+
+    @staticmethod
+    def append_jsonl_atomic(file_path: str, record: Dict[str, Any]):
+        """原子性地向JSONL文件追加一条记录，确保并发安全"""
+        path = Path(file_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+
+        serialized = json.dumps(FileUtils._convert_numpy_types(record), ensure_ascii=False)
+        with open(path, 'a', encoding='utf-8') as f:
+            fcntl.flock(f, fcntl.LOCK_EX)
+            try:
+                f.write(serialized)
+                f.write('\n')
+                f.flush()
+                os.fsync(f.fileno())
+            finally:
+                fcntl.flock(f, fcntl.LOCK_UN)
+
+    @staticmethod
+    def write_manifest(file_path: str, manifest: Dict[str, Any]):
+        """写入运行清单文件，自动处理目录创建和序列化"""
+        FileUtils.write_json(manifest, file_path)
