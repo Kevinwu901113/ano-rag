@@ -96,6 +96,10 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "model_path": "./models/default_model",
     # 添加并行策略配置
     "parallel_strategy": "thread",
+    # 性能配置：默认禁用FAISS GPU，加速稳定性
+    "performance": {
+        "use_gpu": False
+    },
     # 添加 LLM 配置的缺失键
     "llm": {
         "provider": "openai", 

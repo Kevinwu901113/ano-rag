@@ -83,12 +83,16 @@ class FileUtils:
         # 转换数据中的numpy类型
         converted_data = convert_numpy_types(data)
         
+        # 确保父目录存在
+        Path(file_path).parent.mkdir(parents=True, exist_ok=True)
         with open(file_path, 'w', encoding='utf-8') as f:
             json.dump(converted_data, f, ensure_ascii=False, indent=2)
     
     @staticmethod
     def write_jsonl(data: List[Dict[str, Any]], file_path: str):
         """写入JSONL文件"""
+        # 确保父目录存在
+        Path(file_path).parent.mkdir(parents=True, exist_ok=True)
         with jsonlines.open(file_path, 'w') as writer:
             writer.write_all(data)
     
@@ -147,5 +151,18 @@ class FileUtils:
         files = []
         path = Path(directory)
         for ext in extensions:
-            files.extend(str(p) for p in path.glob(f"*{ext}"))
+            files.extend(str(p) for p in path.glob(f"*{ext}") )
         return sorted(files)
+
+    @staticmethod
+    def write_file(file_path: str, content: str):
+        """写入纯文本文件"""
+        Path(file_path).parent.mkdir(parents=True, exist_ok=True)
+        with open(file_path, 'w', encoding='utf-8') as f:
+            f.write(content if content is not None else "")
+
+    @staticmethod
+    def read_file(file_path: str) -> str:
+        """读取纯文本文件"""
+        with open(file_path, 'r', encoding='utf-8') as f:
+            return f.read()

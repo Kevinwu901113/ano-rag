@@ -254,17 +254,18 @@ class MirageRunner:
             # Initialize LLM for note generation
             llm = LocalLLM()
             
-            # Choose note generator based on configuration
-            if self.config.note_engines:
-                self.note_generator = ParallelTaskAtomicNoteGenerator(
-                    engines=self.config.note_engines,
-                    max_workers=self.config.max_workers_note
-                )
-            else:
+            # Prefer parallel task generator when enabled in config
+            try:
+                self.note_generator = ParallelTaskAtomicNoteGenerator(llm=llm)
+                self.logger.info("Using ParallelTaskAtomicNoteGenerator")
+            except Exception:
+                # Fallback to enhanced or baseline generators
                 try:
                     self.note_generator = EnhancedAtomicNoteGenerator(llm=llm)
+                    self.logger.info("Using EnhancedAtomicNoteGenerator")
                 except Exception:
                     self.note_generator = AtomicNoteGenerator(llm=llm)
+                    self.logger.info("Using AtomicNoteGenerator")
             
             # Convert doc_pool to text_chunks format
             text_chunks = []
@@ -276,26 +277,22 @@ class MirageRunner:
                         'title': doc.get('doc_name', ''),
                         'document_id': doc.get('mapped_id', f'doc_{idx}'),
                         'is_supporting': doc.get('support', False)
-                    },
-                    'doc_name': doc.get('doc_name', ''),
-                    'chunk_id': f"{doc.get('doc_name', f'doc_{idx}')}#{idx}"
+                    }
                 }
                 text_chunks.append(chunk)
             
             # Generate notes
-            atomic_notes = self.note_generator.generate_atomic_notes(text_chunks)
+            notes = self.note_generator.generate_atomic_notes(text_chunks)
+            self.logger.info(f"Generated {sum(len(n.get('notes', [])) for n in notes)} notes across {len(text_chunks)} chunks")
             
-            # Save notes
-            notes_file = self.run_dir / "notes" / "atomic_notes.jsonl"
-            FileUtils.write_jsonl(atomic_notes, str(notes_file))
+            # Store notes back in doc_pool for downstream use
+            for i, note_result in enumerate(notes):
+                self.doc_pool[i]['notes'] = note_result.get('notes', [])
             
             self.stats['note_generation_time'] = time.time() - start_time
-            self.logger.info(f"Generated {len(atomic_notes)} atomic notes in {self.stats['note_generation_time']:.2f}s")
-            
-            # Persist atomic_notes for graph building
-            self.atomic_notes = atomic_notes
+            self.logger.info(f"Atomic notes generation completed in {self.stats['note_generation_time']:.2f}s")
             return True
-            
+        
         except Exception as e:
             self.logger.error(f"Failed to generate atomic notes: {e}")
             return False
@@ -359,13 +356,12 @@ class MirageRunner:
         try:
             self.logger.info(f"Initializing LLM: {self.config.model_name}")
             
-            # Try LM Studio first, then fallback to LocalLLM
+            # Prefer LM Studio client; fall back to LocalLLM only if instantiation fails
             try:
                 self.llm_client = LMStudioClient(model=self.config.model_name)
-                if not self.llm_client.is_available():
-                    raise Exception("LM Studio not available")
                 self.logger.info("Using LM Studio client")
-            except Exception:
+            except Exception as e:
+                self.logger.warning(f"LM Studio client init failed, falling back: {e}")
                 self.llm_client = LocalLLM(
                     model_name=self.config.model_name,
                     temperature=self.config.temperature,
@@ -430,7 +426,7 @@ class MirageRunner:
                 'total_time': time.time() - start_time,
                 'timestamp': datetime.now().isoformat()
             }
-            FileUtils.write_json(str(query_dir / "timing.json"), timing)
+            FileUtils.write_json(timing, str(query_dir / "timing.json"))
             
             # Mark as done
             done_flag.touch()
@@ -446,7 +442,67 @@ class MirageRunner:
                 'retrieved_contexts': [],
                 'error': True
             }
-    
+
+    def save_predictions(self, results: List[Dict[str, Any]]):
+        """Save predictions to JSONL format"""
+        predictions_file = self.run_dir / "predictions.jsonl"
+        
+        # Clean results for output (remove error field)
+        clean_results = []
+        for result in results:
+            clean_result = {
+                'id': result['id'],
+                'predicted_answer': result['predicted_answer'],
+                'retrieved_contexts': result['retrieved_contexts']
+            }
+            clean_results.append(clean_result)
+        
+        FileUtils.write_jsonl(clean_results, str(predictions_file))
+        self.logger.info(f"Predictions saved to {predictions_file}")
+
+    def save_manifest(self):
+        """Save run manifest with configuration and metadata"""
+        manifest = {
+            'run_id': self.config.run_id,
+            'timestamp': datetime.now().isoformat(),
+            'config': self.config.to_dict(),
+            'data_info': {
+                'dataset_path': self.config.dataset_path,
+                'dataset_size': len(self.dataset),
+                'dataset_hash': self.calculate_file_hash(self.config.dataset_path),
+                'doc_pool_path': self.config.doc_pool_path,
+                'doc_pool_size': len(self.doc_pool),
+                'doc_pool_hash': self.calculate_file_hash(self.config.doc_pool_path),
+            },
+            'statistics': self.stats,
+            'output_files': {
+                'predictions': 'predictions.jsonl',
+                'logs': ['logs/run.log', 'logs/error.log'],
+                'manifest': 'manifest.json'
+            }
+        }
+        
+        if self.config.mode == "oracle":
+            manifest['data_info']['oracle_path'] = self.config.oracle_path
+            manifest['data_info']['oracle_hash'] = self.calculate_file_hash(self.config.oracle_path)
+        
+        # Add notes and graph artifacts if present
+        notes_path = self.run_dir / "notes" / "atomic_notes.jsonl"
+        if notes_path.exists():
+            manifest['output_files']['notes'] = str(notes_path.relative_to(self.run_dir))
+        graph_json = self.run_dir / "graph" / "graph.json"
+        if graph_json.exists():
+            manifest['output_files']['graph'] = {
+                'index': 'graph/graph.json',
+                'embeddings': 'graph/graph_embeddings.npz',
+                'mappings': 'graph/graph_mappings.json',
+                'graphml': 'graph/graph.graphml'
+            }
+        
+        manifest_file = self.run_dir / "manifest.json"
+        FileUtils.write_json(manifest, str(manifest_file))
+        self.logger.info(f"Manifest saved to {manifest_file}")
+
     def retrieve_contexts(self, query_data: Dict[str, Any], query_dir: Path) -> List[Dict[str, str]]:
         """Retrieve contexts based on mode"""
         query_id = query_data['query_id']
@@ -472,10 +528,10 @@ class MirageRunner:
             contexts = self.retrieve_mixed_mode(query, query_dir)
         
         # Save contexts
-        FileUtils.write_json(str(query_dir / "contexts.json"), contexts)
+        FileUtils.write_json(contexts, str(query_dir / "contexts.json"))
         
         return contexts
-    
+
     def retrieve_mixed_mode(self, query: str, query_dir: Path) -> List[Dict[str, str]]:
         """Retrieve contexts in mixed mode"""
         try:
@@ -500,7 +556,7 @@ class MirageRunner:
                         'original_index': result.get('original_index')
                     })
                 
-                FileUtils.write_json(str(query_dir / "retrieval.json"), retrieval_data)
+                FileUtils.write_json(retrieval_data, str(query_dir / "retrieval.json"))
             
             # Convert results to contexts (remap notes to original chunks)
             contexts = self.remap_notes_to_chunks(results)
@@ -510,7 +566,7 @@ class MirageRunner:
         except Exception as e:
             self.logger.error(f"Failed to retrieve contexts: {e}")
             return []
-    
+
     def remap_notes_to_chunks(self, retrieval_results: List[Dict[str, Any]]) -> List[Dict[str, str]]:
         """Remap retrieved notes back to original doc_pool chunks"""
         contexts = []
@@ -775,7 +831,7 @@ class MirageRunner:
             }
             clean_results.append(clean_result)
         
-        FileUtils.write_jsonl(str(predictions_file), clean_results)
+        FileUtils.write_jsonl(clean_results, str(predictions_file))
         self.logger.info(f"Predictions saved to {predictions_file}")
     
     def save_manifest(self):
@@ -818,7 +874,7 @@ class MirageRunner:
             }
         
         manifest_file = self.run_dir / "manifest.json"
-        FileUtils.write_json(str(manifest_file), manifest)
+        FileUtils.write_json(manifest, str(manifest_file))
         self.logger.info(f"Manifest saved to {manifest_file}")
     
     def calculate_file_hash(self, filepath: str) -> str:
@@ -958,8 +1014,8 @@ Examples:
                        help='Force rebuild index')
     
     # LLM configuration
-    parser.add_argument('--model', default='qwen2.5-7b',
-                       help='LLM model name (default: qwen2.5-7b)')
+    parser.add_argument('--model', default='openai/gpt-oss-20b',
+                       help='LLM model name (default: openai/gpt-oss-20b)')
     parser.add_argument('--temperature', type=float, default=0.1,
                        help='LLM temperature (default: 0.1)')
     parser.add_argument('--max_tokens', type=int, default=512,
@@ -1018,8 +1074,7 @@ Examples:
     
     setup_logging(
         log_file=str(log_dir / "run.log"),
-        error_log_file=str(log_dir / "error.log"),
-        debug=args.debug
+        log_level="DEBUG" if args.debug else "INFO"
     )
     
     logger = logging.getLogger(__name__)
