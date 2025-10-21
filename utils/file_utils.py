@@ -166,3 +166,23 @@ class FileUtils:
         """读取纯文本文件"""
         with open(file_path, 'r', encoding='utf-8') as f:
             return f.read()
+
+    @staticmethod
+    def get_file_size_bytes(file_path: str) -> int:
+        """获取文件大小（字节）"""
+        path = Path(file_path)
+        if not path.exists():
+            logger.warning(f"File not found when calculating size: {file_path}")
+            return 0
+        return path.stat().st_size
+
+    @staticmethod
+    def count_file_lines(file_path: str) -> int:
+        """统计文件行数"""
+        path = Path(file_path)
+        if not path.exists():
+            logger.warning(f"File not found when counting lines: {file_path}")
+            return 0
+
+        with open(path, 'r', encoding='utf-8') as f:
+            return sum(1 for _ in f)

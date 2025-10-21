@@ -119,9 +119,9 @@ def validate_output(result_dir: Path):
             for line in f:
                 pred = json.loads(line.strip())
                 predictions.append(pred)
-        
+
         print(f"✅ Found {len(predictions)} predictions")
-        
+
         # Check required fields
         for i, pred in enumerate(predictions):
             required_fields = ['id', 'predicted_answer', 'retrieved_contexts']
@@ -129,15 +129,56 @@ def validate_output(result_dir: Path):
                 if field not in pred:
                     print(f"❌ Missing field '{field}' in prediction {i}")
                     return False
-            
+
             # Check retrieved_contexts format
             for j, ctx in enumerate(pred['retrieved_contexts']):
                 if 'title' not in ctx or 'text' not in ctx:
                     print(f"❌ Invalid context format in prediction {i}, context {j}")
                     return False
-        
+
         print("✅ Predictions format is valid")
-        
+
+        # Validate manifest metadata
+        with open(manifest_file, 'r') as f:
+            manifest = json.load(f)
+
+        data_info = manifest.get('data_info', {})
+        required_data_fields = [
+            'dataset_path',
+            'dataset_size',
+            'dataset_hash',
+            'dataset_file_size_bytes',
+            'dataset_line_count',
+            'doc_pool_path',
+            'doc_pool_size',
+            'doc_pool_hash',
+            'doc_pool_file_size_bytes',
+            'doc_pool_line_count'
+        ]
+
+        for field in required_data_fields:
+            if field not in data_info:
+                print(f"❌ Missing field '{field}' in manifest data_info")
+                return False
+
+        if data_info.get('oracle_path'):
+            oracle_fields = [
+                'oracle_hash',
+                'oracle_file_size_bytes',
+                'oracle_line_count'
+            ]
+            for field in oracle_fields:
+                if field not in data_info:
+                    print(f"❌ Missing field '{field}' in manifest oracle data")
+                    return False
+
+        logs_files = manifest.get('output_files', {}).get('logs', [])
+        if logs_files != ['logs/run.log', 'logs/run_error.log']:
+            print(f"❌ Unexpected log file entries in manifest: {logs_files}")
+            return False
+
+        print("✅ Manifest metadata is complete")
+
         # Print sample prediction
         if predictions:
             print("\n📋 Sample prediction:")
