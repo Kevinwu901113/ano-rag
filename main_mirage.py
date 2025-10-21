@@ -183,17 +183,20 @@ class MirageRunner:
             self.logger.info("Building global retrieval index...")
             start_time = time.time()
             
-            # Initialize embedding manager if needed
-            if self.config.retriever_type in ['dense', 'hybrid']:
+            # Initialize embedding manager when vector retrieval is required or custom model provided
+            if self.config.retriever_type in ['dense', 'hybrid'] or self.config.embed_model:
                 self.embedding_manager = EmbeddingManager()
                 if self.config.embed_model:
-                    # Override embedding model from config
-                    self.embedding_manager.model_name = self.config.embed_model
-                    self.embedding_manager.load_model()
-            
-            # Initialize retriever
-            self.retriever = VectorRetriever()
-            
+                    self.embedding_manager.set_model(self.config.embed_model)
+            else:
+                self.embedding_manager = None
+
+            # Initialize retriever with configured components
+            self.retriever = VectorRetriever(embedding_manager=self.embedding_manager,
+                                             retrieval_mode=self.config.retriever_type)
+            if self.config.embed_model:
+                self.retriever.set_embedding_model(self.config.embed_model)
+
             # Set index directory to run-specific location
             index_dir = self.run_dir / "index"
             self.retriever.data_dir = str(index_dir)

@@ -122,10 +122,29 @@ class EmbeddingManager:
                     logger.warning(f"Failed to initialize model consistency checker: {e}")
             
             logger.info(f"EmbeddingManager initialized with model: {self.model_name}, device: {self.device}")
-            
+
             # 标记模型已加载
             EmbeddingManager._model_loaded = True
-    
+
+    def set_model(self, model_name: str) -> None:
+        """切换嵌入模型并重新加载"""
+        if not model_name or model_name == self.model_name:
+            return
+
+        with self._lock:
+            if model_name == self.model_name and self.model is not None:
+                return
+
+            self.model_name = model_name
+            logger.info(f"Switching embedding model to: {model_name}")
+            self._load_local_model()
+
+            if MODEL_CONSISTENCY_AVAILABLE and self.consistency_checker:
+                try:
+                    self.register_model_signature()
+                except Exception as exc:
+                    logger.warning(f"Failed to register model signature after switch: {exc}")
+
     def _load_local_model(self):
         """专门加载本地模型，如果本地不存在则自动下载"""
         try:
