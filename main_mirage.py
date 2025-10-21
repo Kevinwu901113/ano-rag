@@ -19,6 +19,7 @@ Usage:
     python main_mirage.py --mode mixed --topk 5 --retriever hybrid
     python main_mirage.py --mode oracle --new --debug
     python main_mirage.py --mode base --model qwen2.5-7b --temperature 0.1
+    python main_mirage.py --mode mixed --embed-model sentence-transformers/all-MiniLM-L6-v2
 """
 
 import os
@@ -971,8 +972,8 @@ def parse_note_engines(engines_str: str) -> List[str]:
     
     return engines
 
-def main():
-    """Main entry point"""
+def build_parser() -> argparse.ArgumentParser:
+    """Create and configure the CLI argument parser for MIRAGE runs."""
     parser = argparse.ArgumentParser(
         description="Run AnoRAG system on MIRAGE benchmark",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -981,10 +982,11 @@ Examples:
   python main_mirage.py --mode mixed --topk 5 --retriever hybrid
   python main_mirage.py --mode oracle --new --debug
   python main_mirage.py --mode base --model qwen2.5-7b --temperature 0.1
+  python main_mirage.py --mode mixed --embed-model sentence-transformers/all-MiniLM-L6-v2
   python main_mirage.py --mode mixed --note_engines "ollama:qwen2.5-7b,lmstudio:qwen2.5-7b"
         """
     )
-    
+
     # Mode and basic configuration
     parser.add_argument('--mode', choices=['mixed', 'oracle', 'base'], default='mixed',
                        help='Evaluation mode (default: mixed)')
@@ -1008,10 +1010,10 @@ Examples:
     # Retrieval configuration
     parser.add_argument('--retriever', choices=['bm25', 'dense', 'hybrid'], default='hybrid',
                        help='Retriever type (default: hybrid)')
-    parser.add_argument('--embed_model', type=str,
-                       help='Embedding model name (overrides config)')
-    parser.add_argument('--rebuild_index', action='store_true',
-                       help='Force rebuild index')
+    parser.add_argument('--embed-model', '--embed_model', dest='embed_model', type=str,
+                       help='Embedding model name (overrides config). Alias: --embed-model/--embed_model')
+    parser.add_argument('--rebuild-index', '--rebuild_index', dest='rebuild_index', action='store_true',
+                       help='Force rebuild index. Alias: --rebuild-index/--rebuild_index')
     
     # LLM configuration
     parser.add_argument('--model', default='openai/gpt-oss-20b',
@@ -1037,7 +1039,14 @@ Examples:
     parser.add_argument('--max_workers_note', type=int, default=DEFAULT_MAX_WORKERS_NOTE,
                        help=f'Max parallel note workers (default: {DEFAULT_MAX_WORKERS_NOTE})')
     
-    args = parser.parse_args()
+    return parser
+
+
+def main(argv: Optional[List[str]] = None):
+    """Main entry point"""
+    parser = build_parser()
+
+    args = parser.parse_args(argv)
     
     # Generate run ID
     run_id = generate_run_id(args.new, args.result_dir)
