@@ -29,6 +29,7 @@ import time
 import hashlib
 import argparse
 import logging
+from collections import defaultdict
 from pathlib import Path
 from datetime import datetime
 from typing import Dict, List, Any, Optional, Tuple, Union
@@ -783,7 +784,7 @@ class MirageRunner:
         """Build and save knowledge graph (optional)"""
         if not self.config.enable_graph:
             return True
-            
+
         # Prefer generated atomic notes; fall back to doc_pool conversion
         if hasattr(self, 'atomic_notes') and self.atomic_notes:
             notes_for_graph = self.atomic_notes

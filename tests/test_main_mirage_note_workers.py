@@ -63,7 +63,14 @@ def test_parallel_generator_receives_max_workers(monkeypatch, tmp_path):
             recorded["max_workers"] = max_workers
 
         def generate_atomic_notes(self, text_chunks):
-            return [{"notes": [{"content": f"note-{i}"}]} for i, _ in enumerate(text_chunks)]
+            return [
+                {
+                    "content": f"note-{i}",
+                    "chunk_index": i,
+                    "source_info": {"document_id": f"doc-{i}", "title": chunk["source_info"]["title"]},
+                }
+                for i, chunk in enumerate(text_chunks)
+            ]
 
     monkeypatch.setattr("main_mirage.ParallelTaskAtomicNoteGenerator", StubGenerator)
     monkeypatch.setattr("main_mirage.LocalLLM", lambda: object())
@@ -91,7 +98,14 @@ def test_enhanced_generator_receives_max_workers_when_parallel_fails(monkeypatch
             recorded["max_workers"] = max_workers
 
         def generate_atomic_notes(self, text_chunks):
-            return [{"notes": [{"content": "enhanced"}]} for _ in text_chunks]
+            return [
+                {
+                    "content": "enhanced",
+                    "chunk_index": i,
+                    "source_info": {"document_id": f"doc-{i}", "title": chunk["source_info"]["title"]},
+                }
+                for i, chunk in enumerate(text_chunks)
+            ]
 
     monkeypatch.setattr("main_mirage.ParallelTaskAtomicNoteGenerator", FailingGenerator)
     monkeypatch.setattr("main_mirage.EnhancedAtomicNoteGenerator", StubEnhancedGenerator)
@@ -120,7 +134,14 @@ def test_basic_generator_receives_max_workers_when_all_fallbacks_fail(monkeypatc
             recorded["max_workers"] = max_workers
 
         def generate_atomic_notes(self, text_chunks):
-            return [{"notes": [{"content": "basic"}]} for _ in text_chunks]
+            return [
+                {
+                    "content": "basic",
+                    "chunk_index": i,
+                    "source_info": {"document_id": f"doc-{i}", "title": chunk["source_info"]["title"]},
+                }
+                for i, chunk in enumerate(text_chunks)
+            ]
 
     monkeypatch.setattr("main_mirage.ParallelTaskAtomicNoteGenerator", FailingGenerator)
     monkeypatch.setattr("main_mirage.EnhancedAtomicNoteGenerator", FailingGenerator)
@@ -136,3 +157,76 @@ def test_basic_generator_receives_max_workers_when_all_fallbacks_fail(monkeypatc
     assert runner.generate_atomic_notes()
     assert recorded["max_workers"] == 5
     assert runner.doc_pool[0]["notes"][0]["content"] == "basic"
+
+
+def test_generate_atomic_notes_groups_by_chunk_index(monkeypatch, tmp_path):
+    class StubGenerator:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def generate_atomic_notes(self, text_chunks):
+            return [
+                {
+                    "note_id": "note-0",
+                    "content": "note for first",
+                    "chunk_index": 0,
+                    "source_info": text_chunks[0]["source_info"],
+                },
+                {
+                    "note_id": "note-1",
+                    "content": "note for second",
+                    "chunk_index": "1",
+                    "source_info": text_chunks[1]["source_info"],
+                },
+            ]
+
+    monkeypatch.setattr("main_mirage.ParallelTaskAtomicNoteGenerator", StubGenerator)
+    monkeypatch.setattr("main_mirage.LocalLLM", lambda: object())
+
+    config = _make_config(tmp_path, max_workers_note=2)
+    runner = MirageRunner(config)
+    runner.doc_pool = [
+        {"doc_chunk": "chunk-0", "doc_name": "Doc 0", "mapped_id": "doc-0", "support": False},
+        {"doc_chunk": "chunk-1", "doc_name": "Doc 1", "mapped_id": "doc-1", "support": True},
+    ]
+
+    assert runner.generate_atomic_notes()
+    assert len(runner.doc_pool[0]["notes"]) == 1
+    assert len(runner.doc_pool[1]["notes"]) == 1
+    assert runner.doc_pool[1]["notes"][0]["content"] == "note for second"
+
+
+def test_generate_atomic_notes_groups_by_source_info(monkeypatch, tmp_path):
+    class StubGenerator:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def generate_atomic_notes(self, text_chunks):
+            return [
+                {
+                    "note_id": "note-unsupported",
+                    "content": "orphan",
+                    "source_info": {"document_id": "missing", "title": "Unknown"},
+                },
+                {
+                    "note_id": "note-match",
+                    "content": "matched",
+                    "source_info": {"document_id": "doc-2", "title": "Doc 2", "is_supporting": True},
+                },
+            ]
+
+    monkeypatch.setattr("main_mirage.ParallelTaskAtomicNoteGenerator", StubGenerator)
+    monkeypatch.setattr("main_mirage.LocalLLM", lambda: object())
+
+    config = _make_config(tmp_path, max_workers_note=2)
+    runner = MirageRunner(config)
+    runner.doc_pool = [
+        {"doc_chunk": "chunk-0", "doc_name": "Doc 0", "mapped_id": "doc-0", "support": False},
+        {"doc_chunk": "chunk-1", "doc_name": "Doc 1", "mapped_id": "doc-1", "support": False},
+        {"doc_chunk": "chunk-2", "doc_name": "Doc 2", "mapped_id": "doc-2", "support": True},
+    ]
+
+    assert runner.generate_atomic_notes()
+    assert runner.doc_pool[0]["notes"] == []
+    assert runner.doc_pool[1]["notes"] == []
+    assert runner.doc_pool[2]["notes"][0]["content"] == "matched"
