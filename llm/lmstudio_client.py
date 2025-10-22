@@ -57,6 +57,29 @@ class LMStudioInstance:
         self.client = openai.OpenAI(**client_kwargs)
 
 
+class LMStudioGenerationError(RuntimeError):
+    """Error raised when LM Studio fails to return a completion."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        original_exception: Exception | None = None,
+        is_transport_error: bool = False,
+        is_timeout: bool = False,
+    ) -> None:
+        super().__init__(message)
+        self.original_exception = original_exception
+        self.is_transport_error = is_transport_error
+        self.is_timeout = is_timeout
+
+    def __str__(self) -> str:  # pragma: no cover - delegated to base repr when unused
+        base_msg = super().__str__()
+        if self.original_exception is None:
+            return base_msg
+        return f"{base_msg} (caused by {self.original_exception!r})"
+
+
 class LMStudioClient:
     """LM Studio客户端
     
@@ -149,25 +172,48 @@ class LMStudioClient:
                 if key == 'system_prompt' or value is None:
                     continue
                 options[key] = value
-            
+
             # 准备消息
             messages = []
             if system_prompt:
                 messages.append({"role": "system", "content": system_prompt})
             messages.append({"role": "user", "content": prompt})
-            
+
             # 调用OpenAI客户端生成响应
             response = self.instance.client.chat.completions.create(
                 model=self.instance.model,
                 messages=messages,
                 **options
             )
-            
-            return response.choices[0].message.content.strip()
-            
+
+            message_content = response.choices[0].message.content
+            return message_content.strip() if message_content else ""
+
         except Exception as e:
             logger.error(f"LM Studio generation failed: {e}")
-            return ""
+
+            # 判断异常类型，以便上游根据错误类型采取不同策略
+            request_exception_types = (requests.RequestException,)
+            openai_timeout_type = getattr(openai, "APITimeoutError", None)
+            openai_connection_type = getattr(openai, "APIConnectionError", None)
+
+            timeout_types = (requests.Timeout,)
+            if isinstance(openai_timeout_type, type):
+                timeout_types = timeout_types + (openai_timeout_type,)
+
+            transport_types = request_exception_types
+            if isinstance(openai_connection_type, type):
+                transport_types = transport_types + (openai_connection_type,)
+
+            is_timeout = isinstance(e, timeout_types) or "timeout" in str(e).lower()
+            is_transport_error = isinstance(e, transport_types) or is_timeout
+
+            raise LMStudioGenerationError(
+                "LM Studio generation failed",
+                original_exception=e,
+                is_transport_error=is_transport_error,
+                is_timeout=is_timeout,
+            ) from e
     
     def generate_stream(
         self,

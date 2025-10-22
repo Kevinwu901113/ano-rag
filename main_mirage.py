@@ -125,6 +125,7 @@ class MirageRunner:
         self.llm_client: Optional[Union[LocalLLM, LMStudioClient]] = None
         self.note_generator: Optional[AtomicNoteGenerator] = None
         self.query_processor: Optional[QueryProcessor] = None
+        self.atomic_notes: List[Dict[str, Any]] = []
 
         # Doc pool indexes for reliable remapping
         self.doc_pool_index_by_chunk_id: Dict[str, int] = {}
@@ -208,10 +209,10 @@ class MirageRunner:
             # Set index directory to run-specific location
             index_dir = self.run_dir / "index"
             self.retriever.data_dir = str(index_dir)
-            
-            # Convert doc_pool to atomic notes format for indexing
-            atomic_notes = self.convert_doc_pool_to_notes()
-            
+
+            # Prefer cached/generated atomic notes for indexing
+            atomic_notes = self._prepare_atomic_notes_for_index()
+
             # Build index
             success = self.retriever.build_index(
                 atomic_notes=atomic_notes,
@@ -230,7 +231,42 @@ class MirageRunner:
         except Exception as e:
             self.logger.error(f"Failed to build index: {e}")
             return False
-    
+
+    def _prepare_atomic_notes_for_index(self) -> List[Dict[str, Any]]:
+        """Return the best available atomic notes for index construction."""
+        if self.atomic_notes:
+            self.logger.info(
+                "Using %d in-memory atomic notes for index build",
+                len(self.atomic_notes)
+            )
+            return self.atomic_notes
+
+        from_doc_pool = self._collect_atomic_notes_from_doc_pool()
+        if from_doc_pool:
+            self.logger.info(
+                "Using %d atomic notes from doc_pool for index build",
+                len(from_doc_pool)
+            )
+            self.atomic_notes = from_doc_pool
+            return from_doc_pool
+
+        cached_notes = self._load_cached_atomic_notes()
+        if cached_notes:
+            self.logger.info(
+                "Using %d cached atomic notes for index build",
+                len(cached_notes)
+            )
+            self.atomic_notes = cached_notes
+            return cached_notes
+
+        fallback_notes = self.convert_doc_pool_to_notes()
+        self.logger.info(
+            "No atomic notes available; falling back to %d doc_pool chunks",
+            len(fallback_notes)
+        )
+        self.atomic_notes = fallback_notes
+        return fallback_notes
+
     def convert_doc_pool_to_notes(self) -> List[Dict[str, Any]]:
         """Convert doc_pool entries to atomic notes format for indexing"""
         atomic_notes = []
@@ -432,15 +468,28 @@ class MirageRunner:
     def generate_atomic_notes(self) -> bool:
         """Generate atomic notes from doc_pool (optional)"""
         if not self.config.enable_notes:
+            # Still attempt to harvest any pre-existing notes for downstream steps
+            self.atomic_notes = self._collect_atomic_notes_from_doc_pool()
             return True
 
         try:
             self.logger.info("Generating atomic notes...")
             start_time = time.time()
-            
+
+            # Reuse existing notes if they are already attached to the doc_pool
+            existing_notes = self._collect_atomic_notes_from_doc_pool()
+            if existing_notes:
+                self.logger.info(
+                    "Found %d existing atomic notes; skipping regeneration",
+                    len(existing_notes)
+                )
+                self.atomic_notes = existing_notes
+                self._persist_atomic_notes(existing_notes)
+                return True
+
             # Initialize LLM for note generation
             llm = LocalLLM()
-            
+
             # Prefer parallel task generator when enabled in config
             try:
                 self.note_generator = ParallelTaskAtomicNoteGenerator(
@@ -479,101 +528,257 @@ class MirageRunner:
             
             # Generate notes
             notes = self.note_generator.generate_atomic_notes(text_chunks)
-
-            grouped_notes: Dict[int, List[Dict[str, Any]]] = defaultdict(list)
-            unmatched_notes: List[Dict[str, Any]] = []
-
-            for note in notes:
-                idx = self._resolve_doc_pool_index_from_note(note)
-                if idx is None:
-                    unmatched_notes.append(note)
-                    continue
-                grouped_notes[idx].append(note)
+            self.logger.info(f"Generated {sum(len(n.get('notes', [])) for n in notes)} notes across {len(text_chunks)} chunks")
 
             # Store notes back in doc_pool for downstream use
-            for i in range(len(self.doc_pool)):
-                self.doc_pool[i]['notes'] = grouped_notes.get(i, [])
-
-            noted_chunks = sum(1 for doc in self.doc_pool if doc.get('notes'))
-            self.logger.info(
-                f"Generated {len(notes)} notes mapped to {noted_chunks} doc chunks out of {len(self.doc_pool)}"
-            )
-
-            if unmatched_notes:
-                self.logger.warning(
-                    f"{len(unmatched_notes)} notes could not be matched back to doc_pool entries"
-                )
-
-            # Cache flattened atomic notes for downstream consumers (graph build, exports)
-            self.atomic_notes = notes
+            for idx, doc in enumerate(self.doc_pool):
+                note_result = notes[idx] if idx < len(notes) else {}
+                raw_notes = note_result.get('notes', []) if isinstance(note_result, dict) else []
+                normalized_notes = []
+                for note_idx, note in enumerate(raw_notes):
+                    normalized = self._normalize_atomic_note(
+                        note,
+                        doc,
+                        doc_index=idx,
+                        note_position=len(normalized_notes)
+                    )
+                    if normalized:
+                        normalized_notes.append(normalized)
+                doc['notes'] = normalized_notes
 
             self.stats['note_generation_time'] = time.time() - start_time
             self.logger.info(f"Atomic notes generation completed in {self.stats['note_generation_time']:.2f}s")
+
+            self.atomic_notes = self._collect_atomic_notes_from_doc_pool()
+            if self.atomic_notes:
+                self._persist_atomic_notes(self.atomic_notes)
             return True
 
         except Exception as e:
             self.logger.error(f"Failed to generate atomic notes: {e}")
             return False
 
-    def _coerce_doc_pool_index(self, value: Any) -> Optional[int]:
-        try:
-            if value is None:
-                return None
-            idx = int(value)
-        except (TypeError, ValueError):
+    def _normalize_atomic_note(
+        self,
+        note: Dict[str, Any],
+        doc: Optional[Dict[str, Any]] = None,
+        *,
+        doc_index: Optional[int] = None,
+        note_position: int = 0
+    ) -> Optional[Dict[str, Any]]:
+        """Normalize a single atomic note structure for downstream compatibility."""
+        if not isinstance(note, dict):
             return None
 
-        return idx if 0 <= idx < len(self.doc_pool) else None
+        normalized = json.loads(json.dumps(note)) if note else {}
+        metadata = dict(normalized.get('metadata') or {})
 
-    def _find_doc_pool_candidates_by_source(self, source_info: Dict[str, Any]) -> List[int]:
-        if not source_info:
+        chunk_id = normalized.get('chunk_id') or metadata.get('chunk_id')
+        doc_hash = normalized.get('doc_hash') or metadata.get('doc_hash')
+        offsets = normalized.get('offsets') or metadata.get('offsets')
+        doc_name = normalized.get('doc_name') or metadata.get('doc_name')
+        original_index = normalized.get('original_index', metadata.get('original_index'))
+
+        if doc is not None and doc_index is not None and doc_index >= 0:
+            chunk_id, doc_hash, offsets = self._prepare_doc_metadata(doc, doc_index)
+            doc_name = doc.get('doc_name', doc_name or '')
+            original_index = doc_index
+
+        if chunk_id is None:
+            chunk_id = f"chunk_{doc_index if doc_index is not None else 'na'}_{note_position}"
+
+        if doc_hash is None:
+            text_for_hash = (
+                normalized.get('content')
+                or normalized.get('raw_span')
+                or (doc.get('doc_chunk') if doc else '')
+                or ''
+            )
+            doc_hash = self._compute_doc_hash(text_for_hash)
+
+        if not self._is_valid_offset(offsets):
+            base_text = normalized.get('content') or normalized.get('raw_span') or ''
+            offsets = [0, len(base_text)]
+
+        note_id = normalized.get('note_id') or normalized.get('id')
+        if not note_id:
+            base_doc = doc_name or (doc.get('doc_name') if doc else 'doc')
+            note_id = f"{base_doc}#{chunk_id}#note_{note_position}"
+
+        content = (
+            normalized.get('content')
+            or normalized.get('raw_span')
+            or normalized.get('summary')
+            or (doc.get('doc_chunk') if doc else '')
+            or ''
+        )
+
+        resolved_doc_name = doc_name or ''
+        if doc is not None:
+            resolved_doc_name = resolved_doc_name or doc.get('doc_name', '')
+
+        normalized.update(
+            {
+                'note_id': str(note_id),
+                'chunk_id': str(chunk_id),
+                'doc_name': resolved_doc_name,
+                'doc_hash': doc_hash,
+                'offsets': list(offsets),
+                'original_index': original_index if original_index is not None else doc_index,
+                'content': content,
+            }
+        )
+
+        metadata.update(
+            {
+                'note_id': normalized['note_id'],
+                'chunk_id': normalized['chunk_id'],
+                'doc_hash': normalized['doc_hash'],
+                'doc_name': normalized['doc_name'],
+                'offsets': normalized['offsets'],
+                'original_index': normalized.get('original_index'),
+            }
+        )
+        normalized['metadata'] = metadata
+
+        if doc is not None:
+            source_info = doc.get('source_info') or {
+                'title': doc.get('doc_name', ''),
+                'document_id': doc.get('mapped_id'),
+                'is_supporting': doc.get('support', False)
+            }
+            normalized.setdefault('source_info', source_info)
+
+        return normalized
+
+    def _collect_atomic_notes_from_doc_pool(self) -> List[Dict[str, Any]]:
+        """Harvest normalized atomic notes from the current doc_pool."""
+        if not self.doc_pool:
             return []
 
-        document_id = source_info.get('document_id') or source_info.get('mapped_id')
-        title = source_info.get('title') or source_info.get('doc_name')
+        self._ensure_doc_pool_indexes()
 
-        candidates: List[int] = []
-        for idx, doc in enumerate(self.doc_pool):
-            if document_id and str(doc.get('mapped_id')) == str(document_id):
-                candidates.append(idx)
+        collected: List[Dict[str, Any]] = []
+        for doc_index, doc in enumerate(self.doc_pool):
+            notes = doc.get('notes')
+            if not notes:
+                doc['notes'] = []
                 continue
 
-            if title and doc.get('doc_name') == title:
-                candidates.append(idx)
+            if not isinstance(notes, list):
+                notes = [notes]
 
-        return candidates
+            normalized_notes = []
+            for note_position, note in enumerate(notes):
+                normalized = self._normalize_atomic_note(
+                    note,
+                    doc,
+                    doc_index=doc_index,
+                    note_position=note_position
+                )
+                if normalized:
+                    normalized_notes.append(normalized)
+                    collected.append(normalized)
+            doc['notes'] = normalized_notes
 
-    def _resolve_doc_pool_index_from_note(self, note: Dict[str, Any]) -> Optional[int]:
-        idx = self._coerce_doc_pool_index(note.get('chunk_index'))
-        if idx is not None:
-            return idx
+        return collected
 
-        metadata = note.get('metadata') or {}
-        idx = self._coerce_doc_pool_index(metadata.get('original_index'))
-        if idx is not None:
-            return idx
+    def _match_doc_for_note(self, note: Dict[str, Any]) -> Tuple[Optional[Dict[str, Any]], Optional[int]]:
+        """Find the doc_pool entry corresponding to a cached note."""
+        if not self.doc_pool:
+            return None, None
 
+        self._ensure_doc_pool_indexes()
+
+        metadata = note.get('metadata', {}) or {}
         chunk_id = note.get('chunk_id') or metadata.get('chunk_id')
+        doc_hash = note.get('doc_hash') or metadata.get('doc_hash')
+        offsets = note.get('offsets') or metadata.get('offsets')
+        doc_name = note.get('doc_name') or metadata.get('doc_name') or ''
+        original_index = note.get('original_index', metadata.get('original_index'))
+
+        if isinstance(original_index, str):
+            try:
+                original_index = int(original_index)
+            except ValueError:
+                original_index = None
+
+        if original_index is not None and 0 <= original_index < len(self.doc_pool):
+            candidate = self.doc_pool[original_index]
+            if self._verify_doc_match(candidate, chunk_id, doc_hash, offsets):
+                return candidate, original_index
+
         if chunk_id:
-            self._ensure_doc_pool_indexes()
-            mapped_idx = self.doc_pool_index_by_chunk_id.get(str(chunk_id))
-            if mapped_idx is not None:
-                return mapped_idx
+            idx = self.doc_pool_index_by_chunk_id.get(str(chunk_id))
+            if idx is not None:
+                candidate = self.doc_pool[idx]
+                if self._verify_doc_match(candidate, chunk_id, doc_hash, offsets):
+                    return candidate, idx
 
-        source_info = note.get('source_info') or {}
-        candidates = self._find_doc_pool_candidates_by_source(source_info)
-        if len(candidates) == 1:
-            return candidates[0]
+        if doc_hash:
+            for idx in self.doc_pool_index_by_hash.get(doc_hash, []):
+                candidate = self.doc_pool[idx]
+                if doc_name and candidate.get('doc_name') != doc_name:
+                    continue
+                if self._verify_doc_match(candidate, None, doc_hash, offsets):
+                    return candidate, idx
 
-        if len(candidates) > 1:
-            supporting = source_info.get('is_supporting')
-            if supporting is not None:
-                for candidate in candidates:
-                    if bool(self.doc_pool[candidate].get('support', False)) == bool(supporting):
-                        return candidate
-            return candidates[0]
+        offset_idx = self._lookup_by_offsets(doc_name, offsets)
+        if offset_idx is not None and 0 <= offset_idx < len(self.doc_pool):
+            return self.doc_pool[offset_idx], offset_idx
 
-        return None
+        return None, None
+
+    def _load_cached_atomic_notes(self) -> List[Dict[str, Any]]:
+        """Load atomic notes from disk and align them with the doc_pool."""
+        notes_path = self.run_dir / "notes" / "atomic_notes.jsonl"
+        if not notes_path.exists():
+            return []
+
+        loaded: List[Dict[str, Any]] = []
+        with open(notes_path, 'r', encoding='utf-8') as handle:
+            for line in handle:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    loaded.append(json.loads(line))
+                except json.JSONDecodeError:
+                    self.logger.warning(f"Failed to parse cached atomic note line: {line[:80]}")
+
+        if not loaded:
+            return []
+
+        normalized: List[Dict[str, Any]] = []
+        for note in loaded:
+            doc, doc_index = self._match_doc_for_note(note)
+            normalized_note = self._normalize_atomic_note(
+                note,
+                doc,
+                doc_index=doc_index,
+                note_position=len(normalized)
+            )
+            if normalized_note:
+                normalized.append(normalized_note)
+                if doc is not None and doc_index is not None and doc_index >= 0:
+                    notes_list = self.doc_pool[doc_index].setdefault('notes', [])
+                    if normalized_note not in notes_list:
+                        notes_list.append(normalized_note)
+
+        return normalized
+
+    def _persist_atomic_notes(self, atomic_notes: List[Dict[str, Any]]) -> None:
+        """Write atomic notes to disk for reuse across runs."""
+        if not atomic_notes:
+            return
+
+        notes_dir = self.run_dir / "notes"
+        notes_dir.mkdir(exist_ok=True)
+        notes_path = notes_dir / "atomic_notes.jsonl"
+
+        with open(notes_path, 'w', encoding='utf-8') as handle:
+            for note in atomic_notes:
+                handle.write(json.dumps(note, ensure_ascii=False) + '\n')
 
     def build_graph(self) -> bool:
         """Build and save knowledge graph (optional)"""
@@ -1222,19 +1427,19 @@ class MirageRunner:
             if not self.load_data():
                 return False
             
-            # Step 2: Build global index (skip for base mode)
+            # Step 2: Generate atomic notes (optional)
+            if not self.generate_atomic_notes():
+                return False
+
+            # Step 3: Build global index (skip for base mode)
             if self.config.mode != "base":
                 if not self.build_global_index():
                     return False
-            
-            # Step 3: Generate atomic notes (optional)
-            if not self.generate_atomic_notes():
-                return False
-            
+
             # Step 3.5: Build graph (optional)
             if not self.build_graph():
                 return False
-            
+
             # Step 4: Initialize LLM
             if not self.initialize_llm():
                 return False
