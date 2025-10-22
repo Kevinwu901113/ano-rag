@@ -286,7 +286,15 @@ DEFAULT_CONFIG: Dict[str, Any] = {
             "enabled": True,
             "allocation_method": "round_robin",
             "enable_fallback": True,
-            "fallback_timeout": 10
+            "fallback_timeout": 10,
+            "client_timeouts": {
+                "ollama": 30,
+                "lmstudio": 90,
+            },
+            "client_retries": {
+                "ollama": 2,
+                "lmstudio": 3,
+            }
         },
         "ollama": {
             "model": "qwen2.5:latest",
