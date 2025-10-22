@@ -7,6 +7,7 @@ from .ollama_client import OllamaClient
 from .openai_client import OpenAIClient
 from .lmstudio_client import LMStudioClient
 from .multi_model_client import MultiModelClient, HybridLLMDispatcher
+from .vllm_openai_client import VllmOpenAIClient
 
 
 class LLMFactory:
@@ -23,6 +24,7 @@ class LLMFactory:
         'lmstudio': LMStudioClient,  # 使用统一的 LM Studio 客户端（支持单实例和并发）
         'multi_model': MultiModelClient,  # 多模型并行客户端
         'hybrid_llm': HybridLLMDispatcher,  # 混合LLM智能调度器
+        'vllm-openai': VllmOpenAIClient,  # vLLM OpenAI兼容客户端
     }
     
     @classmethod
@@ -60,6 +62,8 @@ class LLMFactory:
                 return cls._create_multi_model_provider(**kwargs)
             elif provider_type == 'hybrid_llm':
                 return cls._create_hybrid_llm_provider(**kwargs)
+            elif provider_type == 'vllm-openai':
+                return cls._create_vllm_openai_provider(**kwargs)
             else:
                 raise ValueError(f"Unknown provider type: {provider_type}")
                 
@@ -164,6 +168,36 @@ class LLMFactory:
         
         logger.info("Creating Multi-Model provider for parallel model processing")
         return MultiModelClient()
+    
+    @classmethod
+    def _create_vllm_openai_provider(cls, **kwargs) -> VllmOpenAIClient:
+        """创建 vLLM OpenAI 兼容 Provider
+        
+        Args:
+            **kwargs: 额外参数
+            
+        Returns:
+            VllmOpenAIClient 实例
+        """
+        # 获取 vLLM 配置
+        endpoints = kwargs.get('endpoints') or config.get('llm.note_generator.endpoints', [])
+        model = kwargs.get('model') or config.get('llm.note_generator.model', 'Qwen/Qwen2.5-7B-Instruct')
+        
+        if not endpoints:
+            raise ValueError("vLLM endpoints are required")
+        
+        # 其他配置参数
+        vllm_config = {
+            'max_tokens': kwargs.get('max_tokens') or config.get('llm.note_generator.max_tokens', 96),
+            'temperature': kwargs.get('temperature') or config.get('llm.note_generator.temperature', 0.2),
+            'top_p': kwargs.get('top_p') or config.get('llm.note_generator.top_p', 0.9),
+            'timeout': kwargs.get('timeout') or config.get('llm.note_generator.timeout', 15),
+            'concurrency_per_endpoint': kwargs.get('concurrency_per_endpoint') or config.get('llm.note_generator.concurrency_per_endpoint', 32),
+            'retry': kwargs.get('retry') or config.get('llm.note_generator.retry', {})
+        }
+        
+        logger.info(f"Creating vLLM OpenAI provider with {len(endpoints)} endpoints, model: {model}")
+        return VllmOpenAIClient(endpoints=endpoints, model=model, **vllm_config)
     
     @classmethod
     def get_available_providers(cls) -> Dict[str, bool]:

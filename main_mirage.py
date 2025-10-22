@@ -50,6 +50,7 @@ from llm.lmstudio_client import LMStudioClient
 from llm.atomic_note_generator import AtomicNoteGenerator
 from llm.enhanced_atomic_note_generator import EnhancedAtomicNoteGenerator
 from llm.parallel_task_atomic_note_generator import ParallelTaskAtomicNoteGenerator
+from llm.vllm_atomic_note_generator import VllmAtomicNoteGenerator
 from query.query_processor import QueryProcessor
 from MIRAGE.utils import load_json, convert_doc_pool
 from graph import GraphBuilder, GraphIndex
@@ -490,27 +491,61 @@ class MirageRunner:
             # Initialize LLM for note generation
             llm = LocalLLM()
 
-            # Prefer parallel task generator when enabled in config
-            try:
-                self.note_generator = ParallelTaskAtomicNoteGenerator(
-                    llm=llm,
-                    max_workers=self.config.max_workers_note
-                )
-                self.logger.info("Using ParallelTaskAtomicNoteGenerator")
-            except Exception:
-                # Fallback to enhanced or baseline generators
+            # Check if vLLM provider is configured for note generation
+            note_provider = config.get('llm.note_generator.provider')
+            if note_provider == 'vllm-openai':
                 try:
-                    self.note_generator = EnhancedAtomicNoteGenerator(
+                    self.note_generator = VllmAtomicNoteGenerator(
+                        llm=llm,  # 传入但不会实际使用
+                        max_workers=self.config.max_workers_note
+                    )
+                    self.logger.info("Using VllmAtomicNoteGenerator with dual vLLM instances")
+                except Exception as e:
+                    self.logger.warning(f"Failed to initialize vLLM generator: {e}, falling back to parallel generator")
+                    # 回退到并行任务生成器
+                    try:
+                        self.note_generator = ParallelTaskAtomicNoteGenerator(
+                            llm=llm,
+                            max_workers=self.config.max_workers_note
+                        )
+                        self.logger.info("Using ParallelTaskAtomicNoteGenerator as fallback")
+                    except Exception:
+                        # 继续回退到增强生成器
+                        try:
+                            self.note_generator = EnhancedAtomicNoteGenerator(
+                                llm=llm,
+                                max_workers=self.config.max_workers_note
+                            )
+                            self.logger.info("Using EnhancedAtomicNoteGenerator as fallback")
+                        except Exception:
+                            self.note_generator = AtomicNoteGenerator(
+                                llm=llm,
+                                max_workers=self.config.max_workers_note
+                            )
+                            self.logger.info("Using AtomicNoteGenerator as final fallback")
+            else:
+                # 原有的生成器选择逻辑
+                # Prefer parallel task generator when enabled in config
+                try:
+                    self.note_generator = ParallelTaskAtomicNoteGenerator(
                         llm=llm,
                         max_workers=self.config.max_workers_note
                     )
-                    self.logger.info("Using EnhancedAtomicNoteGenerator")
+                    self.logger.info("Using ParallelTaskAtomicNoteGenerator")
                 except Exception:
-                    self.note_generator = AtomicNoteGenerator(
-                        llm=llm,
-                        max_workers=self.config.max_workers_note
-                    )
-                    self.logger.info("Using AtomicNoteGenerator")
+                    # Fallback to enhanced or baseline generators
+                    try:
+                        self.note_generator = EnhancedAtomicNoteGenerator(
+                            llm=llm,
+                            max_workers=self.config.max_workers_note
+                        )
+                        self.logger.info("Using EnhancedAtomicNoteGenerator")
+                    except Exception:
+                        self.note_generator = AtomicNoteGenerator(
+                            llm=llm,
+                            max_workers=self.config.max_workers_note
+                        )
+                        self.logger.info("Using AtomicNoteGenerator")
             
             # Convert doc_pool to text_chunks format
             text_chunks = []
