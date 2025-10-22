@@ -1,4 +1,4 @@
-from typing import List, Dict, Any, Union, Optional
+from typing import List, Dict, Any, Union, Optional, Tuple
 from loguru import logger
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import threading
@@ -6,7 +6,7 @@ import time
 from .atomic_note_generator import AtomicNoteGenerator
 from .local_llm import LocalLLM
 from .ollama_client import OllamaClient
-from .lmstudio_client import LMStudioClient
+from .lmstudio_client import LMStudioClient, LMStudioGenerationError
 from utils.json_utils import extract_json_from_response
 from utils.notes_parser import enrich_note_keys, normalize_note_fields, parse_notes_response
 from config import config
@@ -27,6 +27,11 @@ class ParallelTaskAtomicNoteGenerator(AtomicNoteGenerator):
         self.allocation_method = self.task_division_config.get('allocation_method', 'round_robin')
         self.enable_fallback = self.task_division_config.get('enable_fallback', True)
         self.fallback_timeout = self.task_division_config.get('fallback_timeout', 10)
+        self.client_timeouts = self.task_division_config.get('client_timeouts', {})
+        self.client_retries = self.task_division_config.get('client_retries', {})
+
+        # Backwards compatibility with previous single timeout setting
+        self.default_client_timeout = self.fallback_timeout
         
         # 初始化客户端
         self.ollama_client = None
@@ -45,7 +50,9 @@ class ParallelTaskAtomicNoteGenerator(AtomicNoteGenerator):
             'lmstudio_errors': 0,
             'ollama_total_time': 0.0,
             'lmstudio_total_time': 0.0,
-            'fallback_count': 0
+            'fallback_count': 0,
+            'lmstudio_empty_completions': 0,
+            'lmstudio_transport_errors': 0
         }
         self._stats_lock = threading.Lock()
         
@@ -151,12 +158,15 @@ class ParallelTaskAtomicNoteGenerator(AtomicNoteGenerator):
                 future_to_meta[future] = (index, 'lmstudio', chunk_data)
 
             # 收集结果
-            timeout_value = self.fallback_timeout if self.enable_fallback else None
             for future in as_completed(futures):
                 index, client_type, chunk_data = future_to_meta.get(future, (-1, 'unknown', {}))
                 try:
+                    timeout_value = None
+                    if self.enable_fallback:
+                        timeout_value = self.client_timeouts.get(client_type, self.default_client_timeout)
+                    timeout_repr = f"{timeout_value}s" if timeout_value is not None else "no timeout"
                     # 使用更长的超时时间，并添加详细的超时信息
-                    logger.debug(f"Waiting for {client_type} task {index} with timeout {timeout_value}s")
+                    logger.debug(f"Waiting for {client_type} task {index} with timeout {timeout_repr}")
 
                     batch = future.result(timeout=timeout_value)
                     normalized_batch: List[Dict[str, Any]] = []
@@ -188,10 +198,21 @@ class ParallelTaskAtomicNoteGenerator(AtomicNoteGenerator):
 
                     # 特殊处理TimeoutError
                     if isinstance(e, TimeoutError):
-                        error_msg = f"Task timeout after {self.fallback_timeout}s - consider increasing fallback_timeout in config"
-                        logger.error(f"Task failed for index {index} using {client_type}: [{error_type}] {error_msg}")
-                    else:
-                        logger.error(f"Task failed for index {index} using {client_type}: [{error_type}] {error_msg}")
+                        timeout_str = timeout_repr
+                        error_msg = (
+                            f"Task timeout after {timeout_str} - consider updating client_timeouts[{client_type}] in config"
+                        )
+                    elif isinstance(e, LMStudioGenerationError) and client_type == 'lmstudio':
+                        if e.is_timeout:
+                            error_msg = (
+                                f"LM Studio request timed out after {timeout_repr}: {error_msg}"
+                            )
+                        elif e.is_transport_error:
+                            error_msg = f"LM Studio transport error: {error_msg}"
+
+                    logger.error(
+                        f"Task failed for index {index} using {client_type}: [{error_type}] {error_msg}"
+                    )
 
                     # 获取完整的traceback信息
                     import traceback
@@ -207,10 +228,13 @@ class ParallelTaskAtomicNoteGenerator(AtomicNoteGenerator):
                     # 失败回退处理
                     if self.enable_fallback:
                         try:
-                            fallback_result = self._fallback_process(chunk_data, system_prompt, client_type)
+                            fallback_result, used_alternate_client = self._fallback_process(
+                                chunk_data, system_prompt, client_type
+                            )
                         except Exception as fallback_error:
                             logger.error(f"Fallback also failed for index {index}: {fallback_error}")
                             fallback_result = []
+                            used_alternate_client = True
 
                         normalized_fallback: List[Dict[str, Any]] = []
                         if isinstance(fallback_result, list):
@@ -226,8 +250,9 @@ class ParallelTaskAtomicNoteGenerator(AtomicNoteGenerator):
                             normalized_fallback = [self._create_fallback_note(chunk_data)]
 
                         all_notes.extend(normalized_fallback)
-                        with self._stats_lock:
-                            self.stats['fallback_count'] += 1
+                        if used_alternate_client:
+                            with self._stats_lock:
+                                self.stats['fallback_count'] += 1
                     else:
                         all_notes.append(self._create_fallback_note(chunk_data))
                     if progress_tracker:
@@ -372,24 +397,29 @@ class ParallelTaskAtomicNoteGenerator(AtomicNoteGenerator):
         try:
             text = chunk_data.get('text', '')
             prompt = self._format_atomic_note_prompt(chunk_data)
-            
+
             logger.debug(f"LMStudio processing task {index}, text length: {len(text)}")
-            
+
             llm_params = self._get_optimized_llm_params()
             response = self.lmstudio_client.generate(
                 prompt,
                 system_prompt,
                 **llm_params,
             )
-            
+
             # 检查响应是否为空
             if not response or response.strip() == "":
-                logger.error(f"LMStudio task {index}: Empty response received")
-                raise ValueError("LMStudio returned empty response - possible connection or model issue")
-            
+                logger.info(f"LMStudio task {index}: Empty completion received")
+                with self._stats_lock:
+                    self.stats['lmstudio_empty_completions'] += 1
+                processing_time = time.time() - start_time
+                with self._stats_lock:
+                    self.stats['lmstudio_total_time'] += processing_time
+                return []
+
             logger.debug(f"LMStudio task {index}: Response length: {len(response)}")
             logger.debug(f"LMStudio task {index}: Raw response: {response[:500]}...")
-            
+
             # 解析响应
             cleaned_response = extract_json_from_response(response)
             parse_target = cleaned_response or response
@@ -407,6 +437,15 @@ class ParallelTaskAtomicNoteGenerator(AtomicNoteGenerator):
                     f"No valid JSON found in LM Studio response: {response[:200]}..."
                 )
 
+            if isinstance(parsed_notes, list) and len(parsed_notes) == 0:
+                logger.info(f"LMStudio task {index}: Parsed empty note list")
+                with self._stats_lock:
+                    self.stats['lmstudio_empty_completions'] += 1
+                processing_time = time.time() - start_time
+                with self._stats_lock:
+                    self.stats['lmstudio_total_time'] += processing_time
+                return []
+
             results = self._batch_convert(parsed_notes, chunk_data)
 
             # Debug log the generated content
@@ -417,14 +456,27 @@ class ParallelTaskAtomicNoteGenerator(AtomicNoteGenerator):
                 logger.debug(f"LMStudio task {index}: Generated {len(results)} notes, first content length: {content_length}, preview: {content[:100] if content else 'EMPTY'}")
             else:
                 logger.debug(f"LMStudio task {index}: No valid notes produced from response")
-            
+                with self._stats_lock:
+                    self.stats['lmstudio_empty_completions'] += 1
+                processing_time = time.time() - start_time
+                with self._stats_lock:
+                    self.stats['lmstudio_total_time'] += processing_time
+                return []
+
             # 记录处理时间
             processing_time = time.time() - start_time
             with self._stats_lock:
                 self.stats['lmstudio_total_time'] += processing_time
-            
+
             return results
-            
+
+        except LMStudioGenerationError as e:
+            processing_time = time.time() - start_time
+            with self._stats_lock:
+                self.stats['lmstudio_total_time'] += processing_time
+                if e.is_transport_error:
+                    self.stats['lmstudio_transport_errors'] += 1
+            raise e
         except Exception as e:
             processing_time = time.time() - start_time
             with self._stats_lock:
@@ -475,38 +527,50 @@ class ParallelTaskAtomicNoteGenerator(AtomicNoteGenerator):
             logger.error(f"LM Studio processing failed: {e}")
             return self._create_fallback_note(chunk_data)
             
-    def _fallback_process(self, chunk_data: Dict[str, Any], system_prompt: str, failed_client: str) -> Union[List[Dict[str, Any]], Dict[str, Any]]:
-        """回退处理机制，包含重试逻辑"""
+    def _fallback_process(
+        self,
+        chunk_data: Dict[str, Any],
+        system_prompt: str,
+        failed_client: str,
+    ) -> Tuple[Union[List[Dict[str, Any]], Dict[str, Any]], bool]:
+        """回退处理机制，包含重试逻辑
+
+        Returns a tuple of (fallback_result, used_alternate_client) so the caller can
+        distinguish between retries on the same provider and cross-provider fallback.
+        """
         logger.info(f"Attempting fallback for failed {failed_client} task")
-        
+
         # 首先尝试重试原客户端（可能是临时网络问题）
-        max_retries = 2
+        max_retries = self.client_retries.get(
+            failed_client,
+            self.task_division_config.get('fallback_retries', 2),
+        )
         for retry in range(max_retries):
             try:
                 logger.info(f"Retry {retry + 1}/{max_retries} with {failed_client}")
                 if failed_client == 'ollama' and self.ollama_client:
-                    return self._process_with_ollama(chunk_data, -1, system_prompt)
+                    return self._process_with_ollama(chunk_data, -1, system_prompt), False
                 elif failed_client == 'lmstudio' and self.lmstudio_client:
-                    return self._process_with_lmstudio(chunk_data, -1, system_prompt)
+                    return self._process_with_lmstudio(chunk_data, -1, system_prompt), False
             except Exception as e:
                 logger.warning(f"Retry {retry + 1} failed: {e}")
                 if retry == max_retries - 1:
                     break
-        
+
         # 选择备用客户端
         try:
             if failed_client == 'ollama' and self.lmstudio_client:
                 logger.info("Switching to LM Studio as fallback")
-                return self._process_with_lmstudio(chunk_data, -1, system_prompt)
+                return self._process_with_lmstudio(chunk_data, -1, system_prompt), True
             elif failed_client == 'lmstudio' and self.ollama_client:
                 logger.info("Switching to Ollama as fallback")
-                return self._process_with_ollama(chunk_data, -1, system_prompt)
+                return self._process_with_ollama(chunk_data, -1, system_prompt), True
         except Exception as e:
             logger.error(f"Fallback client also failed: {e}")
-        
+
         # 最后使用原始LLM
         logger.warning("All parallel clients failed, using original LLM")
-        return self._fallback_to_original_llm(chunk_data, system_prompt)
+        return self._fallback_to_original_llm(chunk_data, system_prompt), True
     
     def _fallback_to_original_llm(self, chunk_data: Dict[str, Any], system_prompt: str) -> Union[List[Dict[str, Any]], Dict[str, Any]]:
         """使用原始LLM作为最终回退"""
@@ -544,6 +608,11 @@ class ParallelTaskAtomicNoteGenerator(AtomicNoteGenerator):
         logger.info("=== Parallel Processing Performance Stats ===")
         logger.info(f"Ollama: {stats['ollama_tasks']} tasks, {stats['ollama_success']} success, {stats['ollama_errors']} errors")
         logger.info(f"LM Studio: {stats['lmstudio_tasks']} tasks, {stats['lmstudio_success']} success, {stats['lmstudio_errors']} errors")
+        logger.info(
+            "LM Studio details: "
+            f"{stats['lmstudio_empty_completions']} empty completions, "
+            f"{stats['lmstudio_transport_errors']} transport errors"
+        )
         logger.info(f"Fallback count: {stats['fallback_count']}")
         
         if stats['ollama_tasks'] > 0:
@@ -581,5 +650,7 @@ class ParallelTaskAtomicNoteGenerator(AtomicNoteGenerator):
                 'lmstudio_errors': 0,
                 'ollama_total_time': 0.0,
                 'lmstudio_total_time': 0.0,
-                'fallback_count': 0
+                'fallback_count': 0,
+                'lmstudio_empty_completions': 0,
+                'lmstudio_transport_errors': 0
             }
