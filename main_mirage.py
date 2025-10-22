@@ -29,6 +29,7 @@ import time
 import hashlib
 import argparse
 import logging
+from collections import defaultdict
 from pathlib import Path
 from datetime import datetime
 from typing import Dict, List, Any, Optional, Tuple, Union
@@ -432,7 +433,7 @@ class MirageRunner:
         """Generate atomic notes from doc_pool (optional)"""
         if not self.config.enable_notes:
             return True
-        
+
         try:
             self.logger.info("Generating atomic notes...")
             start_time = time.time()
@@ -478,25 +479,107 @@ class MirageRunner:
             
             # Generate notes
             notes = self.note_generator.generate_atomic_notes(text_chunks)
-            self.logger.info(f"Generated {sum(len(n.get('notes', [])) for n in notes)} notes across {len(text_chunks)} chunks")
-            
+
+            grouped_notes: Dict[int, List[Dict[str, Any]]] = defaultdict(list)
+            unmatched_notes: List[Dict[str, Any]] = []
+
+            for note in notes:
+                idx = self._resolve_doc_pool_index_from_note(note)
+                if idx is None:
+                    unmatched_notes.append(note)
+                    continue
+                grouped_notes[idx].append(note)
+
             # Store notes back in doc_pool for downstream use
-            for i, note_result in enumerate(notes):
-                self.doc_pool[i]['notes'] = note_result.get('notes', [])
-            
+            for i in range(len(self.doc_pool)):
+                self.doc_pool[i]['notes'] = grouped_notes.get(i, [])
+
+            noted_chunks = sum(1 for doc in self.doc_pool if doc.get('notes'))
+            self.logger.info(
+                f"Generated {len(notes)} notes mapped to {noted_chunks} doc chunks out of {len(self.doc_pool)}"
+            )
+
+            if unmatched_notes:
+                self.logger.warning(
+                    f"{len(unmatched_notes)} notes could not be matched back to doc_pool entries"
+                )
+
+            # Cache flattened atomic notes for downstream consumers (graph build, exports)
+            self.atomic_notes = notes
+
             self.stats['note_generation_time'] = time.time() - start_time
             self.logger.info(f"Atomic notes generation completed in {self.stats['note_generation_time']:.2f}s")
             return True
-        
+
         except Exception as e:
             self.logger.error(f"Failed to generate atomic notes: {e}")
             return False
+
+    def _coerce_doc_pool_index(self, value: Any) -> Optional[int]:
+        try:
+            if value is None:
+                return None
+            idx = int(value)
+        except (TypeError, ValueError):
+            return None
+
+        return idx if 0 <= idx < len(self.doc_pool) else None
+
+    def _find_doc_pool_candidates_by_source(self, source_info: Dict[str, Any]) -> List[int]:
+        if not source_info:
+            return []
+
+        document_id = source_info.get('document_id') or source_info.get('mapped_id')
+        title = source_info.get('title') or source_info.get('doc_name')
+
+        candidates: List[int] = []
+        for idx, doc in enumerate(self.doc_pool):
+            if document_id and str(doc.get('mapped_id')) == str(document_id):
+                candidates.append(idx)
+                continue
+
+            if title and doc.get('doc_name') == title:
+                candidates.append(idx)
+
+        return candidates
+
+    def _resolve_doc_pool_index_from_note(self, note: Dict[str, Any]) -> Optional[int]:
+        idx = self._coerce_doc_pool_index(note.get('chunk_index'))
+        if idx is not None:
+            return idx
+
+        metadata = note.get('metadata') or {}
+        idx = self._coerce_doc_pool_index(metadata.get('original_index'))
+        if idx is not None:
+            return idx
+
+        chunk_id = note.get('chunk_id') or metadata.get('chunk_id')
+        if chunk_id:
+            self._ensure_doc_pool_indexes()
+            mapped_idx = self.doc_pool_index_by_chunk_id.get(str(chunk_id))
+            if mapped_idx is not None:
+                return mapped_idx
+
+        source_info = note.get('source_info') or {}
+        candidates = self._find_doc_pool_candidates_by_source(source_info)
+        if len(candidates) == 1:
+            return candidates[0]
+
+        if len(candidates) > 1:
+            supporting = source_info.get('is_supporting')
+            if supporting is not None:
+                for candidate in candidates:
+                    if bool(self.doc_pool[candidate].get('support', False)) == bool(supporting):
+                        return candidate
+            return candidates[0]
+
+        return None
 
     def build_graph(self) -> bool:
         """Build and save knowledge graph (optional)"""
         if not self.config.enable_graph:
             return True
-            
+
         # Prefer generated atomic notes; fall back to doc_pool conversion
         if hasattr(self, 'atomic_notes') and self.atomic_notes:
             notes_for_graph = self.atomic_notes
