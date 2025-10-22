@@ -13,8 +13,8 @@ from utils.logging_utils import (
     log_retrieval_metrics, log_diversity_metrics, log_path_aware_metrics
 )
 
-from llm import OllamaClient, LocalLLM
-from llm.multi_model_client import HybridLLMDispatcher
+from llm import OllamaClient, LocalLLM, LMStudioClient
+from llm.factory import LLMFactory
 from llm.prompts import build_context_prompt, build_context_prompt_with_passages
 from utils.robust_json_parser import extract_prediction_with_retry
 from vector_store import VectorRetriever, EnhancedRecallOptimizer
@@ -264,17 +264,24 @@ Prompt Length: {len(prompt)} characters
             FileUtils.ensure_dir(vector_store_dir)
             FileUtils.ensure_dir(vector_index_dir)
             self.vector_retriever.data_dir = vector_store_dir
-            self.vector_retriever.vector_index.index_dir = vector_index_dir
+            # 兼容测试替身：DummyVectorRetriever 可能没有 vector_index 属性
+            if hasattr(self.vector_retriever, 'vector_index') and hasattr(self.vector_retriever.vector_index, 'index_dir'):
+                self.vector_retriever.vector_index.index_dir = vector_index_dir
         if vector_index_file and os.path.exists(vector_index_file):
             try:
                 # adjust storage directories
                 dir_path = os.path.dirname(vector_index_file)
                 self.vector_retriever.data_dir = dir_path
-                self.vector_retriever.vector_index.index_dir = dir_path
-                # load index directly
-                self.vector_retriever.vector_index.load_index(os.path.basename(vector_index_file))
+                # 兼容测试替身：条件存在才设置/加载索引
+                if hasattr(self.vector_retriever, 'vector_index'):
+                    if hasattr(self.vector_retriever.vector_index, 'index_dir'):
+                        self.vector_retriever.vector_index.index_dir = dir_path
+                    # load index directly if method exists
+                    if hasattr(self.vector_retriever.vector_index, 'load_index'):
+                        self.vector_retriever.vector_index.load_index(os.path.basename(vector_index_file))
                 self.vector_retriever.atomic_notes = atomic_notes
-                self.vector_retriever._build_id_mappings()
+                if hasattr(self.vector_retriever, '_build_id_mappings'):
+                    self.vector_retriever._build_id_mappings()
                 # load stored embeddings if available
                 embed_file = os.path.join(dir_path, "note_embeddings.npz")
                 if os.path.exists(embed_file):
@@ -355,16 +362,16 @@ Prompt Length: {len(prompt)} characters
         else:
             self.recall_optimizer = EnhancedRecallOptimizer(self.vector_retriever, self.graph_retriever)
 
-        # 初始化LLM客户端 - 支持混合模式
-        llm_provider = self._llm_cfg.get('provider', 'ollama')
-        if llm_provider == 'hybrid_llm':
-            self.llm_client = HybridLLMDispatcher()
-            logger.info("Using HybridLLMDispatcher for intelligent task routing")
-        else:
-            self.llm_client = OllamaClient()
-            logger.info(f"Using single LLM provider: {llm_provider}")
+        # 初始化LLM客户端：统一走工厂，根据配置选择 lmstudio 或 ollama
+        llm_provider = self._llm_cfg.get('provider', 'lmstudio')
+        try:
+            self.llm_client = LLMFactory.create_provider(llm_provider)
+            logger.info(f"Using LLM provider: {llm_provider}")
+        except Exception as e:
+            logger.error(f"Failed to create LLM provider '{llm_provider}': {e}. Falling back to LMStudioClient.")
+            self.llm_client = LMStudioClient()
         
-        # 保持向后兼容性
+        # 保持向后兼容性（历史变量名）
         self.ollama = self.llm_client
         self.atomic_notes = atomic_notes
         

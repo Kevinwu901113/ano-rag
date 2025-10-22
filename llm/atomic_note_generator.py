@@ -75,13 +75,7 @@ class AtomicNoteGenerator:
         self.llm = llm
         self._atomic_prompt_cache: Optional[Tuple[str, str]] = None
 
-        # 检查是否为hybrid模式并使用单例HybridLLMDispatcher
-        self.is_hybrid_mode = getattr(llm, 'is_hybrid_mode', False)
-        self.hybrid_dispatcher = None
-        if self.is_hybrid_mode:
-            from .multi_model_client import HybridLLMDispatcher
-            self.hybrid_dispatcher = HybridLLMDispatcher()  # 单例模式，自动重用实例
-            logger.info("AtomicNoteGenerator using HybridLLMDispatcher singleton instance")
+        # 移除混合LLM模式支持
 
         default_max_workers = config.get('document.concurrent_processing.max_workers', 4)
         self.max_concurrent_workers = max_workers if max_workers is not None else default_max_workers

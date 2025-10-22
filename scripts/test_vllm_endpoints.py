@@ -10,6 +10,13 @@ import json
 import time
 from typing import List, Dict, Any
 
+# 防止被 pytest 收集：这是脚本风格的端点检查，不符合 pytest 测试函数签名
+try:
+    import pytest
+    pytestmark = pytest.mark.skip(reason="Script-style vLLM endpoint check; skip during pytest collection")
+except Exception:
+    pass
+
 # 测试端点配置
 ENDPOINTS = [
     "http://127.0.0.1:8000/v1",

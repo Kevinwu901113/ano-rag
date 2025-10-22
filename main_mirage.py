@@ -47,13 +47,15 @@ from utils.logging_utils import setup_logging
 from vector_store import VectorRetriever, EmbeddingManager
 from llm.local_llm import LocalLLM
 from llm.lmstudio_client import LMStudioClient
-from llm.atomic_note_generator import AtomicNoteGenerator
-from llm.enhanced_atomic_note_generator import EnhancedAtomicNoteGenerator
-from llm.parallel_task_atomic_note_generator import ParallelTaskAtomicNoteGenerator
 from llm.vllm_atomic_note_generator import VllmAtomicNoteGenerator
 from query.query_processor import QueryProcessor
 from MIRAGE.utils import load_json, convert_doc_pool
 from graph import GraphBuilder, GraphIndex
+from llm.atomic_note_generator import AtomicNoteGenerator
+
+# 兼容占位：供测试猴子补丁替换
+ParallelTaskAtomicNoteGenerator = AtomicNoteGenerator
+EnhancedAtomicNoteGenerator = AtomicNoteGenerator
 
 # Constants
 MIRAGE_DATA_DIR = "mirage"
@@ -124,7 +126,7 @@ class MirageRunner:
         self.retriever: Optional[VectorRetriever] = None
         self.embedding_manager: Optional[EmbeddingManager] = None
         self.llm_client: Optional[Union[LocalLLM, LMStudioClient]] = None
-        self.note_generator: Optional[AtomicNoteGenerator] = None
+        self.note_generator: Optional[VllmAtomicNoteGenerator] = None
         self.query_processor: Optional[QueryProcessor] = None
         self.atomic_notes: List[Dict[str, Any]] = []
 
@@ -491,61 +493,76 @@ class MirageRunner:
             # Initialize LLM for note generation
             llm = LocalLLM()
 
-            # Check if vLLM provider is configured for note generation
-            note_provider = config.get('llm.note_generator.provider')
-            if note_provider == 'vllm-openai':
+            # 根据配置选择笔记生成器，支持并传递 max_workers，含回退链
+            engines = [e.lower() for e in (self.config.note_engines or [])]
+            preferred = engines or ["parallel", "enhanced", "basic"]
+            self.note_generator = None
+            errors = []
+            for engine in preferred:
                 try:
-                    self.note_generator = VllmAtomicNoteGenerator(
-                        llm=llm,  # 传入但不会实际使用
-                        max_workers=self.config.max_workers_note
-                    )
-                    self.logger.info("Using VllmAtomicNoteGenerator with dual vLLM instances")
-                except Exception as e:
-                    self.logger.warning(f"Failed to initialize vLLM generator: {e}, falling back to parallel generator")
-                    # 回退到并行任务生成器
-                    try:
+                    if engine == "vllm":
+                        self.note_generator = VllmAtomicNoteGenerator(
+                            llm=llm,
+                            max_workers=self.config.max_workers_note
+                        )
+                        self.logger.info("Using VllmAtomicNoteGenerator")
+                        break
+                    elif engine == "parallel":
                         self.note_generator = ParallelTaskAtomicNoteGenerator(
                             llm=llm,
                             max_workers=self.config.max_workers_note
                         )
-                        self.logger.info("Using ParallelTaskAtomicNoteGenerator as fallback")
-                    except Exception:
-                        # 继续回退到增强生成器
-                        try:
-                            self.note_generator = EnhancedAtomicNoteGenerator(
-                                llm=llm,
-                                max_workers=self.config.max_workers_note
-                            )
-                            self.logger.info("Using EnhancedAtomicNoteGenerator as fallback")
-                        except Exception:
-                            self.note_generator = AtomicNoteGenerator(
-                                llm=llm,
-                                max_workers=self.config.max_workers_note
-                            )
-                            self.logger.info("Using AtomicNoteGenerator as final fallback")
-            else:
-                # 原有的生成器选择逻辑
-                # Prefer parallel task generator when enabled in config
-                try:
-                    self.note_generator = ParallelTaskAtomicNoteGenerator(
-                        llm=llm,
-                        max_workers=self.config.max_workers_note
-                    )
-                    self.logger.info("Using ParallelTaskAtomicNoteGenerator")
-                except Exception:
-                    # Fallback to enhanced or baseline generators
-                    try:
+                        self.logger.info("Using ParallelTaskAtomicNoteGenerator")
+                        break
+                    elif engine == "enhanced":
                         self.note_generator = EnhancedAtomicNoteGenerator(
                             llm=llm,
                             max_workers=self.config.max_workers_note
                         )
                         self.logger.info("Using EnhancedAtomicNoteGenerator")
-                    except Exception:
+                        break
+                    elif engine == "basic":
                         self.note_generator = AtomicNoteGenerator(
                             llm=llm,
                             max_workers=self.config.max_workers_note
                         )
                         self.logger.info("Using AtomicNoteGenerator")
+                        break
+                except Exception as e:
+                    errors.append(f"{engine}: {e}")
+                    continue
+
+            if self.note_generator is None:
+                for engine in ["parallel", "enhanced", "basic"]:
+                    try:
+                        if engine == "parallel":
+                            self.note_generator = ParallelTaskAtomicNoteGenerator(
+                                llm=llm,
+                                max_workers=self.config.max_workers_note
+                            )
+                            self.logger.info("Using ParallelTaskAtomicNoteGenerator (fallback)")
+                            break
+                        elif engine == "enhanced":
+                            self.note_generator = EnhancedAtomicNoteGenerator(
+                                llm=llm,
+                                max_workers=self.config.max_workers_note
+                            )
+                            self.logger.info("Using EnhancedAtomicNoteGenerator (fallback)")
+                            break
+                        else:
+                            self.note_generator = AtomicNoteGenerator(
+                                llm=llm,
+                                max_workers=self.config.max_workers_note
+                            )
+                            self.logger.info("Using AtomicNoteGenerator (fallback)")
+                            break
+                    except Exception as e:
+                        errors.append(f"{engine}: {e}")
+                        continue
+
+            if self.note_generator is None:
+                self.logger.error(f"Failed to initialize note generator: {errors}")
+                return False
             
             # Convert doc_pool to text_chunks format
             text_chunks = []
@@ -563,12 +580,44 @@ class MirageRunner:
             
             # Generate notes
             notes = self.note_generator.generate_atomic_notes(text_chunks)
-            self.logger.info(f"Generated {sum(len(n.get('notes', [])) for n in notes)} notes across {len(text_chunks)} chunks")
+
+            # 适配不同返回格式：支持扁平笔记列表或按chunk返回
+            grouped_by_chunk = {i: [] for i in range(len(text_chunks))}
+            if isinstance(notes, list) and notes and isinstance(notes[0], dict) and ('notes' not in notes[0]):
+                # 扁平列表：按 chunk_index 或 source_info 分组
+                for note in notes:
+                    idx = None
+                    # 优先使用 chunk_index
+                    if isinstance(note.get('chunk_index'), (int, str)):
+                        try:
+                            idx = int(note['chunk_index'])
+                        except Exception:
+                            idx = None
+                    # 回退：根据 source_info.document_id 匹配 doc_pool
+                    if idx is None:
+                        src = note.get('source_info') or {}
+                        doc_id = src.get('document_id')
+                        if doc_id:
+                            for j, doc in enumerate(self.doc_pool):
+                                if doc.get('mapped_id') == doc_id:
+                                    idx = j
+                                    break
+                    if idx is None or idx < 0 or idx >= len(text_chunks):
+                        continue
+                    grouped_by_chunk[idx].append(note)
+            else:
+                # 按chunk返回：每项应为 {'notes': [...]} 或类似结构
+                for idx in range(len(text_chunks)):
+                    item = notes[idx] if idx < len(notes) else {}
+                    if isinstance(item, dict):
+                        grouped_by_chunk[idx] = item.get('notes', [])
+
+            total_notes = sum(len(v) for v in grouped_by_chunk.values())
+            self.logger.info(f"Generated {total_notes} notes across {len(text_chunks)} chunks")
 
             # Store notes back in doc_pool for downstream use
             for idx, doc in enumerate(self.doc_pool):
-                note_result = notes[idx] if idx < len(notes) else {}
-                raw_notes = note_result.get('notes', []) if isinstance(note_result, dict) else []
+                raw_notes = grouped_by_chunk.get(idx, [])
                 normalized_notes = []
                 for note_idx, note in enumerate(raw_notes):
                     normalized = self._normalize_atomic_note(

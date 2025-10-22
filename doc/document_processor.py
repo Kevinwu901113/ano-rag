@@ -8,8 +8,8 @@ from networkx.readwrite import json_graph
 from .chunker import DocumentChunker
 from .clustering import TopicClustering
 from .incremental_processor import IncrementalProcessor
-from llm import AtomicNoteGenerator, LocalLLM
-from llm.parallel_task_atomic_note_generator import ParallelTaskAtomicNoteGenerator
+from llm import LocalLLM
+from llm.vllm_atomic_note_generator import VllmAtomicNoteGenerator
 from utils import BatchProcessor, FileUtils, JSONLProgressTracker
 from utils.enhanced_ner import EnhancedNER
 from utils.consistency_checker import ConsistencyChecker
@@ -41,15 +41,9 @@ class DocumentProcessor:
             raise ValueError("DocumentProcessor requires a LocalLLM instance to be passed")
         self.llm = llm
         
-        # 选择原子笔记生成器：优先使用并行任务分配生成器
-        parallel_config = config.get('atomic_note_generation', {})
-        if (parallel_config.get('parallel_enabled', False) and 
-            parallel_config.get('parallel_strategy') == 'task_division'):
-            logger.info("Using ParallelTaskAtomicNoteGenerator for atomic note generation")
-            self.atomic_note_generator = ParallelTaskAtomicNoteGenerator(self.llm)
-        else:
-            logger.info("Using standard AtomicNoteGenerator for atomic note generation")
-            self.atomic_note_generator = AtomicNoteGenerator(self.llm)
+        # 统一使用 vLLM 作为原子笔记生成器
+        logger.info("Using VllmAtomicNoteGenerator for atomic note generation")
+        self.atomic_note_generator = VllmAtomicNoteGenerator(self.llm)
         self.batch_processor = BatchProcessor(
             batch_size=config.get('document.batch_size', 32),
             use_gpu=config.get('performance.use_gpu', True)

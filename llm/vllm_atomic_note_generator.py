@@ -62,16 +62,12 @@ class VllmAtomicNoteGenerator(AtomicNoteGenerator):
     def _init_vllm_client(self, **kwargs) -> VllmOpenAIClient:
         """初始化vLLM客户端"""
         try:
-            # 从配置或参数获取vLLM设置
-            endpoints = kwargs.get('endpoints') or config.get('llm.note_generator.endpoints', [])
-            model = kwargs.get('model') or config.get('llm.note_generator.model', 'Qwen/Qwen2.5-7B-Instruct')
+            # 读取模型名称（如未配置则给出合理默认值）
+            _ = kwargs.get('model') or config.get('llm.note_generator.model', 'Qwen/Qwen2.5-7B-Instruct')
             
-            if not endpoints:
-                raise ValueError("vLLM endpoints not configured")
-            
-            # 使用工厂创建vLLM客户端
-            client = LLMFactory.create_provider('vllm-openai', **kwargs)
-            logger.info(f"vLLM client initialized with {len(endpoints)} endpoints")
+            # 使用工厂创建vLLM客户端（工厂内部读取配置，无需显式传参）
+            client = LLMFactory.create_provider('vllm-openai')
+            logger.info("vLLM client initialized via factory provider")
             
             return client
             
@@ -119,210 +115,146 @@ class VllmAtomicNoteGenerator(AtomicNoteGenerator):
             return atomic_notes
             
         except Exception as e:
-            logger.error(f"vLLM atomic note generation failed: {e}")
-            # 回退到父类方法
-            logger.info("Falling back to sequential processing")
-            return super().generate_atomic_notes(text_chunks, progress_tracker)
+            logger.error(f"Failed to generate atomic notes: {e}")
+            raise
     
     async def _generate_atomic_notes_async(self, text_chunks: List[Dict[str, Any]], progress_tracker: Optional[Any] = None) -> List[Dict[str, Any]]:
         """
-        异步生成原子笔记
-        
-        Args:
-            text_chunks: 文本块列表
-            progress_tracker: 进度跟踪器
-            
-        Returns:
-            原子笔记列表
+        异步生成原子笔记，使用分桶调度批处理请求
         """
-        if not text_chunks:
-            return []
+        # 统计桶分布
+        for idx, chunk in enumerate(text_chunks):
+            prompt = self._format_atomic_note_prompt(chunk)
+            # 将原始索引写入调度项，便于结果映射
+            bucket_id = self.bucket_scheduler.add_request(prompt, self._get_atomic_note_system_prompt(), index=idx)
+            self.vllm_stats['bucket_distribution'][bucket_id] = self.vllm_stats['bucket_distribution'].get(bucket_id, 0) + 1
         
-        # 获取系统提示
-        system_prompt = self._get_atomic_note_system_prompt()
+        # 批量并发处理
+        results: List[Dict[str, Any]] = [None] * len(text_chunks)
         
-        # 将请求添加到分桶调度器
-        request_ids = []
-        chunk_mapping = {}  # request_id -> chunk_data 映射
-        
-        for chunk_data in text_chunks:
-            prompt = self._format_atomic_note_prompt(chunk_data)
-            request_id = self.bucket_scheduler.add_request(prompt, system_prompt)
-            request_ids.append(request_id)
-            chunk_mapping[request_id] = chunk_data
-        
-        # 记录分桶统计
-        bucket_stats = self.bucket_scheduler.get_bucket_stats()
-        self.vllm_stats['bucket_distribution'] = bucket_stats
-        logger.info(f"Requests distributed across buckets: {bucket_stats}")
-        
-        # 使用分桶调度器处理请求
-        results = await self.bucket_scheduler.process_with_client(self.vllm_client, system_prompt)
-        
-        # 处理结果并转换为原子笔记格式
-        atomic_notes = []
-        for request_id in request_ids:
-            chunk_data = chunk_mapping[request_id]
-            response = results.get(request_id, "")
+        async def process_bucket(bucket_id: int, items):
+            # items 为 BucketRequest 列表
+            prompts = [it.prompt for it in items]
+            system_prompt = self._get_atomic_note_system_prompt()
             
-            if response:
+            responses: List[str] = await self.vllm_client.chat_many(prompts, system_prompt)
+            
+            # 处理响应
+            for i, item in enumerate(items):
+                idx = item.kwargs.get('index', 0)
+                response = responses[i] if i < len(responses) else ""
                 try:
-                    notes = self._process_llm_response(response, chunk_data)
-                    atomic_notes.extend(notes)
-                except Exception as e:
-                    logger.error(f"Failed to process response for request {request_id}: {e}")
-                    # 创建回退笔记
-                    fallback_note = self._create_fallback_note(chunk_data)
-                    if fallback_note:
-                        atomic_notes.append(fallback_note)
-            else:
-                logger.warning(f"Empty response for request {request_id}")
-                # 创建回退笔记
-                fallback_note = self._create_fallback_note(chunk_data)
-                if fallback_note:
-                    atomic_notes.append(fallback_note)
+                    notes = self._process_llm_response(response, text_chunks[idx])
+                except Exception:
+                    notes = []
+                results[idx] = {
+                    'chunk_index': idx,
+                    'notes': notes
+                }
         
-        # 更新统计信息
-        self.vllm_stats['total_requests'] = len(request_ids)
-        self.processing_stats['total_chunks_processed'] = len(text_chunks)
-        self.processing_stats['total_notes_generated'] = len(atomic_notes)
+        # 为每个桶创建任务
+        tasks: List[Any] = []
+        for bucket_id, items in self.bucket_scheduler.buckets.items():
+            if not items:
+                continue
+            tasks.append(process_bucket(bucket_id, items))
         
-        return atomic_notes
+        # 并发执行
+        await asyncio.gather(*tasks)
+        
+        return results
     
     def _process_llm_response(self, response: str, chunk_data: Dict[str, Any]) -> List[Dict[str, Any]]:
-        """
-        处理LLM响应并转换为原子笔记格式
-        
-        Args:
-            response: LLM响应文本
-            chunk_data: 原始文本块数据
-            
-        Returns:
-            原子笔记列表
-        """
+        """解析LLM响应并转换为原子笔记格式"""
         try:
-            # 解析响应
-            notes_data = parse_notes_response(response, sentinel=self.sentinel_char)
-            
-            if not notes_data:
-                logger.debug(f"No valid notes parsed from response: {response[:200]}...")
-                return []
-            
-            # 转换为原子笔记格式
-            atomic_notes = []
-            for note_data in notes_data:
-                try:
-                    atomic_note = self._convert_to_atomic_note_format(note_data, chunk_data)
-                    if atomic_note:
-                        atomic_notes.append(atomic_note)
-                except Exception as e:
-                    logger.error(f"Failed to convert note to atomic format: {e}")
-                    continue
-            
-            # 过滤有效笔记
-            valid_notes = filter_valid_notes(atomic_notes)
-            
-            return valid_notes
-            
-        except Exception as e:
-            logger.error(f"Failed to process LLM response: {e}")
-            return []
+            content = extract_json_from_response(response)
+        except Exception:
+            content = response
+        
+        try:
+            parsed = parse_notes_response(content)
+        except Exception:
+            parsed = []
+        
+        valid_notes = filter_valid_notes(parsed)
+        
+        converted: List[Dict[str, Any]] = []
+        for note in valid_notes:
+            converted.append(self._convert_to_atomic_note_format(note, chunk_data))
+        return converted
     
     def _format_atomic_note_prompt(self, chunk_data: Dict[str, Any]) -> str:
-        """
-        格式化原子笔记生成提示
-        
-        Args:
-            chunk_data: 文本块数据
-            
-        Returns:
-            格式化的提示文本
-        """
+        """根据模板格式化提示"""
+        system_prompt, user_prompt_tmpl = self._get_atomic_note_prompts()
         text = chunk_data.get('text', '')
-        
-        # 使用父类的提示格式化方法
-        _, user_prompt_template = self._get_atomic_note_prompts()
-        
-        # 格式化提示
-        prompt = user_prompt_template.format(text=text)
-        
+        formatted_ids = self._format_sent_ids(chunk_data.get('sentence_ids'))
+        # 支持两种占位符名：{text} 和 {chunk_text}
+        mapping = {
+            'text': text,
+            'chunk_text': text,
+            'sent_ids': formatted_ids
+        }
+        prompt = user_prompt_tmpl.format(**mapping)
         return prompt
     
     async def health_check(self) -> Dict[str, Any]:
-        """
-        健康检查
-        
-        Returns:
-            健康状态信息
-        """
+        """返回vLLM客户端和分桶调度器的健康状态"""
         try:
             vllm_health = await self.vllm_client.health_check()
-            
+            status = 'healthy'
+            if not vllm_health:
+                status = 'degraded'
             return {
-                "status": "healthy",
-                "vllm_endpoints": vllm_health,
-                "bucket_scheduler": {
-                    "bucket_count": len(self.bucket_scheduler.buckets),
-                    "bucket_stats": self.bucket_scheduler.get_bucket_stats()
-                },
-                "processing_stats": self.vllm_stats
+                'status': status,
+                'vllm_endpoints': vllm_health,
+                'bucket_scheduler': {
+                    'bucket_stats': self.bucket_scheduler.get_bucket_stats()
+                }
             }
-            
-        except Exception as e:
+        except Exception:
             return {
-                "status": "unhealthy",
-                "error": str(e)
+                'status': 'error',
+                'vllm_endpoints': {},
+                'bucket_scheduler': {
+                    'bucket_stats': self.bucket_scheduler.get_bucket_stats()
+                }
             }
     
     def get_performance_stats(self) -> Dict[str, Any]:
-        """
-        获取性能统计信息
-        
-        Returns:
-            性能统计数据
-        """
+        """返回性能统计（请求分布、吞吐等）"""
+        total = sum(self.vllm_stats['bucket_distribution'].values()) or 1
         return {
-            "vllm_stats": self.vllm_stats,
-            "processing_stats": self.processing_stats,
-            "bucket_distribution": self.vllm_stats.get('bucket_distribution', {})
+            'total_requests': self.vllm_stats['total_requests'],
+            'bucket_distribution': self.vllm_stats['bucket_distribution'],
+            'processing_time': self.vllm_stats['processing_time'],
+            'throughput_qps': self.vllm_stats['throughput_qps'],
+            'avg_requests_per_bucket': total / max(len(self.vllm_stats['bucket_distribution']) or 1, 1)
         }
     
     async def close(self):
-        """关闭资源"""
         try:
             await self.vllm_client.close()
-            logger.info("VllmAtomicNoteGenerator closed")
-        except Exception as e:
-            logger.error(f"Error closing VllmAtomicNoteGenerator: {e}")
+        except Exception:
+            pass
     
     def __del__(self):
-        """析构函数"""
         try:
-            # 尝试清理资源
-            if hasattr(self, 'vllm_client'):
-                # 如果有事件循环，尝试关闭
-                try:
-                    loop = asyncio.get_event_loop()
-                    if loop.is_running():
-                        loop.create_task(self.close())
-                except Exception:
-                    pass
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                # 避免未等待协程的警告：不在析构中调度关闭
+                pass
+            else:
+                # 避免在析构中运行事件循环
+                pass
         except Exception:
             pass
 
 
 def create_vllm_note_generator(**kwargs) -> VllmAtomicNoteGenerator:
-    """
-    创建vLLM原子笔记生成器的工厂函数
-    
-    Args:
-        **kwargs: 配置参数
-        
-    Returns:
-        VllmAtomicNoteGenerator实例
-    """
+    """工厂方法：创建vLLM原子笔记生成器"""
     try:
-        return VllmAtomicNoteGenerator(**kwargs)
+        gen = VllmAtomicNoteGenerator(**kwargs)
+        return gen
     except Exception as e:
-        logger.error(f"Failed to create vLLM note generator: {e}")
+        logger.error(f"Failed to create VllmAtomicNoteGenerator: {e}")
         raise
