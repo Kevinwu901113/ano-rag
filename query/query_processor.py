@@ -7,13 +7,16 @@ import threading
 import time
 import json
 
+# 向后兼容占位符：删除 Ollama 后保留模块属性，供测试 monkeypatch
+OllamaClient = None
+
 # 导入增强的日志功能
 from utils.logging_utils import (
     StructuredLogger, log_performance, log_operation,
     log_retrieval_metrics, log_diversity_metrics, log_path_aware_metrics
 )
 
-from llm import OllamaClient, LocalLLM, LMStudioClient
+from llm import LocalLLM, LMStudioClient
 from llm.factory import LLMFactory
 from llm.prompts import build_context_prompt, build_context_prompt_with_passages
 from utils.robust_json_parser import extract_prediction_with_retry
@@ -404,8 +407,7 @@ Prompt Length: {len(prompt)} characters
         # 初始化最终答案生成所使用的LLM（默认回退到主LLM客户端）
         self.final_answer_client = self._create_final_answer_client() or self.llm_client
 
-        # 保持向后兼容性（历史变量名）
-        self.ollama = self.final_answer_client
+        # 移除历史别名，直接使用 self.final_answer_client
         self.atomic_notes = atomic_notes
         
         # 初始化子问题分解组件
@@ -2488,10 +2490,10 @@ Prompt Length: {len(prompt)} characters
                 # 记录传入最终答案生成模块的完整prompt内容
                 self._log_final_answer_prompt(prompt, query)
 
-                raw_answer = self.ollama.generate_final_answer(prompt)
+                raw_answer = self.final_answer_client.generate_final_answer(prompt, query)
                 # 使用鲁棒的JSON解析器，带重试机制
                 def retry_generate():
-                    return self.ollama.generate_final_answer(prompt)
+                    return self.final_answer_client.generate_final_answer(prompt, query)
 
                 # 从配置获取重试参数
                 json_parsing_config = config.get('retrieval.json_parsing', {})
@@ -2564,7 +2566,8 @@ Prompt Length: {len(prompt)} characters
             
             # 评估答案质量
             context = "\n".join(n.get('content','') for n in selected_notes)
-            scores = self.ollama.evaluate_answer(query, context, answer)
+            evaluator = getattr(self.final_answer_client, 'evaluate_answer', None)
+            scores = evaluator(query, context, answer) if callable(evaluator) else {"relevance": 0.0, "accuracy": 0.0, "completeness": 0.0}
         
         # 为笔记添加反馈分数
         for n in selected_notes:

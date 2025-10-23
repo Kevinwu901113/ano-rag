@@ -283,55 +283,36 @@ scheduler:
 
 # 大语言模型配置
 llm:
-  provider: "hybrid_llm"      # LLM提供商：lmstudio/openai/ollama/hybrid_llm等
-  model: "openai/gpt-oss-20b"   # 模型名称，需与provider匹配
-  temperature: 0.1          # 生成温度，控制输出随机性（0-1）
-  max_output_tokens: 8192    # 最大输出token数量
-  
+  provider: "lmstudio"      # 仅用于必要的本地LLM初始化（不再回退到transformers）
+  model: "gpt-oss"           # 与 LM Studio 中加载的模型一致
+  temperature: 0.1
+  max_output_tokens: 8192
+
   # 原子笔记生成专用配置（vLLM双实例）
   note_generator:
-    provider: "vllm-openai"   # 原子笔记生成使用vLLM Provider
-    endpoints: 
+    provider: "vllm-openai"
+    endpoints:
       - "http://127.0.0.1:8000/v1"
       - "http://127.0.0.1:8001/v1"
-    model: "Qwen/Qwen2.5-7B-Instruct"  # 生产环境使用7B模型
-    max_tokens: 96            # 原子笔记生成的最大token数
-    temperature: 0.2          # 生成温度
-    top_p: 0.9               # top_p采样参数
-    timeout: 15              # 请求超时时间（秒）
-    concurrency_per_endpoint: 32  # 每个端点的并发数
-    bucket_edges: [64, 128, 256, 512, 1024]  # 长度分桶边界
+    model: "qwen2.5:7b"       # 使用 qwen2.5:7b 作为笔记生成模型
+    max_tokens: 96
+    temperature: 0.2
+    top_p: 0.9
+    timeout: 15
+    concurrency_per_endpoint: 32
+    bucket_edges: [64, 128, 256, 512, 1024]
     retry:
-      max_attempts: 3         # 最大重试次数
-      backoff_base_ms: 200    # 重试退避基础时间（毫秒）
-  
-  # 最终答案生成配置（保持LM Studio不变）
+      max_attempts: 3
+      backoff_base_ms: 200
+
+  # 最终答案生成配置（LM Studio）
   final_answer:
-    provider: "lmstudio-openai"  # 最终答案生成保持使用LM Studio
+    provider: "lmstudio-openai"
     base_url: "http://127.0.0.1:1234/v1"
-    model: "gpt-oss"          # 保持原有模型
-  
-  # 混合LLM配置（当provider为hybrid_llm时生效）
-  hybrid_llm:
-    mode: "task_division"    # 混合模式：task_division任务划分|competitive竞争模式
-    
-    # 轻量级任务配置（使用Ollama）
-    light_tasks:
-      model: "qwen2.5:latest" # 轻量级任务模型
-      base_url: "http://localhost:11434"  # Ollama服务地址
-      timeout: 30             # 请求超时时间（秒）
-      max_async: 16            # 最大异步请求数
-      # max_tokens: 1024        # 最大输出token数
-      num_ctx: 32768           # 上下文窗口大小
-      temperature: 0.1        # 生成温度
-    
-    # 重量级任务配置（使用LM Studio）
-    heavy_tasks:
-      provider: "lmstudio"    # 重量级任务提供商
-      model: "openai/gpt-oss-20b"  # 重量级任务模型
-      base_url: "http://localhost:1234/v1"  # LM Studio服务地址
-      instances: 1            # LM Studio实例数量
-      timeout: 60             # 请求超时时间（秒）
+    model: "gpt-oss"
+
+  # 移除混合LLM配置（不再使用 hybrid_llm）
+
 
 # 检索护栏配置
 guardrail:
@@ -361,13 +342,6 @@ atomic_note_generation:
     enable_fallback: true       # 是否启用失败回退机制
     fallback_timeout: 60        # 回退超时时间（秒）- 增加到60秒以避免超时错误
     
-  # Ollama配置（用于原子笔记生成）
-  ollama:
-    model: "qwen2.5:latest"     # Ollama模型名称
-    base_url: "http://localhost:11434"  # Ollama服务地址
-    timeout: 30                 # 请求超时时间（秒）
-    max_async: 16               # 最大异步请求数
-    temperature: 0.1            # 生成温度
     
   # LM Studio配置（用于原子笔记生成）
   lmstudio:
