@@ -157,8 +157,38 @@ Prompt Length: {len(prompt)} characters
             safe_params['top_k'] = safe_params['top_m_candidates']
         elif 'top_k' in safe_params and 'top_m_candidates' not in safe_params:
             safe_params['top_m_candidates'] = safe_params['top_k']
-            
+
         return safe_params
+
+    def _create_final_answer_client(self) -> Optional[Any]:
+        """根据配置初始化用于最终答案生成的LLM客户端。"""
+        final_answer_cfg = self._llm_cfg.get('final_answer') if isinstance(self._llm_cfg, dict) else None
+        if not final_answer_cfg:
+            return None
+
+        provider = final_answer_cfg.get('provider')
+        if not provider:
+            return None
+
+        normalized_provider = provider.split('-', 1)[0]
+        overrides: Dict[str, Any] = {}
+        for key in ('base_url', 'model', 'api_key', 'port'):
+            value = final_answer_cfg.get(key)
+            if value is not None:
+                overrides[key] = value
+
+        try:
+            client = LLMFactory.create_provider(normalized_provider, **overrides)
+            logger.info(
+                f"Using final answer LLM provider: {provider} (normalized to {normalized_provider})"
+            )
+            return client
+        except Exception as exc:
+            logger.error(
+                f"Failed to create final answer LLM provider '{provider}': {exc}. "
+                "Falling back to main LLM client."
+            )
+            return None
 
     def __init__(
         self,
@@ -370,9 +400,12 @@ Prompt Length: {len(prompt)} characters
         except Exception as e:
             logger.error(f"Failed to create LLM provider '{llm_provider}': {e}. Falling back to LMStudioClient.")
             self.llm_client = LMStudioClient()
-        
+
+        # 初始化最终答案生成所使用的LLM（默认回退到主LLM客户端）
+        self.final_answer_client = self._create_final_answer_client() or self.llm_client
+
         # 保持向后兼容性（历史变量名）
-        self.ollama = self.llm_client
+        self.ollama = self.final_answer_client
         self.atomic_notes = atomic_notes
         
         # 初始化子问题分解组件
