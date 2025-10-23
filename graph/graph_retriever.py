@@ -80,6 +80,8 @@ class GraphRetriever:
                     continue
                 visited.add(node_id)
                 data = G.nodes[node_id].copy()
+                if 'note_id' not in data or not data.get('note_id'):
+                    data['note_id'] = node_id
                 data["graph_distance"] = dist
                 centrality = self.index.get_centrality(node_id)
                 data["centrality"] = centrality

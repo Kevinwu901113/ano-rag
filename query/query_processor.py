@@ -1,4 +1,4 @@
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Set
 from loguru import logger
 import os
 import numpy as np
@@ -6,6 +6,7 @@ import concurrent.futures
 import threading
 import time
 import json
+import hashlib
 
 # 向后兼容占位符：删除 Ollama 后保留模块属性，供测试 monkeypatch
 OllamaClient = None
@@ -163,6 +164,147 @@ Prompt Length: {len(prompt)} characters
 
         return safe_params
 
+    def _normalize_atomic_notes(self, notes: Optional[List[Dict[str, Any]]]) -> List[Dict[str, Any]]:
+        """确保所有原子笔记具备稳定的 note_id。"""
+        if not notes:
+            return []
+
+        normalized_notes: List[Dict[str, Any]] = []
+        seen_ids: Set[str] = set()
+        generated_count = 0
+        adjusted_count = 0
+
+        for idx, note in enumerate(notes):
+            if not isinstance(note, dict):
+                logger.warning(f"Skipping non-dict atomic note at index {idx}: {type(note)}")
+                continue
+
+            normalized = note.copy()
+            existing_id = normalized.get('note_id')
+            assigned_id = self._ensure_note_identifier(
+                normalized,
+                fallback_index=idx,
+                seen_ids=seen_ids,
+                prefix="atomic"
+            )
+
+            if existing_id:
+                if assigned_id != existing_id:
+                    adjusted_count += 1
+            else:
+                generated_count += 1
+
+            normalized_notes.append(normalized)
+
+        if generated_count:
+            logger.warning(f"Generated fallback note_id for {generated_count} atomic notes lacking identifiers")
+        if adjusted_count:
+            logger.warning(f"Adjusted note_id for {adjusted_count} atomic notes to avoid collisions")
+
+        return normalized_notes
+
+    def _ensure_note_identifier(
+        self,
+        note: Any,
+        fallback_index: int,
+        seen_ids: Optional[Set[str]] = None,
+        prefix: str = "note"
+    ) -> Optional[str]:
+        """为单个笔记生成或恢复 note_id。"""
+        if not isinstance(note, dict):
+            return None
+
+        def _register(note_id_value: Optional[str]) -> Optional[str]:
+            if note_id_value is None:
+                return None
+            note_id_value = str(note_id_value).strip()
+            if not note_id_value:
+                return None
+            if seen_ids is not None:
+                unique_id = note_id_value
+                suffix = 1
+                while unique_id in seen_ids:
+                    unique_id = f"{note_id_value}__dup{suffix}"
+                    suffix += 1
+                note_id_value = unique_id
+                seen_ids.add(note_id_value)
+            note['note_id'] = note_id_value
+            return note_id_value
+
+        # 1. 已有 note_id 直接返回（保持原值，不做去重以避免破坏外部引用）
+        if 'note_id' in note and note['note_id']:
+            note_id = str(note['note_id']).strip()
+            note['note_id'] = note_id
+            if seen_ids is not None:
+                seen_ids.add(note_id)
+            return note_id
+
+        # 2. 尝试常见的替代字段
+        candidate_fields: List[Optional[str]] = []
+        for key in ('id', 'chunk_id', 'document_id', 'doc_id'):
+            value = note.get(key)
+            if value:
+                candidate_fields.append(str(value))
+
+        metadata = note.get('metadata')
+        if isinstance(metadata, dict):
+            for key in ('note_id', 'chunk_id', 'id'):
+                value = metadata.get(key)
+                if value:
+                    candidate_fields.append(str(value))
+
+        retrieval_info = note.get('retrieval_info')
+        if isinstance(retrieval_info, dict):
+            value = retrieval_info.get('note_id')
+            if value:
+                candidate_fields.append(str(value))
+
+        for candidate in candidate_fields:
+            registered = _register(candidate)
+            if registered:
+                return registered
+
+        # 3. 根据文档信息或内容生成稳定的 note_id
+        doc_id = note.get('doc_id') or note.get('document_id')
+        paragraph_idxs = note.get('paragraph_idxs') or note.get('paragraph_indices') or note.get('paragraph_idx')
+        base_id = None
+        if doc_id and paragraph_idxs:
+            if isinstance(paragraph_idxs, (list, tuple)):
+                if paragraph_idxs:
+                    para_part = "-".join(str(i) for i in paragraph_idxs)
+                else:
+                    para_part = "root"
+            else:
+                para_part = str(paragraph_idxs)
+            base_id = f"{doc_id}#{para_part}"
+        elif doc_id:
+            base_id = f"{doc_id}#{fallback_index:06d}"
+        else:
+            content = note.get('content') or note.get('text') or ''
+            if content:
+                content_hash = hashlib.sha1(content.encode('utf-8')).hexdigest()[:16]
+                base_id = f"{prefix}_{content_hash}"
+            else:
+                base_id = f"{prefix}_{fallback_index:06d}"
+
+        registered = _register(base_id)
+        if registered:
+            return registered
+
+        # 4. 最后兜底：使用计数器生成 ID
+        fallback_id = f"{prefix}_{fallback_index:06d}"
+        return _register(fallback_id)
+
+    def _register_note(self, note: Dict[str, Any], prefix: str = "note") -> Optional[str]:
+        note_id = self._ensure_note_identifier(
+            note,
+            fallback_index=self._note_id_autogen_counter,
+            seen_ids=self._note_id_registry,
+            prefix=prefix
+        )
+        self._note_id_autogen_counter += 1
+        return note_id
+
     def _create_final_answer_client(self) -> Optional[Any]:
         """根据配置初始化用于最终答案生成的LLM客户端。"""
         final_answer_cfg = self._llm_cfg.get('final_answer') if isinstance(self._llm_cfg, dict) else None
@@ -288,6 +430,14 @@ Prompt Length: {len(prompt)} characters
         context_cfg = self._context_cfg
         self.max_notes_for_llm = int(context_cfg.get("max_notes_for_llm", 50))
         self.max_tokens = context_cfg.get("max_tokens")  # 可选
+
+        # 对输入的原子笔记进行 note_id 规范化，确保后续流程的稳定性
+        atomic_notes = self._normalize_atomic_notes(atomic_notes)
+        self._note_id_registry: Set[str] = {
+            note['note_id'] for note in atomic_notes
+            if isinstance(note, dict) and note.get('note_id')
+        }
+        self._note_id_autogen_counter = len(self._note_id_registry)
 
         # Query rewriter functionality has been removed
         self.vector_retriever = VectorRetriever()
@@ -1482,21 +1632,23 @@ Prompt Length: {len(prompt)} characters
         entity_stats = {}
         
         for entity in bridge_entities:
-            # 从倒排索引获取候选笔记
             candidates = self.entity_inverted_index.get_candidate_notes(
                 [entity], fuzzy_match=True
             )
-            
+
             entity_candidates = 0
             for candidate in candidates:
-                note_id = candidate.get('note_id')
+                if not isinstance(candidate, dict):
+                    logger.debug(f"Skipping non-dict second hop candidate for entity {entity}: {type(candidate)}")
+                    continue
+
+                note_id = self._register_note(candidate, prefix="hop2_pool")
                 if note_id and note_id not in seen_ids:
-                    # === 数据结构约定：补充路径信息 ===
                     candidate['bridge_entity'] = entity
-                    candidate['hop_type'] = 'second_hop'  # 标记为二跳
-                    candidate['hop_no'] = 2  # 第二跳
-                    candidate['bridge_path'] = [entity]  # 从起点到此的实体链（二跳只有一个桥接实体）
-                    
+                    candidate['hop_type'] = 'second_hop'
+                    candidate['hop_no'] = 2
+                    candidate['bridge_path'] = [entity]
+
                     candidate_pool.append(candidate)
                     seen_ids.add(note_id)
                     entity_candidates += 1
@@ -1523,18 +1675,20 @@ Prompt Length: {len(prompt)} characters
             try:
                 results = self.vector_retriever.search([entity])
                 if results and results[0]:
-                    for candidate in results[0][:5]:  # 每个实体取前5个结果
-                        # 检查候选是否包含该实体
+                    for candidate in results[0][:5]:
+                        if not isinstance(candidate, dict):
+                            logger.debug(f"Skipping non-dict fallback candidate for entity {entity}: {type(candidate)}")
+                            continue
+
                         if self._candidate_contains_entity(candidate, entity):
-                            note_id = candidate.get('note_id')
+                            note_id = self._register_note(candidate, prefix="hop2_fallback")
                             if note_id and note_id not in seen_ids:
-                                # === 数据结构约定：补充路径信息 ===
                                 candidate['bridge_entity'] = entity
-                                candidate['hop_type'] = 'second_hop'  # 标记为二跳
-                                candidate['hop_no'] = 2  # 第二跳
-                                candidate['bridge_path'] = [entity]  # 从起点到此的实体链（二跳只有一个桥接实体）
+                                candidate['hop_type'] = 'second_hop'
+                                candidate['hop_no'] = 2
+                                candidate['bridge_path'] = [entity]
                                 candidate['fallback_source'] = 'vector_search'
-                                
+
                                 fallback_candidates.append(candidate)
                                 seen_ids.add(note_id)
                                 entity_candidates += 1
@@ -2006,24 +2160,17 @@ Prompt Length: {len(prompt)} characters
             vector_results = self.vector_retriever.search(queries)
 
             # 合并结果并去重
-            seen_note_ids = set()
+            seen_note_ids: Set[str] = set()
             for sub in vector_results:
                 for note in sub:
-                    # 为向量检索结果添加subq_source标记
                     if 'tags' not in note:
                         note['tags'] = {}
                     note['tags']['subq_source'] = 'vector'
-                    
-                    note_id = note.get('note_id')
+
+                    note_id = self._register_note(note, prefix="vector")
                     if note_id and note_id not in seen_note_ids:
                         candidate_notes.append(note)
                         seen_note_ids.add(note_id)
-                    elif not note_id:  # 如果没有note_id，基于内容去重
-                        content = note.get('content', '')
-                        content_hash = hash(content)
-                        if content_hash not in seen_note_ids:
-                            candidate_notes.append(note)
-                            seen_note_ids.add(content_hash)
             
             logger.info(f"Initial vector recall for dispatcher: {len(candidate_notes)} unique notes")
             
@@ -2064,12 +2211,11 @@ Prompt Length: {len(prompt)} characters
                     
                     # 将图检索结果添加到候选结果中
                     for note in graph_notes:
-                        # 为图检索结果添加subq_source标记
                         if 'tags' not in note:
                             note['tags'] = {}
                         note['tags']['subq_source'] = 'graph'
-                        
-                        note_id = note.get('note_id')
+
+                        note_id = self._register_note(note, prefix="graph")
                         if note_id and note_id not in seen_note_ids:
                             candidate_notes.append(note)
                             seen_note_ids.add(note_id)
@@ -2141,19 +2287,13 @@ Prompt Length: {len(prompt)} characters
 
             # 合并结果并去重
             candidate_notes = []
-            seen_note_ids = set()
+            seen_note_ids: Set[str] = set()
             for sub in vector_results:
                 for note in sub:
-                    note_id = note.get('note_id')
+                    note_id = self._register_note(note, prefix="vector")
                     if note_id and note_id not in seen_note_ids:
                         candidate_notes.append(note)
                         seen_note_ids.add(note_id)
-                    elif not note_id:  # 如果没有note_id，基于内容去重
-                        content = note.get('content', '')
-                        content_hash = hash(content)
-                        if content_hash not in seen_note_ids:
-                            candidate_notes.append(note)
-                            seen_note_ids.add(content_hash)
             
             logger.info(f"Initial vector recall: {len(candidate_notes)} unique notes from {sum(len(sub) for sub in vector_results)} total results")
             
@@ -2246,17 +2386,22 @@ Prompt Length: {len(prompt)} characters
             
             # 4. 合并第一跳和二跳候选
             if second_hop_notes:
-                if self.merge_strategy == 'weighted':
-                    # 为二跳候选添加权重标记
-                    for note in second_hop_notes:
+                normalized_second_hop: List[Dict[str, Any]] = []
+                for note in second_hop_notes:
+                    if self.merge_strategy == 'weighted':
                         note['hop_type'] = 'second_hop'
                         note['original_score'] = note.get('similarity', 0.0)
-                elif self.merge_strategy == 'ranked':
-                    # 简单合并，保持原有排序
-                    pass
-                
-                candidate_notes.extend(second_hop_notes)
-                logger.info(f"After merging first and second hop: {len(candidate_notes)} total notes")
+                    elif self.merge_strategy == 'ranked':
+                        pass
+
+                    note_id = self._register_note(note, prefix="hop2")
+                    if note_id and note_id not in seen_note_ids:
+                        normalized_second_hop.append(note)
+                        seen_note_ids.add(note_id)
+
+                if normalized_second_hop:
+                    candidate_notes.extend(normalized_second_hop)
+                    logger.info(f"After merging first and second hop: {len(candidate_notes)} total notes")
                 
                 # 对合并后的候选再次修复实体抽取
                 if self.fix_entity_extraction_enabled:
@@ -2318,15 +2463,21 @@ Prompt Length: {len(prompt)} characters
                 graph_notes = mh_result.get('notes', [])
                 
                 # 为multi_hop_processor的图检索结果添加hop_no和bridge_path字段
+                normalized_graph_notes: List[Dict[str, Any]] = []
                 for note in graph_notes:
                     if 'hop_no' not in note:
                         note['hop_type'] = 'graph_hop'
-                        note['hop_no'] = 1  # 默认为1跳，多跳信息由multi_hop_processor提供
+                        note['hop_no'] = 1
                         note['bridge_entity'] = None
                         note['bridge_path'] = []
-                
-                candidate_notes.extend(graph_notes)
-                for n in graph_notes:
+
+                    note_id = self._register_note(note, prefix="graph")
+                    if note_id and note_id not in seen_note_ids:
+                        normalized_graph_notes.append(note)
+                        seen_note_ids.add(note_id)
+
+                candidate_notes.extend(normalized_graph_notes)
+                for n in normalized_graph_notes:
                     reasoning_paths.extend(n.get('reasoning_paths', []))
                 
                 # 应用多跳安全网过滤，替代传统的噪声阈值过滤
@@ -2340,14 +2491,20 @@ Prompt Length: {len(prompt)} characters
                 graph_notes = self._perform_hybrid_graph_retrieval(candidate_notes, query)
                 
                 # 为混合图检索结果添加hop_no和bridge_path字段
+                normalized_graph_notes = []
                 for note in graph_notes:
                     if 'hop_no' not in note:
                         note['hop_type'] = 'graph_hop'
-                        note['hop_no'] = 1  # 混合图检索默认为1跳
+                        note['hop_no'] = 1
                         note['bridge_entity'] = None
                         note['bridge_path'] = []
-                
-                candidate_notes.extend(graph_notes)
+
+                    note_id = self._register_note(note, prefix="graph")
+                    if note_id and note_id not in seen_note_ids:
+                        normalized_graph_notes.append(note)
+                        seen_note_ids.add(note_id)
+
+                candidate_notes.extend(normalized_graph_notes)
                 
                 # 应用多跳安全网过滤，替代传统的噪声阈值过滤
                 logger.info(f"Before multi-hop safety filtering (non-multi-hop): {len(candidate_notes)} candidates")
