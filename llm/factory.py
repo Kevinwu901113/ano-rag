@@ -43,7 +43,10 @@ class LLMFactory:
                 raise ValueError(f"Unknown provider type: {provider_type}")
         except Exception as e:
             logger.error(f"Failed to create {provider_type} provider: {e}")
-            # 移除回退到 ollama，改为回退到 lmstudio
+            # vLLM 客户端不允许回退到 LM Studio，直接抛出异常以便上游硬失败
+            if provider_type == 'vllm-openai':
+                raise
+            # 其他 Provider（如 openai）仍可回退到 LM Studio
             if provider_type != 'lmstudio':
                 logger.info("Falling back to LMStudio provider")
                 return cls._create_lmstudio_provider(**kwargs)

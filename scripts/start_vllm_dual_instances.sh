@@ -5,8 +5,9 @@
 
 set -e
 
-# 配置参数
-MODEL_NAME="Qwen/Qwen2.5-0.5B"  # 使用本地可用的模型进行测试
+# 配置参数（与 config.yaml 对齐）
+MODEL_NAME="Qwen/Qwen2.5-7B-Instruct"  # 与 llm.note_generator.model 对齐
+SERVED_MODEL_NAME="qwen2.5:7b"          # OpenAI 端展示的模型别名
 DTYPE="float16"
 GPU_MEMORY_UTIL="0.92"
 MAX_MODEL_LEN="4096"
@@ -21,7 +22,7 @@ LOG_DIR="logs/vllm"
 mkdir -p "$LOG_DIR"
 
 echo "Starting vLLM dual instances..."
-echo "Model: $MODEL_NAME"
+echo "Model: $MODEL_NAME (served as: $SERVED_MODEL_NAME)"
 echo "GPU0 Port: $GPU0_PORT"
 echo "GPU1 Port: $GPU1_PORT"
 
@@ -40,6 +41,7 @@ start_gpu0() {
     echo "Starting vLLM instance on GPU0 (port $GPU0_PORT)..."
     CUDA_VISIBLE_DEVICES=0 python -m vllm.entrypoints.openai.api_server \
         --model "$MODEL_NAME" \
+        --served-model-name "$SERVED_MODEL_NAME" \
         --dtype "$DTYPE" \
         --gpu-memory-utilization "$GPU_MEMORY_UTIL" \
         --max-model-len "$MAX_MODEL_LEN" \
@@ -58,6 +60,7 @@ start_gpu1() {
     echo "Starting vLLM instance on GPU1 (port $GPU1_PORT)..."
     CUDA_VISIBLE_DEVICES=1 python -m vllm.entrypoints.openai.api_server \
         --model "$MODEL_NAME" \
+        --served-model-name "$SERVED_MODEL_NAME" \
         --dtype "$DTYPE" \
         --gpu-memory-utilization "$GPU_MEMORY_UTIL" \
         --max-model-len "$MAX_MODEL_LEN" \
@@ -80,8 +83,9 @@ health_check() {
     echo "Checking health of service on port $port..."
     
     while [ $attempt -le $max_attempts ]; do
-        if curl -s "http://127.0.0.1:$port/v1/models" >/dev/null 2>&1; then
-            echo "✓ Service on port $port is healthy"
+        # 检查 models 列表以及 served 模型别名是否存在
+        if curl -s "http://127.0.0.1:$port/v1/models" | grep -q "$SERVED_MODEL_NAME"; then
+            echo "✓ Service on port $port is healthy (served: $SERVED_MODEL_NAME)"
             return 0
         fi
         

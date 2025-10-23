@@ -23,6 +23,7 @@ class VllmEndpoint:
     is_healthy: bool = True
     last_error_time: float = 0
     consecutive_errors: int = 0
+    served_model_id: Optional[str] = None
 
 
 class VllmOpenAIClient:
@@ -84,6 +85,29 @@ class VllmOpenAIClient:
                 )
             )
             self.endpoints.append(endpoint)
+            # 初始快速健康检查：连通性与模型可用性，自动对齐服务端模型名
+            try:
+                with httpx.Client(timeout=self.timeout) as sync_client:
+                    resp = sync_client.get(f"{url}/models", timeout=3.0)
+                    resp.raise_for_status()
+                    data = resp.json() if hasattr(resp, "json") else {}
+                    served_ids = [m.get("id") for m in (data.get("data") or []) if isinstance(m, dict)]
+                    if served_ids:
+                        # 优先选择与配置匹配的模型，否则取第一个
+                        endpoint.served_model_id = self.model if self.model in served_ids else served_ids[0]
+                        endpoint.is_healthy = True
+                        endpoint.consecutive_errors = 0
+                        logger.info(f"Endpoint {url} aligned model to '{endpoint.served_model_id}' (served={served_ids})")
+                    else:
+                        endpoint.is_healthy = False
+                        endpoint.consecutive_errors = self.error_threshold
+                        endpoint.last_error_time = time.time()
+                        logger.warning(f"Endpoint {url} returned empty models; marked unhealthy.")
+            except Exception as e:
+                endpoint.is_healthy = False
+                endpoint.consecutive_errors = self.error_threshold
+                endpoint.last_error_time = time.time()
+                logger.warning(f"Endpoint {url} initial health check failed: {e}; marked unhealthy.")
     
     def _get_next_endpoint(self) -> Optional[VllmEndpoint]:
         """获取下一个可用端点（轮询策略）"""
@@ -123,15 +147,34 @@ class VllmOpenAIClient:
         
         return False
     
-    def _attempt_recovery(self):
-        """尝试恢复不健康的端点"""
-        current_time = time.time()
-        for endpoint in self.endpoints:
-            if not endpoint.is_healthy and current_time - endpoint.last_error_time > 60:
-                endpoint.consecutive_errors = max(0, endpoint.consecutive_errors - 1)
-                if endpoint.consecutive_errors == 0:
+    def _refresh_endpoint_health(self, endpoint: VllmEndpoint) -> bool:
+        """主动探测 /models，若可达则更新 served_model_id 并标记健康"""
+        try:
+            with httpx.Client(timeout=self.timeout) as sync_client:
+                resp = sync_client.get(f"{endpoint.url}/models", timeout=3.0)
+                resp.raise_for_status()
+                data = resp.json() if hasattr(resp, "json") else {}
+                served_ids = [m.get("id") for m in (data.get("data") or []) if isinstance(m, dict)]
+                if served_ids:
+                    endpoint.served_model_id = self.model if self.model in served_ids else served_ids[0]
                     endpoint.is_healthy = True
+                    endpoint.consecutive_errors = 0
+                    return True
+        except Exception:
+            pass
+        return False
+    
+    def _attempt_recovery(self):
+        """尝试恢复不健康的端点：主动探测 /models 并判断模型可用性"""
+        for endpoint in self.endpoints:
+            if not endpoint.is_healthy:
+                if self._refresh_endpoint_health(endpoint):
                     logger.info(f"Endpoint {endpoint.url} marked as recovered")
+                else:
+                    # 渐进衰减错误计数，允许偶尔恢复
+                    current_time = time.time()
+                    if current_time - endpoint.last_error_time > 60:
+                        endpoint.consecutive_errors = max(0, endpoint.consecutive_errors - 1)
     
     def _mark_endpoint_error(self, endpoint: VllmEndpoint, error: Exception):
         """标记端点错误"""
@@ -154,7 +197,8 @@ class VllmOpenAIClient:
         """向指定端点发送请求"""
         async with endpoint.semaphore:  # 并发限流
             url = f"{endpoint.url}/chat/completions"
-            
+            # 按端点对齐模型名
+            payload["model"] = endpoint.served_model_id or self.model
             try:
                 response = await endpoint.client.post(url, json=payload)
                 response.raise_for_status()
@@ -196,7 +240,6 @@ class VllmOpenAIClient:
                     # 指数回退
                     backoff_time = (self.backoff_base_ms * (2 ** attempt)) / 1000.0
                     backoff_time += random.uniform(0, backoff_time * 0.1)  # 添加抖动
-                    
                     logger.debug(f"Request failed (attempt {attempt + 1}/{self.max_attempts}), "
                                f"retrying in {backoff_time:.2f}s: {e}")
                     await asyncio.sleep(backoff_time)
@@ -300,13 +343,27 @@ class VllmOpenAIClient:
                 url = f"{endpoint.url}/models"
                 response = await endpoint.client.get(url, timeout=5.0)
                 response.raise_for_status()
-                
-                results[f"endpoint_{i}"] = {
-                    "url": endpoint.url,
-                    "status": "healthy",
-                    "consecutive_errors": endpoint.consecutive_errors
-                }
-                
+                data = response.json() if hasattr(response, "json") else {}
+                served_ids = [m.get("id") for m in (data.get("data") or []) if isinstance(m, dict)]
+                # 有可用模型即视为健康，并报告对齐的模型名
+                if served_ids:
+                    if endpoint.served_model_id is None:
+                        endpoint.served_model_id = self.model if self.model in served_ids else served_ids[0]
+                    status = {
+                        "url": endpoint.url,
+                        "status": "healthy",
+                        "served_model_id": endpoint.served_model_id,
+                        "consecutive_errors": endpoint.consecutive_errors
+                    }
+                else:
+                    status = {
+                        "url": endpoint.url,
+                        "status": "unhealthy",
+                        "error": "empty_models",
+                        "consecutive_errors": endpoint.consecutive_errors
+                    }
+                results[f"endpoint_{i}"] = status
+            
             except Exception as e:
                 results[f"endpoint_{i}"] = {
                     "url": endpoint.url,

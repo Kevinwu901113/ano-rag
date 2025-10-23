@@ -60,14 +60,26 @@ class VllmAtomicNoteGenerator(AtomicNoteGenerator):
         logger.info("VllmAtomicNoteGenerator initialized with bucket scheduler")
     
     def _init_vllm_client(self, **kwargs) -> VllmOpenAIClient:
-        """初始化vLLM客户端"""
+        """初始化vLLM客户端，并进行类型与配置校验（硬失败）"""
         try:
             # 读取模型名称（如未配置则给出合理默认值）
-            _ = kwargs.get('model') or config.get('llm.note_generator.model', 'Qwen/Qwen2.5-7B-Instruct')
+            model_name = kwargs.get('model') or config.get('llm.note_generator.model', 'Qwen/Qwen2.5-7B-Instruct')
+            endpoints = kwargs.get('endpoints') or config.get('llm.note_generator.endpoints', [])
+            
+            # 端点校验（必须配置至少一个端点）
+            if not endpoints or not isinstance(endpoints, list):
+                raise ValueError("llm.note_generator.endpoints 未配置或格式错误（需为非空列表）")
             
             # 使用工厂创建vLLM客户端（工厂内部读取配置，无需显式传参）
             client = LLMFactory.create_provider('vllm-openai')
             logger.info("vLLM client initialized via factory provider")
+            
+            # 类型校验：必须是 VllmOpenAIClient，否则硬失败
+            if not isinstance(client, VllmOpenAIClient):
+                raise TypeError(f"vLLM 客户端类型错误：期望 VllmOpenAIClient，实际为 {type(client).__name__}")
+            
+            # 附加日志：端点与模型一致性提示
+            logger.info(f"vLLM endpoints: {endpoints}; served model alias expected: {model_name}")
             
             return client
             
@@ -162,7 +174,18 @@ class VllmAtomicNoteGenerator(AtomicNoteGenerator):
         # 并发执行
         await asyncio.gather(*tasks)
         
-        return results
+        # 扁平化各chunk的笔记列表为统一输出
+        flat_notes: List[Dict[str, Any]] = []
+        for item in results:
+            if not item:
+                continue
+            note_list = item.get('notes') if isinstance(item, dict) else None
+            if isinstance(note_list, list):
+                for n in note_list:
+                    if isinstance(n, dict):
+                        flat_notes.append(n)
+        
+        return flat_notes
     
     def _process_llm_response(self, response: str, chunk_data: Dict[str, Any]) -> List[Dict[str, Any]]:
         """解析LLM响应并转换为原子笔记格式"""

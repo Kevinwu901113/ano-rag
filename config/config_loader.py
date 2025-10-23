@@ -132,6 +132,22 @@ DEFAULT_CONFIG: Dict[str, Any] = {
                 "instances": 2,
                 "timeout": 60
             }
+        },
+        # 新增：笔记生成器（vLLM）默认配置，避免自定义键被忽略
+        "note_generator": {
+            "provider": "vllm-openai",
+            "endpoints": [],
+            "model": "qwen2.5:7b",
+            "max_tokens": 96,
+            "temperature": 0.2,
+            "top_p": 0.9,
+            "timeout": 15,
+            "concurrency_per_endpoint": 32,
+            "bucket_edges": [64, 128, 256, 512, 1024],
+            "retry": {
+                "max_attempts": 3,
+                "backoff_base_ms": 200
+            }
         }
     },
     # 添加各种配置文件路径
