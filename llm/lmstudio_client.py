@@ -1,3 +1,4 @@
+import asyncio
 import json
 import random
 import time
@@ -139,30 +140,51 @@ class LMStudioClient:
         
         logger.info(f"Connected to LM Studio: {base_url} (model: {model})")
     
-    def generate_concurrent(self, prompts: List[str], **kwargs) -> List[str]:
+    def generate_concurrent(
+        self,
+        prompts: List[str],
+        system_prompt: str | None = None,
+        **kwargs,
+    ) -> List[str]:
         """并发生成多个响应"""
         if not self.concurrent_enabled or len(prompts) == 1:
             # 单线程处理
-            return [self.generate(prompt, **kwargs) for prompt in prompts]
-        
+            return [
+                self.generate(prompt, system_prompt=system_prompt, **kwargs)
+                for prompt in prompts
+            ]
+
         # 使用线程池并发处理
-        futures = []
-        with self.executor as executor:
-            for prompt in prompts:
-                future = executor.submit(self.generate, prompt, **kwargs)
-                futures.append(future)
-            
-            results = []
+        executor = self.executor or ThreadPoolExecutor(
+            max_workers=min(self.max_concurrent_requests, len(prompts)) or 1
+        )
+        created_local_executor = executor is not self.executor
+
+        futures = {
+            executor.submit(
+                self.generate,
+                prompt,
+                system_prompt,
+                **kwargs,
+            ): idx
+            for idx, prompt in enumerate(prompts)
+        }
+
+        results: List[str] = [""] * len(prompts)
+        try:
             for future in as_completed(futures):
+                idx = futures[future]
                 try:
-                    result = future.result()
-                    results.append(result)
+                    results[idx] = future.result()
                 except Exception as e:
                     logger.error(f"Concurrent generation failed: {e}")
-                    results.append("")
-        
+                    results[idx] = ""
+        finally:
+            if created_local_executor:
+                executor.shutdown(wait=True)
+
         return results
-    
+
     def generate(self, prompt: str, system_prompt: str = None, **kwargs) -> str:
         """生成单个响应"""
         try:
@@ -214,7 +236,28 @@ class LMStudioClient:
                 is_transport_error=is_transport_error,
                 is_timeout=is_timeout,
             ) from e
-    
+
+    async def chat_many(
+        self,
+        prompts: List[str],
+        system_prompt: str | None = None,
+        **kwargs,
+    ) -> List[str]:
+        """提供异步批量对话接口，兼容需要chat_many的上游组件"""
+
+        if not prompts:
+            return []
+
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(
+            None,
+            lambda: self.generate_concurrent(
+                prompts,
+                system_prompt=system_prompt,
+                **kwargs,
+            ),
+        )
+
     def generate_stream(
         self,
         prompt: str,
@@ -319,7 +362,11 @@ class LMStudioClient:
         
         # 使用线程池并行处理
         if self.executor:
-            return self.generate_concurrent(prompts, system_prompt, **kwargs)
+            return self.generate_concurrent(
+                prompts,
+                system_prompt=system_prompt,
+                **kwargs,
+            )
         else:
             # 回退到串行处理
             results = []
