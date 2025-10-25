@@ -78,14 +78,27 @@ class ContextDispatcher:
 
         merged: Dict[str, Dict[str, Any]] = {}
         for cand in selected_semantic:
-            merged[cand["note_id"]] = cand
-        for cand in selected_graph:
-            nid = cand["note_id"]
-            if nid in merged:
-                merged[nid]["tags"]["is_bridge"] = merged[nid]["tags"].get("is_bridge") or cand["tags"].get("is_bridge")
-                merged[nid]["scores"].update({k: v for k, v in cand["scores"].items() if v is not None})
+            note_id = cand.get("note_id")
+            if note_id is not None:
+                merged[note_id] = cand
             else:
-                merged[nid] = cand
+                # 为没有note_id的候选生成一个临时ID
+                temp_id = f"temp_semantic_{len(merged)}"
+                cand["note_id"] = temp_id
+                merged[temp_id] = cand
+        for cand in selected_graph:
+            nid = cand.get("note_id")
+            if nid is not None:
+                if nid in merged:
+                    merged[nid]["tags"]["is_bridge"] = merged[nid]["tags"].get("is_bridge") or cand["tags"].get("is_bridge")
+                    merged[nid]["scores"].update({k: v for k, v in cand["scores"].items() if v is not None})
+                else:
+                    merged[nid] = cand
+            else:
+                # 为没有note_id的候选生成一个临时ID
+                temp_id = f"temp_graph_{len(merged)}"
+                cand["note_id"] = temp_id
+                merged[temp_id] = cand
 
         results = list(merged.values())
 
@@ -117,10 +130,10 @@ class ContextDispatcher:
     def _select_paths(self, candidates: List[Dict[str, Any]], query: str) -> List[Dict[str, Any]]:
         """第一阶段：路径选择"""
         # 提取种子节点
-        semantic_seeds = [c["note_id"] for c in candidates 
-                         if c.get("tags", {}).get("source") != "graph"]
-        bm25_seeds = [c["note_id"] for c in candidates 
-                     if c.get("tags", {}).get("source") == "bm25"]
+        semantic_seeds = [c.get("note_id") for c in candidates 
+                         if c.get("tags", {}).get("source") != "graph" and c.get("note_id") is not None]
+        bm25_seeds = [c.get("note_id") for c in candidates 
+                     if c.get("tags", {}).get("source") == "bm25" and c.get("note_id") is not None]
         
         # 生成和选择路径
         paths = self.graph_retriever.generate_and_select_paths(
@@ -133,7 +146,7 @@ class ContextDispatcher:
             for node_id in path_info["nodes"]:
                 # 查找原始候选中的节点信息
                 original_cand = next(
-                    (c for c in candidates if c["note_id"] == node_id), None
+                    (c for c in candidates if c.get("note_id") == node_id), None
                 )
                 if original_cand:
                     cand = original_cand.copy()
@@ -169,8 +182,8 @@ class ContextDispatcher:
             nodes.sort(key=lambda x: x.get("final_similarity", 0), reverse=True)
             
             for node in nodes:
-                node_id = node["note_id"]
-                if node_id in selected_ids:
+                node_id = node.get("note_id")
+                if node_id is None or node_id in selected_ids:
                     continue
                 
                 # 估算token消耗

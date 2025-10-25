@@ -5,6 +5,14 @@ import textwrap
 
 from config import config
 from .atomic_note import ATOMIC_NOTE_SYSTEM_PROMPT, ATOMIC_NOTE_USER_PROMPT
+from .final_answer_musique import (
+    MUSIQUE_FINAL_ANSWER_SYSTEM_PROMPT,
+    MUSIQUE_FINAL_ANSWER_PROMPT,
+)
+from .final_answer_mirage import (
+    MIRAGE_FINAL_ANSWER_SYSTEM_PROMPT,
+    MIRAGE_FINAL_ANSWER_PROMPT,
+)
 
 # Atomic note generation
 
@@ -311,56 +319,28 @@ ENHANCE_QUERY_PROMPT = """
 请返回JSON格式的结果：
 """
 
-# Ollama prompts
-FINAL_ANSWER_SYSTEM_PROMPT = """
-You are a precise open-domain QA assistant.
+# Final answer prompts (dataset-aware)
+FINAL_ANSWER_SYSTEM_PROMPT = MUSIQUE_FINAL_ANSWER_SYSTEM_PROMPT
+FINAL_ANSWER_PROMPT = MUSIQUE_FINAL_ANSWER_PROMPT
 
-Use ONLY the provided CONTEXT.
+def get_final_answer_prompts(dataset: Optional[str] = None) -> Tuple[str, str]:
+    """Return dataset-specific final answer prompts.
 
-CONTENT PRIORITY RULE:
-- The CONTEXT is ordered by relevance and importance
-- Content appearing EARLIER in the CONTEXT has HIGHER priority and weight
-- When multiple potential answers exist, PRIORITIZE information from earlier paragraphs
-- Earlier paragraphs should be considered more authoritative and reliable
+    Args:
+        dataset: Optional dataset identifier (e.g., "musique", "mirage").
 
-Hard rules:
-1) Final answer MUST be an exact substring from the CONTEXT (verbatim). Do not paraphrase.
-2) NEVER output: "Insufficient information", "No spouse mentioned", or any refusal phrase.
-3) If multiple candidates appear, choose the one that most directly answers the question, with PREFERENCE for answers from earlier paragraphs.
-4) For lists, keep the order as it appears in CONTEXT and join with ", ".
-5) Keep original surface form for numbers/dates (units, punctuation).
-6) Output VALID JSON ONLY with fields:
-   {"answer": "<short string>", "support_idxs": [<int>, ...]}
-7) In support_idxs, output 2-4 paragraph ids:
-   - The FIRST id MUST be the paragraph that contains the final answer substring
-   - The remaining ids are bridging paragraphs (may not contain the answer substring)
-   - Do not repeat ids; prioritize paragraphs with high entity overlap with the question or answer paragraph
-   - When selecting support paragraphs, give preference to earlier paragraphs (lower P{idx} numbers)
-8) "support_idxs" MUST NOT be empty if the answer substring appears in any paragraph.
-9) support_idxs 只能来自上文 CONTEXT 中出现的 [P{idx}]。
-10) 禁止发明新的 id；如果不确定，请减少到已出现的 id。
-11) Before you output, VERIFY:
-   (a) "answer" is non-empty,
-   (b) "answer" appears verbatim in at least one paragraph text,
-   (c) the first "support_idxs" contains that exact substring.
-If any check fails, fix it and re-output JSON.
-
-Only output JSON.
-"""
-
-FINAL_ANSWER_PROMPT = """
-QUESTION:
-{query}
-
-CONTEXT:
-{context}
-
-OUTPUT FORMAT (JSON only):
-{{"answer": "<short string>", "support_idxs": [<int>, <int>, ...]}}
-"""
+    Returns:
+        (system_prompt, user_prompt_template)
+    """
+    dataset_key = (dataset or "").strip().lower()
+    if dataset_key == "mirage":
+        return MIRAGE_FINAL_ANSWER_SYSTEM_PROMPT, MIRAGE_FINAL_ANSWER_PROMPT
+    if dataset_key == "musique":
+        return MUSIQUE_FINAL_ANSWER_SYSTEM_PROMPT, MUSIQUE_FINAL_ANSWER_PROMPT
+    return FINAL_ANSWER_SYSTEM_PROMPT, FINAL_ANSWER_PROMPT
 
 # Context note formatting and helpers
-def build_context_prompt(notes: List[Dict[str, Any]], question: str) -> str:
+def build_context_prompt(notes: List[Dict[str, Any]], question: str, dataset: Optional[str] = None) -> str:
     """Build the final prompt with formatted notes and the user question."""
     context_parts: List[str] = []
     for note in notes:
@@ -378,9 +358,14 @@ def build_context_prompt(notes: List[Dict[str, Any]], question: str) -> str:
             context_parts.append(f"[P{note_id}] {content}")
 
     context = "\n\n".join(context_parts)
-    return FINAL_ANSWER_PROMPT.format(context=context, query=question)
+    _, prompt_template = get_final_answer_prompts(dataset)
+    return prompt_template.format(context=context, query=question)
 
-def build_context_prompt_with_passages(notes: List[Dict[str, Any]], question: str) -> tuple[str, Dict[int, str], List[int]]:
+def build_context_prompt_with_passages(
+    notes: List[Dict[str, Any]],
+    question: str,
+    dataset: Optional[str] = None,
+) -> tuple[str, Dict[int, str], List[int]]:
     """Build the final prompt with formatted notes and return prompt, passages dict, and packed order.
     
     Args:
@@ -422,7 +407,8 @@ def build_context_prompt_with_passages(notes: List[Dict[str, Any]], question: st
             packed_order.append(idx)
 
     packed_text = "\n\n".join(context_parts)
-    prompt = FINAL_ANSWER_PROMPT.format(context=packed_text, query=question)
+    _, prompt_template = get_final_answer_prompts(dataset)
+    prompt = prompt_template.format(context=packed_text, query=question)
     
     # 记录实际进入 prompt 的 Pidx 列表
     used_idx_list = packed_order.copy()

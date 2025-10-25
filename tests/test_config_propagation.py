@@ -99,8 +99,8 @@ def _patch_query_processor(monkeypatch, loader):
     monkeypatch.setattr(qp, "LLMBasedRewriter", DummyRewriter, raising=False)
     monkeypatch.setattr(qp, "DiversityScheduler", DummyDiversityScheduler, raising=False)
     monkeypatch.setattr(qp, "build_bm25_corpus", lambda notes, func: {i: func(n) for i, n in enumerate(notes)}, raising=False)
-    monkeypatch.setattr(qp, "OllamaClient", lambda: object(), raising=False)
-    monkeypatch.setattr(qp, "HybridLLMDispatcher", lambda: object(), raising=False)
+    # 移除对 OllamaClient 的 monkeypatch；不再需要
+    # 保留其他组件的占位或模拟（如有）
 
     return qp
 

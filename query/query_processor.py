@@ -8,8 +8,7 @@ import time
 import json
 import hashlib
 
-# 向后兼容占位符：删除 Ollama 后保留模块属性，供测试 monkeypatch
-OllamaClient = None
+# Ollama 支持已移除；请使用 LLMFactory 的 'lmstudio' 或 'vllm-openai' 作为 provider。
 
 # 导入增强的日志功能
 from utils.logging_utils import (
@@ -545,7 +544,7 @@ Prompt Length: {len(prompt)} characters
         else:
             self.recall_optimizer = EnhancedRecallOptimizer(self.vector_retriever, self.graph_retriever)
 
-        # 初始化LLM客户端：统一走工厂，根据配置选择 lmstudio 或 ollama
+        # 初始化LLM客户端：统一走工厂，根据配置选择 provider（如 lmstudio、vllm-openai 等）
         llm_provider = self._llm_cfg.get('provider', 'lmstudio')
         try:
             self.llm_client = LLMFactory.create_provider(llm_provider)
@@ -2590,8 +2589,8 @@ Prompt Length: {len(prompt)} characters
                     id_to_idx[str(note_id)] = idx
             predicted_support_idxs = [id_to_idx[str(nid)] for nid in support_note_ids if str(nid) in id_to_idx]
             context = "\n".join(n.get('content', '') for n in selected_notes)
-            if self.ollama:
-                scores = self.ollama.evaluate_answer(query, context, answer)
+            if self.final_answer_client:
+                scores = self.final_answer_client.evaluate_answer(query, context, answer)
             logger.info(
                 f"Answer selector produced direct answer via graph path: {selector_result.get('rels', [])}"
             )
@@ -2635,22 +2634,34 @@ Prompt Length: {len(prompt)} characters
                 efsa_prompt = f"Query: {query}\nContext:\n{context}"
                 self._log_final_answer_prompt(efsa_prompt, query)
 
-                scores = self.ollama.evaluate_answer(query, context, answer)
+                scores = self.final_answer_client.evaluate_answer(query, context, answer)
             else:
                 # EFSA未找到实体答案，回退到原有的LLM句子型答案生成
                 logger.info("EFSA did not find entity answer, falling back to LLM-based answer generation")
 
                 # 生成答案和评分
                 # 使用新的 build_context_prompt_with_passages 函数生成带有 [P{idx}] 标签的上下文和passages字典
-                prompt, passages_by_idx, packed_order = build_context_prompt_with_passages(selected_notes, query)
+                prompt, passages_by_idx, packed_order = build_context_prompt_with_passages(
+                    selected_notes,
+                    query,
+                    dataset,
+                )
 
                 # 记录传入最终答案生成模块的完整prompt内容
                 self._log_final_answer_prompt(prompt, query)
 
-                raw_answer = self.final_answer_client.generate_final_answer(prompt, query)
+                raw_answer = self.final_answer_client.generate_final_answer(
+                    prompt,
+                    query,
+                    dataset=dataset,
+                )
                 # 使用鲁棒的JSON解析器，带重试机制
                 def retry_generate():
-                    return self.final_answer_client.generate_final_answer(prompt, query)
+                    return self.final_answer_client.generate_final_answer(
+                        prompt,
+                        query,
+                        dataset=dataset,
+                    )
 
                 # 从配置获取重试参数
                 json_parsing_config = config.get('retrieval.json_parsing', {})
@@ -2898,24 +2909,39 @@ Prompt Length: {len(prompt)} characters
             
             # Step 5: Generate final answer using original query
             # 使用新的 build_context_prompt_with_passages 函数生成带有 [P{idx}] 标签的上下文和passages字典
-            prompt, passages = build_context_prompt_with_passages(selected_notes, query)
+            prompt, passages, _ = build_context_prompt_with_passages(
+                selected_notes,
+                query,
+                dataset,
+            )
             
             # 记录传入最终答案生成模块的完整prompt内容
             self._log_final_answer_prompt(prompt, query)
             
-            raw_answer = self.ollama.generate_final_answer(prompt)
+            raw_answer = self.final_answer_client.generate_final_answer(
+                prompt,
+                query,
+                dataset=dataset,
+            )
             
             # 使用鲁棒的JSON解析器，带重试机制
             def retry_generate():
-                return self.ollama.generate_final_answer(prompt)
+                return self.final_answer_client.generate_final_answer(
+                    prompt,
+                    query,
+                    dataset=dataset,
+                )
             
             answer, predicted_support_idxs = extract_prediction_with_retry(
-            raw_answer, passages, retry_func=retry_generate, max_retries=3
-        )
+                raw_answer,
+                passages,
+                retry_func=retry_generate,
+                max_retries=3,
+            )
             
             # Step 6: Evaluate answer and collect feedback
             context = "\n".join(n.get('content', '') for n in selected_notes)
-            scores = self.ollama.evaluate_answer(query, context, answer)
+            scores = self.final_answer_client.evaluate_answer(query, context, answer)
             
             # 为笔记添加反馈分数
             for n in selected_notes:

@@ -14,10 +14,9 @@ from loguru import logger
 
 from config import config
 from .prompts import (
-    FINAL_ANSWER_SYSTEM_PROMPT,
-    FINAL_ANSWER_PROMPT,
     EVALUATE_ANSWER_SYSTEM_PROMPT,
     EVALUATE_ANSWER_PROMPT,
+    get_final_answer_prompts,
 )
 from .streaming_early_stop import create_early_stop_stream
 
@@ -379,10 +378,21 @@ class LMStudioClient:
                     results.append("")
             return results
     
-    def generate_final_answer(self, context: str, query: str) -> str:
-        """Generate final answer using context and query."""
-        prompt = FINAL_ANSWER_PROMPT.format(context=context, query=query)
-        return self.generate(prompt, FINAL_ANSWER_SYSTEM_PROMPT)
+    def generate_final_answer(
+        self,
+        prompt_or_context: str,
+        query: Optional[str] = None,
+        dataset: Optional[str] = None,
+    ) -> str:
+        """Generate final answer; accepts either a preformatted prompt or raw context."""
+        system_prompt, prompt_template = get_final_answer_prompts(dataset)
+
+        prompt_text = prompt_or_context or ""
+        # Heuristic: if the incoming text does not look preformatted, rebuild with template
+        if "OUTPUT FORMAT" not in prompt_text and query is not None:
+            prompt_text = prompt_template.format(context=prompt_text, query=query)
+
+        return self.generate(prompt_text, system_prompt)
     
     def evaluate_answer(self, query: str, context: str, answer: str) -> Dict[str, float]:
         """Evaluate answer quality."""

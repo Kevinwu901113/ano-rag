@@ -117,22 +117,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
             "temperature": 0.7,
             "max_tokens": 512
         },
-        "hybrid_llm": {
-            "mode": "task_division",
-            "light_tasks": {
-                "provider": "ollama",
-                "model": "qwen2.5:latest",
-                "base_url": "http://localhost:11434",
-                "timeout": 30
-            },
-            "heavy_tasks": {
-                "provider": "lmstudio",
-                "model": "openai/gpt-oss-20b",
-                "base_url": "http://localhost:1234/v1",
-                "instances": 2,
-                "timeout": 60
-            }
-        },
+        # 已移除 hybrid_llm 中的 ollama 配置；如需多提供者请直接使用 LLMFactory 并在具体模块配置中声明
         # 新增：笔记生成器（vLLM）默认配置，避免自定义键被忽略
         "note_generator": {
             "provider": "vllm-openai",

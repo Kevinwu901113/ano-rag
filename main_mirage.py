@@ -1,1719 +1,1065 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """
-MIRAGE Benchmark Runner for AnoRAG System
+MIRAGE数据集批量处理脚本
 
-This script runs the AnoRAG system on the MIRAGE benchmark in Mixed mode,
-generating answers from a global document pool and ensuring output compatibility
-with MIRAGE's official evaluation.py without performing evaluation itself.
+该脚本用于批量处理MIRAGE基准测试数据，对每个测试样本：
+1. 解析查询与对应的doc_pool文档块
+2. 将每个文档块视为独立段落，构建知识库（process阶段）
+   - 注意：query字段仅用于查询阶段，不参与文档构建
+3. 使用query进行检索与回答（query阶段）
+4. 输出包含predicted_answer与retrieved_contexts等信息的结果
 
-Key Features:
-- Support for Mixed/Oracle/Base modes
-- Global document pool indexing (BM25/Dense/Hybrid)
-- Optional atomic note extraction and graph building
-- Note-to-original-chunk remapping for evaluation compatibility
-- Parallel processing with resume capability
-- Comprehensive logging and reproducibility
-
-Usage:
-    python main_mirage.py --mode mixed --topk 5 --retriever hybrid
-    python main_mirage.py --mode oracle --new --debug
-    python main_mirage.py --mode base --model qwen2.5-7b --temperature 0.1
-    python main_mirage.py --mode mixed --embed-model sentence-transformers/all-MiniLM-L6-v2
+除数据集读取与最终输出格式外，其余处理流程与main_musique.py保持一致。
 """
 
-import os
-import sys
-import json
-import time
-import hashlib
 import argparse
-import logging
-from collections import defaultdict
-from pathlib import Path
-from datetime import datetime
-from typing import Dict, List, Any, Optional, Tuple, Union
+import json
+import os
+from typing import List, Dict, Any, Optional, Tuple, Set
+import concurrent.futures
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass, asdict
+from tqdm import tqdm
+from loguru import logger
+import numpy as np
 
-# Add project root to Python path
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-
-# Core imports
+from doc import DocumentProcessor
+from query import QueryProcessor
 from config import config
-from utils.file_utils import FileUtils
-from utils.text_utils import TextUtils
-from utils.logging_utils import setup_logging
-from vector_store import VectorRetriever, EmbeddingManager
-from llm.local_llm import LocalLLM
-from llm.lmstudio_client import LMStudioClient
-from llm.vllm_atomic_note_generator import VllmAtomicNoteGenerator
-from query.query_processor import QueryProcessor
-from MIRAGE.utils import load_json, convert_doc_pool
-from graph import GraphBuilder, GraphIndex
-from llm.atomic_note_generator import AtomicNoteGenerator
+from graph.index import NoteGraph
+from utils import FileUtils, setup_logging
+from llm import LocalLLM
+from llm.cor_controller import chain_of_retrieval
+from parallel import create_parallel_interface, ProcessingMode, ParallelStrategy
 
-# 兼容占位：供测试猴子补丁替换
-ParallelTaskAtomicNoteGenerator = AtomicNoteGenerator
-EnhancedAtomicNoteGenerator = AtomicNoteGenerator
 
-# Constants
-MIRAGE_DATA_DIR = "mirage"
-RESULT_DIR = "result"
-DEFAULT_TOPK = 5
-DEFAULT_MAX_WORKERS_QUERY = 4
-DEFAULT_MAX_WORKERS_NOTE = 2
+RESULT_ROOT = config.get('storage.result_root', 'result')
 
-@dataclass
-class MirageConfig:
-    """Configuration for MIRAGE run"""
-    # Run configuration
-    run_id: str
-    mode: str  # mixed, oracle, base
-    topk: int
-    new_run: bool
-    debug: bool
+
+def safe_config_defaults(params_dict: Dict[str, Any]) -> Dict[str, Any]:
+    """为配置参数添加安全默认值，防止 KeyError"""
+    if not isinstance(params_dict, dict):
+        params_dict = {}
     
-    # Data paths
-    dataset_path: str
-    doc_pool_path: str
-    oracle_path: str
-    result_dir: str
+    # 添加常用的默认值
+    defaults = {
+        'top_k': 20,
+        'top_m_candidates': 30,
+        'first_hop_topk': 20,
+        'prf_topk': 20,
+        'dense_weight': 0.7,
+        'bm25_weight': 0.3,
+        'hop_decay': 0.8,
+        'per_hop_keep_top_m': 6,
+        'lower_threshold': 0.1,
+        'max_notes_for_llm': 15,
+        'max_tokens': 1800,
+        'similarity_threshold': 0.15,
+        'batch_size': 64
+    }
     
-    # Retrieval configuration
-    retriever_type: str  # bm25, dense, hybrid
-    embed_model: str
-    rebuild_index: bool
-    
-    # LLM configuration
-    model_name: str
-    temperature: float
-    max_tokens: int
-    seed: Optional[int]
-    
-    # Note engine configuration
-    note_engines: List[str]
-    enable_notes: bool
-    enable_graph: bool
-    
-    # Parallel configuration
-    max_workers_query: int
-    max_workers_note: int
-    
-    # Timing
-    start_time: float
-    
-    def to_dict(self) -> Dict[str, Any]:
-        """Convert to dictionary for serialization"""
-        return asdict(self)
+    # 合并默认值，保留原有值
+    result = defaults.copy()
+    result.update(params_dict)
+    return result
 
-class MirageRunner:
-    """Main runner for MIRAGE benchmark"""
-    
-    def __init__(self, config: MirageConfig):
-        self.config = config
-        self.logger = logging.getLogger(__name__)
-        
-        # Initialize paths
-        self.setup_paths()
-        
-        # Data storage
-        self.dataset: List[Dict[str, Any]] = []
-        self.doc_pool: List[Dict[str, Any]] = []
-        self.oracle_data: Dict[str, List[Dict[str, Any]]] = {}
-        
-        # Components
-        self.retriever: Optional[VectorRetriever] = None
-        self.embedding_manager: Optional[EmbeddingManager] = None
-        self.llm_client: Optional[Union[LocalLLM, LMStudioClient]] = None
-        self.note_generator: Optional[VllmAtomicNoteGenerator] = None
-        self.query_processor: Optional[QueryProcessor] = None
-        self.atomic_notes: List[Dict[str, Any]] = []
 
-        # Doc pool indexes for reliable remapping
-        self.doc_pool_index_by_chunk_id: Dict[str, int] = {}
-        self.doc_pool_index_by_hash: Dict[str, List[int]] = {}
-        self.doc_pool_offset_index: Dict[Tuple[str, int, int], int] = {}
-        self._doc_chunk_embeddings: Optional[Any] = None
-        
-        # Statistics
-        self.stats = {
-            'total_queries': 0,
-            'processed_queries': 0,
-            'failed_queries': 0,
-            'total_time': 0.0,
-            'index_build_time': 0.0,
-            'note_generation_time': 0.0,
-            'retrieval_time': 0.0,
-            'generation_time': 0.0,
-            'graph_build_time': 0.0
-        }
-    
-    def setup_paths(self):
-        """Setup directory structure"""
-        self.run_dir = Path(self.config.result_dir) / self.config.run_id
-        self.run_dir.mkdir(parents=True, exist_ok=True)
-        
-        # Create subdirectories
-        (self.run_dir / "logs").mkdir(exist_ok=True)
-        (self.run_dir / "index").mkdir(exist_ok=True)
-        (self.run_dir / "notes").mkdir(exist_ok=True)
-        (self.run_dir / "graph").mkdir(exist_ok=True)
-        (self.run_dir / "queries").mkdir(exist_ok=True)
-        
-        self.logger.info(f"Run directory: {self.run_dir}")
-    
-    def load_data(self) -> bool:
-        """Load MIRAGE dataset, doc_pool, and oracle data"""
-        try:
-            self.logger.info("Loading MIRAGE data...")
-            
-            # Load dataset
-            self.dataset = load_json(self.config.dataset_path)
-            self.logger.info(f"Loaded {len(self.dataset)} queries from dataset")
-            
-            # Load doc_pool - it's already in the correct format as a list
-            self.doc_pool = load_json(self.config.doc_pool_path)
-            self.logger.info(f"Loaded {len(self.doc_pool)} documents from doc_pool")
-            self._build_doc_pool_indexes()
+def get_latest_workdir() -> str:
+    """获取最新的工作目录"""
+    os.makedirs(RESULT_ROOT, exist_ok=True)
+    subdirs = [d for d in os.listdir(RESULT_ROOT) if os.path.isdir(os.path.join(RESULT_ROOT, d))]
+    if not subdirs:
+        return create_new_workdir()
+    # 按数字排序而不是字符串排序，确保21排在9后面
+    numeric_subdirs = [d for d in subdirs if d.isdigit()]
+    if numeric_subdirs:
+        latest = str(max(int(d) for d in numeric_subdirs))
+    else:
+        # 如果没有纯数字目录，回退到字符串排序
+        latest = sorted(subdirs)[-1]
+    return os.path.join(RESULT_ROOT, latest)
 
-            # Load oracle data if needed
-            if self.config.mode == "oracle":
-                self.oracle_data = load_json(self.config.oracle_path)
-                self.logger.info(f"Loaded oracle data for {len(self.oracle_data)} queries")
-            
-            self.stats['total_queries'] = len(self.dataset)
-            return True
-            
-        except Exception as e:
-            self.logger.error(f"Failed to load data: {e}")
-            return False
-    
-    def build_global_index(self) -> bool:
-        """Build or load global retrieval index"""
-        try:
-            self.logger.info("Building global retrieval index...")
-            start_time = time.time()
-            
-            # Initialize embedding manager when vector retrieval is required or custom model provided
-            if self.config.retriever_type in ['dense', 'hybrid'] or self.config.embed_model:
-                self.embedding_manager = EmbeddingManager()
-                if self.config.embed_model:
-                    self.embedding_manager.set_model(self.config.embed_model)
-            else:
-                self.embedding_manager = None
 
-            # Initialize retriever with configured components
-            self.retriever = VectorRetriever(embedding_manager=self.embedding_manager,
-                                             retrieval_mode=self.config.retriever_type)
-            if self.config.embed_model:
-                self.retriever.set_embedding_model(self.config.embed_model)
+def create_new_workdir() -> str:
+    """创建新的工作目录"""
+    os.makedirs(RESULT_ROOT, exist_ok=True)
+    existing = [int(d) for d in os.listdir(RESULT_ROOT) if d.isdigit()]
+    next_idx = max(existing) + 1 if existing else 1
+    work_dir = os.path.join(RESULT_ROOT, str(next_idx))
+    os.makedirs(work_dir, exist_ok=True)
+    return work_dir
 
-            # Set index directory to run-specific location
-            index_dir = self.run_dir / "index"
-            self.retriever.data_dir = str(index_dir)
 
-            # Prefer cached/generated atomic notes for indexing
-            atomic_notes = self._prepare_atomic_notes_for_index()
+def _sanitize_identifier(identifier: str) -> str:
+    """将任意字符串转为安全的文件夹名称"""
+    if not identifier:
+        return "unknown"
+    safe_chars = []
+    for ch in identifier:
+        if ch.isalnum() or ch in {"_", "-"}:
+            safe_chars.append(ch)
+        else:
+            safe_chars.append("_")
+    sanitized = "".join(safe_chars).strip("._")
+    return sanitized or "unknown"
 
-            # Build index
-            success = self.retriever.build_index(
-                atomic_notes=atomic_notes,
-                force_rebuild=self.config.rebuild_index,
-                save_index=True
-            )
-            
-            if not success:
-                self.logger.error("Failed to build retrieval index")
-                return False
-            
-            self.stats['index_build_time'] = time.time() - start_time
-            self.logger.info(f"Index built successfully in {self.stats['index_build_time']:.2f}s")
-            return True
-            
-        except Exception as e:
-            self.logger.error(f"Failed to build index: {e}")
-            return False
 
-    def _prepare_atomic_notes_for_index(self) -> List[Dict[str, Any]]:
-        """Return the best available atomic notes for index construction."""
-        if self.atomic_notes:
-            self.logger.info(
-                "Using %d in-memory atomic notes for index build",
-                len(self.atomic_notes)
-            )
-            return self.atomic_notes
+def create_item_workdir(base_work_dir: str, item_id: str, index: int, debug_mode: bool = False) -> str:
+    """为单个item创建工作目录
 
-        from_doc_pool = self._collect_atomic_notes_from_doc_pool()
-        if from_doc_pool:
-            self.logger.info(
-                "Using %d atomic notes from doc_pool for index build",
-                len(from_doc_pool)
-            )
-            self.atomic_notes = from_doc_pool
-            return from_doc_pool
+    Args:
+        base_work_dir: 基础工作目录
+        item_id: 项目ID
+        index: 数据集中该item的顺序索引
+        debug_mode: 是否为debug模式，如果是则创建debug子文件夹
 
-        cached_notes = self._load_cached_atomic_notes()
-        if cached_notes:
-            self.logger.info(
-                "Using %d cached atomic notes for index build",
-                len(cached_notes)
-            )
-            self.atomic_notes = cached_notes
-            return cached_notes
+    Returns:
+        工作目录路径
+    """
+    safe_id = _sanitize_identifier(item_id)
+    item_folder_name = f"{index:03d}_{safe_id}" if safe_id else f"{index:03d}"
 
-        fallback_notes = self.convert_doc_pool_to_notes()
-        self.logger.info(
-            "No atomic notes available; falling back to %d doc_pool chunks",
-            len(fallback_notes)
-        )
-        self.atomic_notes = fallback_notes
-        return fallback_notes
+    if debug_mode:
+        # debug模式：/results/数字/debug/{i:03d}_item_id/
+        debug_dir = os.path.join(base_work_dir, "debug")
+        item_work_dir = os.path.join(debug_dir, item_folder_name)
+    else:
+        # 非debug模式：/results/数字/{i:03d}_item_id/
+        item_work_dir = os.path.join(base_work_dir, item_folder_name)
 
-    def convert_doc_pool_to_notes(self) -> List[Dict[str, Any]]:
-        """Convert doc_pool entries to atomic notes format for indexing"""
-        atomic_notes = []
+    os.makedirs(item_work_dir, exist_ok=True)
+    return item_work_dir
 
-        for idx, doc in enumerate(self.doc_pool):
-            chunk_id, doc_hash, offsets = self._prepare_doc_metadata(doc, idx)
-            note = {
-                'note_id': chunk_id,
-                'content': doc.get('doc_chunk', ''),
-                'doc_name': doc.get('doc_name', ''),
-                'chunk_id': chunk_id,
-                'doc_hash': doc_hash,
-                'offsets': offsets,
-                'original_index': idx,
-                'metadata': {
-                    'source': 'doc_pool',
-                    'mapped_id': doc.get('mapped_id'),
-                    'support': doc.get('support', False),
-                    'chunk_id': chunk_id,
-                    'doc_hash': doc_hash,
-                    'offsets': offsets,
-                    'doc_name': doc.get('doc_name', ''),
-                    'original_index': idx
-                }
-            }
-            atomic_notes.append(note)
 
-        return atomic_notes
+class MirageProcessor:
+    """MIRAGE数据集处理器"""
 
-    def _prepare_doc_metadata(self, doc: Dict[str, Any], index: int) -> Tuple[str, str, List[int]]:
-        """Ensure doc chunk metadata is normalized and return identifiers."""
-        chunk_id = self._extract_chunk_id(doc, index)
-        doc_chunk = doc.get('doc_chunk', '') or ''
-        doc_hash = doc.get('doc_hash') or self._compute_doc_hash(doc_chunk)
-
-        offsets = doc.get('offsets')
-        if not self._is_valid_offset(offsets):
-            offsets = [0, len(doc_chunk)]
-
-        # Persist normalized metadata back to doc for downstream use
-        doc['chunk_id'] = chunk_id
-        doc['doc_hash'] = doc_hash
-        doc['offsets'] = list(offsets)
-
-        return chunk_id, doc_hash, list(offsets)
-
-    @staticmethod
-    def _compute_doc_hash(content: str) -> str:
-        return hashlib.sha1((content or '').encode()).hexdigest()
-
-    @staticmethod
-    def _is_valid_offset(offsets: Any) -> bool:
-        return isinstance(offsets, (list, tuple)) and len(offsets) == 2 and all(
-            isinstance(x, (int, float)) for x in offsets
-        )
-
-    def _extract_chunk_id(self, doc: Dict[str, Any], index: int) -> str:
-        chunk_id = (
-            doc.get('chunk_id')
-            or doc.get('metadata', {}).get('chunk_id')
-            or f"{doc.get('doc_name', f'doc_{index}')}#{index}"
-        )
-        return str(chunk_id)
-
-    def _build_doc_pool_indexes(self) -> None:
-        """Create indexes to quickly locate doc_pool chunks by metadata."""
-        self.doc_pool_index_by_chunk_id.clear()
-        self.doc_pool_index_by_hash.clear()
-        self.doc_pool_offset_index.clear()
-        self._doc_chunk_embeddings = None
-
-        for idx, doc in enumerate(self.doc_pool):
-            chunk_id, doc_hash, offsets = self._prepare_doc_metadata(doc, idx)
-
-            if chunk_id:
-                self.doc_pool_index_by_chunk_id[chunk_id] = idx
-
-            if doc_hash:
-                self.doc_pool_index_by_hash.setdefault(doc_hash, []).append(idx)
-
-            if self._is_valid_offset(offsets):
-                doc_name = doc.get('doc_name', '')
-                self.doc_pool_offset_index[(doc_name, int(offsets[0]), int(offsets[1]))] = idx
-
-    def _ensure_doc_pool_indexes(self) -> None:
-        if not self.doc_pool_index_by_chunk_id and self.doc_pool:
-            self._build_doc_pool_indexes()
-
-    def _lookup_by_offsets(self, doc_name: str, offsets: Optional[List[int]]) -> Optional[int]:
-        if not self._is_valid_offset(offsets):
-            return None
-
-        offset_tuple = (doc_name or '', int(offsets[0]), int(offsets[1]))
-        return self.doc_pool_offset_index.get(offset_tuple)
-
-    def _verify_doc_match(
+    def __init__(
         self,
-        doc: Dict[str, Any],
-        expected_chunk_id: Optional[str],
-        expected_hash: Optional[str],
-        expected_offsets: Optional[List[int]]
-    ) -> bool:
-        if expected_chunk_id and str(doc.get('chunk_id')) != str(expected_chunk_id):
-            return False
-
-        if expected_hash:
-            doc_hash = doc.get('doc_hash') or self._compute_doc_hash(doc.get('doc_chunk', ''))
-            if doc_hash != expected_hash:
-                return False
-
-        if self._is_valid_offset(expected_offsets):
-            doc_offsets = doc.get('offsets')
-            if not self._is_valid_offset(doc_offsets) or [int(doc_offsets[0]), int(doc_offsets[1])] != [
-                int(expected_offsets[0]), int(expected_offsets[1])
-            ]:
-                return False
-
-        return True
-
-    def _ensure_doc_embeddings(self) -> Optional[Any]:
-        if self._doc_chunk_embeddings is not None:
-            return self._doc_chunk_embeddings
-
-        if not self.retriever or not getattr(self.retriever, 'embedding_manager', None):
-            return None
-
-        contents = [doc.get('doc_chunk', '') or '' for doc in self.doc_pool]
-        if not contents:
-            return None
-
-        try:
-            embeddings = self.retriever.embedding_manager.encode_texts(contents)
-            self._doc_chunk_embeddings = embeddings
-            return embeddings
-        except Exception as exc:  # pragma: no cover - safety net
-            if self.config.debug:
-                self.logger.debug(f"Failed to encode doc_pool chunks for embeddings: {exc}")
-            return None
-
-    def _find_chunk_by_embedding(self, content: str) -> Optional[Tuple[Dict[str, Any], int]]:
-        if not content or not content.strip():
-            return None
-
-        embeddings = self._ensure_doc_embeddings()
-        if embeddings is None:
-            return None
-
-        try:
-            note_embedding = self.retriever.embedding_manager.encode_texts([content])
-        except Exception as exc:  # pragma: no cover - safety net
-            if self.config.debug:
-                self.logger.debug(f"Failed to encode note content for embedding remap: {exc}")
-            return None
-
-        try:
-            import numpy as np
-
-            doc_matrix = np.array(embeddings, dtype=float)
-            note_vector = np.array(note_embedding, dtype=float)
-
-            if note_vector.ndim == 1:
-                note_vector = note_vector.reshape(1, -1)
-
-            if doc_matrix.ndim == 1:
-                doc_matrix = doc_matrix.reshape(len(self.doc_pool), -1)
-
-            if doc_matrix.size == 0 or note_vector.size == 0:
-                return None
-
-            note_norm = np.linalg.norm(note_vector, axis=1, keepdims=True)
-            doc_norm = np.linalg.norm(doc_matrix, axis=1, keepdims=False)
-
-            if not note_norm.size or not doc_norm.size or float(note_norm.max()) == 0.0:
-                return None
-
-            similarities = (doc_matrix @ note_vector.T).reshape(-1) / (
-                (doc_norm * note_norm.squeeze()) + 1e-8
-            )
-
-            if similarities.size == 0:
-                return None
-
-            best_idx = int(similarities.argmax())
-            best_score = float(similarities[best_idx])
-
-            if best_score < 0.6:
-                return None
-
-            return self.doc_pool[best_idx], best_idx
-        except Exception as exc:  # pragma: no cover - numerical safety
-            if self.config.debug:
-                self.logger.debug(f"Embedding remap failed: {exc}")
-            return None
-
-    @staticmethod
-    def _get_chunk_key(doc: Dict[str, Any], index: int) -> str:
-        return str(doc.get('chunk_id') or f"{doc.get('doc_name', '')}#{index}")
+        max_workers: int = 4,
+        debug: bool = False,
+        work_dir: Optional[str] = None,
+        llm: Optional[LocalLLM] = None,
+        enable_cor: bool = False,
+    ):
+        self.max_workers = max_workers
+        self.debug = debug  # 调试模式，不清理中间文件
+        self.base_work_dir = work_dir or create_new_workdir()
+        if llm is None:
+            raise ValueError("MirageProcessor requires a LocalLLM instance to be passed")
+        self.llm = llm
+        self.enable_cor = enable_cor
+        self.doc_pool_by_query: Dict[str, List[Dict[str, Any]]] = {}
+        self.global_paragraph_lookup: Dict[Tuple[str, int], Dict[str, Any]] = {}
+        self.global_atomic_notes: List[Dict[str, Any]] = []
+        self.global_embeddings: Optional[np.ndarray] = None
+        self.global_graph_file: Optional[str] = None
+        self.global_note_graph: Optional[NoteGraph] = None
+        self.global_resources_ready = False
+        self.global_root_dir = os.path.join(self.base_work_dir, 'mirage_global')
+        self.global_corpus_dir = os.path.join(self.global_root_dir, 'corpus')
+        self.global_processed_dir = os.path.join(self.global_root_dir, 'processed')
+        
+        # 更新配置中的工作目录和所有存储路径，确保文件生成在正确的工作目录内
+        cfg = config.load_config()
+        storage = cfg.setdefault('storage', {})
+        storage['work_dir'] = self.base_work_dir
+        # 设置所有存储路径到工作目录下
+        storage['vector_db_path'] = os.path.join(self.base_work_dir, 'vector_store')
+        storage['graph_db_path'] = os.path.join(self.base_work_dir, 'graph_store')
+        storage['processed_docs_path'] = os.path.join(self.base_work_dir, 'processed')
+        storage['cache_path'] = os.path.join(self.base_work_dir, 'cache')
+        storage['vector_index_path'] = os.path.join(self.base_work_dir, 'vector_index')
+        storage['vector_store_path'] = os.path.join(self.base_work_dir, 'vector_store')
+        storage['embedding_cache_path'] = os.path.join(self.base_work_dir, 'embedding_cache')
+        # 设置评估数据集路径
+        cfg.setdefault('eval', {})['datasets_path'] = os.path.join(self.base_work_dir, 'eval_datasets')
+        
+        # 预初始化共享资源以避免并行处理时的竞争
+        self._shared_embedding_manager = None
+        self._init_shared_resources()
+        
+        logger.info(f"Using base work directory: {self.base_work_dir}")
+        logger.info(f"Storage paths configured to use work directory: {self.base_work_dir}")
     
-    def generate_atomic_notes(self) -> bool:
-        """Generate atomic notes from doc_pool (optional)"""
-        if not self.config.enable_notes:
-            # Still attempt to harvest any pre-existing notes for downstream steps
-            self.atomic_notes = self._collect_atomic_notes_from_doc_pool()
-            return True
-
+    def _init_shared_resources(self):
+        """预初始化共享资源，避免并行处理时的资源竞争"""
         try:
-            self.logger.info("Generating atomic notes...")
-            start_time = time.time()
+            from vector_store.embedding_manager import EmbeddingManager
+            self._shared_embedding_manager = EmbeddingManager()
+            logger.info("Shared EmbeddingManager initialized successfully")
+        except Exception as e:
+            logger.warning(f"Failed to pre-initialize shared resources: {e}")
 
-            # Reuse existing notes if they are already attached to the doc_pool
-            existing_notes = self._collect_atomic_notes_from_doc_pool()
-            if existing_notes:
-                self.logger.info(
-                    "Found %d existing atomic notes; skipping regeneration",
-                    len(existing_notes)
-                )
-                self.atomic_notes = existing_notes
-                self._persist_atomic_notes(existing_notes)
-                return True
+    def _write_doc_pool_corpus(self, doc_pool_chunks: List[Dict[str, Any]]) -> List[str]:
+        """将doc_pool转换为文档文件供全局处理使用"""
+        os.makedirs(self.global_corpus_dir, exist_ok=True)
+        self.global_paragraph_lookup.clear()
 
-            # Initialize LLM for note generation
-            llm = LocalLLM()
+        grouped_chunks: Dict[Tuple[str, str], List[Dict[str, Any]]] = {}
+        for chunk in doc_pool_chunks:
+            if not isinstance(chunk, dict):
+                continue
+            mapped_id = str(chunk.get('mapped_id') or 'global')
+            doc_name = chunk.get('doc_name') or 'document'
+            grouped_chunks.setdefault((mapped_id, doc_name), []).append(chunk)
 
-            # 根据配置选择笔记生成器，支持并传递 max_workers，含回退链
-            engines = [e.lower() for e in (self.config.note_engines or [])]
-            preferred = engines or ["parallel", "enhanced", "basic"]
-            self.note_generator = None
-            errors = []
-            for engine in preferred:
-                try:
-                    if engine == "vllm":
-                        self.note_generator = VllmAtomicNoteGenerator(
-                            llm=llm,
-                            max_workers=self.config.max_workers_note
-                        )
-                        self.logger.info("Using VllmAtomicNoteGenerator")
-                        break
-                    elif engine == "parallel":
-                        self.note_generator = ParallelTaskAtomicNoteGenerator(
-                            llm=llm,
-                            max_workers=self.config.max_workers_note
-                        )
-                        self.logger.info("Using ParallelTaskAtomicNoteGenerator")
-                        break
-                    elif engine == "enhanced":
-                        self.note_generator = EnhancedAtomicNoteGenerator(
-                            llm=llm,
-                            max_workers=self.config.max_workers_note
-                        )
-                        self.logger.info("Using EnhancedAtomicNoteGenerator")
-                        break
-                    elif engine == "basic":
-                        self.note_generator = AtomicNoteGenerator(
-                            llm=llm,
-                            max_workers=self.config.max_workers_note
-                        )
-                        self.logger.info("Using AtomicNoteGenerator")
-                        break
-                except Exception as e:
-                    errors.append(f"{engine}: {e}")
+        file_paths: List[str] = []
+        doc_counter = 0
+
+        for (mapped_id, doc_name), chunks in grouped_chunks.items():
+            safe_qid = _sanitize_identifier(mapped_id) or "global"
+            safe_doc = _sanitize_identifier(doc_name) or "document"
+
+            group_dir = os.path.join(self.global_corpus_dir, safe_qid)
+            os.makedirs(group_dir, exist_ok=True)
+
+            file_name = f"{doc_counter:05d}_{safe_doc}.json"
+            file_path = os.path.join(group_dir, file_name)
+
+            paragraphs: List[Dict[str, Any]] = []
+            paragraph_ids_seen = set()
+
+            for idx, chunk in enumerate(chunks):
+                text = chunk.get('doc_chunk') or ''
+                if not isinstance(text, str) or not text.strip():
                     continue
 
-            if self.note_generator is None:
-                for engine in ["parallel", "enhanced", "basic"]:
+                paragraph_idx = chunk.get('original_index', idx)
+                try:
+                    paragraph_idx = int(paragraph_idx)
+                except Exception:
+                    paragraph_idx = idx
+
+                if paragraph_idx in paragraph_ids_seen:
+                    paragraph_idx = max(paragraph_ids_seen) + 1 if paragraph_ids_seen else paragraph_idx
+                paragraph_ids_seen.add(paragraph_idx)
+
+                offsets = chunk.get('offsets')
+                if isinstance(offsets, (list, tuple)) and len(offsets) == 2:
                     try:
-                        if engine == "parallel":
-                            self.note_generator = ParallelTaskAtomicNoteGenerator(
-                                llm=llm,
-                                max_workers=self.config.max_workers_note
-                            )
-                            self.logger.info("Using ParallelTaskAtomicNoteGenerator (fallback)")
-                            break
-                        elif engine == "enhanced":
-                            self.note_generator = EnhancedAtomicNoteGenerator(
-                                llm=llm,
-                                max_workers=self.config.max_workers_note
-                            )
-                            self.logger.info("Using EnhancedAtomicNoteGenerator (fallback)")
-                            break
-                        else:
-                            self.note_generator = AtomicNoteGenerator(
-                                llm=llm,
-                                max_workers=self.config.max_workers_note
-                            )
-                            self.logger.info("Using AtomicNoteGenerator (fallback)")
-                            break
-                    except Exception as e:
-                        errors.append(f"{engine}: {e}")
-                        continue
+                        offsets_value = [int(offsets[0]), int(offsets[1])]
+                    except Exception:
+                        offsets_value = [0, len(text)]
+                else:
+                    offsets_value = [0, len(text)]
 
-            if self.note_generator is None:
-                self.logger.error(f"Failed to initialize note generator: {errors}")
-                return False
-            
-            # Convert doc_pool to text_chunks format
-            text_chunks = []
-            for idx, doc in enumerate(self.doc_pool):
-                chunk = {
-                    'text': doc.get('doc_chunk', ''),
-                    'chunk_index': idx,
-                    'source_info': {
-                        'title': doc.get('doc_name', ''),
-                        'document_id': doc.get('mapped_id', f'doc_{idx}'),
-                        'is_supporting': doc.get('support', False)
-                    }
+                chunk_id = chunk.get('chunk_id') or f"{mapped_id}_{paragraph_idx}"
+
+                paragraphs.append({
+                    'idx': paragraph_idx,
+                    'title': doc_name,
+                    'paragraph_text': text
+                })
+
+                self.global_paragraph_lookup[(file_path, paragraph_idx)] = {
+                    'mapped_id': mapped_id,
+                    'doc_name': doc_name,
+                    'doc_chunk': text,
+                    'support': bool(chunk.get('support', False)),
+                    'chunk_id': chunk_id,
+                    'offsets': offsets_value,
+                    'original_index': chunk.get('original_index', idx)
                 }
-                text_chunks.append(chunk)
-            
-            # Generate notes
-            notes = self.note_generator.generate_atomic_notes(text_chunks)
 
-            # 适配不同返回格式：支持扁平笔记列表或按chunk返回
-            grouped_by_chunk = {i: [] for i in range(len(text_chunks))}
-            if isinstance(notes, list) and notes and isinstance(notes[0], dict) and ('notes' not in notes[0]):
-                # 扁平列表：按 chunk_index 或 source_info 分组
-                for note in notes:
-                    idx = None
-                    # 优先使用 chunk_index
-                    if isinstance(note.get('chunk_index'), (int, str)):
-                        try:
-                            idx = int(note['chunk_index'])
-                        except Exception:
-                            idx = None
-                    # 回退：根据 source_info.document_id 匹配 doc_pool
-                    if idx is None:
-                        src = note.get('source_info') or {}
-                        doc_id = src.get('document_id')
-                        if doc_id:
-                            for j, doc in enumerate(self.doc_pool):
-                                if doc.get('mapped_id') == doc_id:
-                                    idx = j
-                                    break
-                    if idx is None or idx < 0 or idx >= len(text_chunks):
-                        continue
-                    grouped_by_chunk[idx].append(note)
-            else:
-                # 按chunk返回：每项应为 {'notes': [...]} 或类似结构
-                for idx in range(len(text_chunks)):
-                    item = notes[idx] if idx < len(notes) else {}
-                    if isinstance(item, dict):
-                        grouped_by_chunk[idx] = item.get('notes', [])
-
-            total_notes = sum(len(v) for v in grouped_by_chunk.values())
-            self.logger.info(f"Generated {total_notes} notes across {len(text_chunks)} chunks")
-
-            # Store notes back in doc_pool for downstream use
-            for idx, doc in enumerate(self.doc_pool):
-                raw_notes = grouped_by_chunk.get(idx, [])
-                normalized_notes = []
-                for note_idx, note in enumerate(raw_notes):
-                    normalized = self._normalize_atomic_note(
-                        note,
-                        doc,
-                        doc_index=idx,
-                        note_position=len(normalized_notes)
-                    )
-                    if normalized:
-                        normalized_notes.append(normalized)
-                doc['notes'] = normalized_notes
-
-            self.stats['note_generation_time'] = time.time() - start_time
-            self.logger.info(f"Atomic notes generation completed in {self.stats['note_generation_time']:.2f}s")
-
-            self.atomic_notes = self._collect_atomic_notes_from_doc_pool()
-            if self.atomic_notes:
-                self._persist_atomic_notes(self.atomic_notes)
-            return True
-
-        except Exception as e:
-            self.logger.error(f"Failed to generate atomic notes: {e}")
-            return False
-
-    def _normalize_atomic_note(
-        self,
-        note: Dict[str, Any],
-        doc: Optional[Dict[str, Any]] = None,
-        *,
-        doc_index: Optional[int] = None,
-        note_position: int = 0
-    ) -> Optional[Dict[str, Any]]:
-        """Normalize a single atomic note structure for downstream compatibility."""
-        if not isinstance(note, dict):
-            return None
-
-        normalized = json.loads(json.dumps(note)) if note else {}
-        metadata = dict(normalized.get('metadata') or {})
-
-        chunk_id = normalized.get('chunk_id') or metadata.get('chunk_id')
-        doc_hash = normalized.get('doc_hash') or metadata.get('doc_hash')
-        offsets = normalized.get('offsets') or metadata.get('offsets')
-        doc_name = normalized.get('doc_name') or metadata.get('doc_name')
-        original_index = normalized.get('original_index', metadata.get('original_index'))
-
-        if doc is not None and doc_index is not None and doc_index >= 0:
-            chunk_id, doc_hash, offsets = self._prepare_doc_metadata(doc, doc_index)
-            doc_name = doc.get('doc_name', doc_name or '')
-            original_index = doc_index
-
-        if chunk_id is None:
-            chunk_id = f"chunk_{doc_index if doc_index is not None else 'na'}_{note_position}"
-
-        if doc_hash is None:
-            text_for_hash = (
-                normalized.get('content')
-                or normalized.get('raw_span')
-                or (doc.get('doc_chunk') if doc else '')
-                or ''
-            )
-            doc_hash = self._compute_doc_hash(text_for_hash)
-
-        if not self._is_valid_offset(offsets):
-            base_text = normalized.get('content') or normalized.get('raw_span') or ''
-            offsets = [0, len(base_text)]
-
-        note_id = normalized.get('note_id') or normalized.get('id')
-        if not note_id:
-            base_doc = doc_name or (doc.get('doc_name') if doc else 'doc')
-            note_id = f"{base_doc}#{chunk_id}#note_{note_position}"
-
-        content = (
-            normalized.get('content')
-            or normalized.get('raw_span')
-            or normalized.get('summary')
-            or (doc.get('doc_chunk') if doc else '')
-            or ''
-        )
-
-        resolved_doc_name = doc_name or ''
-        if doc is not None:
-            resolved_doc_name = resolved_doc_name or doc.get('doc_name', '')
-
-        normalized.update(
-            {
-                'note_id': str(note_id),
-                'chunk_id': str(chunk_id),
-                'doc_name': resolved_doc_name,
-                'doc_hash': doc_hash,
-                'offsets': list(offsets),
-                'original_index': original_index if original_index is not None else doc_index,
-                'content': content,
-            }
-        )
-
-        metadata.update(
-            {
-                'note_id': normalized['note_id'],
-                'chunk_id': normalized['chunk_id'],
-                'doc_hash': normalized['doc_hash'],
-                'doc_name': normalized['doc_name'],
-                'offsets': normalized['offsets'],
-                'original_index': normalized.get('original_index'),
-            }
-        )
-        normalized['metadata'] = metadata
-
-        if doc is not None:
-            source_info = doc.get('source_info') or {
-                'title': doc.get('doc_name', ''),
-                'document_id': doc.get('mapped_id'),
-                'is_supporting': doc.get('support', False)
-            }
-            normalized.setdefault('source_info', source_info)
-
-        return normalized
-
-    def _collect_atomic_notes_from_doc_pool(self) -> List[Dict[str, Any]]:
-        """Harvest normalized atomic notes from the current doc_pool."""
-        if not self.doc_pool:
-            return []
-
-        self._ensure_doc_pool_indexes()
-
-        collected: List[Dict[str, Any]] = []
-        for doc_index, doc in enumerate(self.doc_pool):
-            notes = doc.get('notes')
-            if not notes:
-                doc['notes'] = []
+            if not paragraphs:
                 continue
 
-            if not isinstance(notes, list):
-                notes = [notes]
+            payload = {
+                'id': f"{mapped_id}_{doc_counter}",
+                'paragraphs': paragraphs
+            }
 
-            normalized_notes = []
-            for note_position, note in enumerate(notes):
-                normalized = self._normalize_atomic_note(
-                    note,
-                    doc,
-                    doc_index=doc_index,
-                    note_position=note_position
-                )
-                if normalized:
-                    normalized_notes.append(normalized)
-                    collected.append(normalized)
-            doc['notes'] = normalized_notes
+            FileUtils.write_json(payload, file_path)
+            file_paths.append(file_path)
+            doc_counter += 1
 
-        return collected
+        logger.info(f"Prepared {len(file_paths)} global documents from doc_pool")
+        return file_paths
 
-    def _match_doc_for_note(self, note: Dict[str, Any]) -> Tuple[Optional[Dict[str, Any]], Optional[int]]:
-        """Find the doc_pool entry corresponding to a cached note."""
-        if not self.doc_pool:
-            return None, None
-
-        self._ensure_doc_pool_indexes()
-
-        metadata = note.get('metadata', {}) or {}
-        chunk_id = note.get('chunk_id') or metadata.get('chunk_id')
-        doc_hash = note.get('doc_hash') or metadata.get('doc_hash')
-        offsets = note.get('offsets') or metadata.get('offsets')
-        doc_name = note.get('doc_name') or metadata.get('doc_name') or ''
-        original_index = note.get('original_index', metadata.get('original_index'))
-
-        if isinstance(original_index, str):
-            try:
-                original_index = int(original_index)
-            except ValueError:
-                original_index = None
-
-        if original_index is not None and 0 <= original_index < len(self.doc_pool):
-            candidate = self.doc_pool[original_index]
-            if self._verify_doc_match(candidate, chunk_id, doc_hash, offsets):
-                return candidate, original_index
-
-        if chunk_id:
-            idx = self.doc_pool_index_by_chunk_id.get(str(chunk_id))
-            if idx is not None:
-                candidate = self.doc_pool[idx]
-                if self._verify_doc_match(candidate, chunk_id, doc_hash, offsets):
-                    return candidate, idx
-
-        if doc_hash:
-            for idx in self.doc_pool_index_by_hash.get(doc_hash, []):
-                candidate = self.doc_pool[idx]
-                if doc_name and candidate.get('doc_name') != doc_name:
-                    continue
-                if self._verify_doc_match(candidate, None, doc_hash, offsets):
-                    return candidate, idx
-
-        offset_idx = self._lookup_by_offsets(doc_name, offsets)
-        if offset_idx is not None and 0 <= offset_idx < len(self.doc_pool):
-            return self.doc_pool[offset_idx], offset_idx
-
-        return None, None
-
-    def _load_cached_atomic_notes(self) -> List[Dict[str, Any]]:
-        """Load atomic notes from disk and align them with the doc_pool."""
-        notes_path = self.run_dir / "notes" / "atomic_notes.jsonl"
-        if not notes_path.exists():
-            return []
-
-        loaded: List[Dict[str, Any]] = []
-        with open(notes_path, 'r', encoding='utf-8') as handle:
-            for line in handle:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    loaded.append(json.loads(line))
-                except json.JSONDecodeError:
-                    self.logger.warning(f"Failed to parse cached atomic note line: {line[:80]}")
-
-        if not loaded:
-            return []
-
-        normalized: List[Dict[str, Any]] = []
-        for note in loaded:
-            doc, doc_index = self._match_doc_for_note(note)
-            normalized_note = self._normalize_atomic_note(
-                note,
-                doc,
-                doc_index=doc_index,
-                note_position=len(normalized)
-            )
-            if normalized_note:
-                normalized.append(normalized_note)
-                if doc is not None and doc_index is not None and doc_index >= 0:
-                    notes_list = self.doc_pool[doc_index].setdefault('notes', [])
-                    if normalized_note not in notes_list:
-                        notes_list.append(normalized_note)
-
-        return normalized
-
-    def _persist_atomic_notes(self, atomic_notes: List[Dict[str, Any]]) -> None:
-        """Write atomic notes to disk for reuse across runs."""
-        if not atomic_notes:
+    def _prepare_global_resources(self, doc_pool_chunks: List[Dict[str, Any]]) -> None:
+        """构建全局doc_pool的原子笔记、向量和图谱"""
+        if self.global_resources_ready and self.global_atomic_notes:
             return
 
-        notes_dir = self.run_dir / "notes"
-        notes_dir.mkdir(exist_ok=True)
-        notes_path = notes_dir / "atomic_notes.jsonl"
+        logger.info("Preparing global MIRAGE corpus (doc_pool -> notes/graph)...")
+        os.makedirs(self.global_root_dir, exist_ok=True)
+        os.makedirs(self.global_processed_dir, exist_ok=True)
 
-        with open(notes_path, 'w', encoding='utf-8') as handle:
-            for note in atomic_notes:
-                handle.write(json.dumps(note, ensure_ascii=False) + '\n')
+        doc_files = self._write_doc_pool_corpus(doc_pool_chunks)
+        if not doc_files:
+            raise ValueError("Doc pool preprocessing produced no documents")
 
-    def build_graph(self) -> bool:
-        """Build and save knowledge graph (optional)"""
-        if not self.config.enable_graph:
-            return True
+        processor = DocumentProcessor(output_dir=self.global_processed_dir, llm=self.llm)
+        process_result = processor.process_documents(
+            doc_files,
+            force_reprocess=False,
+            output_dir=self.global_processed_dir
+        )
 
-        # Prefer generated atomic notes; fall back to doc_pool conversion
-        if hasattr(self, 'atomic_notes') and self.atomic_notes:
-            notes_for_graph = self.atomic_notes
-        else:
-            self.logger.warning("No generated atomic notes; falling back to doc_pool-based notes for graph")
-            notes_for_graph = self.convert_doc_pool_to_notes()
-            if not notes_for_graph:
-                self.logger.warning("No notes available from doc_pool; skipping graph build")
-                return True
-            
-        try:
-            self.logger.info("Building knowledge graph...")
-            start_time = time.time()
-            
-            # Initialize GraphBuilder without LLM (LLM-enhanced relations disabled pre-LLM init)
-            graph_builder = GraphBuilder(llm=self.llm_client)
-            
-            # Compute embeddings for notes
-            if not self.embedding_manager:
-                self.embedding_manager = EmbeddingManager()
-            
-            note_embeddings = self.embedding_manager.encode_atomic_notes(notes_for_graph)
-            
-            # Build graph
-            graph = graph_builder.build_graph(notes_for_graph, embeddings=note_embeddings)
-            
-            # Index graph
-            graph_index = GraphIndex()
-            graph_index.build_index(graph, atomic_notes=notes_for_graph, embeddings=note_embeddings)
-            
-            # Save graph artifacts
-            graph_dir = self.run_dir / "graph"
-            graph_dir.mkdir(exist_ok=True)
-            
-            graph_file = graph_dir / "graph.json"
-            graph_index.save_index(str(graph_file))
-            graph_index.save_graphml(str(graph_dir / "graph.graphml"))
+        atomic_notes = process_result.get('atomic_notes') or []
+        if not atomic_notes:
+            raise ValueError("No atomic notes generated from MIRAGE doc_pool")
 
-            # Cache path for downstream use if needed
-            self.graph_file = str(graph_file)
+        self.global_atomic_notes = atomic_notes
 
-            self.stats['graph_build_time'] = time.time() - start_time
-            self.logger.info(f"Graph built and saved in {self.stats['graph_build_time']:.2f}s")
-            return True
-
-        except Exception as e:
-            self.logger.error(f"Failed to build graph: {e}")
-            return False
-
-    def initialize_llm(self) -> bool:
-        """Initialize LLM client for answer generation"""
-        try:
-            self.logger.info(f"Initializing LLM: {self.config.model_name}")
-            
-            # Prefer LM Studio client; fall back to LocalLLM only if instantiation fails
+        embeddings_path = os.path.join(self.global_processed_dir, 'embeddings.npy')
+        if os.path.exists(embeddings_path):
             try:
-                self.llm_client = LMStudioClient(model=self.config.model_name)
-                self.logger.info("Using LM Studio client")
-            except Exception as e:
-                self.logger.warning(f"LM Studio client init failed, falling back: {e}")
-                self.llm_client = LocalLLM(
-                    model_name=self.config.model_name,
-                    temperature=self.config.temperature,
-                    max_tokens=self.config.max_tokens
-                )
-                self.logger.info("Using LocalLLM client")
-            
-            return True
-            
-        except Exception as e:
-            self.logger.error(f"Failed to initialize LLM: {e}")
-            return False
-    
-    def process_single_query(self, query_data: Dict[str, Any]) -> Dict[str, Any]:
-        """Process a single query through the full pipeline"""
-        query_id = query_data['query_id']
-        query = query_data['query']
-        
-        try:
-            self.logger.info(f"Processing query {query_id}: {query[:50]}...")
-            
-            # Create query directory
-            query_dir = self.run_dir / "queries" / str(query_id)
-            query_dir.mkdir(exist_ok=True)
-            
-            # Check if already processed
-            done_flag = query_dir / "done.flag"
-            if done_flag.exists() and not self.config.debug:
-                self.logger.info(f"Query {query_id} already processed, skipping")
-                # Load existing result
-                contexts_file = query_dir / "contexts.json"
-                answer_file = query_dir / "answer.txt"
-                
-                if contexts_file.exists() and answer_file.exists():
-                    contexts = FileUtils.read_json(str(contexts_file))
-                    answer = FileUtils.read_file(str(answer_file))
-                    return {
-                        'id': query_id,
-                        'predicted_answer': answer.strip(),
-                        'retrieved_contexts': contexts,
-                        'error': False
-                    }
-            
-            start_time = time.time()
-            
-            # Step 1: Retrieval
-            contexts = self.retrieve_contexts(query_data, query_dir)
-            
-            # Step 2: Answer generation
-            answer = self.generate_answer(query, contexts, query_dir)
-            
-            # Step 3: Save results
-            result = {
-                'id': query_id,
-                'predicted_answer': answer,
-                'retrieved_contexts': contexts,
-                'error': False
-            }
-            
-            # Save timing
-            timing = {
-                'total_time': time.time() - start_time,
-                'timestamp': datetime.now().isoformat()
-            }
-            FileUtils.write_json(timing, str(query_dir / "timing.json"))
-            
-            # Mark as done
-            done_flag.touch()
-            
-            self.logger.info(f"Query {query_id} processed successfully")
-            return result
-            
-        except Exception as e:
-            self.logger.error(f"Failed to process query {query_id}: {e}")
-            return {
-                'id': query_id,
-                'predicted_answer': "",
-                'retrieved_contexts': [],
-                'error': True
-            }
-
-    def save_predictions(self, results: List[Dict[str, Any]]):
-        """Save predictions to JSONL format"""
-        predictions_file = self.run_dir / "predictions.jsonl"
-
-        # Clean results for output (remove error field)
-        clean_results = []
-        for result in results:
-            clean_result = {
-                'id': result['id'],
-                'predicted_answer': result['predicted_answer'],
-                'retrieved_contexts': result['retrieved_contexts']
-            }
-            clean_results.append(clean_result)
-
-        predictions_file.unlink(missing_ok=True)
-        for clean_result in clean_results:
-            FileUtils.append_jsonl_atomic(str(predictions_file), clean_result)
-        self.logger.info(f"Predictions saved to {predictions_file}")
-
-    def save_manifest(self):
-        """Save run manifest with configuration and metadata"""
-        manifest = {
-            'run_id': self.config.run_id,
-            'timestamp': datetime.now().isoformat(),
-            'config': self.config.to_dict(),
-            'data_info': {
-                'dataset_path': self.config.dataset_path,
-                'dataset_size': len(self.dataset),
-                'dataset_hash': self.calculate_file_hash(self.config.dataset_path),
-                'dataset_file_size_bytes': FileUtils.get_file_size_bytes(self.config.dataset_path),
-                'dataset_line_count': FileUtils.count_file_lines(self.config.dataset_path),
-                'doc_pool_path': self.config.doc_pool_path,
-                'doc_pool_size': len(self.doc_pool),
-                'doc_pool_hash': self.calculate_file_hash(self.config.doc_pool_path),
-                'doc_pool_file_size_bytes': FileUtils.get_file_size_bytes(self.config.doc_pool_path),
-                'doc_pool_line_count': FileUtils.count_file_lines(self.config.doc_pool_path),
-            },
-            'statistics': self.stats,
-            'output_files': {
-                'predictions': 'predictions.jsonl',
-                'logs': ['logs/run.log', 'logs/run_error.log'],
-                'manifest': 'manifest.json'
-            }
-        }
-
-        if self.config.mode == "oracle":
-            manifest['data_info']['oracle_path'] = self.config.oracle_path
-            manifest['data_info']['oracle_hash'] = self.calculate_file_hash(self.config.oracle_path)
-            manifest['data_info']['oracle_file_size_bytes'] = FileUtils.get_file_size_bytes(self.config.oracle_path)
-            manifest['data_info']['oracle_line_count'] = FileUtils.count_file_lines(self.config.oracle_path)
-        
-        # Add notes and graph artifacts if present
-        notes_path = self.run_dir / "notes" / "atomic_notes.jsonl"
-        if notes_path.exists():
-            manifest['output_files']['notes'] = str(notes_path.relative_to(self.run_dir))
-        graph_json = self.run_dir / "graph" / "graph.json"
-        if graph_json.exists():
-            manifest['output_files']['graph'] = {
-                'index': 'graph/graph.json',
-                'embeddings': 'graph/graph_embeddings.npz',
-                'mappings': 'graph/graph_mappings.json',
-                'graphml': 'graph/graph.graphml'
-            }
-        
-        manifest_file = self.run_dir / "manifest.json"
-        FileUtils.write_manifest(str(manifest_file), manifest)
-        self.logger.info(f"Manifest saved to {manifest_file}")
-
-    def retrieve_contexts(self, query_data: Dict[str, Any], query_dir: Path) -> List[Dict[str, str]]:
-        """Retrieve contexts based on mode"""
-        query_id = query_data['query_id']
-        query = query_data['query']
-        
-        if self.config.mode == "base":
-            # Base mode: no contexts
-            contexts = []
-        elif self.config.mode == "oracle":
-            # Oracle mode: use gold standard contexts
-            oracle_entry = self.oracle_data.get(str(query_id))
-            contexts = []
-            if oracle_entry:
-                # Oracle data is a single entry, not a list
-                contexts.append({
-                    'title': oracle_entry.get('doc_name', ''),
-                    'text': oracle_entry.get('doc_chunk', '')
-                })
-            else:
-                self.logger.warning(f"No oracle data found for query {query_id}")
+                self.global_embeddings = np.load(embeddings_path)
+            except Exception as exc:
+                logger.warning(f"Failed to load global embeddings: {exc}")
+                self.global_embeddings = None
         else:
-            # Mixed mode: retrieve from global doc_pool
-            contexts = self.retrieve_mixed_mode(query, query_dir)
-        
-        # Save contexts
-        FileUtils.write_json(contexts, str(query_dir / "contexts.json"))
-        
-        return contexts
+            self.global_embeddings = None
 
-    def retrieve_mixed_mode(self, query: str, query_dir: Path) -> List[Dict[str, str]]:
-        """Retrieve contexts in mixed mode"""
+        graph_file = os.path.join(self.global_processed_dir, 'graph.json')
+        self.global_graph_file = graph_file if os.path.exists(graph_file) else None
+
+        if self.enable_cor:
+            self.global_note_graph = NoteGraph.from_config(config)
+            for note in self.global_atomic_notes:
+                self.global_note_graph.add_note(note)
+
+        self.global_resources_ready = True
+        logger.info(
+            "Global MIRAGE corpus ready: %d documents, %d atomic notes",
+            len(doc_files),
+            len(self.global_atomic_notes)
+        )
+        
+    def process_single_item(self, item: Dict[str, Any], work_dir: str) -> Dict[str, Any]:
+        """处理单个MIRAGE测试项"""
+        item_id = item.get('id', 'unknown')
+        question = item.get('question', '')
+
+        logger.info(f"Processing item {item_id}")
+
         try:
-            # Perform retrieval
-            results = self.retriever.search([query], top_k=self.config.topk * 2)[0]  # Get more candidates for better remapping
-            
-            # Save detailed retrieval results if debug mode
-            if self.config.debug:
-                retrieval_data = {
-                    'query': query,
-                    'mode': self.config.mode,
-                    'topk': self.config.topk,
-                    'results': []
+            if not self.global_resources_ready or not self.global_atomic_notes:
+                raise RuntimeError("Global doc_pool resources are not prepared")
+
+            os.makedirs(work_dir, exist_ok=True)
+
+            cor_result = None
+            if self.enable_cor and self.global_note_graph:
+                try:
+                    cor_result = chain_of_retrieval(question=question, graph=self.global_note_graph)
+                    logger.debug(
+                        "CoR controller finished for %s with confidence %.2f",
+                        item_id,
+                        cor_result.confidence,
+                    )
+                except Exception as exc:
+                    logger.warning(f"CoR controller failed for {item_id}: {exc}")
+                    cor_result = None
+
+            query_processor = QueryProcessor(
+                self.global_atomic_notes,
+                self.global_embeddings,
+                graph_file=self.global_graph_file if self.global_graph_file and os.path.exists(self.global_graph_file) else None,
+                vector_index_file=None,
+                llm=self.llm,
+                work_dir=work_dir
+            )
+
+            query_result = query_processor.process(question, dataset='mirage', qid=item_id)
+
+            predicted_answer = query_result.get('answer', 'No answer found')
+            predicted_support_idxs = query_result.get('predicted_support_idxs', [])
+
+            cor_metadata: Dict[str, Any] = {}
+            if cor_result is not None:
+                if cor_result.answer:
+                    predicted_answer = cor_result.answer
+                if cor_result.evidence_note_ids:
+                    cor_metadata['evidence_note_ids'] = cor_result.evidence_note_ids
+                cor_metadata['confidence'] = cor_result.confidence
+                if cor_result.missing_entities:
+                    cor_metadata['missing_entities'] = list(cor_result.missing_entities)
+                if cor_result.covered_entities:
+                    cor_metadata['covered_entities'] = list(cor_result.covered_entities)
+
+            candidate_notes = query_result.get('candidate_notes') or []
+            recalled_notes = candidate_notes if candidate_notes else query_result.get('notes', [])
+            selected_notes = query_result.get('notes', [])
+            atomic_notes_info = {
+                'id': item_id,
+                'question': question,
+                'candidate_count': len(recalled_notes),
+                'selected_count': len(selected_notes),
+                'recalled_atomic_notes': [],
+                'selected_atomic_notes': [],
+                'final_recall_path': query_result.get('final_recall_path')
+            }
+
+            def build_note_info(note: Dict[str, Any]) -> Dict[str, Any]:
+                retrieval_info = note.get('retrieval_info', {})
+                return {
+                    'note_id': note.get('note_id', ''),
+                    'content': note.get('content', ''),
+                    'paragraph_idxs': note.get('paragraph_idxs', []),
+                    'similarity_score': retrieval_info.get('similarity', note.get('similarity', 0.0)),
+                    'retrieval_method': retrieval_info.get('retrieval_method', note.get('retrieval_method', 'unknown')),
+                    'subq_source': note.get('tags', {}).get('subq_source', 'unknown'),
+                    'source_tag': note.get('tags', {}).get('source', 'unknown'),
+                    'hop_no': note.get('hop_no', 1),
+                    'bridge_entity': note.get('bridge_entity'),
+                    'final_score': note.get('final_score', note.get('score')),
                 }
-                
-                for result in results:
-                    retrieval_data['results'].append({
-                        'score': result.get('score', 0.0),
-                        'note_id': result.get('note_id', ''),
-                        'content': result.get('content', ''),
-                        'retrieval_method': result.get('retrieval_method', 'unknown'),
-                        'original_index': result.get('original_index')
-                    })
-                
-                FileUtils.write_json(retrieval_data, str(query_dir / "retrieval.json"))
-            
-            # Convert results to contexts (remap notes to original chunks)
-            contexts = self.remap_notes_to_chunks(results)
-            
-            return contexts
-            
+
+            for note in recalled_notes:
+                atomic_notes_info['recalled_atomic_notes'].append(build_note_info(note))
+
+            for note in selected_notes:
+                atomic_notes_info['selected_atomic_notes'].append(build_note_info(note))
+
+            recall_log_path = os.path.join(work_dir, 'atomic_notes_recall.jsonl')
+            with open(recall_log_path, 'w', encoding='utf-8') as recall_file:
+                for note_info in atomic_notes_info['recalled_atomic_notes']:
+                    record = {'id': item_id, **note_info}
+                    recall_file.write(json.dumps(record, ensure_ascii=False) + '\n')
+
+            atomic_notes_info['recalled_atomic_notes_path'] = recall_log_path
+
+            selected_log_path = os.path.join(work_dir, 'selected_atomic_notes.jsonl')
+            with open(selected_log_path, 'w', encoding='utf-8') as selected_file:
+                for note_info in atomic_notes_info['selected_atomic_notes']:
+                    record = {'id': item_id, **note_info}
+                    selected_file.write(json.dumps(record, ensure_ascii=False) + '\n')
+
+            atomic_notes_info['selected_atomic_notes_path'] = selected_log_path
+
+            query_result.pop('candidate_notes', None)
+
+            result: Dict[str, Any] = {
+                'id': item_id,
+                'predicted_answer': predicted_answer,
+                'predicted_support_idxs': predicted_support_idxs,
+                'predicted_answerable': True
+            }
+
+            if cor_metadata:
+                result['cor_metadata'] = cor_metadata
+                atomic_notes_info['cor_metadata'] = cor_metadata
+
+            retrieved_contexts = self._prepare_retrieved_contexts(item_id, selected_notes)
+            if retrieved_contexts:
+                result['retrieved_contexts'] = retrieved_contexts
+                atomic_notes_info['retrieved_contexts'] = retrieved_contexts
+
+            logger.info(f"Completed processing item {item_id}")
+            return result, atomic_notes_info
+
         except Exception as e:
-            self.logger.error(f"Failed to retrieve contexts: {e}")
+            logger.error(f"Failed to process item {item_id}: {e}")
+            error_result = {
+                'id': item_id,
+                'predicted_answer': 'Error occurred during processing',
+                'predicted_support_idxs': [],
+                'predicted_answerable': True
+            }
+            error_atomic_notes = {
+                'id': item_id,
+                'question': question,
+                'recalled_atomic_notes': [],
+                'error': str(e)
+            }
+            return error_result, error_atomic_notes
+
+    def _prepare_retrieved_contexts(
+        self,
+        item_id: str,
+        selected_notes: List[Dict[str, Any]]
+    ) -> List[Dict[str, Any]]:
+        """根据召回的笔记整理MIRAGE所需的上下文输出"""
+        if not selected_notes:
             return []
 
-    def remap_notes_to_chunks(self, retrieval_results: List[Dict[str, Any]]) -> List[Dict[str, str]]:
-        """Remap retrieved notes back to original doc_pool chunks"""
-        contexts = []
-        seen_chunks = set()
+        contexts: List[Dict[str, Any]] = []
+        seen_chunks: Set[Tuple[Any, Any, Any]] = set()
 
-        self._ensure_doc_pool_indexes()
+        query_chunks = self.doc_pool_by_query.get(item_id, [])
+        query_idx_map: Dict[int, Dict[str, Any]] = {}
+        query_chunk_id_map: Dict[str, Dict[str, Any]] = {}
 
-        for result in retrieval_results:
+        for i, chunk in enumerate(query_chunks):
+            idx_val = chunk.get('original_index', i)
             try:
-                resolved = self._resolve_chunk_from_result(result)
+                idx_val = int(idx_val)
+            except Exception:
+                idx_val = i
+            query_idx_map[idx_val] = chunk
+            chunk_id = chunk.get('chunk_id')
+            if chunk_id:
+                query_chunk_id_map[str(chunk_id)] = chunk
 
-                if not resolved:
-                    if self.config.debug:
-                        self.logger.debug(
-                            f"Failed to resolve note '{result.get('note_id')}' back to doc chunk"
-                        )
-                    continue
+        for note in selected_notes:
+            paragraph_idxs = note.get('paragraph_idxs') or []
+            if not paragraph_idxs:
+                retrieval_info = note.get('retrieval_info', {})
+                if isinstance(retrieval_info, dict):
+                    paragraph_idxs = retrieval_info.get('paragraph_idxs', [])
+            if not paragraph_idxs:
+                tag_idxs = note.get('tags', {}).get('paragraph_idxs')
+                if isinstance(tag_idxs, list):
+                    paragraph_idxs = tag_idxs
 
-                doc, idx = resolved
-                chunk_key = self._get_chunk_key(doc, idx)
+            try:
+                score_raw = note.get('final_score', note.get('score', note.get('similarity', 0.0)))
+                if isinstance(score_raw, (list, tuple)) and score_raw:
+                    score_value = float(score_raw[0])
+                else:
+                    score_value = float(score_raw) if score_raw is not None else 0.0
+            except Exception:
+                score_value = 0.0
 
-                if chunk_key in seen_chunks:
-                    if self.config.debug:
-                        self.logger.debug(
-                            f"Skipping duplicate chunk {chunk_key} for note {result.get('note_id')}"
-                        )
-                    continue
+            source_info = note.get('source_info', {}) or {}
+            file_path = source_info.get('file_path')
+            chunk_id_from_note = (
+                note.get('chunk_id')
+                or source_info.get('chunk_id')
+                or note.get('metadata', {}).get('chunk_id')
+            )
 
+            chunk_infos: List[Dict[str, Any]] = []
+
+            for paragraph_idx in paragraph_idxs or [None]:
+                chunk_meta = None
+                if file_path is not None and paragraph_idx is not None:
+                    chunk_meta = self.global_paragraph_lookup.get((file_path, paragraph_idx))
+                if not chunk_meta and paragraph_idx is not None:
+                    chunk_meta = query_idx_map.get(int(paragraph_idx))
+                if not chunk_meta and chunk_id_from_note:
+                    chunk_meta = query_chunk_id_map.get(str(chunk_id_from_note))
+                if chunk_meta:
+                    chunk_infos.append(chunk_meta)
+
+            if not chunk_infos and chunk_id_from_note and chunk_id_from_note in query_chunk_id_map:
+                chunk_infos.append(query_chunk_id_map[chunk_id_from_note])
+
+            if not chunk_infos:
+                # 回退：使用笔记内容构造上下文
                 contexts.append({
-                    'title': doc.get('doc_name', ''),
-                    'text': doc.get('doc_chunk', '')
+                    'note_id': note.get('note_id', ''),
+                    'content': note.get('content', ''),
+                    'retrieval_method': note.get('retrieval_method', note.get('tags', {}).get('retrieval_method', 'unknown')),
+                    'score': score_value,
+                    'paragraph_idxs': paragraph_idxs,
+                    'doc_name': source_info.get('file_name') or note.get('tags', {}).get('source', ''),
                 })
+                continue
+
+            for chunk_meta in chunk_infos:
+                chunk_key = (
+                    chunk_meta.get('chunk_id'),
+                    chunk_meta.get('mapped_id'),
+                    chunk_meta.get('original_index')
+                )
+                if chunk_key in seen_chunks:
+                    continue
                 seen_chunks.add(chunk_key)
 
-                if len(contexts) >= self.config.topk:
-                    break
+                contexts.append({
+                    'note_id': note.get('note_id', ''),
+                    'content': note.get('content', ''),
+                    'retrieval_method': note.get('retrieval_method', note.get('tags', {}).get('retrieval_method', 'unknown')),
+                    'score': score_value,
+                    'paragraph_idxs': paragraph_idxs,
+                    'doc_name': chunk_meta.get('doc_name', ''),
+                    'doc_chunk': chunk_meta.get('doc_chunk', ''),
+                    'support': chunk_meta.get('support', False),
+                    'chunk_id': chunk_meta.get('chunk_id', ''),
+                    'mapped_id': chunk_meta.get('mapped_id', ''),
+                    'offsets': chunk_meta.get('offsets', []),
+                    'original_index': chunk_meta.get('original_index'),
+                })
 
-            except Exception as e:
-                self.logger.warning(f"Failed to remap result: {e}")
+        return contexts
+
+    def _load_dataset(self, dataset_file: str) -> List[Dict[str, Any]]:
+        """加载MIRAGE数据集"""
+        try:
+            if dataset_file.endswith('.jsonl'):
+                with open(dataset_file, 'r', encoding='utf-8') as handle:
+                    return [json.loads(line.strip()) for line in handle if line.strip()]
+            data = FileUtils.read_json(dataset_file)
+            if isinstance(data, list):
+                return data
+            return [data]
+        except Exception as exc:
+            logger.error(f"Failed to load dataset file {dataset_file}: {exc}")
+            raise
+
+    def _load_doc_pool(self, doc_pool_file: str) -> Tuple[List[Dict[str, Any]], Dict[str, List[Dict[str, Any]]]]:
+        """加载doc_pool并按mapped_id构建索引"""
+        try:
+            data = FileUtils.read_json(doc_pool_file)
+        except Exception as exc:
+            logger.error(f"Failed to load doc_pool file {doc_pool_file}: {exc}")
+            raise
+
+        if not isinstance(data, list):
+            raise ValueError(f"Doc pool file {doc_pool_file} must contain a list of chunks")
+
+        doc_pool_map: Dict[str, List[Dict[str, Any]]] = {}
+        normalized_chunks: List[Dict[str, Any]] = []
+        for idx, chunk in enumerate(data):
+            if not isinstance(chunk, dict):
                 continue
-        
-        # Debug logging
-        if self.config.debug:
-            mapping_info = {
-                'total_results': len(retrieval_results),
-                'mapped_contexts': len(contexts),
-                'target_topk': self.config.topk
-            }
-            mapping_file = self.run_dir / "notes" / "mapping.jsonl"
-            mapping_file.parent.mkdir(exist_ok=True)
-            
-            with open(mapping_file, 'a') as f:
-                f.write(json.dumps(mapping_info) + '\n')
-
-        return contexts[:self.config.topk]
-
-    def _resolve_chunk_from_result(self, result: Dict[str, Any]) -> Optional[Tuple[Dict[str, Any], int]]:
-        metadata = result.get('metadata', {}) or {}
-        note_id = result.get('note_id') or metadata.get('note_id') or ''
-        chunk_id = result.get('chunk_id') or metadata.get('chunk_id') or note_id
-        doc_hash = result.get('doc_hash') or metadata.get('doc_hash')
-        offsets = result.get('offsets') or metadata.get('offsets')
-        doc_name = result.get('doc_name') or metadata.get('doc_name')
-
-        original_index = result.get('original_index', metadata.get('original_index'))
-        if isinstance(original_index, str):
+            mapped_id = chunk.get('mapped_id')
+            if not mapped_id:
+                continue
+            normalized = dict(chunk)
             try:
-                original_index = int(original_index)
-            except ValueError:
-                original_index = None
+                normalized['original_index'] = int(normalized.get('original_index', idx))
+            except Exception:
+                normalized['original_index'] = idx
+            doc_pool_map.setdefault(mapped_id, []).append(normalized)
+            normalized_chunks.append(normalized)
 
-        # 1. direct index mapping
-        if original_index is not None and 0 <= original_index < len(self.doc_pool):
-            doc = self.doc_pool[original_index]
-            if self._verify_doc_match(doc, chunk_id, doc_hash, offsets):
-                return doc, original_index
-
-        # 2. chunk_id mapping (with metadata verification)
-        if chunk_id:
-            idx = self.doc_pool_index_by_chunk_id.get(str(chunk_id))
-            if idx is not None:
-                doc = self.doc_pool[idx]
-                if self._verify_doc_match(doc, chunk_id, doc_hash, offsets):
-                    return doc, idx
-
-        # 3. doc_hash mapping
-        if doc_hash:
-            candidate_indexes = self.doc_pool_index_by_hash.get(doc_hash, [])
-            for idx in candidate_indexes:
-                doc = self.doc_pool[idx]
-                if doc_name and doc.get('doc_name') != doc_name:
-                    continue
-                if self._verify_doc_match(doc, None, doc_hash, offsets):
-                    return doc, idx
-
-        # 4. offsets mapping
-        offset_idx = self._lookup_by_offsets(doc_name, offsets)
-        if offset_idx is not None and 0 <= offset_idx < len(self.doc_pool):
-            return self.doc_pool[offset_idx], offset_idx
-
-        # 5. embedding-based fallback
-        embedding_match = self._find_chunk_by_embedding(result.get('content', ''))
-        if embedding_match:
-            return embedding_match
-
-        # 6. substring fallback
-        content = result.get('content', '')
-        if content:
-            best_match = self.find_best_chunk_match(content)
-            if best_match and 'index' in best_match:
-                return best_match, best_match['index']
-
-        return None
+        return normalized_chunks, doc_pool_map
     
-    def find_best_chunk_match(self, content: str) -> Optional[Dict[str, Any]]:
-        """Find best matching chunk in doc_pool using content similarity"""
-        if not content:
-            return None
+    def process_dataset(
+        self,
+        dataset_file: str,
+        doc_pool_file: str,
+        output_file: str,
+        atomic_notes_file: str = None,
+        parallel: bool = True,
+        use_engine_parallel: bool = False,
+        parallel_workers: int = 4,
+        parallel_strategy: str = 'hybrid',
+        continue_from_existing: bool = False
+    ) -> None:
+        """批量处理MIRAGE数据集"""
+        logger.info(f"Starting batch processing of dataset={dataset_file}, doc_pool={doc_pool_file}")
         
-        best_match = None
-        best_score = 0.0
+        # 共享资源已在初始化时预加载，无需重复初始化
+        if parallel and not use_engine_parallel:
+            logger.info("Using pre-initialized shared resources for parallel processing")
         
-        # Simple substring matching as fallback
-        for idx, doc in enumerate(self.doc_pool):
-            doc_chunk = doc.get('doc_chunk', '')
-            if not doc_chunk:
+        dataset_items = self._load_dataset(dataset_file)
+        doc_pool_chunks, doc_pool_map = self._load_doc_pool(doc_pool_file)
+        self.doc_pool_by_query = doc_pool_map
+
+        self._prepare_global_resources(doc_pool_chunks)
+
+        items: List[Dict[str, Any]] = []
+        missing_chunks = 0
+        for raw_item in dataset_items:
+            item_id = raw_item.get('query_id') or raw_item.get('id')
+            if not item_id:
+                logger.warning("Skipping dataset entry without query_id/id")
                 continue
-            
-            # Calculate simple overlap score
-            if content in doc_chunk:
-                score = len(content) / len(doc_chunk)
-                if score > best_score:
-                    best_score = score
-                    best_match = {**doc, 'index': idx}
-            elif doc_chunk in content:
-                score = len(doc_chunk) / len(content)
-                if score > best_score:
-                    best_score = score
-                    best_match = {**doc, 'index': idx}
+
+            if item_id not in doc_pool_map:
+                missing_chunks += 1
+                logger.warning(f"No doc_pool chunks found for query {item_id}")
+
+            prepared_item = {
+                'id': item_id,
+                'question': raw_item.get('query', raw_item.get('question', '')),
+                'raw_item': raw_item
+            }
+            items.append(prepared_item)
+
+        logger.info(f"Prepared {len(items)} MIRAGE items from dataset")
+        if missing_chunks:
+            logger.warning(f"{missing_chunks} items have no associated doc_pool chunks")
         
-        return best_match if best_score > 0.5 else None
-    
-    def generate_answer(self, query: str, contexts: List[Dict[str, str]], query_dir: Path) -> str:
-        """Generate answer using LLM"""
-        try:
-            # Prepare context string
-            context_str = ""
-            if contexts:
-                for i, ctx in enumerate(contexts, 1):
-                    context_str += f"{i}. {ctx['text']}\n\n"
-            else:
-                context_str = "No context provided."
-            
-            # Generate answer using appropriate method
-            if hasattr(self.llm_client, 'generate_final_answer'):
-                # Use specialized final answer generation method
-                answer = self.llm_client.generate_final_answer(context_str.strip(), query)
-            else:
-                # Fallback to generic generate method with proper prompt
-                system_prompt = "You are a helpful assistant that answers questions based on the provided context. If the context doesn't contain enough information to answer the question, say so clearly."
-                
-                if context_str.strip() == "No context provided.":
-                    prompt = f"Question: {query}\n\nAnswer:"
-                else:
-                    prompt = f"Context:\n{context_str.strip()}\n\nQuestion: {query}\n\nAnswer:"
-                
-                answer = self.llm_client.generate(
-                    prompt=prompt,
-                    system_prompt=system_prompt,
-                    temperature=self.config.temperature,
-                    max_tokens=self.config.max_tokens
-                )
-            
-            # Clean answer
-            answer = answer.strip() if answer else ""
-            
-            # Handle empty or invalid answers
-            if not answer or answer.lower() in ['', 'none', 'n/a', 'unknown']:
-                answer = "I don't know."
-            
-            # Normalize answer using TextUtils
-            normalized_answer = TextUtils.normalize_text(answer)
-            
-            # Save both versions
-            FileUtils.write_file(str(query_dir / "answer.txt"), answer)
-            FileUtils.write_file(str(query_dir / "answer_norm.txt"), normalized_answer)
-            
-            return answer
-            
-        except Exception as e:
-            self.logger.error(f"Failed to generate answer: {e}")
-            # Return empty answer on failure
-            FileUtils.write_file(str(query_dir / "answer.txt"), "")
-            FileUtils.write_file(str(query_dir / "answer_norm.txt"), "")
-            return ""
-    
-    def run_parallel_processing(self) -> List[Dict[str, Any]]:
-        """Run parallel processing of all queries"""
+        # 确保输出文件路径是绝对路径
+        if not os.path.isabs(output_file):
+            output_file = os.path.abspath(output_file)
+        if atomic_notes_file and not os.path.isabs(atomic_notes_file):
+            atomic_notes_file = os.path.abspath(atomic_notes_file)
+        
+        # 确保输出目录存在
+        os.makedirs(os.path.dirname(output_file), exist_ok=True)
+        if atomic_notes_file:
+            os.makedirs(os.path.dirname(atomic_notes_file), exist_ok=True)
+        
+        # 处理已完成的项目（继续模式）
+        processed_ids = set()
+        if continue_from_existing and os.path.exists(output_file):
+            logger.info(f"Continue mode: checking existing results in {output_file}")
+            try:
+                with open(output_file, 'r', encoding='utf-8') as f:
+                    for line in f:
+                        if line.strip():
+                            result = json.loads(line.strip())
+                            processed_ids.add(result.get('id'))
+                logger.info(f"Found {len(processed_ids)} already processed items")
+            except Exception as e:
+                logger.warning(f"Failed to read existing results: {e}")
+                processed_ids = set()
+        
+        # 过滤出未处理的项目
+        if continue_from_existing and processed_ids:
+            original_count = len(items)
+            items = [item for item in items if item.get('id') not in processed_ids]
+            logger.info(f"Filtered items: {original_count} -> {len(items)} (skipped {len(processed_ids)} already processed)")
+        
+        # 如果不是继续模式，初始化输出文件（清空或创建）
+        if not continue_from_existing:
+            with open(output_file, 'w', encoding='utf-8') as f:
+                pass  # 清空文件
+            if atomic_notes_file:
+                with open(atomic_notes_file, 'w', encoding='utf-8') as f:
+                    pass  # 清空文件
+        
+        # 如果所有项目都已处理完成
+        if not items:
+            logger.info("All items have been processed. Nothing to do.")
+            return
+        
         results = []
-        completed_queries = set()
+        atomic_notes_records = []  # 用于保存召回的原子文档信息
         
-        # Check for existing completed queries
-        for query_data in self.dataset:
-            query_id = query_data['query_id']
-            query_dir = self.run_dir / "queries" / str(query_id)
-            done_flag = query_dir / "done.flag"
-            
-            if done_flag.exists():
-                completed_queries.add(query_id)
-                # Load existing result
+        if use_engine_parallel:
+            logger.warning("Parallel engine mode is not supported for MIRAGE; falling back to thread/serial execution")
+            use_engine_parallel = False
+        
+        if use_engine_parallel:
+            # 使用并行引擎处理
+            results = self._process_with_parallel_engine(
+                items, parallel_workers, parallel_strategy
+            )
+            atomic_notes_records = []  # 并行引擎暂不支持原子笔记记录
+        elif parallel and len(items) > 1:
+            # 优化的并行处理：使用批处理减少资源竞争
+            with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+                # 为每个item创建独立的工作目录
+                futures = []
+                for i, item in enumerate(items, start=1):
+                    item_id = item.get('id', f'item_{i}')
+                    work_dir = create_item_workdir(self.base_work_dir, item_id, i, debug_mode=self.debug)
+                    future = executor.submit(self.process_single_item, item, work_dir)
+                    futures.append((future, work_dir, item_id))
+                
+                # 优化的结果收集：使用as_completed提高响应性
+                completed_count = 0
+                with tqdm(total=len(futures), desc="Processing items") as pbar:
+                    for future, work_dir, item_id in futures:
+                        try:
+                            # 设置超时以避免长时间阻塞
+                            result, atomic_notes_info = future.result(timeout=300)  # 5分钟超时
+                            results.append(result)
+                            atomic_notes_records.append(atomic_notes_info)
+                            
+                            # 实时写入结果
+                            with open(output_file, 'a', encoding='utf-8') as f:
+                                f.write(json.dumps(result, ensure_ascii=False) + '\n')
+                            if atomic_notes_file:
+                                with open(atomic_notes_file, 'a', encoding='utf-8') as f:
+                                    f.write(json.dumps(atomic_notes_info, ensure_ascii=False) + '\n')
+                            
+                            completed_count += 1
+                        except concurrent.futures.TimeoutError:
+                            logger.error(f"Processing timeout for item {item_id}")
+                            timeout_result = {
+                                'id': item_id,
+                                'predicted_answer': 'Processing timeout',
+                                'predicted_support_idxs': [],
+                                'predicted_answerable': True
+                            }
+                            timeout_atomic_notes = {
+                                'id': item_id,
+                                'question': item.get('question', ''),
+                                'recalled_atomic_notes': [],
+                                'error': 'Processing timeout'
+                            }
+                            results.append(timeout_result)
+                            atomic_notes_records.append(timeout_atomic_notes)
+                            
+                            # 实时写入超时结果
+                            with open(output_file, 'a', encoding='utf-8') as f:
+                                f.write(json.dumps(timeout_result, ensure_ascii=False) + '\n')
+                            if atomic_notes_file:
+                                with open(atomic_notes_file, 'a', encoding='utf-8') as f:
+                                    f.write(json.dumps(timeout_atomic_notes, ensure_ascii=False) + '\n')
+                        except Exception as e:
+                            logger.error(f"Failed to get result for item {item_id}: {e}")
+                            error_result = {
+                                'id': item_id,
+                                'predicted_answer': 'Processing failed',
+                                'predicted_support_idxs': [],
+                                'predicted_answerable': True
+                            }
+                            error_atomic_notes = {
+                                'id': item_id,
+                                'question': item.get('question', ''),
+                                'recalled_atomic_notes': [],
+                                'error': str(e)
+                            }
+                            results.append(error_result)
+                            atomic_notes_records.append(error_atomic_notes)
+                            
+                            # 实时写入错误结果
+                            with open(output_file, 'a', encoding='utf-8') as f:
+                                f.write(json.dumps(error_result, ensure_ascii=False) + '\n')
+                            if atomic_notes_file:
+                                with open(atomic_notes_file, 'a', encoding='utf-8') as f:
+                                    f.write(json.dumps(error_atomic_notes, ensure_ascii=False) + '\n')
+                        finally:
+                            if self.debug:
+                                logger.info(f"Debug mode: keeping work directory {work_dir}")
+                            pbar.update(1)
+        else:
+            # 串行处理
+            for i, item in enumerate(tqdm(items, desc="Processing items"), start=1):
+                item_id = item.get('id', f'item_{i}')
+                work_dir = create_item_workdir(self.base_work_dir, item_id, i, debug_mode=self.debug)
                 try:
-                    contexts_file = query_dir / "contexts.json"
-                    answer_file = query_dir / "answer.txt"
-                    
-                    if contexts_file.exists() and answer_file.exists():
-                        contexts = FileUtils.read_json(str(contexts_file))
-                        answer = FileUtils.read_file(str(answer_file))
-                        results.append({
-                            'id': query_id,
-                            'predicted_answer': answer.strip(),
-                            'retrieved_contexts': contexts,
-                            'error': False
-                        })
-                        self.stats['processed_queries'] += 1
-                    else:
-                        # Mark as incomplete if files are missing
-                        completed_queries.discard(query_id)
-                        done_flag.unlink(missing_ok=True)
-                except Exception as e:
-                    self.logger.warning(f"Failed to load existing result for query {query_id}: {e}")
-                    completed_queries.discard(query_id)
-                    done_flag.unlink(missing_ok=True)
-        
-        # Filter out completed queries
-        remaining_queries = [q for q in self.dataset if q['query_id'] not in completed_queries]
-        
-        if completed_queries:
-            self.logger.info(f"Found {len(completed_queries)} completed queries, processing {len(remaining_queries)} remaining")
-        
-        if not remaining_queries:
-            self.logger.info("All queries already completed")
-            # Sort results by query_id to maintain order
-            results.sort(key=lambda x: x['id'])
-            return results
-        
-        # Process remaining queries in parallel
-        with ThreadPoolExecutor(max_workers=self.config.max_workers_query) as executor:
-            # Submit remaining queries
-            future_to_query = {
-                executor.submit(self.process_single_query, query_data): query_data
-                for query_data in remaining_queries
-            }
-            
-            # Collect results with progress tracking
-            for future in as_completed(future_to_query):
-                query_data = future_to_query[future]
-                try:
-                    result = future.result()
+                    result, atomic_notes_info = self.process_single_item(item, work_dir)
                     results.append(result)
+                    atomic_notes_records.append(atomic_notes_info)
                     
-                    if result['error']:
-                        self.stats['failed_queries'] += 1
-                    else:
-                        self.stats['processed_queries'] += 1
-                    
-                    # Log progress
-                    total_processed = self.stats['processed_queries'] + self.stats['failed_queries']
-                    self.logger.info(f"Progress: {total_processed}/{self.stats['total_queries']} queries processed")
-                    
+                    # 实时写入结果
+                    with open(output_file, 'a', encoding='utf-8') as f:
+                        f.write(json.dumps(result, ensure_ascii=False) + '\n')
+                    if atomic_notes_file:
+                        with open(atomic_notes_file, 'a', encoding='utf-8') as f:
+                            f.write(json.dumps(atomic_notes_info, ensure_ascii=False) + '\n')
                 except Exception as e:
-                    self.logger.error(f"Query {query_data['query_id']} failed: {e}")
-                    results.append({
-                        'id': query_data['query_id'],
-                        'predicted_answer': "",
-                        'retrieved_contexts': [],
-                        'error': True
-                    })
-                    self.stats['failed_queries'] += 1
+                    logger.error(f"Failed to process item {item_id}: {e}")
+                    error_result = {
+                        'id': item_id,
+                        'predicted_answer': 'Processing failed',
+                        'predicted_support_idxs': [],
+                        'predicted_answerable': True
+                    }
+                    error_atomic_notes = {
+                        'id': item_id,
+                        'question': item.get('question', ''),
+                        'recalled_atomic_notes': [],
+                        'error': str(e)
+                    }
+                    results.append(error_result)
+                    atomic_notes_records.append(error_atomic_notes)
+                    
+                    # 实时写入错误结果
+                    with open(output_file, 'a', encoding='utf-8') as f:
+                        f.write(json.dumps(error_result, ensure_ascii=False) + '\n')
+                    if atomic_notes_file:
+                        with open(atomic_notes_file, 'a', encoding='utf-8') as f:
+                            f.write(json.dumps(error_atomic_notes, ensure_ascii=False) + '\n')
+                finally:
+                    if self.debug:
+                        logger.info(f"Debug mode: keeping work directory {work_dir}")
         
-        # Sort results by query_id to maintain order
-        results.sort(key=lambda x: x['id'])
-        return results
-    
-    def save_predictions(self, results: List[Dict[str, Any]]):
-        """Save predictions to JSONL format"""
-        predictions_file = self.run_dir / "predictions.jsonl"
-
-        # Clean results for output (remove error field)
-        clean_results = []
-        for result in results:
-            clean_result = {
-                'id': result['id'],
-                'predicted_answer': result['predicted_answer'],
-                'retrieved_contexts': result['retrieved_contexts']
-            }
-            clean_results.append(clean_result)
-
-        predictions_file.unlink(missing_ok=True)
-        for clean_result in clean_results:
-            FileUtils.append_jsonl_atomic(str(predictions_file), clean_result)
-        self.logger.info(f"Predictions saved to {predictions_file}")
-    
-    def save_manifest(self):
-        """Save run manifest with configuration and metadata"""
-        manifest = {
-            'run_id': self.config.run_id,
-            'timestamp': datetime.now().isoformat(),
-            'config': self.config.to_dict(),
-            'data_info': {
-                'dataset_path': self.config.dataset_path,
-                'dataset_size': len(self.dataset),
-                'dataset_hash': self.calculate_file_hash(self.config.dataset_path),
-                'dataset_file_size_bytes': FileUtils.get_file_size_bytes(self.config.dataset_path),
-                'dataset_line_count': FileUtils.count_file_lines(self.config.dataset_path),
-                'doc_pool_path': self.config.doc_pool_path,
-                'doc_pool_size': len(self.doc_pool),
-                'doc_pool_hash': self.calculate_file_hash(self.config.doc_pool_path),
-                'doc_pool_file_size_bytes': FileUtils.get_file_size_bytes(self.config.doc_pool_path),
-                'doc_pool_line_count': FileUtils.count_file_lines(self.config.doc_pool_path),
-            },
-            'statistics': self.stats,
-            'output_files': {
-                'predictions': 'predictions.jsonl',
-                'logs': ['logs/run.log', 'logs/run_error.log'],
-                'manifest': 'manifest.json'
-            }
-        }
-
-        if self.config.mode == "oracle":
-            manifest['data_info']['oracle_path'] = self.config.oracle_path
-            manifest['data_info']['oracle_hash'] = self.calculate_file_hash(self.config.oracle_path)
-            manifest['data_info']['oracle_file_size_bytes'] = FileUtils.get_file_size_bytes(self.config.oracle_path)
-            manifest['data_info']['oracle_line_count'] = FileUtils.count_file_lines(self.config.oracle_path)
+        # 结果已实时写入，无需再次保存
+        logger.info(f"Batch processing completed. Results saved to {output_file}")
         
-        # Add notes and graph artifacts if present
-        notes_path = self.run_dir / "notes" / "atomic_notes.jsonl"
-        if notes_path.exists():
-            manifest['output_files']['notes'] = str(notes_path.relative_to(self.run_dir))
-        graph_json = self.run_dir / "graph" / "graph.json"
-        if graph_json.exists():
-            manifest['output_files']['graph'] = {
-                'index': 'graph/graph.json',
-                'embeddings': 'graph/graph_embeddings.npz',
-                'mappings': 'graph/graph_mappings.json',
-                'graphml': 'graph/graph.graphml'
-            }
+        if atomic_notes_file:
+            logger.info(f"Atomic notes recall information saved to {atomic_notes_file}")
         
-        manifest_file = self.run_dir / "manifest.json"
-        FileUtils.write_manifest(str(manifest_file), manifest)
-        self.logger.info(f"Manifest saved to {manifest_file}")
+        # 打印统计信息
+        total_items = len(results)
+        answered_items = sum(1 for r in results if r['predicted_answer'] not in ['No answer found', 'Processing failed', 'Processing timeout'] and 'Error' not in r['predicted_answer'])
+        failed_items = sum(1 for r in results if r['predicted_answer'] in ['Processing failed', 'Processing timeout'])
+        avg_support_idxs = sum(len(r['predicted_support_idxs']) for r in results) / total_items if total_items > 0 else 0
+        
+        logger.info(f"Processing Statistics:")
+        logger.info(f"  Total items: {total_items}")
+        logger.info(f"  Successfully answered: {answered_items} ({answered_items/total_items*100:.1f}%)")
+        logger.info(f"  Failed/Timeout: {failed_items} ({failed_items/total_items*100:.1f}%)")
+        logger.info(f"  Average support paragraphs: {avg_support_idxs:.1f}")
+        
+        # 性能统计
+        if parallel and not use_engine_parallel:
+            logger.info(f"Parallel processing with {self.max_workers} workers completed")
+        
+        if self.debug:
+            logger.info(f"Debug mode: All intermediate files preserved in {self.base_work_dir}")
+            logger.info(f"  - Item work directories: {self.base_work_dir}/debug/<item_id>/")
+            logger.info(f"  - Each item directory contains: atomic_notes.json, graph.json, embeddings.npy, chunks.jsonl, etc.")
+            logger.info(f"  - Process artifacts structure: /results/<number>/debug/<item_id>/atomic_notes.json")
     
-    def calculate_file_hash(self, filepath: str) -> str:
-        """Calculate SHA1 hash of a file"""
+    def _process_with_parallel_engine(self, items: List[Dict[str, Any]], 
+                                      parallel_workers: int, parallel_strategy: str) -> List[Dict[str, Any]]:
+         """使用并行引擎处理MIRAGE数据集"""
+         logger.info(f"Starting parallel engine processing with {len(items)} items")
+         
+         # 策略映射
+         strategy_map = {
+             'copy': ParallelStrategy.DATA_COPY,
+             'split': ParallelStrategy.DATA_SPLIT,
+             'dispatch': ParallelStrategy.TASK_DISPATCH,
+             'hybrid': ParallelStrategy.HYBRID
+         }
+         
+         # 创建并行接口
+         parallel_interface = create_parallel_interface(
+             max_workers=parallel_workers,
+             processing_mode=ProcessingMode.AUTO,
+             strategy=strategy_map.get(parallel_strategy, ParallelStrategy.HYBRID),
+             debug=self.debug
+         )
+         
+         try:
+             # 使用并行引擎处理MIRAGE数据集
+             results = parallel_interface.process_musique_dataset(
+                 items=items,
+                 base_work_dir=self.base_work_dir
+             )
+             
+             # 获取性能统计
+             perf_stats = parallel_interface.get_performance_stats()
+             if perf_stats:
+                 logger.info(f"Parallel engine stats: {perf_stats}")
+             
+             return results
+             
+         finally:
+             parallel_interface.cleanup()
+
+
+def main():
+    parser = argparse.ArgumentParser(description='MIRAGE数据集批量处理工具')
+    parser.add_argument('dataset_file', nargs='?', default='MIRAGE/mirage/dataset.json', help='输入的MIRAGE数据集文件（.json或.jsonl格式），默认：MIRAGE/mirage/dataset.json')
+    parser.add_argument('output_file', nargs='?', default='mirage_results.jsonl', help='输出结果文件（.jsonl格式），默认：mirage_results.jsonl')
+    parser.add_argument('--doc-pool-file', default='MIRAGE/mirage/doc_pool.json', help='MIRAGE doc_pool文件路径，默认：MIRAGE/mirage/doc_pool.json')
+    parser.add_argument('--workers', type=int, default=4, help='并行处理的工作线程数（默认：4）')
+    parser.add_argument('--serial', action='store_true', help='使用串行处理而非并行处理')
+    parser.add_argument('--use-engine-parallel', action='store_true', help='使用并行引擎进行处理')
+    parser.add_argument('--parallel-workers', type=int, default=4, help='并行引擎工作进程数（默认：4）')
+    parser.add_argument('--parallel-strategy', choices=['copy', 'split', 'dispatch', 'hybrid'],
+                       default='hybrid', help='并行处理策略（默认：hybrid）')
+    parser.add_argument('--log-file', help='日志文件路径')
+    parser.add_argument('--atomic-notes-file', default='mirage_atomic_notes_recall.jsonl', help='保存召回原子文档的文件路径，默认：mirage_atomic_notes_recall.jsonl')
+    parser.add_argument('--debug', action='store_true', help='调试模式，保留所有中间文件和工作目录')
+    parser.add_argument('--work-dir', help='指定工作目录，如果不指定则自动创建新目录')
+    parser.add_argument('--new', action='store_true', help='强制创建新的工作目录')
+    parser.add_argument('--test-auditor', action='store_true', help='测试摘要校验器功能')
+    parser.add_argument('--audit-file', help='指定要审核的原子笔记文件路径')
+    parser.add_argument('--enable-cor', action='store_true', help='启用轻量多轮检索控制器')
+    
+    args = parser.parse_args()
+    
+    # 确定工作目录
+    if args.new:
+        work_dir = create_new_workdir()
+    elif args.work_dir:
+        work_dir = args.work_dir
+        os.makedirs(work_dir, exist_ok=True)
+    else:
+        work_dir = get_latest_workdir()  # 使用最新的工作目录继续任务
+    
+    # 将最终产物文件路径调整到工作目录（即结果根目录）
+    # 这样note、recall、log等最终产物都在 /results/32/ 下
+    # 而中间产物在 /results/32/debug/<item_id>/ 下
+    # work_dir 本身就是 /results/32/ 这样的目录
+    
+    if not os.path.isabs(args.output_file):
+        output_file = os.path.join(work_dir, args.output_file)
+    else:
+        output_file = args.output_file
+    
+    if not os.path.isabs(args.atomic_notes_file):
+        atomic_notes_file = os.path.join(work_dir, args.atomic_notes_file)
+    else:
+        atomic_notes_file = args.atomic_notes_file
+    
+    # 设置日志文件路径到结果根目录
+    if args.log_file:
+        if not os.path.isabs(args.log_file):
+            log_file = os.path.join(work_dir, args.log_file)
+        else:
+            log_file = args.log_file
+    else:
+        log_file = os.path.join(work_dir, 'mirage_processing.log')
+    
+    setup_logging(log_file)
+    
+    # 测试摘要校验器功能
+    if args.test_auditor:
+        if not args.audit_file:
+            logger.error("测试摘要校验器需要指定 --audit-file 参数")
+            return
+        
+        logger.info(f"开始测试摘要校验器，审核文件: {args.audit_file}")
         try:
-            with open(filepath, 'rb') as f:
-                return hashlib.sha1(f.read()).hexdigest()
-        except Exception:
-            return "unknown"
-    
-    def run(self) -> bool:
-        """Main execution flow"""
+            from utils.summary_auditor import SummaryAuditor
+            # 为测试功能创建 LocalLLM 实例
+            test_llm = LocalLLM()
+            auditor = SummaryAuditor(llm=test_llm)
+        except ImportError as e:
+            logger.error(f"Failed to import SummaryAuditor: {e}")
+            return
+        except Exception as e:
+            logger.error(f"Failed to initialize SummaryAuditor: {e}")
+            return
+        
+        # 读取原子笔记文件
         try:
-            self.logger.info(f"Starting MIRAGE run: {self.config.run_id}")
-            self.logger.info(f"Mode: {self.config.mode}, TopK: {self.config.topk}, Retriever: {self.config.retriever_type}")
+            atomic_notes = FileUtils.read_json(args.audit_file)
+            logger.info(f"加载了 {len(atomic_notes)} 个原子笔记")
             
-            # Step 1: Load data
-            if not self.load_data():
-                return False
+            # 执行批量审核
+            audit_results = auditor.batch_audit_summaries(atomic_notes)
             
-            # Step 2: Generate atomic notes (optional)
-            if not self.generate_atomic_notes():
-                return False
-
-            # Step 3: Build global index (skip for base mode)
-            if self.config.mode != "base":
-                if not self.build_global_index():
-                    return False
-
-            # Step 3.5: Build graph (optional)
-            if not self.build_graph():
-                return False
-
-            # Step 4: Initialize LLM
-            if not self.initialize_llm():
-                return False
+            # 输出审核结果统计
+            total_notes = len(atomic_notes)
+            flagged_count = sum(1 for note in atomic_notes if note.get('audit_result', {}).get('needs_rewrite', False))
             
-            # Step 5: Process all queries
-            self.logger.info("Starting query processing...")
-            start_time = time.time()
+            logger.info(f"审核完成: 总计 {total_notes} 个笔记，标记需要重写 {flagged_count} 个")
+            logger.info(f"标记率: {flagged_count/total_notes*100:.2f}%")
             
-            results = self.run_parallel_processing()
-            
-            self.stats['total_time'] = time.time() - start_time
-            
-            # Step 6: Save results
-            self.save_predictions(results)
-            self.save_manifest()
-            
-            # Step 7: Final statistics
-            self.logger.info("=" * 50)
-            self.logger.info("MIRAGE Run Completed")
-            self.logger.info(f"Total queries: {self.stats['total_queries']}")
-            self.logger.info(f"Processed: {self.stats['processed_queries']}")
-            self.logger.info(f"Failed: {self.stats['failed_queries']}")
-            self.logger.info(f"Total time: {self.stats['total_time']:.2f}s")
-            self.logger.info(f"Results saved to: {self.run_dir}")
-            self.logger.info("=" * 50)
-            
-            return True
+            # 保存审核结果
+            output_dir = os.path.dirname(args.audit_file)
+            auditor.save_flagged_summaries(atomic_notes, output_dir)
             
         except Exception as e:
-            self.logger.error(f"MIRAGE run failed: {e}")
-            return False
-
-def generate_run_id(new_run: bool, result_dir: str) -> str:
-    """Generate or find existing run ID"""
-    if new_run:
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        return f"mirage_run_{timestamp}"
-
-    # Find most recent run
-    latest_run = FileUtils.get_latest_run_dir(result_dir, "mirage_run_")
-    if latest_run:
-        return latest_run.name
-
-    # No existing runs, create new one
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    return f"mirage_run_{timestamp}"
-
-def parse_note_engines(engines_str: str) -> List[str]:
-    """Parse note engines string into list"""
-    if not engines_str:
-        return []
+            logger.error(f"测试摘要校验器时出错: {e}")
+        
+        return
     
-    engines = []
-    for engine in engines_str.split(','):
-        engine = engine.strip()
-        if engine:
-            engines.append(engine)
+    # 检查输入文件
+    if not os.path.exists(args.dataset_file):
+        logger.error(f"Dataset file not found: {args.dataset_file}")
+        return
+    if not os.path.exists(args.doc_pool_file):
+        logger.error(f"Doc pool file not found: {args.doc_pool_file}")
+        return
     
-    return engines
-
-def build_parser() -> argparse.ArgumentParser:
-    """Create and configure the CLI argument parser for MIRAGE runs."""
-    parser = argparse.ArgumentParser(
-        description="Run AnoRAG system on MIRAGE benchmark",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
-Examples:
-  python main_mirage.py --mode mixed --topk 5 --retriever hybrid
-  python main_mirage.py --mode oracle --new --debug
-  python main_mirage.py --mode base --model qwen2.5-7b --temperature 0.1
-  python main_mirage.py --mode mixed --embed-model sentence-transformers/all-MiniLM-L6-v2
-  python main_mirage.py --mode mixed --note_engines "ollama:qwen2.5-7b,lmstudio:qwen2.5-7b"
-        """
-    )
-
-    # Mode and basic configuration
-    parser.add_argument('--mode', choices=['mixed', 'oracle', 'base'], default='mixed',
-                       help='Evaluation mode (default: mixed)')
-    parser.add_argument('--topk', type=int, default=DEFAULT_TOPK,
-                       help=f'Number of contexts per query (default: {DEFAULT_TOPK})')
-    parser.add_argument('--new', action='store_true',
-                       help='Create new run directory')
-    parser.add_argument('--debug', action='store_true',
-                       help='Enable debug mode with detailed logging')
+    logger.info(f"Work directory: {work_dir}")
+    logger.info(f"Dataset file: {args.dataset_file}")
+    logger.info(f"Doc pool file: {args.doc_pool_file}")
+    logger.info(f"Output file: {output_file}")
+    logger.info(f"Atomic notes file: {atomic_notes_file}")
+    logger.info(f"Log file: {log_file}")
     
-    # Data paths
-    parser.add_argument('--dataset', default=f'{MIRAGE_DATA_DIR}/dataset.json',
-                       help='Path to dataset.json')
-    parser.add_argument('--doc_pool', default=f'{MIRAGE_DATA_DIR}/doc_pool.json',
-                       help='Path to doc_pool.json')
-    parser.add_argument('--oracle', default=f'{MIRAGE_DATA_DIR}/oracle.json',
-                       help='Path to oracle.json')
-    parser.add_argument('--result_dir', default=RESULT_DIR,
-                       help='Result directory')
+    # 创建共享的 LocalLLM 实例
+    logger.info("Initializing shared LocalLLM instance...")
+    shared_llm = LocalLLM()
+    logger.info("LocalLLM instance initialized successfully")
     
-    # Retrieval configuration
-    parser.add_argument('--retriever', choices=['bm25', 'dense', 'hybrid'], default='hybrid',
-                       help='Retriever type (default: hybrid)')
-    parser.add_argument('--embed-model', '--embed_model', dest='embed_model', type=str,
-                       help='Embedding model name (overrides config). Alias: --embed-model/--embed_model')
-    parser.add_argument('--rebuild-index', '--rebuild_index', dest='rebuild_index', action='store_true',
-                       help='Force rebuild index. Alias: --rebuild-index/--rebuild_index')
-    
-    # LLM configuration
-    parser.add_argument('--model', default='openai/gpt-oss-20b',
-                       help='LLM model name (default: openai/gpt-oss-20b)')
-    parser.add_argument('--temperature', type=float, default=0.1,
-                       help='LLM temperature (default: 0.1)')
-    parser.add_argument('--max_tokens', type=int, default=512,
-                       help='LLM max tokens (default: 512)')
-    parser.add_argument('--seed', type=int,
-                       help='Random seed for reproducibility')
-    
-    # Note generation configuration
-    parser.add_argument('--note_engines', type=str,
-                       help='Comma-separated list of note engines (e.g., "ollama:qwen2.5-7b,lmstudio:qwen2.5-7b")')
-    parser.add_argument('--enable_notes', action='store_true',
-                       help='Enable atomic note generation')
-    parser.add_argument('--enable_graph', action='store_true',
-                       help='Enable graph building and retrieval')
-    
-    # Parallel configuration
-    parser.add_argument('--max_workers_query', type=int, default=DEFAULT_MAX_WORKERS_QUERY,
-                       help=f'Max parallel query workers (default: {DEFAULT_MAX_WORKERS_QUERY})')
-    parser.add_argument('--max_workers_note', type=int, default=DEFAULT_MAX_WORKERS_NOTE,
-                       help=f'Max parallel note workers (default: {DEFAULT_MAX_WORKERS_NOTE})')
-    
-    return parser
-
-
-def main(argv: Optional[List[str]] = None):
-    """Main entry point"""
-    parser = build_parser()
-
-    args = parser.parse_args(argv)
-    
-    # Generate run ID
-    run_id = generate_run_id(args.new, args.result_dir)
-    
-    # Create configuration
-    mirage_config = MirageConfig(
-        run_id=run_id,
-        mode=args.mode,
-        topk=args.topk,
-        new_run=args.new,
+    # 创建处理器并开始处理
+    processor = MirageProcessor(
+        max_workers=args.workers,
         debug=args.debug,
-        dataset_path=args.dataset,
-        doc_pool_path=args.doc_pool,
-        oracle_path=args.oracle,
-        result_dir=args.result_dir,
-        retriever_type=args.retriever,
-        embed_model=args.embed_model or config.get('embedding.model_name', 'sentence-transformers/all-MiniLM-L6-v2'),
-        rebuild_index=args.rebuild_index,
-        model_name=args.model,
-        temperature=args.temperature,
-        max_tokens=args.max_tokens,
-        seed=args.seed,
-        note_engines=parse_note_engines(args.note_engines),
-        enable_notes=args.enable_notes or bool(args.note_engines),
-        enable_graph=args.enable_graph,
-        max_workers_query=args.max_workers_query,
-        max_workers_note=args.max_workers_note,
-        start_time=time.time()
+        work_dir=work_dir,
+        llm=shared_llm,
+        enable_cor=args.enable_cor,
     )
     
-    # Setup logging
-    log_dir = Path(args.result_dir) / run_id / "logs"
-    log_dir.mkdir(parents=True, exist_ok=True)
+    # 确定是否为继续模式（非new且工作目录已存在且输出文件已存在）
+    continue_from_existing = not args.new and os.path.exists(work_dir) and os.path.exists(output_file)
+    if continue_from_existing:
+        logger.info(f"Continue mode enabled: will resume from existing results in {output_file}")
     
-    setup_logging(
-        log_file=str(log_dir / "run.log"),
-        log_level="DEBUG" if args.debug else "INFO"
+    processor.process_dataset(
+        args.dataset_file,
+        args.doc_pool_file,
+        output_file,
+        atomic_notes_file=atomic_notes_file,
+        parallel=not args.serial,
+        use_engine_parallel=args.use_engine_parallel,
+        parallel_workers=args.parallel_workers,
+        parallel_strategy=args.parallel_strategy,
+        continue_from_existing=continue_from_existing
     )
-    
-    logger = logging.getLogger(__name__)
-    logger.info("Starting MIRAGE benchmark runner")
-    logger.info(f"Configuration: {mirage_config.to_dict()}")
-    
-    # Create and run MIRAGE runner
-    runner = MirageRunner(mirage_config)
-    success = runner.run()
-    
-    if success:
-        logger.info("MIRAGE run completed successfully")
-        print(f"Results saved to: {Path(args.result_dir) / run_id}")
-        print(f"Predictions file: {Path(args.result_dir) / run_id / 'predictions.jsonl'}")
-        sys.exit(0)
-    else:
-        logger.error("MIRAGE run failed")
-        sys.exit(1)
 
-if __name__ == "__main__":
+
+if __name__ == '__main__':
     main()
