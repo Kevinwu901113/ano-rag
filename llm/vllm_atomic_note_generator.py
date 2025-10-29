@@ -4,10 +4,15 @@ vLLM 原子笔记生成器
 """
 
 import asyncio
+import hashlib
+import os
 import time
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Callable
 from loguru import logger
 from config import config
+from tqdm import tqdm
+
+from utils import FileUtils
 
 from .atomic_note_generator import AtomicNoteGenerator
 from .vllm_openai_client import VllmOpenAIClient
@@ -41,14 +46,14 @@ class VllmAtomicNoteGenerator(AtomicNoteGenerator):
         
         # 初始化vLLM客户端
         self.vllm_client = self._init_vllm_client(**kwargs)
-        
+
         # 初始化分桶调度器
         bucket_edges = config.get('llm.note_generator.bucket_edges', [64, 128, 256, 512, 1024])
         self.bucket_scheduler = BatchedBucketScheduler(
             bucket_edges=bucket_edges,
             batch_size=32
         )
-        
+
         # 性能统计
         self.vllm_stats = {
             'total_requests': 0,
@@ -56,7 +61,14 @@ class VllmAtomicNoteGenerator(AtomicNoteGenerator):
             'processing_time': 0,
             'throughput_qps': 0
         }
-        
+
+        # 进度与缓存目录
+        work_dir = config.get('storage.work_dir', '.')
+        self.progress_dir = os.path.join(work_dir, 'progress', 'atomic_notes')
+        FileUtils.ensure_dir(self.progress_dir)
+        self.progress_index_path = os.path.join(self.progress_dir, 'processed_chunks.json')
+        self.processed_chunks_map = self._load_processed_chunks()
+
         logger.info("VllmAtomicNoteGenerator initialized with bucket scheduler")
     
     def _init_vllm_client(self, **kwargs) -> VllmOpenAIClient:
@@ -87,7 +99,12 @@ class VllmAtomicNoteGenerator(AtomicNoteGenerator):
             logger.error(f"Failed to initialize vLLM client: {e}")
             raise
     
-    def generate_atomic_notes(self, text_chunks: List[Dict[str, Any]], progress_tracker: Optional[Any] = None) -> List[Dict[str, Any]]:
+    def generate_atomic_notes(
+        self,
+        text_chunks: List[Dict[str, Any]],
+        progress_tracker: Optional[Any] = None,
+        on_notes_batch: Optional[Callable[[List[Dict[str, Any]]], None]] = None
+    ) -> List[Dict[str, Any]]:
         """
         生成原子笔记（主入口方法）
         
@@ -110,7 +127,11 @@ class VllmAtomicNoteGenerator(AtomicNoteGenerator):
             asyncio.set_event_loop(loop)
             try:
                 atomic_notes = loop.run_until_complete(
-                    self._generate_atomic_notes_async(text_chunks, progress_tracker)
+                    self._generate_atomic_notes_async(
+                        text_chunks,
+                        progress_tracker,
+                        on_notes_batch=on_notes_batch
+                    )
                 )
             finally:
                 loop.close()
@@ -130,19 +151,57 @@ class VllmAtomicNoteGenerator(AtomicNoteGenerator):
             logger.error(f"Failed to generate atomic notes: {e}")
             raise
     
-    async def _generate_atomic_notes_async(self, text_chunks: List[Dict[str, Any]], progress_tracker: Optional[Any] = None) -> List[Dict[str, Any]]:
+    async def _generate_atomic_notes_async(
+        self,
+        text_chunks: List[Dict[str, Any]],
+        progress_tracker: Optional[Any] = None,
+        on_notes_batch: Optional[Callable[[List[Dict[str, Any]]], None]] = None
+    ) -> List[Dict[str, Any]]:
         """
         异步生成原子笔记，使用分桶调度批处理请求
         """
+        total_chunks = len(text_chunks)
+        progress_bar = tqdm(
+            total=total_chunks,
+            desc="Atomic notes",
+            unit="chunk",
+            dynamic_ncols=True,
+            leave=True,
+        )
+        progress_lock = asyncio.Lock()
+
         # 统计桶分布
+        results: List[Dict[str, Any]] = [None] * len(text_chunks)
+        chunk_keys: Dict[int, str] = {}
         for idx, chunk in enumerate(text_chunks):
+            chunk_key = self._make_chunk_key(chunk)
+            chunk_keys[idx] = chunk_key
+            # 如果已经存在缓存的笔记，直接加载
+            if chunk_key and chunk_key in self.processed_chunks_map:
+                cached_path = self.processed_chunks_map.get(chunk_key)
+                if cached_path and os.path.exists(cached_path):
+                    try:
+                        cached_notes = FileUtils.read_json(cached_path)
+                    except Exception:
+                        cached_notes = []
+                    results[idx] = {
+                        'chunk_index': idx,
+                        'notes': cached_notes if isinstance(cached_notes, list) else []
+                    }
+                    progress_bar.update(1)
+                    continue
+
             prompt = self._format_atomic_note_prompt(chunk)
             # 将原始索引写入调度项，便于结果映射
-            bucket_id = self.bucket_scheduler.add_request(prompt, self._get_atomic_note_system_prompt(), index=idx)
+            bucket_id = self.bucket_scheduler.add_request(
+                prompt,
+                self._get_atomic_note_system_prompt(),
+                index=idx,
+                chunk_key=chunk_key,
+            )
             self.vllm_stats['bucket_distribution'][bucket_id] = self.vllm_stats['bucket_distribution'].get(bucket_id, 0) + 1
-        
+
         # 批量并发处理
-        results: List[Dict[str, Any]] = [None] * len(text_chunks)
         
         async def process_bucket(bucket_id: int, items):
             # items 为 BucketRequest 列表
@@ -154,6 +213,7 @@ class VllmAtomicNoteGenerator(AtomicNoteGenerator):
             # 处理响应
             for i, item in enumerate(items):
                 idx = item.kwargs.get('index', 0)
+                chunk_key = item.kwargs.get('chunk_key')
                 response = responses[i] if i < len(responses) else ""
                 try:
                     notes = self._process_llm_response(response, text_chunks[idx])
@@ -163,7 +223,11 @@ class VllmAtomicNoteGenerator(AtomicNoteGenerator):
                     'chunk_index': idx,
                     'notes': notes
                 }
-        
+                if on_notes_batch and notes:
+                    on_notes_batch(notes)
+                await self._store_chunk_notes(chunk_key, notes, progress_lock)
+                progress_bar.update(1)
+
         # 为每个桶创建任务
         tasks: List[Any] = []
         for bucket_id, items in self.bucket_scheduler.buckets.items():
@@ -172,7 +236,10 @@ class VllmAtomicNoteGenerator(AtomicNoteGenerator):
             tasks.append(process_bucket(bucket_id, items))
         
         # 并发执行
-        await asyncio.gather(*tasks)
+        try:
+            await asyncio.gather(*tasks)
+        finally:
+            progress_bar.close()
         
         # 扁平化各chunk的笔记列表为统一输出
         flat_notes: List[Dict[str, Any]] = []
@@ -186,6 +253,42 @@ class VllmAtomicNoteGenerator(AtomicNoteGenerator):
                         flat_notes.append(n)
         
         return flat_notes
+
+    def _make_chunk_key(self, chunk: Dict[str, Any]) -> Optional[str]:
+        source_info = chunk.get('source_info') or {}
+        file_path = source_info.get('file_path')
+        chunk_idx = chunk.get('chunk_index')
+        if not file_path:
+            return None
+        return f"{file_path}#{chunk_idx if chunk_idx is not None else 0}"
+
+    def _load_processed_chunks(self) -> Dict[str, str]:
+        if os.path.exists(self.progress_index_path):
+            try:
+                data = FileUtils.read_json(self.progress_index_path)
+                if isinstance(data, dict):
+                    return data
+            except Exception as exc:
+                logger.warning(f"Failed to load processed chunk index: {exc}")
+        return {}
+
+    async def _store_chunk_notes(self, chunk_key: Optional[str], notes: List[Dict[str, Any]], lock: asyncio.Lock):
+        if not chunk_key:
+            return
+        chunk_hash = hashlib.md5(chunk_key.encode('utf-8')).hexdigest()
+        chunk_file = os.path.join(self.progress_dir, f"{chunk_hash}.json")
+        try:
+            FileUtils.write_json(notes, chunk_file)
+        except Exception as exc:
+            logger.warning(f"Failed to write chunk notes for {chunk_key}: {exc}")
+            return
+
+        async with lock:
+            self.processed_chunks_map[chunk_key] = chunk_file
+            try:
+                FileUtils.write_json(self.processed_chunks_map, self.progress_index_path)
+            except Exception as exc:
+                logger.warning(f"Failed to update chunk progress index: {exc}")
     
     def _process_llm_response(self, response: str, chunk_data: Dict[str, Any]) -> List[Dict[str, Any]]:
         """解析LLM响应并转换为原子笔记格式"""

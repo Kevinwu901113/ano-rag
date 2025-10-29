@@ -55,6 +55,14 @@ DEFAULT_CONFIG: Dict[str, Any] = {
             "type_compat_weight": 1.0,
             "same_paragraph_bonus": 0.3,
             "same_title_bonus": 0.2,
+        },
+        "semantic_similarity": {
+            "use_lsh": True,
+            "num_planes": 32,
+            "bands": 8,
+            "max_candidates": 64,
+            "min_candidates": 10,
+            "random_seed": 42
         }
     },
     "multi_hop": {

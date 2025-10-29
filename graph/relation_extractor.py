@@ -25,6 +25,21 @@ class RelationExtractor:
         self.entity_cooccurrence_threshold = config.get('graph.entity_cooccurrence_threshold', 2)
         self.context_window = config.get('graph.context_window', 3)
         self.max_relations_per_note = config.get('graph.max_relations_per_note', 10)
+
+        # 语义相似关系的近似匹配配置
+        semantic_cfg = config.get('graph.semantic_similarity', {}) or {}
+        if not isinstance(semantic_cfg, dict):
+            semantic_cfg = {}
+        self.semantic_similarity_config = semantic_cfg
+        self.lsh_enabled = semantic_cfg.get('use_lsh', True)
+        self.lsh_num_planes = max(int(semantic_cfg.get('num_planes', 32) or 1), 1)
+        self.lsh_num_bands = max(int(semantic_cfg.get('bands', 8) or 1), 1)
+        self.lsh_max_candidates = max(int(semantic_cfg.get('max_candidates', 64) or 1), 1)
+        self.lsh_min_candidates = max(int(semantic_cfg.get('min_candidates', 10) or 1), 1)
+        self.lsh_random_seed = int(semantic_cfg.get('random_seed', 42) or 42)
+        self.similarity_threshold = semantic_cfg.get('similarity_threshold', self.similarity_threshold)
+        self._lsh_random_vectors = None
+        self._lsh_last_dim = None
         
         # 批处理器
         self.batch_processor = BatchProcessor(
@@ -590,42 +605,105 @@ class RelationExtractor:
     
     def extract_semantic_similarity_relations(self, atomic_notes: List[Dict[str, Any]], 
                                             embeddings: np.ndarray) -> List[Dict[str, Any]]:
-        """提取语义相似性关系"""
-        relations = []
-        
-        if embeddings.shape[0] != len(atomic_notes):
+        """提取语义相似性关系（使用近似候选加速）"""
+        relations: List[Dict[str, Any]] = []
+        note_count = len(atomic_notes)
+
+        if embeddings.shape[0] != note_count:
             logger.warning("Embeddings count doesn't match notes count")
             return relations
-        
-        # 计算相似度矩阵
-        similarity_matrix = self._compute_similarity_matrix(embeddings)
-        
-        # 提取高相似度的笔记对
-        for i in range(len(atomic_notes)):
-            for j in range(i + 1, len(atomic_notes)):
-                similarity = similarity_matrix[i, j]
-                
-                if similarity >= self.similarity_threshold:
+
+        if note_count == 0:
+            return relations
+
+        normalized_embeddings = self._normalize_embeddings(embeddings)
+
+        candidate_scores: Dict[int, List[Tuple[int, float]]] = {}
+        candidate_pairs: Optional[Set[Tuple[int, int]]] = None
+
+        if self.lsh_enabled and note_count >= self.lsh_min_candidates:
+            try:
+                candidate_scores = self._generate_lsh_candidate_map(normalized_embeddings)
+                candidate_pairs = self._collect_candidate_pairs(candidate_scores)
+                logger.info(
+                    "Semantic similarity LSH candidate pairs: %d (notes=%d)",
+                    len(candidate_pairs),
+                    note_count
+                )
+                if not candidate_pairs:
+                    candidate_pairs = None
+            except Exception as exc:
+                logger.warning(f"LSH candidate generation failed: {exc}")
+                candidate_pairs = None
+
+        candidate_lookup: Dict[int, Dict[int, float]] = {
+            src_idx: {cand_idx: score for cand_idx, score in scored_list}
+            for src_idx, scored_list in candidate_scores.items()
+        }
+
+        if candidate_pairs is None:
+            logger.info("LSH disabled or produced no candidates; falling back to full similarity matrix")
+            similarity_matrix = self._compute_similarity_matrix(normalized_embeddings)
+
+            for i in range(note_count):
+                for j in range(i + 1, note_count):
+                    similarity = float(similarity_matrix[i, j])
+                    if similarity < self.similarity_threshold:
+                        continue
+
                     note1 = atomic_notes[i]
                     note2 = atomic_notes[j]
-                    
                     note1_id = note1.get('note_id')
                     note2_id = note2.get('note_id')
-                    
+
                     weight = self.relation_weights['semantic_similarity'] * similarity
-                    
                     relation = {
                         'source_id': note1_id,
                         'target_id': note2_id,
                         'relation_type': 'semantic_similarity',
                         'weight': weight,
                         'metadata': {
-                            'cosine_similarity': float(similarity),
+                            'cosine_similarity': similarity,
                             'similarity_rank': self._get_similarity_rank(i, j, similarity_matrix)
                         }
                     }
                     relations.append(relation)
-        
+
+            return relations
+
+        similarity_matrix = None  # 避免未定义引用
+
+        for i, j in candidate_pairs:
+            similarity = self._lookup_similarity(candidate_lookup, i, j, normalized_embeddings)
+
+            if similarity < self.similarity_threshold:
+                continue
+
+            note1 = atomic_notes[i]
+            note2 = atomic_notes[j]
+            note1_id = note1.get('note_id')
+            note2_id = note2.get('note_id')
+
+            weight = self.relation_weights['semantic_similarity'] * similarity
+
+            rank_i = self._candidate_rank(candidate_scores.get(i), j) if candidate_scores else None
+            rank_j = self._candidate_rank(candidate_scores.get(j), i) if candidate_scores else None
+            similarity_rank = None
+            ranks = [r for r in (rank_i, rank_j) if r is not None]
+            similarity_rank = min(ranks) if ranks else None
+
+            relation = {
+                'source_id': note1_id,
+                'target_id': note2_id,
+                'relation_type': 'semantic_similarity',
+                'weight': weight,
+                'metadata': {
+                    'cosine_similarity': similarity,
+                    'similarity_rank': similarity_rank
+                }
+            }
+            relations.append(relation)
+
         return relations
 
     def extract_personal_relations(self, atomic_notes: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -765,6 +843,129 @@ class RelationExtractor:
         # 综合相似性
         combined_sim = 0.7 * jaccard_sim + 0.3 * entity_sim
         return min(combined_sim, 1.0)
+
+    def _normalize_embeddings(self, embeddings: np.ndarray) -> np.ndarray:
+        """对嵌入向量进行归一化，避免重复计算"""
+        if embeddings.size == 0:
+            return embeddings
+        norms = np.linalg.norm(embeddings, axis=1, keepdims=True)
+        norms = np.where(norms == 0, 1, norms)
+        return embeddings / norms
+
+    def _prepare_lsh_random_vectors(self, embed_dim: int) -> np.ndarray:
+        """生成（或复用）随机投影向量"""
+        if self._lsh_random_vectors is not None and self._lsh_last_dim == embed_dim:
+            return self._lsh_random_vectors
+
+        rows_per_band = max(1, self.lsh_num_planes // max(self.lsh_num_bands, 1))
+        actual_planes = rows_per_band * max(self.lsh_num_bands, 1)
+        rng = np.random.default_rng(self.lsh_random_seed)
+        random_vectors = rng.normal(size=(actual_planes, embed_dim))
+        random_vectors = self._normalize_embeddings(random_vectors)
+
+        self._lsh_random_vectors = random_vectors
+        self._lsh_last_dim = embed_dim
+        self.lsh_num_planes = actual_planes
+        self.lsh_num_bands = max(1, actual_planes // rows_per_band)
+        return random_vectors
+
+    def _generate_lsh_candidate_map(self, normalized_embeddings: np.ndarray) -> Dict[int, List[Tuple[int, float]]]:
+        """使用随机投影 LSH 生成候选列表"""
+        note_count, embed_dim = normalized_embeddings.shape
+        if note_count == 0:
+            return {}
+
+        random_vectors = self._prepare_lsh_random_vectors(embed_dim)
+        rows_per_band = max(1, self.lsh_num_planes // max(self.lsh_num_bands, 1))
+        actual_bands = max(1, self.lsh_num_planes // rows_per_band)
+
+        projections = normalized_embeddings @ random_vectors.T
+        hash_bits = (projections >= 0).astype(np.uint8)
+
+        buckets_per_band: List[Dict[int, List[int]]] = [defaultdict(list) for _ in range(actual_bands)]
+
+        powers = 1 << np.arange(rows_per_band, dtype=np.uint32)
+        for idx in range(note_count):
+            for band_idx in range(actual_bands):
+                start = band_idx * rows_per_band
+                end = start + rows_per_band
+                if end > hash_bits.shape[1]:
+                    break
+                band_bits = hash_bits[idx, start:end]
+                key = int(np.dot(band_bits, powers[:band_bits.shape[0]]))
+                buckets_per_band[band_idx][key].append(idx)
+
+        candidate_sets: List[Set[int]] = [set() for _ in range(note_count)]
+        for bucket in buckets_per_band:
+            for indices in bucket.values():
+                if len(indices) < 2:
+                    continue
+                for i in indices:
+                    candidate_sets[i].update(j for j in indices if j != i)
+
+        candidate_scores: Dict[int, List[Tuple[int, float]]] = {}
+        prefilter_threshold = max(self.similarity_threshold - 0.1, 0.0)
+
+        for idx, candidates in enumerate(candidate_sets):
+            if not candidates:
+                continue
+            candidate_list = list(candidates)
+            sims = normalized_embeddings[candidate_list] @ normalized_embeddings[idx]
+            sorted_indices = np.argsort(sims)[::-1]
+            top_indices = sorted_indices[:self.lsh_max_candidates]
+
+            scored_candidates: List[Tuple[int, float]] = []
+            for pos in top_indices:
+                candidate_idx = candidate_list[pos]
+                similarity = float(sims[pos])
+                if similarity < prefilter_threshold:
+                    continue
+                scored_candidates.append((candidate_idx, similarity))
+
+            if scored_candidates:
+                candidate_scores[idx] = scored_candidates
+
+        return candidate_scores
+
+    def _collect_candidate_pairs(self, candidate_scores: Dict[int, List[Tuple[int, float]]]) -> Set[Tuple[int, int]]:
+        """从候选列表中收集唯一的索引对"""
+        pairs: Set[Tuple[int, int]] = set()
+        for source_idx, scored_list in candidate_scores.items():
+            for target_idx, _ in scored_list:
+                if source_idx == target_idx:
+                    continue
+                pair = (min(source_idx, target_idx), max(source_idx, target_idx))
+                pairs.add(pair)
+        return pairs
+
+    def _lookup_similarity(self,
+                           candidate_lookup: Dict[int, Dict[int, float]],
+                           source_idx: int,
+                           target_idx: int,
+                           normalized_embeddings: np.ndarray) -> float:
+        """尝试复用候选列表中的相似度，否则回退到点积"""
+        scored_source = candidate_lookup.get(source_idx)
+        if scored_source is not None:
+            similarity = scored_source.get(target_idx)
+            if similarity is not None:
+                return similarity
+
+        scored_target = candidate_lookup.get(target_idx)
+        if scored_target is not None:
+            similarity = scored_target.get(source_idx)
+            if similarity is not None:
+                return similarity
+
+        return float(np.dot(normalized_embeddings[source_idx], normalized_embeddings[target_idx]))
+
+    def _candidate_rank(self, scored_list: Optional[List[Tuple[int, float]]], target_idx: int) -> Optional[int]:
+        """返回候选在列表中的排名（1-based）"""
+        if not scored_list:
+            return None
+        for pos, (cand_idx, _) in enumerate(scored_list):
+            if cand_idx == target_idx:
+                return pos + 1
+        return None
     
     def _compute_similarity_matrix(self, embeddings: np.ndarray) -> np.ndarray:
         """计算相似度矩阵"""

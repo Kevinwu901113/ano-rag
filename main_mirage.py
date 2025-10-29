@@ -27,6 +27,7 @@ from query import QueryProcessor
 from config import config
 from graph.index import NoteGraph
 from utils import FileUtils, setup_logging
+from utils.robust_json_parser import is_unanswerable_answer
 from llm import LocalLLM
 from llm.cor_controller import chain_of_retrieval
 from parallel import create_parallel_interface, ProcessingMode, ParallelStrategy
@@ -276,9 +277,85 @@ class MirageProcessor:
         logger.info(f"Prepared {len(file_paths)} global documents from doc_pool")
         return file_paths
 
+    def _has_complete_global_cache(self, expected_chunk_count: int) -> bool:
+        """根据缓存内容判断是否存在完整的全局处理结果"""
+        atomic_notes_path = os.path.join(self.global_processed_dir, 'atomic_notes.json')
+        embeddings_path = os.path.join(self.global_processed_dir, 'embeddings.npy')
+        notes_count = 0
+
+        if not (os.path.exists(atomic_notes_path) and os.path.exists(embeddings_path)):
+            logger.debug("Global cache missing atomic notes or embeddings")
+            return False
+
+        try:
+            notes_data = FileUtils.read_json(atomic_notes_path)
+            if isinstance(notes_data, list):
+                notes_count = len(notes_data)
+        except Exception as exc:
+            logger.warning(f"Failed to load cached atomic notes: {exc}")
+            return False
+
+        if notes_count == 0:
+            logger.debug("Global cache has zero atomic notes")
+            return False
+
+        # 如果已经存在向量文件且原子笔记数量接近于文档块数，视为完整缓存
+        coverage_ratio = notes_count / max(1, expected_chunk_count)
+        if coverage_ratio < 0.9:
+            logger.info(
+                "Cached atomic notes count (%d) below expected coverage (%.2f%%); "
+                "will rebuild",
+                notes_count,
+                coverage_ratio * 100,
+            )
+            return False
+
+        return True
+
+    def _load_cached_global_resources(self) -> bool:
+        """尝试从缓存加载全局资源（原子笔记、向量、图）"""
+        atomic_notes_path = os.path.join(self.global_processed_dir, 'atomic_notes.json')
+        embeddings_path = os.path.join(self.global_processed_dir, 'embeddings.npy')
+        graph_path = os.path.join(self.global_processed_dir, 'graph.json')
+
+        if not (os.path.exists(atomic_notes_path) and os.path.exists(embeddings_path)):
+            return False
+
+        try:
+            logger.info("Loading cached MIRAGE global resources...")
+            atomic_notes = FileUtils.read_json(atomic_notes_path)
+            self.global_atomic_notes = atomic_notes or []
+
+            self.global_embeddings = np.load(embeddings_path) if os.path.exists(embeddings_path) else None
+            self.global_graph_file = graph_path if os.path.exists(graph_path) else None
+
+            if self.enable_cor:
+                self.global_note_graph = NoteGraph.from_config(config)
+                for note in self.global_atomic_notes:
+                    self.global_note_graph.add_note(note)
+
+            self.global_resources_ready = True
+            logger.info(
+                "Cached global resources loaded: %d atomic notes%s",
+                len(self.global_atomic_notes),
+                ", embeddings present" if self.global_embeddings is not None else ""
+            )
+            return True
+        except Exception as exc:
+            logger.warning(f"Failed to load cached global resources: {exc}")
+            self.global_atomic_notes = []
+            self.global_embeddings = None
+            self.global_graph_file = None
+            self.global_note_graph = None
+            self.global_resources_ready = False
+            return False
+
     def _prepare_global_resources(self, doc_pool_chunks: List[Dict[str, Any]]) -> None:
         """构建全局doc_pool的原子笔记、向量和图谱"""
         if self.global_resources_ready and self.global_atomic_notes:
+            return
+
+        if self._has_complete_global_cache(len(doc_pool_chunks)) and self._load_cached_global_resources():
             return
 
         logger.info("Preparing global MIRAGE corpus (doc_pool -> notes/graph)...")
@@ -366,11 +443,13 @@ class MirageProcessor:
 
             predicted_answer = query_result.get('answer', 'No answer found')
             predicted_support_idxs = query_result.get('predicted_support_idxs', [])
+            answer_is_answerable = not is_unanswerable_answer(predicted_answer)
 
             cor_metadata: Dict[str, Any] = {}
             if cor_result is not None:
                 if cor_result.answer:
                     predicted_answer = cor_result.answer
+                    answer_is_answerable = not is_unanswerable_answer(predicted_answer)
                 if cor_result.evidence_note_ids:
                     cor_metadata['evidence_note_ids'] = cor_result.evidence_note_ids
                 cor_metadata['confidence'] = cor_result.confidence
@@ -431,11 +510,14 @@ class MirageProcessor:
 
             query_result.pop('candidate_notes', None)
 
+            if not answer_is_answerable:
+                predicted_support_idxs = []
+
             result: Dict[str, Any] = {
                 'id': item_id,
                 'predicted_answer': predicted_answer,
                 'predicted_support_idxs': predicted_support_idxs,
-                'predicted_answerable': True
+                'predicted_answerable': answer_is_answerable
             }
 
             if cor_metadata:
@@ -446,6 +528,8 @@ class MirageProcessor:
             if retrieved_contexts:
                 result['retrieved_contexts'] = retrieved_contexts
                 atomic_notes_info['retrieved_contexts'] = retrieved_contexts
+
+            atomic_notes_info['predicted_answerable'] = answer_is_answerable
 
             logger.info(f"Completed processing item {item_id}")
             return result, atomic_notes_info
@@ -738,7 +822,7 @@ class MirageProcessor:
                 
                 # 优化的结果收集：使用as_completed提高响应性
                 completed_count = 0
-                with tqdm(total=len(futures), desc="Processing items") as pbar:
+                with tqdm(total=len(futures), desc="Answering queries", unit="query", dynamic_ncols=True) as pbar:
                     for future, work_dir, item_id in futures:
                         try:
                             # 设置超时以避免长时间阻塞
@@ -806,7 +890,7 @@ class MirageProcessor:
                             pbar.update(1)
         else:
             # 串行处理
-            for i, item in enumerate(tqdm(items, desc="Processing items"), start=1):
+            for i, item in enumerate(tqdm(items, desc="Answering queries", unit="query", dynamic_ncols=True), start=1):
                 item_id = item.get('id', f'item_{i}')
                 work_dir = create_item_workdir(self.base_work_dir, item_id, i, debug_mode=self.debug)
                 try:

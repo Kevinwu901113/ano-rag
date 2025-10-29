@@ -135,7 +135,12 @@ class DocumentProcessor:
             atomic_notes = FileUtils.read_json(atomic_file)
         else:
             logger.info("Step 2: Generating atomic notes")
-            atomic_notes = self._generate_atomic_notes(all_chunks, progress_tracker)
+            reset_partial = force_reprocess or chunks_updated
+            atomic_notes = self._generate_atomic_notes(
+                all_chunks,
+                progress_tracker,
+                reset_partial=reset_partial
+            )
             FileUtils.write_json(atomic_notes, atomic_file)
             
             # 保存被标记为需要重写的摘要（如果启用了摘要校验器）
@@ -280,11 +285,35 @@ class DocumentProcessor:
         
         return valid_chunks
     
-    def _generate_atomic_notes(self, chunks: List[Dict[str, Any]], progress_tracker: Optional[JSONLProgressTracker] = None) -> List[Dict[str, Any]]:
+    def _generate_atomic_notes(
+        self,
+        chunks: List[Dict[str, Any]],
+        progress_tracker: Optional[JSONLProgressTracker] = None,
+        reset_partial: bool = False
+    ) -> List[Dict[str, Any]]:
         """生成原子笔记"""
         try:
+            partial_atomic_file = os.path.join(self.processed_docs_path, "atomic_notes.partial.jsonl")
+            if reset_partial or not os.path.exists(partial_atomic_file):
+                FileUtils.write_file(partial_atomic_file, "")
+                logger.info(f"Initialized partial atomic notes file: {partial_atomic_file}")
+                resume_partial = False
+            else:
+                logger.info(f"Appending to existing partial atomic notes file: {partial_atomic_file}")
+                resume_partial = True
+
+            def _append_partial_notes(notes: List[Dict[str, Any]]):
+                if not notes:
+                    return
+                for note in notes:
+                    FileUtils.append_jsonl_atomic(partial_atomic_file, note)
+
             # 使用批处理生成原子笔记
-            atomic_notes = self.atomic_note_generator.generate_atomic_notes(chunks, progress_tracker)
+            atomic_notes = self.atomic_note_generator.generate_atomic_notes(
+                chunks,
+                progress_tracker,
+                on_notes_batch=_append_partial_notes
+            )
             
             # 验证原子笔记质量
             valid_notes = self.atomic_note_generator.validate_atomic_notes(atomic_notes)
@@ -299,7 +328,10 @@ class DocumentProcessor:
             try:
                 # 使用当前处理目录作为JSONL文件的输出目录，与atomic_notes.json等文件保持一致
                 work_dir = self.processed_docs_path or config.get('storage.work_dir')
-                jsonl_writer = get_global_note_writer(work_dir)
+                jsonl_writer = get_global_note_writer(
+                    work_dir,
+                    reset=reset_partial or not resume_partial
+                )
                 for note in enhanced_notes:
                     # 从source_info中获取问题ID
                     source_info = note.get('source_info', {})
@@ -315,7 +347,13 @@ class DocumentProcessor:
                 logger.info(f"Written {len(enhanced_notes)} notes to note.jsonl")
             except Exception as e:
                 logger.error(f"Failed to write notes to JSONL: {e}")
-            
+
+            try:
+                FileUtils.write_jsonl(enhanced_notes, partial_atomic_file)
+                logger.info(f"Persisted {len(enhanced_notes)} atomic notes to partial JSONL: {partial_atomic_file}")
+            except Exception as e:
+                logger.error(f"Failed to persist partial atomic notes: {e}")
+
             logger.info(f"Generated {len(enhanced_notes)} atomic notes")
             return enhanced_notes
             

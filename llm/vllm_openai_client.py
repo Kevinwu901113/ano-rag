@@ -67,6 +67,10 @@ class VllmOpenAIClient:
         self.health_check_interval = 60  # 秒
         self.error_threshold = 5  # 连续错误阈值
         self.recovery_time = 300  # 恢复时间（秒）
+        self.health_check_enabled = kwargs.get(
+            'health_check_enabled',
+            (config.get('llm.vllm_openai', {}) or {}).get('health_check', {}).get('enabled', True)
+        )
         
         # 初始化端点
         self._init_endpoints(endpoints)
@@ -99,15 +103,19 @@ class VllmOpenAIClient:
                         endpoint.consecutive_errors = 0
                         logger.info(f"Endpoint {url} aligned model to '{endpoint.served_model_id}' (served={served_ids})")
                     else:
-                        endpoint.is_healthy = False
-                        endpoint.consecutive_errors = self.error_threshold
-                        endpoint.last_error_time = time.time()
-                        logger.warning(f"Endpoint {url} returned empty models; marked unhealthy.")
+                        if self.health_check_enabled:
+                            endpoint.is_healthy = False
+                            endpoint.consecutive_errors = self.error_threshold
+                            endpoint.last_error_time = time.time()
+                            logger.warning(f"Endpoint {url} returned empty models; marked unhealthy.")
             except Exception as e:
-                endpoint.is_healthy = False
-                endpoint.consecutive_errors = self.error_threshold
-                endpoint.last_error_time = time.time()
-                logger.warning(f"Endpoint {url} initial health check failed: {e}; marked unhealthy.")
+                if self.health_check_enabled:
+                    endpoint.is_healthy = False
+                    endpoint.consecutive_errors = self.error_threshold
+                    endpoint.last_error_time = time.time()
+                    logger.warning(f"Endpoint {url} initial health check failed: {e}; marked unhealthy.")
+                else:
+                    logger.warning(f"Endpoint {url} initial health check failed: {e}; health-check disabled, keeping endpoint active.")
     
     def _get_next_endpoint(self) -> Optional[VllmEndpoint]:
         """获取下一个可用端点（轮询策略）"""
@@ -115,13 +123,19 @@ class VllmOpenAIClient:
             return None
         
         # 过滤健康的端点
-        healthy_endpoints = [ep for ep in self.endpoints if self._is_endpoint_healthy(ep)]
+        if self.health_check_enabled:
+            healthy_endpoints = [ep for ep in self.endpoints if self._is_endpoint_healthy(ep)]
+        else:
+            healthy_endpoints = self.endpoints[:]
         
         if not healthy_endpoints:
             # 如果没有健康端点，尝试恢复
             logger.warning("No healthy endpoints available, attempting recovery...")
-            self._attempt_recovery()
-            healthy_endpoints = [ep for ep in self.endpoints if self._is_endpoint_healthy(ep)]
+            if self.health_check_enabled:
+                self._attempt_recovery()
+                healthy_endpoints = [ep for ep in self.endpoints if self._is_endpoint_healthy(ep)]
+            else:
+                healthy_endpoints = self.endpoints[:]
         
         if not healthy_endpoints:
             logger.error("All endpoints are unhealthy")
@@ -135,6 +149,8 @@ class VllmOpenAIClient:
     
     def _is_endpoint_healthy(self, endpoint: VllmEndpoint) -> bool:
         """检查端点是否健康"""
+        if not self.health_check_enabled:
+            return True
         if endpoint.consecutive_errors < self.error_threshold:
             return True
         
@@ -166,6 +182,8 @@ class VllmOpenAIClient:
     
     def _attempt_recovery(self):
         """尝试恢复不健康的端点：主动探测 /models 并判断模型可用性"""
+        if not self.health_check_enabled:
+            return
         for endpoint in self.endpoints:
             if not endpoint.is_healthy:
                 if self._refresh_endpoint_health(endpoint):
@@ -178,18 +196,19 @@ class VllmOpenAIClient:
     
     def _mark_endpoint_error(self, endpoint: VllmEndpoint, error: Exception):
         """标记端点错误"""
-        endpoint.consecutive_errors += 1
-        endpoint.last_error_time = time.time()
-        
-        if endpoint.consecutive_errors >= self.error_threshold:
-            endpoint.is_healthy = False
-            logger.warning(f"Endpoint {endpoint.url} marked as unhealthy after {endpoint.consecutive_errors} errors")
+        if self.health_check_enabled:
+            endpoint.consecutive_errors += 1
+            endpoint.last_error_time = time.time()
+            
+            if endpoint.consecutive_errors >= self.error_threshold:
+                endpoint.is_healthy = False
+                logger.warning(f"Endpoint {endpoint.url} marked as unhealthy after {endpoint.consecutive_errors} errors")
         
         logger.debug(f"Endpoint {endpoint.url} error: {error}")
     
     def _mark_endpoint_success(self, endpoint: VllmEndpoint):
         """标记端点成功"""
-        if endpoint.consecutive_errors > 0:
+        if self.health_check_enabled and endpoint.consecutive_errors > 0:
             endpoint.consecutive_errors = 0
             endpoint.is_healthy = True
     

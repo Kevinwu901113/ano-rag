@@ -8,6 +8,31 @@ from loguru import logger
 # 禁用的答案短语
 FORBIDDEN = {"insufficient information", "no spouse mentioned"}
 
+UNANSWERABLE_TOKENS_RAW = {
+    "unanswerable",
+    "cannot answer",
+    "can't answer",
+    "not answerable",
+    "unknown",
+    "无法回答",
+    "无法回答。",
+    "无答案",
+}
+
+
+def is_unanswerable_answer(text: str) -> bool:
+    """Check whether the answer denotes an unanswerable case."""
+    if not text:
+        return False
+    stripped = text.strip()
+    stripped_no_period = stripped.rstrip("。.")
+    normalized = stripped.lower()
+    return (
+        stripped in UNANSWERABLE_TOKENS_RAW
+        or stripped_no_period in UNANSWERABLE_TOKENS_RAW
+        or normalized in UNANSWERABLE_TOKENS_RAW
+    )
+
 def parse_llm_json(raw: str) -> Dict[str, Any]:
     """
     尝试从raw文本中抽出第一个JSON对象，并解析为dict。
@@ -71,6 +96,8 @@ def extract_prediction(raw_llm_output: str, passages: Dict[int, str]) -> Tuple[s
     data = parse_llm_json(raw_llm_output)
     ans = str(data.get("answer", "")).strip()
     idxs = data.get("support_idxs", [])
+
+    unanswerable = is_unanswerable_answer(ans)
     
     # 非空校验
     if not ans:
@@ -82,14 +109,21 @@ def extract_prediction(raw_llm_output: str, passages: Dict[int, str]) -> Tuple[s
     
     # support 至少 1 条（如果确实能在某段落中找到子串）
     # 仅做"存在性"检查，不修改 ans，不做抽取覆盖
-    has_substr_somewhere = any(ans in (passages.get(i, "")) for i in idxs)
-    if not has_substr_somewhere:
-        # 如果模型没给出含子串的 idx，尝试从全部段落里找一条加入（不改答案）
-        for i, txt in passages.items():
-            if ans and ans in txt:
-                idxs = [i]  # 只保底 1 条
-                has_substr_somewhere = True
-                break
+    has_substr_somewhere = False
+    if not unanswerable:
+        has_substr_somewhere = any(ans in (passages.get(i, "")) for i in idxs)
+        if not has_substr_somewhere:
+            # 如果模型没给出含子串的 idx，尝试从全部段落里找一条加入（不改答案）
+            for i, txt in passages.items():
+                if ans and ans in txt:
+                    idxs = [i]  # 只保底 1 条
+                    has_substr_somewhere = True
+                    break
+        if not has_substr_somewhere:
+            raise ValueError("Answer does not appear in any provided passage")
+    else:
+        # Unanswerable case: ignore whatever support indices were provided
+        idxs = []
     
     # 去重并转换为int，只保留合法的id（存在于passages_by_idx中的id）
     # support的最终长度由fill_support_idxs_noid统一控制

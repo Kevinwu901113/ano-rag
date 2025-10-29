@@ -14,7 +14,7 @@ from config import config
 class NoteJSONLWriter:
     """原子笔记JSONL文件写入器"""
     
-    def __init__(self, output_dir: Optional[str] = None):
+    def __init__(self, output_dir: Optional[str] = None, reset: bool = False):
         """
         初始化JSONL写入器
         
@@ -26,8 +26,8 @@ class NoteJSONLWriter:
         self._lock = threading.Lock()
         self._ensure_output_dir()
         
-        # 初始化时清空文件（如果存在）
-        self._initialize_file()
+        # 初始化文件，可选择是否清空
+        self._initialize_file(reset)
         
         logger.info(f"NoteJSONLWriter initialized, output file: {self.jsonl_file_path}")
     
@@ -35,8 +35,10 @@ class NoteJSONLWriter:
         """确保输出目录存在"""
         os.makedirs(self.output_dir, exist_ok=True)
     
-    def _initialize_file(self):
+    def _initialize_file(self, reset: bool):
         """初始化JSONL文件"""
+        if os.path.exists(self.jsonl_file_path) and not reset:
+            return
         try:
             with open(self.jsonl_file_path, 'w', encoding='utf-8') as f:
                 pass  # 创建空文件
@@ -175,12 +177,13 @@ _global_writer: Optional[NoteJSONLWriter] = None
 _writer_lock = threading.Lock()
 
 
-def get_global_note_writer(output_dir: Optional[str] = None) -> NoteJSONLWriter:
+def get_global_note_writer(output_dir: Optional[str] = None, reset: bool = False) -> NoteJSONLWriter:
     """
     获取全局笔记写入器实例
     
     Args:
         output_dir: 输出目录，仅在首次创建时使用
+        reset: 是否在（重新）创建时清空文件
         
     Returns:
         NoteJSONLWriter实例
@@ -190,7 +193,9 @@ def get_global_note_writer(output_dir: Optional[str] = None) -> NoteJSONLWriter:
     with _writer_lock:
         # 如果提供了新的输出目录，或者全局写入器不存在，则创建新的
         if _global_writer is None or (output_dir and _global_writer.output_dir != output_dir):
-            _global_writer = NoteJSONLWriter(output_dir)
+            _global_writer = NoteJSONLWriter(output_dir, reset=reset)
+        elif reset:
+            _global_writer.clear_file()
         return _global_writer
 
 

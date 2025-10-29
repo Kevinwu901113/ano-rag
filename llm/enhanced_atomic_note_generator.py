@@ -1,4 +1,4 @@
-from typing import List, Dict, Any, Optional, Union, Tuple
+from typing import List, Dict, Any, Optional, Union, Tuple, Callable
 from loguru import logger
 from .local_llm import LocalLLM
 from utils.batch_processor import BatchProcessor
@@ -110,7 +110,11 @@ class EnhancedAtomicNoteGenerator:
 
         return f"[{', '.join(cleaned)}]" if cleaned else "[]"
 
-    def generate_atomic_notes(self, text_chunks: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    def generate_atomic_notes(
+        self,
+        text_chunks: List[Dict[str, Any]],
+        on_notes_batch: Optional[Callable[[List[Dict[str, Any]]], None]] = None
+    ) -> List[Dict[str, Any]]:
         """从文本块生成增强的原子笔记"""
         logger.info(f"Generating enhanced atomic notes for {len(text_chunks)} text chunks")
         # 重置覆盖率报告
@@ -141,6 +145,12 @@ class EnhancedAtomicNoteGenerator:
         
         # 最终统计
         self._log_generation_statistics(atomic_notes)
+
+        if on_notes_batch:
+            try:
+                on_notes_batch(atomic_notes)
+            except Exception as exc:  # pragma: no cover - defensive
+                logger.warning(f"on_notes_batch callback failed in enhanced generator: {exc}")
 
         logger.info(f"Enhanced atomic note generation completed: {len(atomic_notes)} notes")
         self._export_coverage_report()

@@ -62,8 +62,8 @@ def test_parallel_generator_receives_max_workers(monkeypatch, tmp_path):
         def __init__(self, llm, max_workers=None):
             recorded["max_workers"] = max_workers
 
-        def generate_atomic_notes(self, text_chunks):
-            return [
+        def generate_atomic_notes(self, text_chunks, progress_tracker=None, on_notes_batch=None):
+            notes = [
                 {
                     "content": f"note-{i}",
                     "chunk_index": i,
@@ -71,6 +71,9 @@ def test_parallel_generator_receives_max_workers(monkeypatch, tmp_path):
                 }
                 for i, chunk in enumerate(text_chunks)
             ]
+            if on_notes_batch:
+                on_notes_batch(notes)
+            return notes
 
     monkeypatch.setattr("main_mirage.ParallelTaskAtomicNoteGenerator", StubGenerator)
     monkeypatch.setattr("main_mirage.LocalLLM", lambda: object())
@@ -97,8 +100,8 @@ def test_enhanced_generator_receives_max_workers_when_parallel_fails(monkeypatch
         def __init__(self, llm, max_workers=None):
             recorded["max_workers"] = max_workers
 
-        def generate_atomic_notes(self, text_chunks):
-            return [
+        def generate_atomic_notes(self, text_chunks, progress_tracker=None, on_notes_batch=None):
+            notes = [
                 {
                     "content": "enhanced",
                     "chunk_index": i,
@@ -106,6 +109,9 @@ def test_enhanced_generator_receives_max_workers_when_parallel_fails(monkeypatch
                 }
                 for i, chunk in enumerate(text_chunks)
             ]
+            if on_notes_batch:
+                on_notes_batch(notes)
+            return notes
 
     monkeypatch.setattr("main_mirage.ParallelTaskAtomicNoteGenerator", FailingGenerator)
     monkeypatch.setattr("main_mirage.EnhancedAtomicNoteGenerator", StubEnhancedGenerator)
@@ -133,8 +139,8 @@ def test_basic_generator_receives_max_workers_when_all_fallbacks_fail(monkeypatc
         def __init__(self, llm, max_workers=None):
             recorded["max_workers"] = max_workers
 
-        def generate_atomic_notes(self, text_chunks):
-            return [
+        def generate_atomic_notes(self, text_chunks, progress_tracker=None, on_notes_batch=None):
+            notes = [
                 {
                     "content": "basic",
                     "chunk_index": i,
@@ -142,6 +148,9 @@ def test_basic_generator_receives_max_workers_when_all_fallbacks_fail(monkeypatc
                 }
                 for i, chunk in enumerate(text_chunks)
             ]
+            if on_notes_batch:
+                on_notes_batch(notes)
+            return notes
 
     monkeypatch.setattr("main_mirage.ParallelTaskAtomicNoteGenerator", FailingGenerator)
     monkeypatch.setattr("main_mirage.EnhancedAtomicNoteGenerator", FailingGenerator)
@@ -164,8 +173,8 @@ def test_generate_atomic_notes_groups_by_chunk_index(monkeypatch, tmp_path):
         def __init__(self, *args, **kwargs):
             pass
 
-        def generate_atomic_notes(self, text_chunks):
-            return [
+        def generate_atomic_notes(self, text_chunks, progress_tracker=None, on_notes_batch=None):
+            notes = [
                 {
                     "note_id": "note-0",
                     "content": "note for first",
@@ -179,6 +188,9 @@ def test_generate_atomic_notes_groups_by_chunk_index(monkeypatch, tmp_path):
                     "source_info": text_chunks[1]["source_info"],
                 },
             ]
+            if on_notes_batch:
+                on_notes_batch(notes)
+            return notes
 
     monkeypatch.setattr("main_mirage.ParallelTaskAtomicNoteGenerator", StubGenerator)
     monkeypatch.setattr("main_mirage.LocalLLM", lambda: object())
@@ -201,8 +213,8 @@ def test_generate_atomic_notes_groups_by_source_info(monkeypatch, tmp_path):
         def __init__(self, *args, **kwargs):
             pass
 
-        def generate_atomic_notes(self, text_chunks):
-            return [
+        def generate_atomic_notes(self, text_chunks, progress_tracker=None, on_notes_batch=None):
+            notes = [
                 {
                     "note_id": "note-unsupported",
                     "content": "orphan",
@@ -214,6 +226,9 @@ def test_generate_atomic_notes_groups_by_source_info(monkeypatch, tmp_path):
                     "source_info": {"document_id": "doc-2", "title": "Doc 2", "is_supporting": True},
                 },
             ]
+            if on_notes_batch:
+                on_notes_batch(notes)
+            return notes
 
     monkeypatch.setattr("main_mirage.ParallelTaskAtomicNoteGenerator", StubGenerator)
     monkeypatch.setattr("main_mirage.LocalLLM", lambda: object())

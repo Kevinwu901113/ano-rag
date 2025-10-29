@@ -1,13 +1,23 @@
-from typing import List, Dict, Any, Set, Optional
 import re
 import difflib
+import os
+import sys
+from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor
+from typing import List, Dict, Any, Set, Optional
 from loguru import logger
 from collections import defaultdict
+from tqdm import tqdm
 
 class EnhancedNER:
     """增强的命名实体识别模块，专门针对人物识别和实体归一化优化"""
     
-    def __init__(self):
+    def __init__(
+        self,
+        max_workers: Optional[int] = None,
+        executor_mode: str = "process",
+        progress_bar: bool = True,
+        process_chunksize: int = 32,
+    ):
         # 人物识别模式
         self.person_patterns = [
             r'\b[A-Z][a-z]+\s+[A-Z][a-z]+\b',  # 标准英文姓名
@@ -36,6 +46,14 @@ class EnhancedNER:
         
         # 实体别名映射缓存
         self.entity_aliases = defaultdict(set)
+        
+        # 多进程/多线程处理配置
+        cpu_count = os.cpu_count() or 4
+        default_workers = max(1, int(cpu_count * 0.8)) or cpu_count
+        self.max_workers = max_workers or default_workers
+        self.executor_mode = executor_mode if executor_mode in {"thread", "process"} else "process"
+        self.progress_bar = progress_bar
+        self.process_chunksize = max(1, process_chunksize)
         
     def extract_entities(self, text: str, filter_non_persons: bool = True) -> List[str]:
         """提取实体，支持人物过滤"""
@@ -262,44 +280,87 @@ class EnhancedNER:
         
         # 归一化全局实体
         global_normalization = self.normalize_entities(list(global_entities))
+        self._global_normalization = global_normalization
         
-        enhanced_notes = []
-        for note in atomic_notes:
-            enhanced_note = note.copy()
-            
-            # 重新提取和归一化实体
-            content = note.get('content', '')
-            entity_result = self.extract_and_normalize_entities(content)
-            
-            # 更新实体信息
-            enhanced_note['entities'] = entity_result['normalized_entities']
-            enhanced_note['raw_entities'] = entity_result['raw_entities']
-            enhanced_note['entity_normalization'] = entity_result['normalization_mapping']
-            
-            # 增强entity_trace
-            if 'entity_trace' not in enhanced_note:
-                enhanced_note['entity_trace'] = {}
-            
-            # 提高traced_entities的覆盖率
-            traced_entities = []
-            for entity in enhanced_note['entities']:
-                # 在原文中查找实体的所有出现位置
-                entity_positions = self._find_entity_positions(content, entity)
-                if entity_positions:
-                    traced_entities.append({
-                        'entity': entity,
-                        'positions': entity_positions,
-                        'confidence': 0.9,  # 高置信度
-                        'source': 'enhanced_ner'
-                    })
-            
-            enhanced_note['entity_trace']['traced_entities'] = traced_entities
-            enhanced_note['entity_trace']['trace_coverage'] = len(traced_entities) / max(len(enhanced_note['entities']), 1)
-            
-            enhanced_notes.append(enhanced_note)
+        # 并行处理每条笔记
+        if not atomic_notes:
+            logger.info("Enhanced entity tracing for 0 notes")
+            return []
         
-        logger.info(f"Enhanced entity tracing for {len(enhanced_notes)} notes")
+        tqdm_disable = not self.progress_bar or len(atomic_notes) < 1000
+        tqdm_kwargs = {
+            "total": len(atomic_notes),
+            "desc": "Entity tracing",
+            "unit": "note",
+            "dynamic_ncols": True,
+            "file": sys.stdout,
+            "disable": tqdm_disable,
+            "mininterval": 1.0,
+        }
+        
+        def _run_executor(executor_cls, mode: str) -> List[Dict[str, Any]]:
+            detail = f" (chunksize={self.process_chunksize})" if mode == "process" else ""
+            logger.info(
+                f"Entity tracing using {mode} executor with {self.max_workers} workers{detail}"
+            )
+            with executor_cls(max_workers=self.max_workers) as executor:
+                if mode == "process":
+                    iterator = executor.map(self._process_single_note, atomic_notes, chunksize=self.process_chunksize)
+                else:
+                    iterator = executor.map(self._process_single_note, atomic_notes)
+                return list(tqdm(iterator, **tqdm_kwargs))
+        
+        enhanced_notes: List[Dict[str, Any]]
+        mode_used = self.executor_mode
+        if self.executor_mode == "process":
+            try:
+                enhanced_notes = _run_executor(ProcessPoolExecutor, "process")
+            except (PermissionError, OSError, NotImplementedError) as exc:
+                logger.warning(
+                    f"Process-based entity tracing unavailable ({exc}); falling back to thread executor"
+                )
+                enhanced_notes = _run_executor(ThreadPoolExecutor, "thread")
+                mode_used = "thread"
+        else:
+            enhanced_notes = _run_executor(ThreadPoolExecutor, "thread")
+            mode_used = "thread"
+        
+        logger.info(
+            f"Enhanced entity tracing for {len(enhanced_notes)} notes using "
+            f"{self.max_workers} {mode_used} workers"
+        )
+        self.executor_mode = mode_used
         return enhanced_notes
+    
+    def _process_single_note(self, note: Dict[str, Any]) -> Dict[str, Any]:
+        """处理单条原子笔记，提取并增强实体信息"""
+        enhanced_note = note.copy()
+        
+        content = note.get('content', '')
+        entity_result = self.extract_and_normalize_entities(content)
+        
+        enhanced_note['entities'] = entity_result['normalized_entities']
+        enhanced_note['raw_entities'] = entity_result['raw_entities']
+        enhanced_note['entity_normalization'] = entity_result['normalization_mapping']
+        
+        if 'entity_trace' not in enhanced_note:
+            enhanced_note['entity_trace'] = {}
+        
+        traced_entities = []
+        for entity in enhanced_note['entities']:
+            entity_positions = self._find_entity_positions(content, entity)
+            if entity_positions:
+                traced_entities.append({
+                    'entity': entity,
+                    'positions': entity_positions,
+                    'confidence': 0.9,
+                    'source': 'enhanced_ner'
+                })
+        
+        enhanced_note['entity_trace']['traced_entities'] = traced_entities
+        enhanced_note['entity_trace']['trace_coverage'] = len(traced_entities) / max(len(enhanced_note['entities']), 1)
+        
+        return enhanced_note
     
     def _find_entity_positions(self, text: str, entity: str) -> List[Dict[str, Any]]:
         """查找实体在文本中的位置"""
