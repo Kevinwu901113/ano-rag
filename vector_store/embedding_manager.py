@@ -58,6 +58,7 @@ class EmbeddingManager:
     """嵌入管理器，专注于本地模型加载"""
     
     _instance = None
+    _initialized = False
     _model_loaded = False
     _lock = None
     
@@ -70,31 +71,30 @@ class EmbeddingManager:
     
     def __init__(self):
         # 如果模型已经加载，直接返回
-        if self._model_loaded:
+        if self._initialized:
             return
             
         with self._lock:
             # 双重检查锁定模式
-            if self._model_loaded:
+            if self._initialized:
                 return
                 
             # 配置参数
             self.model_name = config.get('embedding.model_name', 'BAAI/bge-m3')
             self.batch_size = config.get('embedding.batch_size', 32)
-            self.device = GPUUtils.get_optimal_device()
+            self._allow_gpu_batch = config.get('performance.use_gpu', True)
+            initial_device = self._determine_device()
+            self._apply_device(initial_device)
             self.max_length = config.get('embedding.max_length', 512)
             self.normalize_embeddings = config.get('embedding.normalize', True)
+            self.lazy_load = config.get('embedding.lazy_load', True)
             
             # 初始化模型
             self.model = None
             self.embedding_dim = None
-            self._load_local_model()
             
             # 批处理器
-            self.batch_processor = BatchProcessor(
-                batch_size=self.batch_size,
-                use_gpu=config.get('performance.use_gpu', True)
-            )
+            self._refresh_batch_processor()
             
             # 缓存路径
             self.cache_dir = config.get('storage.embedding_cache_path')
@@ -121,11 +121,74 @@ class EmbeddingManager:
                 except Exception as e:
                     logger.warning(f"Failed to initialize model consistency checker: {e}")
             
-            logger.info(f"EmbeddingManager initialized with model: {self.model_name}, device: {self.device}")
+            if self.lazy_load:
+                logger.info(
+                    f"EmbeddingManager initialized (lazy load enabled) with model: {self.model_name}, "
+                    f"device: {self.device}"
+                )
+            else:
+                self._load_local_model()
+            
+            EmbeddingManager._initialized = True
 
-            # 标记模型已加载
-            EmbeddingManager._model_loaded = True
+    def _determine_device(self) -> str:
+        """根据环境变量或配置确定嵌入设备"""
+        override = os.getenv("ANO_RAG_EMBEDDING_DEVICE") or config.get('embedding.device')
+        if override:
+            device = str(override).strip()
+            logger.info(f"Embedding device override detected: {device}")
+            return device
+        return GPUUtils.get_optimal_device()
 
+    def _apply_device(self, device: str) -> None:
+        """应用设备设置并同步批处理策略"""
+        normalized = str(device).strip() if device else "cpu"
+        previous = getattr(self, "device", None)
+        self.device = normalized
+        self.use_gpu = normalized.startswith("cuda")
+        self._batch_use_gpu = self.use_gpu and self._allow_gpu_batch
+        if previous != normalized:
+            logger.info(f"EmbeddingManager device set to {self.device} (use_gpu={self.use_gpu})")
+
+    def _refresh_batch_processor(self) -> None:
+        """根据当前设备重建批处理器"""
+        self.batch_processor = BatchProcessor(
+            batch_size=self.batch_size,
+            use_gpu=self._batch_use_gpu
+        )
+
+    def _should_fallback_to_cpu(self, exc: Exception) -> bool:
+        """判断是否需要因为GPU错误而回退到CPU"""
+        if not self.use_gpu or self.device == "cpu":
+            return False
+        message = str(exc).lower()
+        if "cuda out of memory" in message or "cublas" in message:
+            return True
+        try:
+            from torch.cuda import OutOfMemoryError as TorchOutOfMemoryError  # type: ignore
+            return isinstance(exc, TorchOutOfMemoryError)
+        except Exception:  # pragma: no cover - fallback if torch.cuda not available
+            return False
+
+    def _create_sentence_transformer(self, source: str, **kwargs):
+        """加载SentenceTransformer，必要时自动退回CPU"""
+        kwargs.setdefault('trust_remote_code', True)
+        kwargs.setdefault('device', self.device)
+        try:
+            return SentenceTransformer(source, **kwargs)
+        except Exception as exc:
+            if self._should_fallback_to_cpu(exc):
+                logger.warning(f"Failed to load embedding model on device {self.device}: {exc}. Falling back to CPU.")
+                try:
+                    torch.cuda.empty_cache()
+                except Exception:
+                    pass
+                self._apply_device("cpu")
+                self._refresh_batch_processor()
+                kwargs['device'] = self.device
+                return SentenceTransformer(source, **kwargs)
+            raise
+    
     def set_model(self, model_name: str) -> None:
         """切换嵌入模型并重新加载"""
         if not model_name or model_name == self.model_name:
@@ -137,6 +200,8 @@ class EmbeddingManager:
 
             self.model_name = model_name
             logger.info(f"Switching embedding model to: {model_name}")
+            self.model = None
+            EmbeddingManager._model_loaded = False
             self._load_local_model()
 
             if MODEL_CONSISTENCY_AVAILABLE and self.consistency_checker:
@@ -147,6 +212,9 @@ class EmbeddingManager:
 
     def _load_local_model(self):
         """专门加载本地模型，如果本地不存在则自动下载"""
+        if self.model is not None:
+            EmbeddingManager._model_loaded = True
+            return
         try:
             # 获取本地模型目录
             repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
@@ -195,11 +263,7 @@ class EmbeddingManager:
             # 直接使用SentenceTransformer下载模型
             # 这会自动下载到HuggingFace缓存目录
             logger.info("正在从HuggingFace下载模型，这可能需要几分钟...")
-            model = SentenceTransformer(
-                self.model_name,
-                device=self.device,
-                trust_remote_code=True
-            )
+            model = self._create_sentence_transformer(self.model_name)
             
             # 保存模型信息
             self.model = model
@@ -244,11 +308,7 @@ class EmbeddingManager:
         for fallback_model in fallback_models:
             try:
                 logger.info(f"尝试加载备用模型: {fallback_model}")
-                model = SentenceTransformer(
-                    fallback_model,
-                    device=self.device,
-                    trust_remote_code=True
-                )
+                model = self._create_sentence_transformer(fallback_model)
                 
                 # 保存模型信息
                 self.model = model
@@ -366,7 +426,7 @@ class EmbeddingManager:
                 'trust_remote_code': True  # 允许自定义代码
             }
             
-            self.model = SentenceTransformer(model_path, **load_kwargs)
+            self.model = self._create_sentence_transformer(model_path, **load_kwargs)
             
             # 获取嵌入维度
             if hasattr(self.model, 'get_sentence_embedding_dimension'):
@@ -389,6 +449,18 @@ class EmbeddingManager:
         except Exception as e:
             logger.warning(f"从路径 {model_path} 加载模型失败: {e}")
             return False
+        finally:
+            EmbeddingManager._model_loaded = self.model is not None
+
+    def _ensure_model_loaded(self):
+        """懒加载模型，在首次调用编码时再加载到显存"""
+        if self.model is not None:
+            return
+        with self._lock:
+            if self.model is None:
+                self._load_local_model()
+                if self.model is None:
+                    raise RuntimeError(f"Unable to load embedding model: {self.model_name}")
     
     def encode_texts(self, texts: List[str], 
                     batch_size: Optional[int] = None,
@@ -400,6 +472,7 @@ class EmbeddingManager:
         
         batch_size = batch_size or self.batch_size
         normalize = normalize if normalize is not None else self.normalize_embeddings
+        self._ensure_model_loaded()
         
         try:
             logger.info(f"编码 {len(texts)} 个文本，批次大小: {batch_size}")

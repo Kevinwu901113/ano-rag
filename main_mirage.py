@@ -85,9 +85,13 @@ def create_new_workdir() -> str:
     os.makedirs(RESULT_ROOT, exist_ok=True)
     existing = [int(d) for d in os.listdir(RESULT_ROOT) if d.isdigit()]
     next_idx = max(existing) + 1 if existing else 1
-    work_dir = os.path.join(RESULT_ROOT, str(next_idx))
-    os.makedirs(work_dir, exist_ok=True)
-    return work_dir
+    while True:
+        work_dir = os.path.join(RESULT_ROOT, str(next_idx))
+        try:
+            os.mkdir(work_dir)
+            return work_dir
+        except FileExistsError:
+            next_idx += 1
 
 
 def _sanitize_identifier(identifier: str) -> str:

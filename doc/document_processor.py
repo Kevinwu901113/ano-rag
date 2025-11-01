@@ -1,9 +1,13 @@
+import asyncio
 import os
+import time
 import numpy as np
 from typing import List, Dict, Any, Optional
+from pathlib import Path
 from loguru import logger
 from tqdm import tqdm
 import networkx as nx
+from contextlib import nullcontext
 from networkx.readwrite import json_graph
 from .chunker import DocumentChunker
 from .clustering import TopicClustering
@@ -41,9 +45,17 @@ class DocumentProcessor:
             raise ValueError("DocumentProcessor requires a LocalLLM instance to be passed")
         self.llm = llm
         
-        # 统一使用 vLLM 作为原子笔记生成器
-        logger.info("Using VllmAtomicNoteGenerator for atomic note generation")
-        self.atomic_note_generator = VllmAtomicNoteGenerator(self.llm)
+        # vLLM 原子笔记生成器在真正需要时再初始化，以便根据实际可用端点配置
+        logger.info("Preparing VllmAtomicNoteGenerator for atomic note generation (lazy init)")
+        self.atomic_note_generator: Optional[VllmAtomicNoteGenerator] = None
+        self._env_vllm_endpoints: List[str] = []
+        env_eps = os.getenv("ANO_RAG_VLLM_ENDPOINTS")
+        if env_eps:
+            parsed = [ep.strip() for ep in env_eps.split(",") if ep.strip()]
+            if parsed:
+                self._env_vllm_endpoints = parsed
+                logger.info(f"Detected vLLM endpoints from environment: {self._env_vllm_endpoints}")
+        self._active_vllm_endpoints: Optional[List[str]] = list(self._env_vllm_endpoints)
         self.batch_processor = BatchProcessor(
             batch_size=config.get('document.batch_size', 32),
             use_gpu=config.get('performance.use_gpu', True)
@@ -54,7 +66,35 @@ class DocumentProcessor:
         # 存储路径，默认使用配置中的工作目录
         self.processed_docs_path = output_dir or config.get('storage.work_dir') or config.get('storage.processed_docs_path') or './data/processed'
         FileUtils.ensure_dir(self.processed_docs_path)
+
+        self._vllm_autostart_cfg = config.get('llm.note_generator.autostart', {})
+        self._vllm_autostart_enabled = bool(self._vllm_autostart_cfg.get('enabled', False))
+        disable_env = os.getenv("ANO_RAG_DISABLE_VLLM_AUTOSTART")
+        if disable_env and disable_env.strip().lower() not in {"0", "false", "no"}:
+            logger.info("Environment requests disabling vLLM autostart")
+            self._vllm_autostart_enabled = False
+        self._vllm_manager_context = None
+        self._shard_name = os.getenv("ANO_RAG_SHARD_NAME")
+        self._step2_barrier_dir = os.getenv("ANO_RAG_STEP2_BARRIER_DIR") or ""
+        self._step2_total = self._safe_int(os.getenv("ANO_RAG_STEP2_TOTAL"), default=0)
+        self._step2_timeout = self._safe_int(os.getenv("ANO_RAG_STEP2_BARRIER_TIMEOUT"), default=1800)
+        poll_default = self._safe_int(os.getenv("ANO_RAG_STEP2_BARRIER_POLL"), default=5)
+        self._step2_poll_interval = max(1, poll_default)
+        self._step2_abort_marker = Path(self._step2_barrier_dir, "ABORT") if self._step2_barrier_dir else None
+        if self._step2_barrier_dir and self._step2_total > 1 and self._shard_name:
+            logger.info(
+                f"Step 2 barrier configured for shard {self._shard_name} "
+                f"(dir={self._step2_barrier_dir}, total={self._step2_total}, "
+                f"timeout={self._step2_timeout}s, poll={self._step2_poll_interval}s)"
+            )
         
+    @staticmethod
+    def _safe_int(value: Optional[str], default: int = 0) -> int:
+        try:
+            return int(value) if value is not None else default
+        except (TypeError, ValueError):
+            return default
+    
     def process_documents(self, file_paths: List[str], force_reprocess: bool = False, output_dir: Optional[str] = None) -> Dict[str, Any]:
         """处理文档的主要入口点"""
         logger.info(f"Starting document processing for {len(file_paths)} files")
@@ -136,11 +176,34 @@ class DocumentProcessor:
         else:
             logger.info("Step 2: Generating atomic notes")
             reset_partial = force_reprocess or chunks_updated
-            atomic_notes = self._generate_atomic_notes(
-                all_chunks,
-                progress_tracker,
-                reset_partial=reset_partial
-            )
+            self._active_vllm_endpoints = list(self._env_vllm_endpoints) if self._env_vllm_endpoints else None
+            context_mgr = self._vllm_note_generation_context()
+            try:
+                if context_mgr:
+                    with context_mgr as manager:
+                        if manager and hasattr(manager, "get_ready_endpoints"):
+                            ready_eps = manager.get_ready_endpoints()
+                            if ready_eps:
+                                logger.info(f"vLLM autostart ready endpoints: {ready_eps}")
+                                self._active_vllm_endpoints = ready_eps
+                            else:
+                                failed = getattr(manager, "get_failed_servers", lambda: [])()
+                                if failed:
+                                    logger.warning(f"vLLM autostart reported startup failures: {failed}")
+                        atomic_notes = self._generate_atomic_notes(
+                            all_chunks,
+                            progress_tracker,
+                            reset_partial=reset_partial
+                        )
+                else:
+                    atomic_notes = self._generate_atomic_notes(
+                        all_chunks,
+                        progress_tracker,
+                        reset_partial=reset_partial
+                    )
+            finally:
+                self._active_vllm_endpoints = list(self._env_vllm_endpoints) if self._env_vllm_endpoints else None
+                self._shutdown_atomic_note_generator()
             FileUtils.write_json(atomic_notes, atomic_file)
             
             # 保存被标记为需要重写的摘要（如果启用了摘要校验器）
@@ -155,6 +218,8 @@ class DocumentProcessor:
                 except Exception as e:
                     logger.error(f"Failed to save flagged summaries: {e}")
         note_count = len(atomic_notes)
+        self._step2_barrier_wait(note_count)
+        self._record_step3_marker(note_count)
         
         if not atomic_notes:
             logger.warning("No atomic notes generated")
@@ -166,6 +231,7 @@ class DocumentProcessor:
             logger.info(f"Loading embeddings from {embed_file}")
             embeddings = np.load(embed_file)
         else:
+            logger.info("Stage checkpoint: Step 2 completed; preparing embeddings")
             logger.info("Step 3: Creating embeddings")
             embeddings = self.embedding_manager.encode_atomic_notes(atomic_notes)
             np.save(embed_file, embeddings)
@@ -284,7 +350,132 @@ class DocumentProcessor:
         logger.info(f"Created {len(valid_chunks)} valid chunks from {len(file_paths)} documents")
         
         return valid_chunks
-    
+
+    def _shutdown_atomic_note_generator(self):
+        """Try to close existing vLLM client before reconfiguration."""
+        if not self.atomic_note_generator:
+            return
+        client = getattr(self.atomic_note_generator, "vllm_client", None)
+        if not client:
+            return
+        try:
+            loop = asyncio.new_event_loop()
+            try:
+                loop.run_until_complete(client.close())
+            finally:
+                loop.close()
+        except Exception as exc:  # noqa: BLE001 - best effort cleanup
+            logger.debug(f"Failed to close existing vLLM client cleanly: {exc}")
+        finally:
+            self.atomic_note_generator = None
+
+    def _step2_barrier_wait(self, note_count: int):
+        """在进入Step3前等待其他分片完成Step2，防止提前卸载vLLM。"""
+        if (
+            not self._step2_barrier_dir
+            or not self._shard_name
+            or self._step2_total <= 1
+        ):
+            return
+
+        barrier_path = Path(self._step2_barrier_dir)
+        try:
+            barrier_path.mkdir(parents=True, exist_ok=True)
+        except Exception as exc:
+            logger.warning(f"Failed to prepare Step 2 barrier dir {barrier_path}: {exc}; continuing without sync")
+            return
+
+        marker_file = barrier_path / f"{self._shard_name}.step2"
+        try:
+            marker_file.write_text(f"{time.time()}\tnotes={note_count}\n")
+        except Exception as exc:
+            logger.warning(f"Failed to write Step 2 barrier marker for {self._shard_name}: {exc}")
+
+        expected = max(1, self._step2_total)
+        poll_interval = max(1, self._step2_poll_interval)
+        start_time = time.time()
+        deadline = start_time + self._step2_timeout if self._step2_timeout > 0 else None
+        next_status_log = start_time
+        status_interval = max(30, poll_interval)
+        initial_reached = len(list(barrier_path.glob("*.step2")))
+
+        logger.info(
+            f"Shard {self._shard_name} completed Step 2 (notes={note_count}); "
+            f"waiting for remaining shards ({initial_reached}/{expected} ready)"
+        )
+
+        abort_file = self._step2_abort_marker if self._step2_abort_marker else barrier_path / "ABORT"
+
+        while True:
+            markers = list(barrier_path.glob("*.step2"))
+            reached = len(markers)
+            if reached >= expected:
+                logger.info(
+                    f"All shards reached Step 2 barrier ({reached}/{expected}). Proceeding to Step 3."
+                )
+                return
+
+            if abort_file.exists():
+                logger.warning(
+                    f"Detected Step 2 barrier abort signal at {abort_file}; "
+                    f"proceeding without waiting for remaining shards ({reached}/{expected})."
+                )
+                return
+
+            now = time.time()
+            if deadline and now >= deadline:
+                logger.warning(
+                    f"Step 2 barrier timeout after {self._step2_timeout}s; "
+                    f"continuing with Step 3 ({reached}/{expected} shards reached)."
+                )
+                return
+
+            if now >= next_status_log:
+                remaining = max(0, expected - reached)
+                logger.info(
+                    f"Waiting for {remaining} remaining shard(s) to finish Step 2 "
+                    f"({reached}/{expected} ready)..."
+                )
+                next_status_log = now + status_interval
+
+            time.sleep(poll_interval)
+
+    def _record_step3_marker(self, note_count: int) -> None:
+        """Persist a Step 3 readiness marker for barrier monitoring."""
+        if (
+            not self._step2_barrier_dir
+            or not self._shard_name
+            or self._step2_total <= 1
+        ):
+            return
+
+        marker = Path(self._step2_barrier_dir, f"{self._shard_name}.step3")
+        try:
+            marker.write_text(f"{time.time()}\tnotes={note_count}\n")
+        except Exception as exc:  # noqa: BLE001 - best effort marker
+            logger.warning(
+                "Failed to write Step 3 barrier marker for %s: %s",
+                self._shard_name,
+                exc,
+            )
+
+    def _ensure_atomic_note_generator(self):
+        """Initialize or reconfigure the vLLM note generator as needed."""
+        endpoints = self._active_vllm_endpoints or []
+        current = self.atomic_note_generator
+
+        if endpoints:
+            configured = getattr(current, "configured_endpoints", [])
+            if current is None or configured != endpoints:
+                if current is not None:
+                    self._shutdown_atomic_note_generator()
+                logger.info(f"Initializing VllmAtomicNoteGenerator with endpoints: {endpoints}")
+                self.atomic_note_generator = VllmAtomicNoteGenerator(self.llm, endpoints=endpoints)
+        else:
+            if current is None:
+                logger.info("Initializing VllmAtomicNoteGenerator with default configuration")
+                self.atomic_note_generator = VllmAtomicNoteGenerator(self.llm)
+
     def _generate_atomic_notes(
         self,
         chunks: List[Dict[str, Any]],
@@ -292,6 +483,7 @@ class DocumentProcessor:
         reset_partial: bool = False
     ) -> List[Dict[str, Any]]:
         """生成原子笔记"""
+        self._ensure_atomic_note_generator()
         try:
             partial_atomic_file = os.path.join(self.processed_docs_path, "atomic_notes.partial.jsonl")
             if reset_partial or not os.path.exists(partial_atomic_file):
@@ -360,6 +552,9 @@ class DocumentProcessor:
         except Exception as e:
             logger.error(f"Failed to generate atomic notes: {e}")
             return []
+        finally:
+            # ensure the vLLM client is released after note generation
+            self._shutdown_atomic_note_generator()
     
     
     def _calculate_processing_stats(self, file_paths: List[str],
@@ -469,6 +664,18 @@ class DocumentProcessor:
             'embeddings': embeddings,
             'processing_stats': processing_stats
         }
+
+    def _vllm_note_generation_context(self):
+        """Context manager to optionally autostart/teardown vLLM servers."""
+        if not self._vllm_autostart_enabled:
+            return nullcontext()
+
+        try:
+            from utils.vllm_server_manager import VLLMServerManager
+            return VLLMServerManager(self._vllm_autostart_cfg)
+        except Exception as exc:
+            logger.error(f"Failed to initialize vLLM server manager, falling back to manual mode: {exc}")
+            return nullcontext()
     
     def process_single_document(self, file_path: str, force_reprocess: bool = False) -> Dict[str, Any]:
         """处理单个文档"""

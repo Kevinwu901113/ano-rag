@@ -3,99 +3,34 @@
 """
 Small-scale test for main_mirage.py functionality
 
-This script creates a minimal test dataset to verify that main_mirage.py
-works correctly and produces the expected output format.
+This script copies the bundled MIRAGE small dataset fixtures to verify that
+main_mirage.py works correctly and produces the expected output format.
 """
 
-import os
 import json
 import tempfile
 import shutil
 from pathlib import Path
 
 def create_test_data():
-    """Create minimal test data for MIRAGE"""
-    # Create temporary directory
+    """Create test data for MIRAGE using the bundled small dataset"""
     test_dir = Path(tempfile.mkdtemp(prefix="mirage_test_"))
     mirage_dir = test_dir / "mirage"
     mirage_dir.mkdir()
-    
-    # Create minimal dataset.json
-    dataset = [
-        {
-            "source": "test",
-            "query_id": "test-001",
-            "query": "What is the capital of France?",
-            "doc_name": "France",
-            "answer": ["Paris"],
-            "doc_url": "https://example.com/france",
-            "num_doc_labels": 1
-        },
-        {
-            "source": "test",
-            "query_id": "test-002", 
-            "query": "Who wrote Romeo and Juliet?",
-            "doc_name": "Shakespeare",
-            "answer": ["William Shakespeare", "Shakespeare"],
-            "doc_url": "https://example.com/shakespeare",
-            "num_doc_labels": 1
-        }
-    ]
-    
-    # Create minimal doc_pool.json
-    doc_pool = [
-        {
-            "mapped_id": "test-001",
-            "doc_name": "France",
-            "doc_chunk": "France is a country in Western Europe. The capital and largest city of France is Paris, which is located in the north-central part of the country.",
-            "support": 1
-        },
-        {
-            "mapped_id": "test-001", 
-            "doc_name": "France",
-            "doc_chunk": "France has a rich history and culture. It is known for its cuisine, art, and architecture. The French language is spoken by millions of people worldwide.",
-            "support": 0
-        },
-        {
-            "mapped_id": "test-002",
-            "doc_name": "Shakespeare",
-            "doc_chunk": "William Shakespeare was an English playwright and poet. He wrote many famous plays including Romeo and Juliet, Hamlet, and Macbeth.",
-            "support": 1
-        },
-        {
-            "mapped_id": "test-002",
-            "doc_name": "Shakespeare", 
-            "doc_chunk": "Shakespeare lived from 1564 to 1616. He is widely regarded as the greatest writer in the English language and the world's greatest dramatist.",
-            "support": 0
-        }
-    ]
-    
-    # Create minimal oracle.json
-    oracle = {
-        "test-001": {
-            "mapped_id": "test-001",
-            "doc_name": "France", 
-            "doc_chunk": "France is a country in Western Europe. The capital and largest city of France is Paris, which is located in the north-central part of the country.",
-            "support": 1
-        },
-        "test-002": {
-            "mapped_id": "test-002",
-            "doc_name": "Shakespeare",
-            "doc_chunk": "William Shakespeare was an English playwright and poet. He wrote many famous plays including Romeo and Juliet, Hamlet, and Macbeth.",
-            "support": 1
-        }
+
+    repo_mirage_dir = Path(__file__).resolve().parent / "MIRAGE" / "mirage"
+    source_to_target = {
+        "dataset_small.json": "dataset.json",
+        "doc_pool_small.json": "doc_pool.json",
+        "oracle_small.json": "oracle.json",
     }
-    
-    # Write files
-    with open(mirage_dir / "dataset.json", 'w') as f:
-        json.dump(dataset, f, indent=2)
-    
-    with open(mirage_dir / "doc_pool.json", 'w') as f:
-        json.dump(doc_pool, f, indent=2)
-        
-    with open(mirage_dir / "oracle.json", 'w') as f:
-        json.dump(oracle, f, indent=2)
-    
+
+    for source_name, target_name in source_to_target.items():
+        source_path = repo_mirage_dir / source_name
+        if not source_path.exists():
+            raise FileNotFoundError(f"Required test fixture not found: {source_path}")
+        shutil.copy(source_path, mirage_dir / target_name)
+
     print(f"Test data created in: {test_dir}")
     return test_dir
 

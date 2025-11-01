@@ -110,6 +110,11 @@ retrieval:
   entity_norm_dedup: true
   candidate_pool: 80        # 全局候选池大小，影响最终检索质量
   min_per_subq: 1          # 每个子问题最小召回数量，硬约束
+  query_alignment:
+    enabled: true
+    boost: 0.8
+    penalty: 0.4
+    min_tokens: 2
   
   # JSON解析重试配置
   json_parsing:
@@ -284,9 +289,14 @@ scheduler:
 # 大语言模型配置
 llm:
   provider: "lmstudio"      # 仅用于必要的本地LLM初始化（不再回退到transformers）
-  model: "gpt-oss"           # 与 LM Studio 中加载的模型一致
+  model: "openai/gpt-oss-20b"  # 与 LM Studio 中加载的模型保持一致
   temperature: 0.1
   max_output_tokens: 8192
+
+  lmstudio:
+    model: "openai/gpt-oss-20b"
+    base_url: "http://127.0.0.1:1234/v1"
+    model_alias_map: {}
 
   # 原子笔记生成专用配置（vLLM双实例）
   note_generator:
@@ -304,12 +314,40 @@ llm:
     retry:
       max_attempts: 3
       backoff_base_ms: 200
+    autostart:
+      enabled: true
+      readiness_timeout: 240
+      health_interval: 2.0
+      log_dir: "logs/vllm"
+      servers:
+        - name: "vllm_gpu0"
+          cuda_devices: "0"
+          host: "127.0.0.1"
+          port: 8000
+          model: "Qwen/Qwen2.5-7B-Instruct-AWQ"
+          quantization: "awq_marlin"
+          dtype: "auto"
+          gpu_memory_utilization: 0.7
+          max_model_len: 4096
+          max_num_batched_tokens: 32768
+          download_dir: "/home/wjk/models/Qwen2.5-7B-AWQ"
+        - name: "vllm_gpu1"
+          cuda_devices: "1"
+          host: "127.0.0.1"
+          port: 8001
+          model: "Qwen/Qwen2.5-7B-Instruct-AWQ"
+          quantization: "awq_marlin"
+          dtype: "auto"
+          gpu_memory_utilization: 0.7
+          max_model_len: 4096
+          max_num_batched_tokens: 32768
+          download_dir: "/home/wjk/models/Qwen2.5-7B-AWQ"
 
   # 最终答案生成配置（LM Studio）
   final_answer:
     provider: "lmstudio-openai"
     base_url: "http://127.0.0.1:1234/v1"
-    model: "gpt-oss"
+    model: "openai/gpt-oss-20b"
 
   # 移除混合LLM配置（不再使用 hybrid_llm）
 

@@ -77,14 +77,21 @@ class VllmAtomicNoteGenerator(AtomicNoteGenerator):
             # 读取模型名称（如未配置则给出合理默认值）
             model_name = kwargs.get('model') or config.get('llm.note_generator.model', 'Qwen/Qwen2.5-7B-Instruct')
             endpoints = kwargs.get('endpoints') or config.get('llm.note_generator.endpoints', [])
+            endpoints = list(endpoints) if isinstance(endpoints, (list, tuple)) else []
             
             # 端点校验（必须配置至少一个端点）
             if not endpoints or not isinstance(endpoints, list):
                 raise ValueError("llm.note_generator.endpoints 未配置或格式错误（需为非空列表）")
+
+            # 将动态可用端点写回配置，确保工厂创建的客户端使用最新列表
+            config.set('llm.note_generator.endpoints', endpoints)
             
             # 使用工厂创建vLLM客户端（工厂内部读取配置，无需显式传参）
             client = LLMFactory.create_provider('vllm-openai')
             logger.info("vLLM client initialized via factory provider")
+
+            # 记录当前配置的端点列表，便于外部判断是否需重建实例
+            self.configured_endpoints = endpoints
             
             # 类型校验：必须是 VllmOpenAIClient，否则硬失败
             if not isinstance(client, VllmOpenAIClient):

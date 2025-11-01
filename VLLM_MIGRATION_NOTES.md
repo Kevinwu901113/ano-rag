@@ -8,7 +8,7 @@
 
 ### 变更范围
 - **仅影响原子笔记生成链路**：只修改原子笔记生成相关的 Provider 和调用点
-- **保持最终答案生成不变**：final answer 生成继续使用 LM Studio 的 gpt-oss 模型
+- **保持最终答案生成不变**：final answer 生成继续使用 LM Studio 的 openai/gpt-oss-20b 模型
 - **保留旧 Provider**：保留 Ollama/LMStudio 客户端以便回滚
 
 ### 不变更部分

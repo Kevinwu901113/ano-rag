@@ -43,7 +43,7 @@ class LocalLLM:
             default_model = 'gpt-3.5-turbo'
         elif self.provider == 'lmstudio':
             config_section = 'llm.lmstudio'
-            default_model = 'gpt-oss-20b'
+            default_model = 'openai/gpt-oss-20b'
         else:
             raise ValueError(f"Unsupported provider: {self.provider}")
         
@@ -71,7 +71,9 @@ class LocalLLM:
                     raise Exception("Failed to connect to OpenAI API")
                 logger.info("OpenAI model loaded and tested successfully")
             elif self.is_lmstudio_model:
-                base_url = config.get('llm.lmstudio.base_url', f'http://localhost:{config.get("llm.lmstudio.port", 1234)}/v1')
+                default_base_url = f'http://127.0.0.1:{config.get("llm.lmstudio.port", 1234)}/v1'
+                base_url = config.get('llm.lmstudio.base_url', default_base_url)
+                logger.info(f"Using LM Studio endpoint: {base_url}")
                 self.lmstudio_client = LMStudioClient(base_url=base_url, model=self.model_name)
                 if not self.lmstudio_client.is_available():
                     raise Exception("Failed to connect to LM Studio API")

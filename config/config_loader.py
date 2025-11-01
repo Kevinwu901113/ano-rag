@@ -140,6 +140,13 @@ DEFAULT_CONFIG: Dict[str, Any] = {
             "retry": {
                 "max_attempts": 3,
                 "backoff_base_ms": 200
+            },
+            "autostart": {
+                "enabled": False,
+                "readiness_timeout": 180,
+                "health_interval": 2.0,
+                "log_dir": "logs/vllm",
+                "servers": []
             }
         }
     },
@@ -149,42 +156,48 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "retrieval_guardrail_config_file": "./config/retrieval_guardrail.yaml",
     "entity_predicate_normalizer_config_file": "./config/entity_predicate_normalizer.yaml",
     "embedding_strategy_config_file": "./config/embedding_strategy.yaml",
-    "retrieval": {
-        "candidate_pool": 50,
-        "hybrid": {
-            "enabled": True,
-            "fusion_method": "linear",
-            "weights": {"dense": 1.0, "bm25": 0.5, "graph": 0.5, "path": 0.1},
-            "rrf_k": 60,
-        },
-        "bm25": {"k1": 1.2, "b": 0.75, "text_field": "title_raw_span"},
-        "graph": {"enabled": True, "k_hop": 2, "expand_top_m": 20},
-        "multi_hop": {
-            "enabled": True,
-            "strategy": "hybrid",
-            "max_hops": 3,
-            "max_paths": 10,
-            "min_path_score": 0.3,
-            "min_path_score_floor": 0.1,
-            "min_path_score_step": 0.05,
-            "path_diversity_threshold": 0.7,
-            "max_initial_candidates": 20,
-            "top_k_seed": {
-                "enabled": False,
-                "seed_count": 5,
-                "fallback_to_entity": True
-            },
-            "entity_extraction": {
+        "retrieval": {
+            "candidate_pool": 50,
+            "query_alignment": {
                 "enabled": True,
-                "max_entities": 10
+                "boost": 0.8,
+                "penalty": 0.4,
+                "min_tokens": 2,
             },
-            "hybrid_mode": {
-                "primary_strategy": "entity_extraction",
-                "fallback_strategy": "top_k_seed",
-                "switch_threshold": 3
-            }
+            "hybrid": {
+                "enabled": True,
+                "fusion_method": "linear",
+                "weights": {"dense": 1.0, "bm25": 0.5, "graph": 0.5, "path": 0.1},
+                "rrf_k": 60,
+            },
+            "bm25": {"k1": 1.2, "b": 0.75, "text_field": "title_raw_span"},
+            "graph": {"enabled": True, "k_hop": 2, "expand_top_m": 20},
+            "multi_hop": {
+                "enabled": True,
+                "strategy": "hybrid",
+                "max_hops": 3,
+                "max_paths": 10,
+                "min_path_score": 0.3,
+                "min_path_score_floor": 0.1,
+                "min_path_score_step": 0.05,
+                "path_diversity_threshold": 0.7,
+                "max_initial_candidates": 20,
+                "top_k_seed": {
+                    "enabled": False,
+                    "seed_count": 5,
+                    "fallback_to_entity": True
+                },
+                "entity_extraction": {
+                    "enabled": True,
+                    "max_entities": 10
+                },
+                "hybrid_mode": {
+                    "primary_strategy": "entity_extraction",
+                    "fallback_strategy": "top_k_seed",
+                    "switch_threshold": 3
+                }
+            },
         },
-    },
     "path_aware": {"enabled": True, "min_path_score": 0.3},
     "hybrid_search": {
         "enabled": True,

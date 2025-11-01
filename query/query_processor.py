@@ -7,6 +7,7 @@ import threading
 import time
 import json
 import hashlib
+import re
 
 # Ollama 支持已移除；请使用 LLMFactory 的 'lmstudio' 或 'vllm-openai' 作为 provider。
 
@@ -306,20 +307,40 @@ Prompt Length: {len(prompt)} characters
 
     def _create_final_answer_client(self) -> Optional[Any]:
         """根据配置初始化用于最终答案生成的LLM客户端。"""
+        env_provider = os.getenv("ANO_RAG_FINAL_ANSWER_PROVIDER")
+        env_model = os.getenv("ANO_RAG_FINAL_ANSWER_MODEL")
+        env_base_url = os.getenv("ANO_RAG_FINAL_ANSWER_BASE_URL")
+        env_api_key = os.getenv("ANO_RAG_FINAL_ANSWER_API_KEY")
+        env_port = os.getenv("ANO_RAG_FINAL_ANSWER_PORT")
+
         final_answer_cfg = self._llm_cfg.get('final_answer') if isinstance(self._llm_cfg, dict) else None
-        if not final_answer_cfg:
+        if not final_answer_cfg and not any((env_provider, env_model, env_base_url, env_api_key, env_port)):
             return None
 
-        provider = final_answer_cfg.get('provider')
+        cfg: Dict[str, Any] = dict(final_answer_cfg or {})
+        provider = env_provider or cfg.get('provider')
         if not provider:
             return None
 
         normalized_provider = provider.split('-', 1)[0]
         overrides: Dict[str, Any] = {}
         for key in ('base_url', 'model', 'api_key', 'port'):
-            value = final_answer_cfg.get(key)
+            value = cfg.get(key)
             if value is not None:
                 overrides[key] = value
+
+        if env_model:
+            overrides['model'] = env_model
+            logger.info(f"ANO_RAG_FINAL_ANSWER_MODEL override in effect: {env_model}")
+        if env_base_url:
+            overrides['base_url'] = env_base_url
+        if env_api_key:
+            overrides['api_key'] = env_api_key
+        if env_port:
+            try:
+                overrides['port'] = int(env_port)
+            except ValueError:
+                logger.warning(f"Invalid ANO_RAG_FINAL_ANSWER_PORT override: {env_port}")
 
         try:
             client = LLMFactory.create_provider(normalized_provider, **overrides)
@@ -378,6 +399,11 @@ Prompt Length: {len(prompt)} characters
         self._retrieval_cfg = self._get_config_dict("retrieval")
         self._context_cfg = self._get_config_dict("context")
         self._ranking_cfg = self._get_config_dict("ranking")
+        self._query_alignment_cfg = self._retrieval_cfg.get("query_alignment", {})
+        self.query_alignment_enabled = bool(self._query_alignment_cfg.get("enabled", True))
+        self.query_alignment_boost = float(self._query_alignment_cfg.get("boost", 0.8))
+        self.query_alignment_penalty = float(self._query_alignment_cfg.get("penalty", 0.4))
+        self.query_alignment_min_tokens = max(int(self._query_alignment_cfg.get("min_tokens", 2)), 1)
         
         # 缓存 hybrid_search 子配置
         self._hybrid_search_cfg = hd
@@ -862,7 +888,8 @@ Prompt Length: {len(prompt)} characters
         if not selected_notes:
             return selected_notes
 
-        processed = self.evidence_reranker.rerank(selected_notes, query)
+        processed = self._apply_query_alignment_boost(selected_notes, query)
+        processed = self.evidence_reranker.rerank(processed, query)
         processed = self.path_validator.ensure_valid_bundle(
             processed,
             candidate_notes=candidate_notes,
@@ -918,6 +945,84 @@ Prompt Length: {len(prompt)} characters
             logger.error(f"Failed to fix entity extraction flow: {e}")
         
         return candidates
+
+    def _apply_query_alignment_boost(
+        self,
+        notes: List[Dict[str, Any]],
+        query: str,
+    ) -> List[Dict[str, Any]]:
+        """Boost evidence that aligns closely with proper names in the query, penalize mismatches."""
+
+        if not self.query_alignment_enabled or not notes or not query:
+            return notes
+
+        target_names = self._extract_query_names(query)
+        if not target_names:
+            return notes
+
+        for note in notes:
+            doc_name = (note.get("doc_name") or note.get("title") or "").strip()
+            combined_text = " ".join(
+                filter(
+                    None,
+                    [
+                        doc_name,
+                        note.get("content", ""),
+                        note.get("raw_span", ""),
+                    ],
+                )
+            ).lower()
+
+            base_score = float(
+                note.get(
+                    "final_score",
+                    note.get("final_similarity", note.get("salience", 0.0)),
+                )
+            )
+
+            bonus = 0.0
+            penalty = 0.0
+
+            doc_lower = doc_name.lower()
+
+            for name in target_names:
+                name_lower = name.lower()
+                if name_lower and name_lower in combined_text:
+                    bonus += self.query_alignment_boost
+                    continue
+
+                # If last name present but full name missing, likely a different person sharing surname.
+                tokens = name_lower.split()
+                if len(tokens) < self.query_alignment_min_tokens:
+                    continue
+                first, last = tokens[0], tokens[-1]
+
+                last_in_text = last and last in combined_text
+                first_in_text = first and first in combined_text
+
+                if last_in_text and first_in_text and name_lower not in combined_text:
+                    penalty += self.query_alignment_penalty
+                elif last_in_text and name_lower not in combined_text:
+                    # surname only match -> mild penalty
+                    penalty += self.query_alignment_penalty * 0.5
+
+            adjusted = base_score + bonus - penalty
+            note["final_score"] = adjusted
+            if "final_similarity" in note:
+                note["final_similarity"] = adjusted
+
+        return notes
+
+    def _extract_query_names(self, query: str) -> List[str]:
+        """Extract capitalized multi-token names from the query string."""
+
+        pattern = re.compile(r"\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+)+)\b")
+        names = []
+        for match in pattern.finditer(query):
+            candidate = match.group(1).strip()
+            if candidate and len(candidate.split()) >= self.query_alignment_min_tokens:
+                names.append(candidate)
+        return names
     
     def _perform_ner_on_text(self, text: str) -> List[str]:
         """对文本执行命名实体识别。"""

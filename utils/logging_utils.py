@@ -87,32 +87,44 @@ def setup_logging(log_file: str, log_level: str = "INFO", enable_json: bool = Fa
         colorize=True
     )
     
+    def _add_file_sink(path: str, *, level: str, rotation: str, retention: str, compression: Optional[str] = None):
+        sink_kwargs = dict(
+            level=level,
+            format=file_format,
+            rotation=rotation,
+            retention=retention,
+            compression=compression,
+            encoding="utf-8",
+            enqueue=True,
+            backtrace=True,
+            diagnose=True,
+        )
+        try:
+            logger.add(path, **sink_kwargs)
+        except (PermissionError, OSError) as exc:
+            sink_kwargs["enqueue"] = False
+            logger.warning(
+                f"Failed to enable async logging for {path} ({exc}); falling back to synchronous writes."
+            )
+            logger.add(path, **sink_kwargs)
+    
     # 添加文件处理器
-    logger.add(
+    _add_file_sink(
         log_file,
         level=log_level,
-        format=file_format,
         rotation="50 MB",
         retention="30 days",
         compression="zip",
-        encoding="utf-8",
-        enqueue=True,
-        backtrace=True,
-        diagnose=True,
     )
     
     # 添加错误文件处理器
     error_file = log_file.replace('.log', '_error.log')
-    logger.add(
+    _add_file_sink(
         error_file,
         level="ERROR",
-        format=file_format,
         rotation="10 MB",
         retention="60 days",
-        encoding="utf-8",
-        enqueue=True,
-        backtrace=True,
-        diagnose=True,
+        compression=None,
     )
     
     return logger

@@ -1,4 +1,3 @@
-import asyncio
 import json
 import random
 import time
@@ -14,9 +13,10 @@ from loguru import logger
 
 from config import config
 from .prompts import (
+    FINAL_ANSWER_SYSTEM_PROMPT,
+    FINAL_ANSWER_PROMPT,
     EVALUATE_ANSWER_SYSTEM_PROMPT,
     EVALUATE_ANSWER_PROMPT,
-    get_final_answer_prompts,
 )
 from .streaming_early_stop import create_early_stop_stream
 
@@ -55,29 +55,6 @@ class LMStudioInstance:
             "max_retries": config.get("llm.lmstudio.max_retries", 3),
         }
         self.client = openai.OpenAI(**client_kwargs)
-
-
-class LMStudioGenerationError(RuntimeError):
-    """Error raised when LM Studio fails to return a completion."""
-
-    def __init__(
-        self,
-        message: str,
-        *,
-        original_exception: Exception | None = None,
-        is_transport_error: bool = False,
-        is_timeout: bool = False,
-    ) -> None:
-        super().__init__(message)
-        self.original_exception = original_exception
-        self.is_transport_error = is_transport_error
-        self.is_timeout = is_timeout
-
-    def __str__(self) -> str:  # pragma: no cover - delegated to base repr when unused
-        base_msg = super().__str__()
-        if self.original_exception is None:
-            return base_msg
-        return f"{base_msg} (caused by {self.original_exception!r})"
 
 
 class LMStudioClient:
@@ -139,51 +116,30 @@ class LMStudioClient:
         
         logger.info(f"Connected to LM Studio: {base_url} (model: {model})")
     
-    def generate_concurrent(
-        self,
-        prompts: List[str],
-        system_prompt: str | None = None,
-        **kwargs,
-    ) -> List[str]:
+    def generate_concurrent(self, prompts: List[str], **kwargs) -> List[str]:
         """并发生成多个响应"""
         if not self.concurrent_enabled or len(prompts) == 1:
             # 单线程处理
-            return [
-                self.generate(prompt, system_prompt=system_prompt, **kwargs)
-                for prompt in prompts
-            ]
-
+            return [self.generate(prompt, **kwargs) for prompt in prompts]
+        
         # 使用线程池并发处理
-        executor = self.executor or ThreadPoolExecutor(
-            max_workers=min(self.max_concurrent_requests, len(prompts)) or 1
-        )
-        created_local_executor = executor is not self.executor
-
-        futures = {
-            executor.submit(
-                self.generate,
-                prompt,
-                system_prompt,
-                **kwargs,
-            ): idx
-            for idx, prompt in enumerate(prompts)
-        }
-
-        results: List[str] = [""] * len(prompts)
-        try:
+        futures = []
+        with self.executor as executor:
+            for prompt in prompts:
+                future = executor.submit(self.generate, prompt, **kwargs)
+                futures.append(future)
+            
+            results = []
             for future in as_completed(futures):
-                idx = futures[future]
                 try:
-                    results[idx] = future.result()
+                    result = future.result()
+                    results.append(result)
                 except Exception as e:
                     logger.error(f"Concurrent generation failed: {e}")
-                    results[idx] = ""
-        finally:
-            if created_local_executor:
-                executor.shutdown(wait=True)
-
+                    results.append("")
+        
         return results
-
+    
     def generate(self, prompt: str, system_prompt: str = None, **kwargs) -> str:
         """生成单个响应"""
         try:
@@ -193,70 +149,26 @@ class LMStudioClient:
                 if key == 'system_prompt' or value is None:
                     continue
                 options[key] = value
-
+            
             # 准备消息
             messages = []
             if system_prompt:
                 messages.append({"role": "system", "content": system_prompt})
             messages.append({"role": "user", "content": prompt})
-
+            
             # 调用OpenAI客户端生成响应
             response = self.instance.client.chat.completions.create(
                 model=self.instance.model,
                 messages=messages,
                 **options
             )
-
-            message_content = response.choices[0].message.content
-            return message_content.strip() if message_content else ""
-
+            
+            return response.choices[0].message.content.strip()
+            
         except Exception as e:
             logger.error(f"LM Studio generation failed: {e}")
-
-            # 判断异常类型，以便上游根据错误类型采取不同策略
-            request_exception_types = (requests.RequestException,)
-            openai_timeout_type = getattr(openai, "APITimeoutError", None)
-            openai_connection_type = getattr(openai, "APIConnectionError", None)
-
-            timeout_types = (requests.Timeout,)
-            if isinstance(openai_timeout_type, type):
-                timeout_types = timeout_types + (openai_timeout_type,)
-
-            transport_types = request_exception_types
-            if isinstance(openai_connection_type, type):
-                transport_types = transport_types + (openai_connection_type,)
-
-            is_timeout = isinstance(e, timeout_types) or "timeout" in str(e).lower()
-            is_transport_error = isinstance(e, transport_types) or is_timeout
-
-            raise LMStudioGenerationError(
-                "LM Studio generation failed",
-                original_exception=e,
-                is_transport_error=is_transport_error,
-                is_timeout=is_timeout,
-            ) from e
-
-    async def chat_many(
-        self,
-        prompts: List[str],
-        system_prompt: str | None = None,
-        **kwargs,
-    ) -> List[str]:
-        """提供异步批量对话接口，兼容需要chat_many的上游组件"""
-
-        if not prompts:
-            return []
-
-        loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(
-            None,
-            lambda: self.generate_concurrent(
-                prompts,
-                system_prompt=system_prompt,
-                **kwargs,
-            ),
-        )
-
+            return ""
+    
     def generate_stream(
         self,
         prompt: str,
@@ -361,11 +273,7 @@ class LMStudioClient:
         
         # 使用线程池并行处理
         if self.executor:
-            return self.generate_concurrent(
-                prompts,
-                system_prompt=system_prompt,
-                **kwargs,
-            )
+            return self.generate_concurrent(prompts, system_prompt, **kwargs)
         else:
             # 回退到串行处理
             results = []
@@ -377,22 +285,11 @@ class LMStudioClient:
                     logger.error(f"Batch generation failed for prompt: {e}")
                     results.append("")
             return results
-    
-    def generate_final_answer(
-        self,
-        prompt_or_context: str,
-        query: Optional[str] = None,
-        dataset: Optional[str] = None,
-    ) -> str:
-        """Generate final answer; accepts either a preformatted prompt or raw context."""
-        system_prompt, prompt_template = get_final_answer_prompts(dataset)
 
-        prompt_text = prompt_or_context or ""
-        # Heuristic: if the incoming text does not look preformatted, rebuild with template
-        if "OUTPUT FORMAT" not in prompt_text and query is not None:
-            prompt_text = prompt_template.format(context=prompt_text, query=query)
-
-        return self.generate(prompt_text, system_prompt)
+    def generate_final_answer(self, context: str, query: str) -> str:
+        """Generate final answer using context and query."""
+        prompt = FINAL_ANSWER_PROMPT.format(context=context, query=query)
+        return self.generate(prompt, FINAL_ANSWER_SYSTEM_PROMPT)
     
     def evaluate_answer(self, query: str, context: str, answer: str) -> Dict[str, float]:
         """Evaluate answer quality."""

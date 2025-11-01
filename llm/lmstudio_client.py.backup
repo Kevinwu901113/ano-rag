@@ -24,7 +24,7 @@ class LMStudioClient:
         # 设置默认配置
         self.port = port or config.get("llm.lmstudio.port", 1234)
         self.base_url = base_url or config.get("llm.lmstudio.base_url", f"http://localhost:{self.port}/v1")
-        self.model = model or config.get("llm.lmstudio.model", "default-model")
+        self.model = model or config.get("llm.lmstudio.model", "openai/gpt-oss-20b")
         self.temperature = config.get("llm.lmstudio.temperature", 0.7)
         self.max_tokens = config.get("llm.lmstudio.max_tokens", 4096)
         
