@@ -2,7 +2,7 @@
 set -euo pipefail
 
 DATASET="${DATASET:-mirage}"
-DATA_DIR="${DATA_DIR:-data/mirage}"
+DATA_DIR="${DATA_DIR:-data/${DATASET}_sample}"
 VLLM_MODEL="${VLLM_MODEL:-qwen2.5-7b-instruct}"
 VLLM_HOST="${VLLM_HOST:-127.0.0.1}"
 VLLM_PORT0="${VLLM_PORT0:-8001}"
@@ -11,22 +11,18 @@ GPU0="${GPU0:-0}"
 GPU1="${GPU1:-1}"
 DTYPE="${DTYPE:-float16}"
 MAX_MODEL_LEN="${MAX_MODEL_LEN:-4096}"
-
 RESULT_ROOT="${RESULT_ROOT:-result}"
-NOTES_DIR="${NOTES_DIR:-}"
-IDX_DIR="${IDX_DIR:-}"
-OUT_SHARD0="${OUT_SHARD0:-}"
-OUT_SHARD1="${OUT_SHARD1:-}"
-OUT_MERGED="${OUT_MERGED:-}"
-
-LMSTUDIO_ENDPOINT="${LMSTUDIO_ENDPOINT:-http://127.0.0.1:1234/v1}"
-LMSTUDIO_MODEL="${LMSTUDIO_MODEL:-openai/gpt-oss-20b}"
-QUESTION="${QUESTION:-Who is the spouse of the Green performer?}"
+SHARD_CNT=${SHARD_CNT:-2}
 VLLM_BIN="${VLLM_BIN:-python -m vllm.entrypoints.openai.api_server}"
 
 NEW_RUN=0
 WORK_DIR=""
 LOG_DIR=""
+NOTES_DIR=""
+IDX_DIR=""
+OUT_SHARD0=""
+OUT_SHARD1=""
+OUT_MERGED=""
 IDX_TMP0=""
 IDX_TMP1=""
 VLLM_LOG0=""
@@ -111,26 +107,13 @@ ensure_workspace() {
   LOG_DIR="$WORK_DIR/logs"
   mkdir -p "$LOG_DIR"
 
-  if [[ -z "$NOTES_DIR" ]]; then
-    NOTES_DIR="$WORK_DIR/notes"
-  fi
-  mkdir -p "$NOTES_DIR"
+  NOTES_DIR="$WORK_DIR/notes"
+  IDX_DIR="$WORK_DIR/indexes"
+  mkdir -p "$NOTES_DIR" "$IDX_DIR"
 
-  if [[ -z "$IDX_DIR" ]]; then
-    IDX_DIR="$WORK_DIR/indexes"
-  fi
-  mkdir -p "$IDX_DIR"
-
-  if [[ -z "$OUT_SHARD0" ]]; then
-    OUT_SHARD0="$NOTES_DIR/notes.${DATASET}.shard0.jsonl"
-  fi
-  if [[ -z "$OUT_SHARD1" ]]; then
-    OUT_SHARD1="$NOTES_DIR/notes.${DATASET}.shard1.jsonl"
-  fi
-  if [[ -z "$OUT_MERGED" ]]; then
-    OUT_MERGED="$NOTES_DIR/notes.${DATASET}.jsonl"
-  fi
-
+  OUT_SHARD0="$NOTES_DIR/notes.${DATASET}.shard0.jsonl"
+  OUT_SHARD1="$NOTES_DIR/notes.${DATASET}.shard1.jsonl"
+  OUT_MERGED="$NOTES_DIR/notes.${DATASET}.jsonl"
   IDX_TMP0="$WORK_DIR/indexes.tmp0"
   IDX_TMP1="$WORK_DIR/indexes.tmp1"
 
@@ -144,6 +127,7 @@ ensure_workspace() {
   BUILD_PID1="$WORK_DIR/build_shard1.pid"
 
   log "Workspace: $WORK_DIR"
+  log "Dataset dir: $DATA_DIR"
   log "Notes dir: $NOTES_DIR"
   log "Indexes dir: $IDX_DIR"
 }
@@ -172,6 +156,11 @@ start_vllm_dual() {
 }
 
 build_notes_dual() {
+  if (( SHARD_CNT != 2 )); then
+    log "Current script supports SHARD_CNT=2 (got ${SHARD_CNT})"
+    exit 1
+  fi
+
   rm -rf "$IDX_TMP0" "$IDX_TMP1"
   mkdir -p "$IDX_TMP0" "$IDX_TMP1"
 
@@ -183,7 +172,7 @@ build_notes_dual() {
     --indexes_dir "${IDX_TMP0}" \
     --vllm_endpoint "http://${VLLM_HOST}:${VLLM_PORT0}/v1" \
     --vllm_model "${VLLM_MODEL}" \
-    --shard-idx 0 --shard-cnt 2 \
+    --shard-idx 0 --shard-cnt "${SHARD_CNT}" \
     > "$BUILD_LOG0" 2>&1 & echo $! > "$BUILD_PID0"
 
   log "Launching shard1 -> ${OUT_SHARD1}"
@@ -194,7 +183,7 @@ build_notes_dual() {
     --indexes_dir "${IDX_TMP1}" \
     --vllm_endpoint "http://${VLLM_HOST}:${VLLM_PORT1}/v1" \
     --vllm_model "${VLLM_MODEL}" \
-    --shard-idx 1 --shard-cnt 2 \
+    --shard-idx 1 --shard-cnt "${SHARD_CNT}" \
     > "$BUILD_LOG1" 2>&1 & echo $! > "$BUILD_PID1"
 
   log "Waiting both shards to finish ..."
@@ -202,7 +191,7 @@ build_notes_dual() {
   wait "$(cat "$BUILD_PID1")" || { log "shard1 failed"; exit 1; }
   rm -f "$BUILD_PID0" "$BUILD_PID1"
 
-  log "Merging shard notes -> ${OUT_MERGED}"
+  log "Merging shards -> ${OUT_MERGED}"
   OUT_SHARD0="${OUT_SHARD0}" OUT_SHARD1="${OUT_SHARD1}" OUT_MERGED="${OUT_MERGED}" python - <<'PY'
 import json, os
 paths = [os.getenv("OUT_SHARD0"), os.getenv("OUT_SHARD1")]
@@ -224,7 +213,7 @@ with open(merged, "w", encoding="utf-8") as fout:
 print(f"merged {len(seen)} notes to {merged}")
 PY
 
-  log "Building final indexes from merged notes ..."
+  log "Building final indexes ..."
   OUT_MERGED="${OUT_MERGED}" IDX_DIR="${IDX_DIR}" python - <<'PY'
 import os
 from indexer.index_builder import IndexBuilder
@@ -243,45 +232,29 @@ stop_vllm_and_wait() {
   log "Stopping vLLM instances ..."
   kill_and_wait "$VLLM_PID0"
   kill_and_wait "$VLLM_PID1"
-
-  log "Waiting ports to close ..."
   wait_port_closed "${VLLM_HOST}" "${VLLM_PORT0}" 90 2 || { log "port ${VLLM_PORT0} still busy"; exit 1; }
   wait_port_closed "${VLLM_HOST}" "${VLLM_PORT1}" 90 2 || { log "port ${VLLM_PORT1} still busy"; exit 1; }
   log "vLLM ports closed."
 }
 
-run_query() {
-  local q="${1:-$QUESTION}"
-  log "Query: ${q}"
-  python main_query.py \
-    --question "${q}" \
-    --indexes_dir "${IDX_DIR}" \
-    --notes "${OUT_MERGED}" \
-    --lmstudio_endpoint "${LMSTUDIO_ENDPOINT}" \
-    --lmstudio_model "${LMSTUDIO_MODEL}"
-}
-
 usage() {
   cat <<USAGE
 Usage:
-  $(basename "$0") [--new] all
-  $(basename "$0") [--new] extract
-  $(basename "$0") [--new] query "<question>"
+  $(basename "$0") [--new]
+
+Environment overrides: DATA_DIR, DATASET, RESULT_ROOT, VLLM_MODEL, ...
 USAGE
 }
 
-# Parse arguments
-cmd=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --new)
       NEW_RUN=1
       shift
       ;;
-    all|extract|query)
-      cmd="$1"
-      shift
-      break
+    -h|--help)
+      usage
+      exit 0
       ;;
     *)
       usage
@@ -290,28 +263,10 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-cmd="${cmd:-all}"
-cmd_args=("$@")
-
 ensure_workspace
+start_vllm_dual
+build_notes_dual
+stop_vllm_and_wait
 
-case "$cmd" in
-  all)
-    start_vllm_dual
-    build_notes_dual
-    stop_vllm_and_wait
-    run_query "$QUESTION"
-    ;;
-  extract)
-    start_vllm_dual
-    build_notes_dual
-    stop_vllm_and_wait
-    ;;
-  query)
-    run_query "${cmd_args[0]:-$QUESTION}"
-    ;;
-  *)
-    usage
-    exit 1
-    ;;
-esac
+log "Notes written to ${OUT_MERGED}"
+log "Indexes stored at ${IDX_DIR}"
