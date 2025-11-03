@@ -59,12 +59,24 @@ def _make_chunks(doc_id: str, paragraphs: List[str], n_sent: int = 2, overlap: i
             cursor += step
 
 
-def iter_docs_and_chunks(data_dir: str) -> Iterable[Tuple[Dict, Dict]]:
+def iter_docs_and_chunks(
+    data_dir: str,
+    shard_idx: int = 0,
+    shard_cnt: int = 1,
+) -> Iterable[Tuple[Dict, Dict]]:
     doc_pool_path = os.path.join(data_dir, "doc_pool.json")
     if not os.path.exists(doc_pool_path):
         raise FileNotFoundError(f"MIRAGE doc_pool not found at {doc_pool_path}")
 
-    for record in _load_doc_pool(doc_pool_path):
+    records = list(_load_doc_pool(doc_pool_path))
+    total = len(records)
+    if shard_cnt > 1:
+        size = max(1, total // shard_cnt)
+        start = shard_idx * size
+        end = total if shard_idx == shard_cnt - 1 else (shard_idx + 1) * size
+        records = records[start:end]
+
+    for record in records:
         raw_id = str(record.get("id") or record.get("doc_id") or record.get("_id") or "")
         if not raw_id:
             continue
