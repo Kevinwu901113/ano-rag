@@ -12,16 +12,31 @@ GPU1="${GPU1:-1}"
 DTYPE="${DTYPE:-float16}"
 MAX_MODEL_LEN="${MAX_MODEL_LEN:-4096}"
 
-NOTES_DIR="${NOTES_DIR:-notes}"
-IDX_DIR="${IDX_DIR:-indexes}"
-OUT_SHARD0="${OUT_SHARD0:-${NOTES_DIR}/notes.mirage.shard0.jsonl}"
-OUT_SHARD1="${OUT_SHARD1:-${NOTES_DIR}/notes.mirage.shard1.jsonl}"
-OUT_MERGED="${OUT_MERGED:-${NOTES_DIR}/notes.jsonl}"
+RESULT_ROOT="${RESULT_ROOT:-result}"
+NOTES_DIR="${NOTES_DIR:-}"
+IDX_DIR="${IDX_DIR:-}"
+OUT_SHARD0="${OUT_SHARD0:-}"
+OUT_SHARD1="${OUT_SHARD1:-}"
+OUT_MERGED="${OUT_MERGED:-}"
 
 LMSTUDIO_ENDPOINT="${LMSTUDIO_ENDPOINT:-http://127.0.0.1:1234/v1}"
 LMSTUDIO_MODEL="${LMSTUDIO_MODEL:-openai/gpt-oss-20b}"
 QUESTION="${QUESTION:-Who is the spouse of the Green performer?}"
 VLLM_BIN="${VLLM_BIN:-python -m vllm.entrypoints.openai.api_server}"
+
+NEW_RUN=0
+WORK_DIR=""
+LOG_DIR=""
+IDX_TMP0=""
+IDX_TMP1=""
+VLLM_LOG0=""
+VLLM_LOG1=""
+VLLM_PID0=""
+VLLM_PID1=""
+BUILD_LOG0=""
+BUILD_LOG1=""
+BUILD_PID0=""
+BUILD_PID1=""
 
 log() { printf "\033[1;34m[%s]\033[0m %s\n" "$(date +'%H:%M:%S')" "$*"; }
 
@@ -59,8 +74,81 @@ kill_and_wait() {
   fi
 }
 
+ensure_workspace() {
+  mkdir -p "$RESULT_ROOT"
+  local selection=""
+  local latest=""
+  local max_index=0
+  while IFS= read -r dir; do
+    base="$(basename "$dir")"
+    if [[ $base =~ ^([0-9]{3})-(.*)$ ]]; then
+      local idx=${BASH_REMATCH[1]}
+      local ds=${BASH_REMATCH[2]}
+      (( idx > max_index )) && max_index=$idx
+      if [[ $ds == "$DATASET" ]]; then
+        latest="$dir"
+      fi
+    fi
+  done < <(find "$RESULT_ROOT" -maxdepth 1 -mindepth 1 -type d | sort)
+
+  if (( NEW_RUN )); then
+    local next=$((max_index + 1))
+    local id=$(printf "%03d" "$next")
+    selection="$RESULT_ROOT/${id}-${DATASET}"
+  else
+    if [[ -n "$latest" ]]; then
+      selection="$latest"
+    else
+      local next=$((max_index + 1))
+      local id=$(printf "%03d" "$next")
+      selection="$RESULT_ROOT/${id}-${DATASET}"
+    fi
+  fi
+
+  WORK_DIR="$selection"
+  mkdir -p "$WORK_DIR"
+
+  LOG_DIR="$WORK_DIR/logs"
+  mkdir -p "$LOG_DIR"
+
+  if [[ -z "$NOTES_DIR" ]]; then
+    NOTES_DIR="$WORK_DIR/notes"
+  fi
+  mkdir -p "$NOTES_DIR"
+
+  if [[ -z "$IDX_DIR" ]]; then
+    IDX_DIR="$WORK_DIR/indexes"
+  fi
+  mkdir -p "$IDX_DIR"
+
+  if [[ -z "$OUT_SHARD0" ]]; then
+    OUT_SHARD0="$NOTES_DIR/notes.${DATASET}.shard0.jsonl"
+  fi
+  if [[ -z "$OUT_SHARD1" ]]; then
+    OUT_SHARD1="$NOTES_DIR/notes.${DATASET}.shard1.jsonl"
+  fi
+  if [[ -z "$OUT_MERGED" ]]; then
+    OUT_MERGED="$NOTES_DIR/notes.${DATASET}.jsonl"
+  fi
+
+  IDX_TMP0="$WORK_DIR/indexes.tmp0"
+  IDX_TMP1="$WORK_DIR/indexes.tmp1"
+
+  VLLM_LOG0="$LOG_DIR/vllm_gpu0.log"
+  VLLM_LOG1="$LOG_DIR/vllm_gpu1.log"
+  VLLM_PID0="$WORK_DIR/vllm_gpu0.pid"
+  VLLM_PID1="$WORK_DIR/vllm_gpu1.pid"
+  BUILD_LOG0="$LOG_DIR/build_shard0.log"
+  BUILD_LOG1="$LOG_DIR/build_shard1.log"
+  BUILD_PID0="$WORK_DIR/build_shard0.pid"
+  BUILD_PID1="$WORK_DIR/build_shard1.pid"
+
+  log "Workspace: $WORK_DIR"
+  log "Notes dir: $NOTES_DIR"
+  log "Indexes dir: $IDX_DIR"
+}
+
 start_vllm_dual() {
-  mkdir -p "$NOTES_DIR" "$IDX_DIR"
   log "Starting vLLM on GPU${GPU0}:${VLLM_PORT0} and GPU${GPU1}:${VLLM_PORT1}"
 
   CUDA_VISIBLE_DEVICES="${GPU0}" nohup ${VLLM_BIN} \
@@ -68,14 +156,14 @@ start_vllm_dual() {
     --host 0.0.0.0 --port "${VLLM_PORT0}" \
     --dtype "${DTYPE}" \
     --max-model-len "${MAX_MODEL_LEN}" \
-    > vllm_gpu0.log 2>&1 & echo $! > vllm_gpu0.pid
+    > "$VLLM_LOG0" 2>&1 & echo $! > "$VLLM_PID0"
 
   CUDA_VISIBLE_DEVICES="${GPU1}" nohup ${VLLM_BIN} \
     --model "${VLLM_MODEL}" \
     --host 0.0.0.0 --port "${VLLM_PORT1}" \
     --dtype "${DTYPE}" \
     --max-model-len "${MAX_MODEL_LEN}" \
-    > vllm_gpu1.log 2>&1 & echo $! > vllm_gpu1.pid
+    > "$VLLM_LOG1" 2>&1 & echo $! > "$VLLM_PID1"
 
   log "Waiting for vLLM endpoints ready ..."
   wait_http_ok "http://${VLLM_HOST}:${VLLM_PORT0}/v1/models" 90 2 || { log "GPU0 endpoint not ready"; exit 1; }
@@ -84,32 +172,35 @@ start_vllm_dual() {
 }
 
 build_notes_dual() {
+  rm -rf "$IDX_TMP0" "$IDX_TMP1"
+  mkdir -p "$IDX_TMP0" "$IDX_TMP1"
+
   log "Launching shard0 -> ${OUT_SHARD0}"
   CUDA_VISIBLE_DEVICES="${GPU0}" python main_build_notes.py \
     --dataset "${DATASET}" \
     --data_dir "${DATA_DIR}" \
     --out "${OUT_SHARD0}" \
-    --indexes_dir "${IDX_DIR}.tmp0" \
+    --indexes_dir "${IDX_TMP0}" \
     --vllm_endpoint "http://${VLLM_HOST}:${VLLM_PORT0}/v1" \
     --vllm_model "${VLLM_MODEL}" \
     --shard-idx 0 --shard-cnt 2 \
-    > build_shard0.log 2>&1 & echo $! > build_shard0.pid
+    > "$BUILD_LOG0" 2>&1 & echo $! > "$BUILD_PID0"
 
   log "Launching shard1 -> ${OUT_SHARD1}"
   CUDA_VISIBLE_DEVICES="${GPU1}" python main_build_notes.py \
     --dataset "${DATASET}" \
     --data_dir "${DATA_DIR}" \
     --out "${OUT_SHARD1}" \
-    --indexes_dir "${IDX_DIR}.tmp1" \
+    --indexes_dir "${IDX_TMP1}" \
     --vllm_endpoint "http://${VLLM_HOST}:${VLLM_PORT1}/v1" \
     --vllm_model "${VLLM_MODEL}" \
     --shard-idx 1 --shard-cnt 2 \
-    > build_shard1.log 2>&1 & echo $! > build_shard1.pid
+    > "$BUILD_LOG1" 2>&1 & echo $! > "$BUILD_PID1"
 
   log "Waiting both shards to finish ..."
-  wait $(cat build_shard0.pid) || { log "shard0 failed"; exit 1; }
-  wait $(cat build_shard1.pid) || { log "shard1 failed"; exit 1; }
-  rm -f build_shard0.pid build_shard1.pid
+  wait "$(cat "$BUILD_PID0")" || { log "shard0 failed"; exit 1; }
+  wait "$(cat "$BUILD_PID1")" || { log "shard1 failed"; exit 1; }
+  rm -f "$BUILD_PID0" "$BUILD_PID1"
 
   log "Merging shard notes -> ${OUT_MERGED}"
   OUT_SHARD0="${OUT_SHARD0}" OUT_SHARD1="${OUT_SHARD1}" OUT_MERGED="${OUT_MERGED}" python - <<'PY'
@@ -144,12 +235,14 @@ builder.build_from_jsonl(notes)
 builder.dump(idx_dir)
 print("indexes built into", idx_dir)
 PY
+
+  rm -rf "$IDX_TMP0" "$IDX_TMP1"
 }
 
 stop_vllm_and_wait() {
   log "Stopping vLLM instances ..."
-  kill_and_wait "vllm_gpu0.pid"
-  kill_and_wait "vllm_gpu1.pid"
+  kill_and_wait "$VLLM_PID0"
+  kill_and_wait "$VLLM_PID1"
 
   log "Waiting ports to close ..."
   wait_port_closed "${VLLM_HOST}" "${VLLM_PORT0}" 90 2 || { log "port ${VLLM_PORT0} still busy"; exit 1; }
@@ -171,13 +264,37 @@ run_query() {
 usage() {
   cat <<USAGE
 Usage:
-  $(basename "$0") all
-  $(basename "$0") extract
-  $(basename "$0") query "<question>"
+  $(basename "$0") [--new] all
+  $(basename "$0") [--new] extract
+  $(basename "$0") [--new] query "<question>"
 USAGE
 }
 
-cmd="${1:-all}"
+# Parse arguments
+cmd=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --new)
+      NEW_RUN=1
+      shift
+      ;;
+    all|extract|query)
+      cmd="$1"
+      shift
+      break
+      ;;
+    *)
+      usage
+      exit 1
+      ;;
+  esac
+done
+
+cmd="${cmd:-all}"
+cmd_args=("$@")
+
+ensure_workspace
+
 case "$cmd" in
   all)
     start_vllm_dual
@@ -191,8 +308,7 @@ case "$cmd" in
     stop_vllm_and_wait
     ;;
   query)
-    shift || true
-    run_query "${1:-$QUESTION}"
+    run_query "${cmd_args[0]:-$QUESTION}"
     ;;
   *)
     usage
