@@ -42,7 +42,7 @@ wait_http_ok() {
   local url="$1" retries="${2:-60}" sleep_s="${3:-2}"
   local i=0
   while (( i < retries )); do
-    if curl -sSf -m 2 "$url" >/dev/null; then return 0; fi
+    if curl --noproxy '*' -sSf -m 2 "$url" >/dev/null; then return 0; fi
     sleep "$sleep_s"; i=$((i+1))
   done
   return 1
