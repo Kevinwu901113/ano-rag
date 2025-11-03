@@ -39,8 +39,13 @@ def main() -> None:
         vllm_endpoint = args.vllm_endpoint or cfg.get("vllm.endpoint")
         vllm_model = args.vllm_model or cfg.get("vllm.model")
 
+        if not vllm_endpoint or not vllm_model:
+            raise ValueError("vLLM endpoint/model must be specified via CLI or config")
+
         log_path = Path(notes_out).parent / "ano-rag-build.log"
         setup_logging(str(log_path))
+
+        Path(indexes_dir).mkdir(parents=True, exist_ok=True)
 
         builder = StructuredBuilder(
             endpoint=vllm_endpoint,

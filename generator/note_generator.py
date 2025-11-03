@@ -1,6 +1,8 @@
+import time
 from typing import Dict, List
 
 import requests
+from loguru import logger
 
 from validators.note_validator import validate_and_normalize
 
@@ -30,25 +32,40 @@ class NoteGenerator:
         self.max_tokens = max_tokens
 
     def _call(self, prompt: str) -> str:
-        response = requests.post(
-            f"{self.endpoint}/chat/completions",
-            json={
-                "model": self.model,
-                "temperature": self.temperature,
-                "max_tokens": self.max_tokens,
-                "messages": [{"role": "user", "content": prompt}],
-            },
-            timeout=60,
-        )
-        response.raise_for_status()
-        data = response.json()
-        return data["choices"][0]["message"]["content"]
+        retries = 2
+        for attempt in range(retries + 1):
+            try:
+                response = requests.post(
+                    f"{self.endpoint}/chat/completions",
+                    json={
+                        "model": self.model,
+                        "temperature": self.temperature,
+                        "max_tokens": self.max_tokens,
+                        "messages": [{"role": "user", "content": prompt}],
+                    },
+                    timeout=60,
+                )
+                response.raise_for_status()
+                data = response.json()
+                return data["choices"][0]["message"]["content"]
+            except requests.RequestException as exc:  # noqa: PERF203
+                if attempt == retries:
+                    raise
+                wait = 2 ** attempt
+                logger.warning("Note generator call failed (attempt={}): {}", attempt + 1, exc)
+                time.sleep(wait)
 
     def generate_for_chunk(self, chunk: Dict) -> List[Dict]:
         doc_id, chunk_id = chunk["doc_id"], chunk["chunk_id"]
+        chunk_text = (
+            chunk["text"].replace("{", "{{").replace("}", "}}")
+        )
         prompt = PROMPT_TMPL.format(
-            chunk_text=chunk["text"], doc_id=doc_id, chunk_id=chunk_id
+            chunk_text=chunk_text, doc_id=doc_id, chunk_id=chunk_id
         )
         raw = self._call(prompt)
-        ok, notes, _ = validate_and_normalize(raw, doc_id, chunk_id)
-        return notes if ok else []
+        ok, notes, metrics = validate_and_normalize(raw, doc_id, chunk_id)
+        if not ok:
+            logger.warning("Validation failed doc={} chunk={} details={}", doc_id, chunk_id, metrics)
+            return []
+        return notes

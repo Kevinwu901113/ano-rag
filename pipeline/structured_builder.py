@@ -37,8 +37,17 @@ class StructuredBuilder:
         for file_path in files:
             path = Path(file_path)
             doc_id = path.stem
-            text = _read_text(path)
-            chunks.extend(make_chunks(doc_id, text, chunk_id_prefix="c"))
+            if path.suffix.lower() == ".jsonl":
+                for idx, row in enumerate(FileUtils.read_jsonl(str(path))):
+                    text = row.get("text") or row.get("content") or ""
+                    if not isinstance(text, str):
+                        continue
+                    chunks.extend(
+                        make_chunks(f"{doc_id}_{idx:04d}", text, chunk_id_prefix="c")
+                    )
+            else:
+                text = _read_text(path)
+                chunks.extend(make_chunks(doc_id, text, chunk_id_prefix="c"))
         return chunks
 
     def build(

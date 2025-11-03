@@ -1,5 +1,6 @@
 import json
 import os
+import time
 from collections import defaultdict
 from typing import Dict, List
 
@@ -67,3 +68,25 @@ class IndexBuilder:
                 handle.write(
                     json.dumps({"obj": obj, "edges": edges}, ensure_ascii=False) + "\n"
                 )
+
+        note_ids = {nid for notes in self.entity_to_notes.values() for nid in notes}
+
+        manifest = {
+            "generated_at": int(time.time()),
+            "counts": {
+                "entities": len(self.entity_to_notes),
+                "predicates": len(self.predicate_to_notes),
+                "notes": len(note_ids),
+            },
+            "files": {
+                "entity_to_notes": "entity_to_notes.json",
+                "predicate_to_notes": "predicate_to_notes.json",
+                "domain_index": "domain_index.json",
+                "type_edge_index": "type_edge_index.json",
+                "graph_edges": "graph_edges.jsonl",
+                "inverse_edges": "inverse_edges.jsonl",
+            },
+            "version": 1,
+        }
+        with open(os.path.join(out_dir, "manifest.json"), "w", encoding="utf-8") as handle:
+            json.dump(manifest, handle, ensure_ascii=False, indent=2)

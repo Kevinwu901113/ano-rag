@@ -28,3 +28,13 @@ class FileUtils:
         with open(path, "w", encoding="utf-8") as handle:
             for row in rows:
                 handle.write(json.dumps(row, ensure_ascii=False) + "\n")
+
+    @staticmethod
+    def get_file_hash(path: str) -> str:
+        import hashlib
+
+        sha1 = hashlib.sha1()
+        with open(path, "rb") as handle:
+            for chunk in iter(lambda: handle.read(8192), b""):
+                sha1.update(chunk)
+        return sha1.hexdigest()

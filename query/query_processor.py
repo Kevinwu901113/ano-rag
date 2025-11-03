@@ -1,3 +1,4 @@
+from pathlib import Path
 from typing import Any, Dict, Optional
 
 from loguru import logger
@@ -27,8 +28,30 @@ class QueryProcessor:
 
         if not self.indexes_dir:
             raise ValueError("indexes_dir must be provided")
+        if not Path(self.indexes_dir).exists():
+            raise FileNotFoundError(
+                f"Indexes directory '{self.indexes_dir}' not found. Run 'main.py process' first."
+            )
+
+        required = [
+            "entity_to_notes.json",
+            "predicate_to_notes.json",
+            "type_edge_index.json",
+            "graph_edges.jsonl",
+            "inverse_edges.jsonl",
+        ]
+        missing = [name for name in required if not Path(self.indexes_dir, name).exists()]
+        if missing:
+            raise FileNotFoundError(
+                f"Missing index files: {missing}. Rebuild notes with 'main.py process'."
+            )
+
         if not self.notes_path:
             raise ValueError("notes_path must be provided")
+        if not Path(self.notes_path).exists():
+            raise FileNotFoundError(
+                f"Notes file '{self.notes_path}' not found. Run 'main.py process' first."
+            )
 
     def process(self, question: str) -> Dict[str, Any]:
         logger.info("Running structured retrieval for question: {}", question)
