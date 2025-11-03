@@ -1,31 +1,21 @@
-"""JSON schema definition for atomic note outputs."""
+"""Compatibility shim for legacy imports.
 
-NOTE_SCHEMA = {
-    "type": "array",
-    "minItems": 1,
-    "items": {
-        "type": "object",
-        "required": ["content", "keywords", "entities"],
-        "properties": {
-            "content": {"type": "string", "minLength": 8},
-            "keywords": {
-                "type": "array",
-                "items": {"type": "string"},
-                "uniqueItems": False,
-            },
-            "entities": {
-                "type": "object",
-                "required": ["PERSON", "ORG", "LOC", "DATE", "MISC"],
-                "properties": {
-                    "PERSON": {"type": "array", "items": {"type": "string"}},
-                    "ORG":    {"type": "array", "items": {"type": "string"}},
-                    "LOC":    {"type": "array", "items": {"type": "string"}},
-                    "DATE":   {"type": "array", "items": {"type": "string"}},
-                    "MISC":   {"type": "array", "items": {"type": "string"}},
-                },
-                "additionalProperties": False,
-            },
-        },
-        "additionalProperties": False,
-    },
-}
+The canonical schema now lives under :mod:`schema.note_schema_v1`.
+"""
+
+from schema.note_schema_v1 import (  # noqa: F401,F403
+    ALLOWED_PREDICATES,
+    ALLOWED_TYPES,
+    NOTE_JSON_SCHEMA,
+    PRED_SYNONYM_SETS,
+)
+
+NOTE_SCHEMA = NOTE_JSON_SCHEMA
+
+__all__ = [
+    "NOTE_JSON_SCHEMA",
+    "ALLOWED_TYPES",
+    "ALLOWED_PREDICATES",
+    "PRED_SYNONYM_SETS",
+    "NOTE_SCHEMA",
+]
