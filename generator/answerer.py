@@ -22,7 +22,8 @@ def call_lmstudio(
     max_tokens: int = 64,
 ) -> str:
     ev_text = "\n".join(f"{idx + 1}) {item['evidence']}" for idx, item in enumerate(evidences))
-    prompt = ANS_PROMPT.format(q=question, ev=ev_text)
+    ev_text = ev_text.replace("{", "{{").replace("}", "}}")
+    prompt = ANS_PROMPT.format(q=question.replace("{", "{{").replace("}", "}}"), ev=ev_text)
 
     retries = 2
     for attempt in range(retries + 1):
