@@ -100,5 +100,13 @@ PRED_SYNONYM_SETS = {
     "parent": {"father", "mother", "parent"},
     "born_in": {"place_of_birth", "born_in"},
     "acted_in": {"starring", "cast_in", "acted_in"},
+    "located_in": {"located_in"},
+    "produced_by": {"produced_by"},
+    "released_in": {"released_in"},
+    "label": {"label"},
+    "member_of": {"member_of"},
+    "founded_by": {"founded_by"},
+    "headquartered_in": {"headquartered_in"},
+    "winner_of": {"winner_of"},
+    "part_of": {"part_of"},
 }
-

@@ -34,6 +34,9 @@ class IndexBuilder:
     def build_from_jsonl(self, notes_path: str) -> None:
         with open(notes_path, "r", encoding="utf-8") as handle:
             for line in handle:
+                line = line.strip()
+                if not line:
+                    continue
                 note = json.loads(line)
                 self.add_note(note)
 
@@ -47,7 +50,8 @@ class IndexBuilder:
         dump_json(self.entity_to_notes, "entity_to_notes.json")
         dump_json(self.predicate_to_notes, "predicate_to_notes.json")
         dump_json(self.domain_index, "domain_index.json")
-        dump_json(self.type_edge_index, "type_edge_index.json")
+        converted = {"|".join(key): value for key, value in self.type_edge_index.items()}
+        dump_json(converted, "type_edge_index.json")
 
         graph_path = os.path.join(out_dir, "graph_edges.jsonl")
         with open(graph_path, "w", encoding="utf-8") as handle:

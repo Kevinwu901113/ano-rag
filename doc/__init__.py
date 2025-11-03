@@ -1,3 +1,3 @@
-from .chunker import DocumentChunker
+from .chunker import make_chunks
 
-__all__ = ['DocumentChunker']
+__all__ = ["make_chunks"]

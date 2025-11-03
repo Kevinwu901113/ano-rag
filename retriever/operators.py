@@ -20,17 +20,17 @@ class Indexes:
             raw = json.load(handle)
             parsed = {}
             for key, value in raw.items():
-                parts = key.strip("()")
-                if parts:
-                    tokens = [token.strip(" '") for token in parts.split(",")]
-                    if len(tokens) == 3:
-                        parsed[tuple(tokens)] = value
+                subj_type, pred, obj_type = key.split("|", 2)
+                parsed[(subj_type, pred, obj_type)] = value
             self.type_edge_index = parsed
 
         self.graph_edges = defaultdict(list)
         graph_path = os.path.join(directory, "graph_edges.jsonl")
         with open(graph_path, "r", encoding="utf-8") as handle:
             for line in handle:
+                line = line.strip()
+                if not line:
+                    continue
                 row = json.loads(line)
                 self.graph_edges[row["subj"]].extend(row["edges"])
 
@@ -38,6 +38,9 @@ class Indexes:
         inverse_path = os.path.join(directory, "inverse_edges.jsonl")
         with open(inverse_path, "r", encoding="utf-8") as handle:
             for line in handle:
+                line = line.strip()
+                if not line:
+                    continue
                 row = json.loads(line)
                 self.inverse_edges[row["obj"]].extend(row["edges"])
 

@@ -54,6 +54,9 @@ def retrieve_answer(
         wanted = {edge["note_id"] for edge in best["path"]}
         with open(notes_path, "r", encoding="utf-8") as handle:
             for line in handle:
+                line = line.strip()
+                if not line:
+                    continue
                 note = json.loads(line)
                 if note["note_id"] in wanted:
                     evidence.append(
