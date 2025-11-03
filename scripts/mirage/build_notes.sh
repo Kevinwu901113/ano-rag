@@ -14,6 +14,7 @@ MAX_MODEL_LEN="${MAX_MODEL_LEN:-4096}"
 RESULT_ROOT="${RESULT_ROOT:-result}"
 SHARD_CNT=${SHARD_CNT:-2}
 VLLM_BIN="${VLLM_BIN:-python -m vllm.entrypoints.openai.api_server}"
+VLLM_DOWNLOAD_DIR="${VLLM_DOWNLOAD_DIR:-}"
 
 NEW_RUN=0
 WORK_DIR=""
@@ -135,11 +136,17 @@ ensure_workspace() {
 start_vllm_dual() {
   log "Starting vLLM on GPU${GPU0}:${VLLM_PORT0} and GPU${GPU1}:${VLLM_PORT1}"
 
+  extra_args=()
+  if [[ -n "$VLLM_DOWNLOAD_DIR" ]]; then
+    extra_args+=(--download-dir "$VLLM_DOWNLOAD_DIR")
+  fi
+
   CUDA_VISIBLE_DEVICES="${GPU0}" nohup ${VLLM_BIN} \
     --model "${VLLM_MODEL}" \
     --host 0.0.0.0 --port "${VLLM_PORT0}" \
     --dtype "${DTYPE}" \
     --max-model-len "${MAX_MODEL_LEN}" \
+    ${extra_args[@]} \
     > "$VLLM_LOG0" 2>&1 & echo $! > "$VLLM_PID0"
 
   CUDA_VISIBLE_DEVICES="${GPU1}" nohup ${VLLM_BIN} \
@@ -147,6 +154,7 @@ start_vllm_dual() {
     --host 0.0.0.0 --port "${VLLM_PORT1}" \
     --dtype "${DTYPE}" \
     --max-model-len "${MAX_MODEL_LEN}" \
+    ${extra_args[@]} \
     > "$VLLM_LOG1" 2>&1 & echo $! > "$VLLM_PID1"
 
   log "Waiting for vLLM endpoints ready ..."
