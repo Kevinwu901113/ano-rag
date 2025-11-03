@@ -15,6 +15,7 @@ RESULT_ROOT="${RESULT_ROOT:-result}"
 SHARD_CNT=${SHARD_CNT:-2}
 VLLM_BIN="${VLLM_BIN:-python -m vllm.entrypoints.openai.api_server}"
 VLLM_DOWNLOAD_DIR="${VLLM_DOWNLOAD_DIR:-}"
+STARTED_VLLM=0
 
 NEW_RUN=0
 WORK_DIR=""
@@ -68,6 +69,27 @@ kill_and_wait() {
       kill -9 "$pid" 2>/dev/null || true
     fi
     rm -f "$pidfile"
+  fi
+}
+
+resolve_model_path() {
+  local candidate="$1"
+  if [[ ! -d "$candidate" ]]; then
+    echo "$candidate"
+    return
+  fi
+
+  if [[ -f "$candidate/config.json" ]]; then
+    echo "$candidate"
+    return
+  fi
+
+  local config_path
+  config_path=$(find "$candidate" -maxdepth 4 -type f -name "config.json" | head -n 1)
+  if [[ -n "$config_path" ]]; then
+    echo "$(dirname "$config_path")"
+  else
+    echo "$candidate"
   fi
 }
 
@@ -136,13 +158,18 @@ ensure_workspace() {
 start_vllm_dual() {
   log "Starting vLLM on GPU${GPU0}:${VLLM_PORT0} and GPU${GPU1}:${VLLM_PORT1}"
 
+  VLLM_MODEL_RESOLVED=$(resolve_model_path "$VLLM_MODEL")
+  if [[ "$VLLM_MODEL_RESOLVED" != "$VLLM_MODEL" ]]; then
+    log "Resolved model path: $VLLM_MODEL_RESOLVED"
+  fi
+
   extra_args=()
   if [[ -n "$VLLM_DOWNLOAD_DIR" ]]; then
     extra_args+=(--download-dir "$VLLM_DOWNLOAD_DIR")
   fi
 
   CUDA_VISIBLE_DEVICES="${GPU0}" nohup ${VLLM_BIN} \
-    --model "${VLLM_MODEL}" \
+    --model "${VLLM_MODEL_RESOLVED}" \
     --host 0.0.0.0 --port "${VLLM_PORT0}" \
     --dtype "${DTYPE}" \
     --max-model-len "${MAX_MODEL_LEN}" \
@@ -150,7 +177,7 @@ start_vllm_dual() {
     > "$VLLM_LOG0" 2>&1 & echo $! > "$VLLM_PID0"
 
   CUDA_VISIBLE_DEVICES="${GPU1}" nohup ${VLLM_BIN} \
-    --model "${VLLM_MODEL}" \
+    --model "${VLLM_MODEL_RESOLVED}" \
     --host 0.0.0.0 --port "${VLLM_PORT1}" \
     --dtype "${DTYPE}" \
     --max-model-len "${MAX_MODEL_LEN}" \
@@ -161,6 +188,7 @@ start_vllm_dual() {
   wait_http_ok "http://${VLLM_HOST}:${VLLM_PORT0}/v1/models" 90 2 || { log "GPU0 endpoint not ready"; exit 1; }
   wait_http_ok "http://${VLLM_HOST}:${VLLM_PORT1}/v1/models" 90 2 || { log "GPU1 endpoint not ready"; exit 1; }
   log "vLLM endpoints are healthy."
+  STARTED_VLLM=1
 }
 
 build_notes_dual() {
@@ -243,6 +271,13 @@ stop_vllm_and_wait() {
   wait_port_closed "${VLLM_HOST}" "${VLLM_PORT0}" 90 2 || { log "port ${VLLM_PORT0} still busy"; exit 1; }
   wait_port_closed "${VLLM_HOST}" "${VLLM_PORT1}" 90 2 || { log "port ${VLLM_PORT1} still busy"; exit 1; }
   log "vLLM ports closed."
+  STARTED_VLLM=0
+}
+
+cleanup() {
+  if [[ $STARTED_VLLM -eq 1 ]]; then
+    stop_vllm_and_wait || true
+  fi
 }
 
 usage() {
@@ -253,6 +288,8 @@ Usage:
 Environment overrides: DATA_DIR, DATASET, RESULT_ROOT, VLLM_MODEL, ...
 USAGE
 }
+
+trap cleanup EXIT
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
