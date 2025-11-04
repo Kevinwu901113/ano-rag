@@ -23,6 +23,12 @@ ATTRIBUTE_HINTS = [
             re.compile(r"occupation of (?P<entity>.+?)(?:\?|$)", re.I),
             re.compile(r"what (?:is|was) (?P<entity>.+?)'?s occupation", re.I),
             re.compile(r"what does (?P<entity>.+?) do for a living", re.I),
+            re.compile(r"what does (?P<entity>.+?) do", re.I),
+            re.compile(r"what (?P<entity>.+?) does for a living", re.I),
+            re.compile(r"what (?P<entity>.+?) works as", re.I),
+            re.compile(r"(?P<entity>.+?)\s+的\s*职业", re.I),
+            re.compile(r"(?P<entity>.+?)\s+的\s*工作", re.I),
+            re.compile(r"做什么职业\s*(?P<entity>.+?)?", re.I),
         ],
         "keywords": ["occupation", "job", "profession", "works as"],
     },
@@ -186,6 +192,7 @@ class AnswerIntentDetector:
 
         capital = re.findall(r"([A-Z][A-Za-z0-9'&\-]+(?:\s+[A-Z][A-Za-z0-9'&\-]+)*)", question)
         if capital:
+            # 使用末尾连续大写 Token 合并为实体候选
             return capital[-1].strip()
         return None
 

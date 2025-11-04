@@ -9,6 +9,7 @@ from .ir import PredicateStep, QueryIR, Seed
 from .intent_detector import AnswerIntent, AnswerIntentDetector
 from .note_store import NoteStore
 from .operators import BIND, EXPAND_from, Indexes
+from utils.bm25_search import build_bm25_corpus, bm25_scores
 from .parser import parse_question
 from .scorer import score_path
 
@@ -32,10 +33,15 @@ def retrieve_answer(question: str, indexes: Indexes, note_store: NoteStore) -> D
 
     seed_entities = _bind_seeds(ir.seeds, indexes, ir.fanout)
     if not seed_entities:
+        # 结构化优先兜底：尝试限制在别名索引范围内的弱信号补全
         return _fallback_lookup(intent, indexes, note_store, ir, "no_seed_match")
 
     candidates = _walk_chain(seed_entities, ir, indexes, note_store)
     if not candidates:
+        # 结构化兜底：在绑定实体范围内做BM25/向量检索补全
+        structured = _structured_fallback(seed_entities, intent, indexes, note_store)
+        if structured:
+            return structured
         return _fallback_lookup(intent, indexes, note_store, ir, "no_path")
 
     candidates.sort(key=lambda c: c.score, reverse=True)
@@ -55,7 +61,8 @@ def retrieve_answer(question: str, indexes: Indexes, note_store: NoteStore) -> D
     return {
         "ir": ir.to_dict(),
         "answer": top_candidates[0].answer,
-        "paths": [cand.path for cand in top_candidates],
+        # occupation优先重排：仅在候选内部调分
+        "paths": [cand.path for cand in _rerank_candidates(top_candidates, intent.attribute)],
         "support_note_ids": support_note_ids,
         "evidence": evidences,
         "reason": None,
@@ -377,6 +384,9 @@ def _score_note(note: Dict[str, Any], attribute: str) -> float:
     attr_name = (meta.get("attribute") or {}).get("name")
     if attr_name == attribute:
         score += 0.05
+    # occupation/title（职业相关）优先加权
+    if attribute == "occupation" and attr_name in {"occupation", "title"}:
+        score += 0.05
     return round(score, 4)
 
 
@@ -390,3 +400,56 @@ def _canonical_predicate(value: Optional[str]) -> Optional[str]:
         if lowered == canon or lowered in synonyms:
             return canon
     return lowered
+
+
+def _structured_fallback(entities: List[str], intent: AnswerIntent, indexes: Indexes, note_store: NoteStore) -> Optional[Dict[str, Any]]:
+    # 仅在结构化实体范围内进行弱信号补全
+    canonical_attr = intent.attribute
+    if not canonical_attr:
+        return None
+    scoped_notes: List[Dict[str, Any]] = []
+    for ent in entities[:10]:
+        for nid in indexes.entity_to_notes.get(ent, [])[:200]:
+            note = note_store.get(nid)
+            if not note:
+                continue
+            scoped_notes.append(note)
+    if not scoped_notes:
+        return None
+    # 使用BM25在 scoped_notes 内检索
+    corpus = build_bm25_corpus(scoped_notes, lambda n: (n.get("evidence") or "") + " " + (n.get("obj") or ""))
+    scores = bm25_scores(corpus, scoped_notes, intent.entity or "")
+    ranked = sorted(zip(scoped_notes, scores), key=lambda x: x[1], reverse=True)
+    # occupation优先：过滤或加分
+    if canonical_attr == "occupation":
+        ranked = sorted(ranked, key=lambda x: ((x[0].get("meta", {}) or {}).get("attribute", {}) .get("name") in {"occupation", "title"}, x[1]), reverse=True)
+    top = ranked[0][0] if ranked else None
+    if not top:
+        return None
+    answer_value = _extract_answer_value(top)
+    paths = [[{"subj": top.get("subj"), "pred": canonical_attr, "obj": answer_value, "note_id": top.get("note_id"), "fallback": True}]] if answer_value else []
+    support_note_ids = [note.get("note_id") for note, _ in ranked[:5] if note.get("note_id")]
+    evidences = [{"note_id": note.get("note_id"), "evidence": note.get("evidence", ""), "quality": (note.get("meta", {}) or {}).get("quality_score") } for note, _ in ranked[:5]]
+    return {
+        "ir": None,
+        "answer": answer_value,
+        "paths": paths,
+        "support_note_ids": support_note_ids,
+        "evidence": evidences,
+        "reason": None if answer_value else "structured_fallback_no_match",
+        "fallback": {"used": True, "stage": "structured_fallback", "status": "ok" if answer_value else "no_match", "intent": intent.to_dict(), "candidates": [{"entity": top.get("subj"), "attribute": canonical_attr, "note_id": top.get("note_id"), "score": ranked[0][1] if ranked else 0.0}]},
+        "intent": intent.to_dict(),
+    }
+
+
+def _rerank_candidates(candidates: List[Candidate], attribute: Optional[str]) -> List[Candidate]:
+    if attribute != "occupation":
+        return candidates
+    def bonus(c: Candidate) -> float:
+        last_note_id = c.note_ids[-1] if c.note_ids else None
+        attr_name = None
+        # We cannot load note_store here; rely on path pred hint
+        if c.path:
+            attr_name = c.path[-1].get("pred")
+        return c.score + (0.05 if attr_name in {"occupation", "title"} else 0.0)
+    return sorted(candidates, key=bonus, reverse=True)

@@ -3,6 +3,10 @@ import os
 import time
 from collections import defaultdict
 from typing import Dict, List
+import re
+import unicodedata
+
+from schema.note_schema_v1 import PRED2ATTR
 
 
 class IndexBuilder:
@@ -35,7 +39,9 @@ class IndexBuilder:
         self.type_edge_index[type_key].append(note_id)
 
         attribute = (note.get("meta") or {}).get("attribute") or {}
-        attr_name = attribute.get("name") or pred
+        raw_attr_name = attribute.get("name") or pred
+        # 谓词归一到属性名（例如 profession/job → occupation）
+        attr_name = PRED2ATTR.get((raw_attr_name or "").lower(), raw_attr_name)
         values = attribute.get("values") or []
         for value in values:
             if isinstance(value, dict):
@@ -44,18 +50,71 @@ class IndexBuilder:
                 normalized = value
             if not normalized:
                 continue
-            normalized_key = str(normalized).strip()
+            # occupation 的值统一归一：去括号/标点/多空格、大小写折叠、职业性别合并
+            normalized_key = self._normalize_field_value(attr_name, str(normalized))
             if not normalized_key:
                 continue
+            # 写入 raw 与 stemmed 两种键，提升命中率
             self.field_index[attr_name][normalized_key].append(note_id)
+            stemmed_key = self._stem_occupation(normalized_key) if attr_name == "occupation" else normalized_key
+            if stemmed_key and stemmed_key != normalized_key:
+                self.field_index[attr_name][stemmed_key].append(note_id)
 
         subject_profile = (note.get("meta") or {}).get("subject_profile") or {}
         for alias in subject_profile.get("aliases") or []:
-            alias_key = alias.strip().lower()
+            alias_key = self._normalize_alias(alias)
             if not alias_key:
                 continue
             if note["subj"] not in self.alias_to_entities[alias_key]:
                 self.alias_to_entities[alias_key].append(note["subj"])
+
+    @staticmethod
+    def _normalize_alias(text: str) -> str:
+        value = (text or "").strip()
+        if not value:
+            return ""
+        # 去括号内容
+        value = re.sub(r"\([^)]*\)", "", value)
+        # 去中划线/点号
+        value = value.replace("-", " ").replace(".", " ")
+        # Unicode 规范化
+        value = unicodedata.normalize("NFKC", value)
+        # 多空格归一
+        value = re.sub(r"\s+", " ", value)
+        return value.strip().lower()
+
+    @staticmethod
+    def _normalize_field_value(attr_name: str, text: str) -> str:
+        raw = (text or "").strip()
+        if not raw:
+            return ""
+        # 去括号内容、标点和多空格；大小写折叠
+        cleaned = re.sub(r"\([^)]*\)", "", raw)
+        cleaned = re.sub(r"[\p{Punct}]", " ", cleaned) if hasattr(re, "P") else re.sub(r"[^\w\s]", " ", cleaned)
+        cleaned = unicodedata.normalize("NFKC", cleaned)
+        cleaned = re.sub(r"\s+", " ", cleaned).strip().lower()
+        if attr_name == "occupation":
+            # 常见职业词典：actor/actress → actor 等
+            if cleaned in {"actress"}:
+                return "actor"
+            if cleaned in {"comics artist", "comic artist", "cartoon artist"}:
+                return "cartoonist"
+        return cleaned
+
+    @staticmethod
+    def _stem_occupation(text: str) -> str:
+        if not text:
+            return ""
+        # 简单词干处理：复数/性别统一
+        mapping = {
+            "actors": "actor",
+            "actresses": "actor",
+            "singers": "singer",
+            "writers": "writer",
+            "authors": "author",
+            "cartoonists": "cartoonist",
+        }
+        return mapping.get(text, text)
 
     def build_from_jsonl(self, notes_path: str) -> None:
         with open(notes_path, "r", encoding="utf-8") as handle:

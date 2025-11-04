@@ -2,6 +2,8 @@ import json
 import os
 from collections import defaultdict
 from typing import Any, Dict, List, Tuple
+import re
+import unicodedata
 
 
 class Indexes:
@@ -63,7 +65,8 @@ class Indexes:
 
 def BIND(indexes: Indexes, alias: str, type_candidates: List[str], limit: int = 50) -> List[str]:
     matches: List[str] = []
-    target = (alias or "").lower()
+    bind_reason = None
+    target = _normalize_alias_query(alias)
     if not target:
         return matches
 
@@ -71,19 +74,34 @@ def BIND(indexes: Indexes, alias: str, type_candidates: List[str], limit: int = 
     for entity in alias_hits:
         if entity not in matches:
             matches.append(entity)
+            bind_reason = bind_reason or "alias_exact"
             if len(matches) >= limit:
                 return matches
 
+    # 归一化后的精确匹配层（对索引的key进行同步归一）
     for alias_key, entities in indexes.alias_to_entities.items():
-        if alias_key == target:
-            continue
-        if target in alias_key or alias_key in target:
+        norm_key = _normalize_alias_query(alias_key)
+        if norm_key == target and alias_key != target and not alias_hits:
             for entity in entities:
-                if entity in matches:
-                    continue
-                matches.append(entity)
-                if len(matches) >= limit:
-                    return matches
+                if entity not in matches:
+                    matches.append(entity)
+                    bind_reason = bind_reason or "alias_norm_exact"
+                    if len(matches) >= limit:
+                        return matches
+
+    # 仅当精确匹配未命中且别名索引非空时做包含匹配
+    if not matches and indexes.alias_to_entities:
+        for alias_key, entities in indexes.alias_to_entities.items():
+            if alias_key == target:
+                continue
+            if target in alias_key or alias_key in target:
+                for entity in entities:
+                    if entity in matches:
+                        continue
+                    matches.append(entity)
+                    bind_reason = bind_reason or "alias_contains"
+                    if len(matches) >= limit:
+                        return matches
 
     for entity in indexes.entity_to_notes.keys():
         name = entity.lower()
@@ -93,6 +111,13 @@ def BIND(indexes: Indexes, alias: str, type_candidates: List[str], limit: int = 
             matches.append(entity)
         if len(matches) >= limit:
             break
+    # 记录绑定理由（不改变返回结构，供上层日志使用）
+    if bind_reason:
+        # Attach to a sentinel attribute on the list for tracing (optional usage upstream)
+        try:
+            matches.bind_reason = bind_reason  # type: ignore[attr-defined]
+        except Exception:
+            pass
     return matches
 
 
@@ -126,3 +151,14 @@ def _loose_match(needle: str, hay: str) -> bool:
         return False
     tokens = [t for t in needle.split() if len(t) > 3]
     return any(t in hay for t in tokens)
+
+
+def _normalize_alias_query(text: str) -> str:
+    value = (text or "").strip()
+    if not value:
+        return ""
+    value = re.sub(r"\([^)]*\)", "", value)
+    value = value.replace("-", " ").replace(".", " ")
+    value = unicodedata.normalize("NFKC", value)
+    value = re.sub(r"\s+", " ", value)
+    return value.strip().lower()

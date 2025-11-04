@@ -194,6 +194,19 @@ ALLOWED_PREDICATES = [
     "type",
 ]
 
+# 属性映射表：谓词到规范化属性名，用于索引层归一
+PRED2ATTR = {
+    "occupation": "occupation",
+    "profession": "occupation",
+    "professions": "occupation",
+    "job": "occupation",
+    "jobs": "occupation",
+    "works as": "occupation",
+    "works_as": "occupation",
+    "career": "occupation",
+    "careers": "occupation",
+}
+
 PRED_SYNONYM_SETS = {
     "performed_by": {"recorded_by", "artist", "performed_by"},
     "authored_by": {"written_by", "authored_by"},
@@ -210,7 +223,20 @@ PRED_SYNONYM_SETS = {
     "headquartered_in": {"headquartered_in"},
     "winner_of": {"winner_of"},
     "part_of": {"part_of"},
-    "occupation": {"occupation", "job", "profession", "occupations"},
+    # 强制归一：职业相关同义词全部归并到 "occupation"
+    "occupation": {
+        "occupation",
+        "occupations",
+        "profession",
+        "professions",
+        "job",
+        "jobs",
+        "works as",
+        "works_as",
+        "career",
+        "careers",
+        "title (when occupational)",
+    },
     "title": {"title", "position", "role", "titles"},
     "category": {"category", "categories", "classification"},
     "nationality": {"nationality", "citizenship", "country_of_citizenship"},

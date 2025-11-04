@@ -5,7 +5,7 @@ from typing import Any, Dict, List, Tuple
 
 from jsonschema import Draft7Validator, ValidationError
 
-from schema.note_schema_v1 import NOTE_JSON_SCHEMA, PRED_SYNONYM_SETS
+from schema.note_schema_v1 import NOTE_JSON_SCHEMA, PRED_SYNONYM_SETS, PRED2ATTR
 from schema.vocabulary import normalize_entity_name, normalize_slot_value
 
 
@@ -34,11 +34,16 @@ def _normalize_pred(raw_pred: str) -> Tuple[str, float]:
     value = (raw_pred or "").strip().lower()
     if not value:
         return "", 0.5
+    # 首先用同义集合归一
     for canon, synonyms in PRED_SYNONYM_SETS.items():
         if value == canon:
             return canon, 1.0
         if value in synonyms:
             return canon, 0.95
+    # 再用属性映射表做强归一（例如 profession/job/works as → occupation）
+    mapped = PRED2ATTR.get(value)
+    if mapped:
+        return mapped, 0.95
     return value, 0.9
 
 
@@ -255,6 +260,12 @@ def validate_and_normalize(raw_text: str, doc_id: str, chunk_id: str):
         attr = item["meta"].get("attribute") or {}
         raw_attr_name = attr.get("name") or item["pred"]
         pred, pred_weight = _normalize_pred(raw_attr_name)
+        # 如果是title但非honorific/position_title则并入occupation
+        if raw_attr_name and raw_attr_name.strip().lower() in {"title", "titles"}:
+            role = (attr.get("role") or "").strip().lower()
+            if role not in {"honorific", "position_title"}:
+                pred = "occupation"
+                pred_weight = min(pred_weight, 0.95)
 
         raw_values = attr.get("values")
         if not isinstance(raw_values, list) or not raw_values:
@@ -311,6 +322,7 @@ def validate_and_normalize(raw_text: str, doc_id: str, chunk_id: str):
                     "confidence": base_conf,
                     "final_conf": final_conf,
                     "attribute": {
+                        # 保证 occupation 的规范输出
                         "name": pred,
                         "values": normalized_values,
                         "role": attr.get("role"),
