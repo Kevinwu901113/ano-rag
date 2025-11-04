@@ -18,7 +18,7 @@ class NoteGenerator:
         endpoint: str,
         model: str,
         temperature: float = 0.0,
-        max_tokens: int = 700,
+        max_tokens: int = 8000,
         parsing_config: Dict[str, Any] | None = None,
         schema_guard_config: Dict[str, Any] | None = None,
     ):
@@ -44,22 +44,22 @@ class NoteGenerator:
     def build_prompt(doc_text: str, doc_id: str) -> str:
         source_text = doc_text or ""
         return (
-            "You are an information extraction system. From the following text, extract factual triple-notes.\n"
-            "Return ONLY a valid JSON array (RFC 8259). Every property name and string value MUST be enclosed in double quotes. "
-            "Do NOT add comments or trailing commas. If the array form is unstable, you may instead output JSONL (one JSON object per line, no commas, no surrounding brackets).\n"
-            "Each item must be an object with keys:\n"
+            "You are an ontology-aligned information extraction system. From the following text, extract factual notes.\n"
+            "Return ONLY valid JSON (RFC 8259). Prefer a JSON array; JSONL is allowed if necessary (one object per line, no surrounding brackets).\n"
+            "Each note object MUST contain the keys:\n"
             '  "subj", "pred", "obj", "subj_type", "obj_type", "evidence", "meta"\n'
-            "Constraints:\n"
-            '  - "subj","pred","obj","evidence" MUST be non-empty strings.\n'
-            '  - "evidence" is a verbatim snippet from the text (>= 4 chars).\n'
-            '  - "subj_type" and "obj_type" MUST be one of ["PERSON","WORK","ORG","PLACE","EVENT","CONCEPT","TIME"].\n'
-            f'  - "meta" = {{"source": "{doc_id}", "confidence": a float in [0,1]}}\n'
+            "Populate them as follows:\n"
+            '  - "subj","pred","obj","evidence" are non-empty strings; evidence is a verbatim snippet (>=4 chars).\n'
+            '  - "subj_type","obj_type" must be one of ["PERSON","WORK","ORG","PLACE","EVENT","CONCEPT","TIME"].\n'
+            '  - "pred" should use canonical attributes like ["occupation","title","category","nationality","born_on","died_on","spouse","parent","authored_by","performed_by","member_of","located_in","headquartered_in","label","same_as","alias_of","type"].\n'
+            f'  - "meta" MUST include: {{"source": "{doc_id}", "confidence": float 0-1, "subject_profile": {{}}, "attribute": {{...}}}}\n'
+            '       * "subject_profile" = {"type": <subj_type>, "aliases": [], "nationality": [], "birth": null, "death": null, "occupations": [], "titles": [], "categories": [], "same_as": []}. Fill lists when evidence gives the data; use [] when unknown.\n'
+            f'       * "attribute" = {{"name": <same as pred>, "values": [{{"value": <raw>, "normalized": <canonical or same>, "confidence": 0-1, "source": "{doc_id}", "evidence": <snippet>}}]}}\n'
+            '       * Set "object_profile" when the object is an entity (type + aliases). Otherwise omit or use null.\n'
+            "Use canonical vocabulary (e.g., map 'comic artist' -> 'cartoonist', 'American' -> 'United States') when obvious; otherwise repeat the raw value.\n"
             "Text:\n"
             f'"""{source_text}"""\n'
-            "Output JSON:\n"
-            "[\n"
-            f'  {{"subj":"...","pred":"...","obj":"...","subj_type":"PERSON","obj_type":"ORG","evidence":"...","meta":{{"source":"{doc_id}","confidence":0.95}}}}\n'
-            "]"
+            "Output only the JSON."
         )
 
     def _call(self, prompt: str, *, stop: List[str] | None = None, max_tokens: int | None = None) -> str:

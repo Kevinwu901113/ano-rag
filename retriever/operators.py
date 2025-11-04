@@ -23,6 +23,22 @@ class Indexes:
                 subj_type, pred, obj_type = key.split("|", 2)
                 parsed[(subj_type, pred, obj_type)] = value
             self.type_edge_index = parsed
+        field_index_path = os.path.join(directory, "field_index.json")
+        if os.path.exists(field_index_path):
+            with open(field_index_path, "r", encoding="utf-8") as handle:
+                self.field_index = json.load(handle)
+        else:
+            self.field_index = {}
+
+        alias_index_path = os.path.join(directory, "entity_alias_index.json")
+        if os.path.exists(alias_index_path):
+            with open(alias_index_path, "r", encoding="utf-8") as handle:
+                raw_alias = json.load(handle)
+                self.alias_to_entities = {
+                    (alias or "").lower(): values for alias, values in raw_alias.items()
+                }
+        else:
+            self.alias_to_entities = {}
 
         self.graph_edges = defaultdict(list)
         graph_path = os.path.join(directory, "graph_edges.jsonl")
@@ -50,6 +66,24 @@ def BIND(indexes: Indexes, alias: str, type_candidates: List[str], limit: int = 
     target = (alias or "").lower()
     if not target:
         return matches
+
+    alias_hits = indexes.alias_to_entities.get(target, [])
+    for entity in alias_hits:
+        if entity not in matches:
+            matches.append(entity)
+            if len(matches) >= limit:
+                return matches
+
+    for alias_key, entities in indexes.alias_to_entities.items():
+        if alias_key == target:
+            continue
+        if target in alias_key or alias_key in target:
+            for entity in entities:
+                if entity in matches:
+                    continue
+                matches.append(entity)
+                if len(matches) >= limit:
+                    return matches
 
     for entity in indexes.entity_to_notes.keys():
         name = entity.lower()

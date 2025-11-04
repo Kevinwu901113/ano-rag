@@ -41,6 +41,8 @@ class QueryProcessor:
             "type_edge_index.json",
             "graph_edges.jsonl",
             "inverse_edges.jsonl",
+            "field_index.json",
+            "entity_alias_index.json",
         ]
         missing = [name for name in required if not Path(self.indexes_dir, name).exists()]
         if missing:

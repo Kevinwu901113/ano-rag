@@ -21,7 +21,7 @@ def main() -> None:
     build.add_argument("--vllm-endpoint", default=None)
     build.add_argument("--vllm-model", default=None)
     build.add_argument("--temperature", type=float, default=0.0)
-    build.add_argument("--max-tokens", type=int, default=700)
+    build.add_argument("--max-tokens", type=int, default=8000)
 
     query = sub.add_parser("query", help="Query the structured indexes")
     query.add_argument("question")
