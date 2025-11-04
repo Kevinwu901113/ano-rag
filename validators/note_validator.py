@@ -36,13 +36,41 @@ def validate_and_normalize(raw_text: str, doc_id: str, chunk_id: str):
     except Exception as exc:  # noqa: BLE001
         return False, [], {"violations": {"json_parse": str(exc)}}
 
+    if not isinstance(parsed, list):
+        return False, [], {
+            "violations": {
+                "json_type": f"expect array, got {type(parsed).__name__}",
+            }
+        }
+
+    patched: List[Dict[str, Any]] = []
+    for obj in parsed:
+        if not isinstance(obj, dict):
+            continue
+        patched_obj = dict(obj)
+        raw_meta = patched_obj.get("meta")
+        meta = dict(raw_meta) if isinstance(raw_meta, dict) else {}
+
+        source = meta.get("source")
+        if not isinstance(source, str) or not source.strip():
+            meta["source"] = f"{doc_id}#{chunk_id}"
+
+        conf = meta.get("confidence")
+        if isinstance(conf, (int, float)):
+            meta["confidence"] = max(0.0, min(1.0, float(conf)))
+        else:
+            meta["confidence"] = 0.8
+
+        patched_obj["meta"] = meta
+        patched.append(patched_obj)
+
     try:
-        Draft7Validator(NOTE_JSON_SCHEMA).validate(parsed)
+        Draft7Validator(NOTE_JSON_SCHEMA).validate(patched)
     except ValidationError as exc:
         return False, [], {"violations": {"json_schema": str(exc)}}
 
     notes: List[Dict[str, Any]] = []
-    for idx, item in enumerate(parsed):
+    for idx, item in enumerate(patched):
         pred, pred_weight = _normalize_pred(item["pred"])
         type_weight = _type_pattern_ok(item["subj_type"], pred, item["obj_type"])
         base_conf = float(item.get("meta", {}).get("confidence", 0.8))

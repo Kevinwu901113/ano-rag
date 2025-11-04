@@ -17,27 +17,43 @@ def build_notes(
     indexes_dir: str,
     vllm_endpoint: str,
     vllm_model: str,
-    temperature: float,
-    max_tokens: int,
-) -> None:
+    shard_idx: int = 0,
+    shard_cnt: int = 1,
+    temperature: float = 0.0,
+    max_tokens: int = 700,
+) -> dict:
     adapter = get_adapter(dataset)
     generator = NoteGenerator(vllm_endpoint, vllm_model, temperature=temperature, max_tokens=max_tokens)
+
+    if shard_cnt < 1:
+        raise ValueError(f"shard_cnt must be >= 1 (got {shard_cnt})")
+    if not 0 <= shard_idx < shard_cnt:
+        raise ValueError(f"shard_idx must be in [0, {shard_cnt - 1}] (got {shard_idx})")
 
     notes_path = Path(notes_out)
     notes_path.parent.mkdir(parents=True, exist_ok=True)
 
+    written = 0
     with open(notes_path, "w", encoding="utf-8") as handle:
-        for _doc, chunk in adapter(data_dir):
+        for idx, (_doc, chunk) in enumerate(adapter(data_dir)):
+            if idx % shard_cnt != shard_idx:
+                continue
             notes = generator.generate_for_chunk(chunk)
             for note in notes:
                 handle.write(json.dumps(note, ensure_ascii=False) + "\n")
+                written += 1
 
-    logger.info("Notes written to {}", notes_out)
+    logger.info("Notes written to {} (shard {}/{}; {} notes)", notes_out, shard_idx, shard_cnt, written)
 
-    builder = IndexBuilder()
-    builder.build_from_jsonl(str(notes_path))
-    builder.dump(indexes_dir)
-    logger.info("Indexes dumped to {}", indexes_dir)
+    if shard_cnt == 1:
+        builder = IndexBuilder()
+        builder.build_from_jsonl(str(notes_path))
+        builder.dump(indexes_dir)
+        logger.info("Indexes dumped to {}", indexes_dir)
+    else:
+        logger.info("Skipping index build for shard mode (shard_cnt={})", shard_cnt)
+
+    return {"notes_written": written, "shard_idx": shard_idx, "shard_cnt": shard_cnt}
 
 
 def main() -> None:

@@ -30,6 +30,14 @@ def _paragraphs_from_record(record: Dict) -> List[str]:
     if isinstance(text, str):
         return [text]
 
+    doc_chunk = record.get("doc_chunk")
+    if isinstance(doc_chunk, str) and doc_chunk.strip():
+        return [doc_chunk.strip()]
+
+    doc_chunks = record.get("doc_chunks")
+    if isinstance(doc_chunks, list) and doc_chunks:
+        return [str(chunk) for chunk in doc_chunks if str(chunk).strip()]
+
     return []
 
 
@@ -77,13 +85,20 @@ def iter_docs_and_chunks(
         records = records[start:end]
 
     for record in records:
-        raw_id = str(record.get("id") or record.get("doc_id") or record.get("_id") or "")
+        raw_id = str(
+            record.get("id")
+            or record.get("doc_id")
+            or record.get("_id")
+            or record.get("mapped_id")
+            or record.get("doc_name")
+            or ""
+        ).strip()
         if not raw_id:
             continue
 
         doc = {
             "doc_id": f"mirage/{raw_id}",
-            "title": record.get("title") or "",
+            "title": record.get("title") or record.get("doc_name") or "",
             "meta": {"dataset": "mirage"},
         }
 

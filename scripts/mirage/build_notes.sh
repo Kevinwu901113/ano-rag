@@ -101,8 +101,9 @@ ensure_workspace() {
   while IFS= read -r dir; do
     base="$(basename "$dir")"
     if [[ $base =~ ^([0-9]{3})-(.*)$ ]]; then
-      local idx=${BASH_REMATCH[1]}
+      local idx_raw=${BASH_REMATCH[1]}
       local ds=${BASH_REMATCH[2]}
+      local idx=$((10#$idx_raw))
       (( idx > max_index )) && max_index=$idx
       if [[ $ds == "$DATASET" ]]; then
         latest="$dir"

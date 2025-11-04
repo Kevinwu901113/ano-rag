@@ -7,7 +7,14 @@ from loguru import logger
 from validators.note_validator import validate_and_normalize
 
 PROMPT_TMPL = """You are an information extractor. From the following text block, extract up to 3 atomic facts as JSON objects with fields: subj, pred, obj, subj_type, obj_type, evidence, meta.
-Rules: one relation per object; evidence must copy an exact sentence from the text; pred must be one of the allowed set or mapped from synonyms; types must be from {PERSON, WORK, ORG, PLACE, EVENT, CONCEPT, TIME}. If no reliable facts, return [].
+Rules:
+- One relation per object; evidence must copy an exact sentence from the text.
+- pred must be one of the allowed set or mapped from synonyms.
+- subj_type/obj_type must be in {{PERSON, WORK, ORG, PLACE, EVENT, CONCEPT, TIME}}.
+- meta MUST include both fields:
+  - "source": any non-empty string (it will be overwritten later).
+  - "confidence": float between 0 and 1 indicating reliability (typical 0.6-0.95).
+If no reliable facts, return [].
 Allowed predicate sets (synonyms in parentheses):
 performed_by(recorded_by,artist), authored_by(written_by), spouse(married_to,partner), parent(father,mother), born_in(place_of_birth), located_in, member_of, acted_in(starring), produced_by, released_in, label, founded_by, headquartered_in, winner_of, part_of
 Return ONLY a JSON array. No extra text.
