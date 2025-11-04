@@ -5,6 +5,8 @@ from loguru import logger
 
 from config import config
 from generator.answerer import call_lmstudio
+from retriever.note_store import NoteStore
+from retriever.operators import Indexes
 from retriever.pipeline import retrieve_answer
 
 
@@ -53,19 +55,23 @@ class QueryProcessor:
                 f"Notes file '{self.notes_path}' not found. Run 'main.py process' first."
             )
 
+        self.indexes = Indexes(self.indexes_dir)
+        self.note_store = NoteStore(self.notes_path)
+
     def process(self, question: str) -> Dict[str, Any]:
         logger.info("Running structured retrieval for question: {}", question)
-        structured = retrieve_answer(question, self.indexes_dir, self.notes_path)
+        structured = retrieve_answer(question, self.indexes, self.note_store)
 
-        final_answer = "Insufficient evidence"
-        if structured.get("answer"):
+        evidences = structured.get("evidence", []) or []
+        final_answer = structured.get("answer")
+        if evidences:
             if not self.lmstudio_endpoint or not self.lmstudio_model:
                 raise ValueError("LM Studio endpoint/model must be configured")
             final_answer = call_lmstudio(
                 self.lmstudio_endpoint,
                 self.lmstudio_model,
                 question,
-                structured.get("evidence", []),
+                evidences,
             )
 
         return {"structured": structured, "answer": final_answer}

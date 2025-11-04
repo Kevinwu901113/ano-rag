@@ -10,6 +10,7 @@ chunk:
 vllm:
   endpoint: "http://127.0.0.1:8000/v1"
   model: "qwen2.5-7b-instruct"
+  temperature: 0.0
 
 lmstudio:
   endpoint: "http://127.0.0.1:1234/v1"
@@ -18,3 +19,28 @@ lmstudio:
 notes:
   out_path: "notes/notes.jsonl"
   indexes_dir: "indexes/"
+
+parsing:
+  allow_jsonl: true
+  enable_array_packer: true
+  enable_bare_key_fix: true
+  enable_loose_extractor: true
+  loose_split_key: "subj"
+  max_tokens: 1024
+  stop:
+    - "]\n"
+    - "\n]"
+    - "\n\nEND"
+    - "END_JSON"
+
+schema_guard:
+  min_evidence_len: 4
+  max_evidence_len: 512
+  type_map:
+    GROUP: ORG
+    OBJECT: CONCEPT
+    NUMBER: CONCEPT
+    QUANTITY: CONCEPT
+    PERCENT: CONCEPT
+    DATE: TIME
+    YEAR: TIME

@@ -20,6 +20,28 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "max_tokens": 64,
     },
     "notes": {"out_path": "notes/notes.jsonl", "indexes_dir": "indexes/"},
+    "parsing": {
+        "allow_jsonl": True,
+        "enable_array_packer": True,
+        "enable_bare_key_fix": True,
+        "enable_loose_extractor": True,
+        "loose_split_key": "subj",
+        "max_tokens": 1024,
+        "stop": ['"]\n', "\n]", "\n\nEND", "END_JSON"],
+    },
+    "schema_guard": {
+        "min_evidence_len": 4,
+        "max_evidence_len": 512,
+        "type_map": {
+            "GROUP": "ORG",
+            "OBJECT": "CONCEPT",
+            "NUMBER": "CONCEPT",
+            "QUANTITY": "CONCEPT",
+            "PERCENT": "CONCEPT",
+            "DATE": "TIME",
+            "YEAR": "TIME",
+        },
+    },
 }
 
 

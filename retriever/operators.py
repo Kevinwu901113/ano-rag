@@ -45,24 +45,50 @@ class Indexes:
                 self.inverse_edges[row["obj"]].extend(row["edges"])
 
 
-def BIND(indexes: Indexes, alias: str, type_candidates: List[str]) -> List[str]:
+def BIND(indexes: Indexes, alias: str, type_candidates: List[str], limit: int = 50) -> List[str]:
     matches: List[str] = []
-    target = alias.lower()
+    target = (alias or "").lower()
+    if not target:
+        return matches
+
     for entity in indexes.entity_to_notes.keys():
-        if target in entity.lower():
+        name = entity.lower()
+        if target in name or name in target:
             matches.append(entity)
-        if len(matches) >= 50:
+        elif _loose_match(target, name):
+            matches.append(entity)
+        if len(matches) >= limit:
             break
     return matches
 
 
 def EXPAND_from(
-    indexes: Indexes, subject: str, predicate: str
+    indexes: Indexes,
+    entity: str,
+    predicate: str,
+    direction: str = "out",
+    limit: int = 200,
 ) -> List[Tuple[str, str]]:
     output: List[Tuple[str, str]] = []
-    for pred, obj, note_id in indexes.graph_edges.get(subject, []):
+    if direction == "in":
+        edge_source = indexes.inverse_edges.get(entity, [])
+        for pred, subj, note_id in edge_source:
+            if pred == predicate:
+                output.append((subj, note_id))
+            if len(output) >= limit:
+                break
+        return output
+
+    for pred, obj, note_id in indexes.graph_edges.get(entity, []):
         if pred == predicate:
             output.append((obj, note_id))
-        if len(output) >= 200:
+        if len(output) >= limit:
             break
     return output
+
+
+def _loose_match(needle: str, hay: str) -> bool:
+    if not needle or not hay:
+        return False
+    tokens = [t for t in needle.split() if len(t) > 3]
+    return any(t in hay for t in tokens)
