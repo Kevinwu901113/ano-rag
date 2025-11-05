@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import re
 from typing import Any, Dict, List, Tuple
+import threading
 
 
 class NoteParsingPipeline:
@@ -58,6 +59,7 @@ class NoteParsingPipeline:
         self._type_map = {k.upper(): v.upper() for k, v in self.schema_config.get("type_map", {}).items()}
         self._stats: Dict[str, int] = {}
         self._last_stats: Dict[str, int] = {}
+        self._lock = threading.Lock()
 
     def parse(self, text: str, doc_id: str | None = None) -> List[Dict[str, Any]]:
         normalized = self._normalize_json_text(text)
@@ -92,8 +94,9 @@ class NoteParsingPipeline:
         return self._finalize([], doc_id, run_stats, None)
 
     def get_stats(self, cumulative: bool = True) -> Dict[str, int]:
-        stats = self._stats if cumulative else self._last_stats
-        return dict(stats)
+        with self._lock:
+            stats = self._stats if cumulative else self._last_stats
+            return dict(stats)
 
     def _finalize(
         self,
@@ -110,12 +113,14 @@ class NoteParsingPipeline:
         if coerced:
             run_stats["type_coercions"] = run_stats.get("type_coercions", 0) + coerced
         self._record_stats(run_stats)
-        self._last_stats = dict(run_stats)
+        with self._lock:
+            self._last_stats = dict(run_stats)
         return ready
 
     def _record_stats(self, run_stats: Dict[str, int]) -> None:
-        for key, value in run_stats.items():
-            self._stats[key] = self._stats.get(key, 0) + value
+        with self._lock:
+            for key, value in run_stats.items():
+                self._stats[key] = self._stats.get(key, 0) + value
 
     @classmethod
     def _merge_dict(cls, base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any]:

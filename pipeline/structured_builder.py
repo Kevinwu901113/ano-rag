@@ -1,8 +1,11 @@
 import json
+import concurrent.futures
+from functools import partial
 from pathlib import Path
 from typing import Dict, List, Optional
 
 from loguru import logger
+from config.config_loader import config as global_config
 
 from doc import make_chunks
 from generator.note_generator import NoteGenerator
@@ -69,12 +72,50 @@ class StructuredBuilder:
         FileUtils.write_jsonl(chunks_out, chunk_records)
         logger.info("Wrote {} chunks to {}", len(chunk_records), chunks_out)
 
+        # Concurrency settings
+        vllm_cfg = global_config.get("vllm", {}) if 'global_config' in globals() else {}
+        ccfg = (vllm_cfg or {}).get("concurrency", {})
+        max_workers = int(ccfg.get("max_workers", 8))
+        batch_size = int(ccfg.get("batch_size", 1))
+
+        def _process_one(chunk):
+            try:
+                return self.generator.generate_for_chunk(chunk)
+            except Exception as exc:
+                logger.warning("Chunk generation failed doc={} chunk={} err={}", chunk.get("doc_id"), chunk.get("chunk_id"), exc)
+                return []
+
         notes_written = 0
         with open(notes_path, "w", encoding="utf-8") as handle:
-            for chunk in chunk_records:
-                for note in self.generator.generate_for_chunk(chunk):
-                    handle.write(json.dumps(note, ensure_ascii=False) + "\n")
-                    notes_written += 1
+            if max_workers <= 1:
+                for chunk in chunk_records:
+                    for note in _process_one(chunk):
+                        handle.write(json.dumps(note, ensure_ascii=False) + "\n")
+                        notes_written += 1
+            else:
+                # Thread pool for parallel chunk processing, keep pool saturated
+                with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+                    inflight = set()
+                    idx = 0
+                    n_total = len(chunk_records)
+                    # Prime the pool
+                    while idx < n_total and len(inflight) < max_workers:
+                        fut = executor.submit(_process_one, chunk_records[idx])
+                        inflight.add(fut)
+                        idx += 1
+                    # As each future completes, submit next to maintain saturation
+                    while inflight:
+                        done, inflight = concurrent.futures.wait(inflight, return_when=concurrent.futures.FIRST_COMPLETED)
+                        for fut in done:
+                            notes = fut.result()
+                            for note in notes:
+                                handle.write(json.dumps(note, ensure_ascii=False) + "\n")
+                                notes_written += 1
+                        # Refill up to max_workers
+                        while idx < n_total and len(inflight) < max_workers:
+                            fut = executor.submit(_process_one, chunk_records[idx])
+                            inflight.add(fut)
+                            idx += 1
 
         logger.info("Wrote {} notes to {}", notes_written, notes_path)
 

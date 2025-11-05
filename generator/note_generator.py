@@ -5,6 +5,9 @@ import time
 from typing import Any, Dict, List
 
 import requests
+from requests.adapters import HTTPAdapter
+import threading
+import itertools
 from loguru import logger
 
 from config.config_loader import config as global_config
@@ -22,7 +25,30 @@ class NoteGenerator:
         parsing_config: Dict[str, Any] | None = None,
         schema_guard_config: Dict[str, Any] | None = None,
     ):
-        self.endpoint = endpoint.rstrip("/")
+        # Concurrency config
+        vllm_cfg = global_config.get("vllm", {}) or {}
+        ccfg = vllm_cfg.get("concurrency", {}) or {}
+
+        # Endpoint pool: use provided list if non-empty; else fallback to single endpoint
+        endpoints = ccfg.get("endpoints") or []
+        if endpoints and isinstance(endpoints, list):
+            self._endpoints = [str(ep).rstrip("/") for ep in endpoints if ep]
+        else:
+            self._endpoints = [endpoint.rstrip("/")]
+
+        # Round-robin iterator for endpoints
+        self._endpoint_cycle = itertools.cycle(self._endpoints)
+
+        # Thread-local HTTP session per worker for connection reuse
+        self._local = threading.local()
+
+        # Timeouts and backoff
+        self._timeout_sec = int(ccfg.get("timeout_sec", 60))
+        self._retry_backoff = list(ccfg.get("retry_backoff", [1, 2, 4]))
+        # HTTP connection pool size guided by concurrency
+        self._pool_maxsize = max(16, int(ccfg.get("max_workers", 8)) * 2)
+
+        self.endpoint = self._endpoints[0]
         self.model = model
         self.temperature = temperature
         self.max_tokens = max_tokens
@@ -63,9 +89,32 @@ class NoteGenerator:
             "Output only the JSON."
         )
 
+    def _get_session(self) -> requests.Session:
+        sess = getattr(self._local, "session", None)
+        if sess is None:
+            sess = requests.Session()
+            adapter = HTTPAdapter(
+                pool_connections=self._pool_maxsize,
+                pool_maxsize=self._pool_maxsize,
+                max_retries=0,
+            )
+            sess.mount("http://", adapter)
+            sess.mount("https://", adapter)
+            sess.headers.update({"Connection": "keep-alive", "Accept": "application/json"})
+            self._local.session = sess
+        return sess
+
+    def _next_endpoint(self) -> str:
+        try:
+            return next(self._endpoint_cycle)
+        except Exception:
+            return self.endpoint
+
     def _call(self, prompt: str, *, stop: List[str] | None = None, max_tokens: int | None = None) -> str:
-        retries = 2
-        for attempt in range(retries + 1):
+        backoffs = self._retry_backoff or [1, 2]
+        attempts = len(backoffs) + 1
+        last_exc: Exception | None = None
+        for attempt in range(attempts):
             try:
                 payload: Dict[str, Any] = {
                     "model": self.model,
@@ -75,19 +124,29 @@ class NoteGenerator:
                 }
                 if stop:
                     payload["stop"] = stop
-                response = requests.post(
-                    f"{self.endpoint}/chat/completions",
+                endpoint = self._next_endpoint()
+                session = self._get_session()
+                response = session.post(
+                    f"{endpoint}/chat/completions",
                     json=payload,
-                    timeout=60,
+                    timeout=self._timeout_sec,
                 )
                 response.raise_for_status()
                 data = response.json()
                 return data["choices"][0]["message"]["content"]
             except requests.RequestException as exc:  # noqa: PERF203
-                if attempt == retries:
+                last_exc = exc
+                if attempt == attempts - 1:
+                    logger.error("Note generator call failed after {} attempts: {}", attempts, exc)
                     raise
-                wait = 2**attempt
-                logger.warning("Note generator call failed (attempt={}): {}", attempt + 1, exc)
+                wait = backoffs[attempt] if attempt < len(backoffs) else backoffs[-1]
+                logger.warning(
+                    "Generator call failed (attempt={}/{}); switching endpoint and backing off {}s: {}",
+                    attempt + 1,
+                    attempts,
+                    wait,
+                    exc,
+                )
                 time.sleep(wait)
 
     def generate_for_chunk(self, chunk: Dict[str, Any]) -> List[Dict[str, Any]]:

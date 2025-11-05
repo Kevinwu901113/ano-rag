@@ -31,6 +31,7 @@ python main.py query \
 ## 项目结构与流程
 
 - `pipeline/structured_builder.py`：统一构建器。遍历 `data-dir` 下的 `.txt/.md/.jsonl/.json` 文件，分块并调用生成器，写出 `notes.jsonl` 与索引。
+  - 现已支持高效并发：线程池保持“满载”提交（不再按 `batch_size` 限制并行度），通过 `config.vllm.concurrency.max_workers` 控制并发线程数；可配置多端点轮询以充分利用多服务实例。
 - `doc/chunker.py`：句级滑窗分块，输出 `{doc_id, chunk_id, text}`。分块参数来自 `config.chunk`（`n_sent`、`overlap`）。
 - `generator/note_generator.py`：构造严格 JSON 提示词，调用 vLLM，使用 `generator/note_parsing.py` 纠错解析，再用 `validators/note_validator.py` 校验与归一化输出。
 - `indexer/index_builder.py`：从 `notes.jsonl` 构建：
@@ -70,6 +71,11 @@ python main.py query \
 
 - `config/config_loader.py` 提供默认值，可被 `config.yaml` 覆盖：
   - `vllm.endpoint`, `vllm.model`, `vllm.temperature`, `vllm.max_tokens`
+  - `vllm.concurrency.max_workers`：并发工作线程数（默认 `8`）。线程池会持续饱和，建议根据 vLLM 吞吐调整。
+  - `vllm.concurrency.batch_size`：批量提交大小（默认 `1`）。仅用于少量初始预热或控制调度粒度，但并不限制并发度（线程池会维持满载）。
+  - `vllm.concurrency.endpoints`：可选，多端点列表（覆盖 `endpoint`，用于轮询均衡）
+  - `vllm.concurrency.timeout_sec`：HTTP 超时秒数（默认 `60`）
+  - `vllm.concurrency.retry_backoff`：重试退避秒数序列（默认 `[1,2,4]`）
   - `lmstudio.endpoint`, `lmstudio.model`
   - `notes.out_path`, `notes.indexes_dir`
   - `chunk.n_sent`, `chunk.overlap`, `chunk.max_tokens`
@@ -91,6 +97,14 @@ python main_build_notes.py \
 ```
 
 - 双卡脚本（自动拉起 vLLM 并并行分片）：`scripts/mirage/build_notes.sh`。
+  - 若启用多端点，可在 `config.yaml` 中添加 `vllm.concurrency.endpoints: [http://127.0.0.1:8001/v1, http://127.0.0.1:8002/v1]`，并相应提高 `max_workers` 以压满吞吐；同时建议设置 `retry_backoff`，在端点短时失败时快速切换与退避。
+
+### 并发调优建议
+
+- 连接池：每个线程拥有复用的 `requests.Session`，连接池大小按 `max_workers` 自动扩展，无需手动设置。
+- 饱和策略：我们在 `StructuredBuilder` 与 `main_build_notes` 中采用“完成即补位”的饱和提交策略，确保线程数始终保持在上限附近。
+- vLLM 参数配合：留意 `--max-num-batched-tokens`、`--gpu-memory-utilization` 等；当响应超时或队列过长时，适当降低 `max_workers` 或提高上述阈值。
+- 容错与回退：启用 `retry_backoff` 可降低短时错误的影响；在多端点场景下，轮询策略会在失败后切换端点。
 
 ## 依赖
 

@@ -12,6 +12,13 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "model": "qwen2.5-7b-instruct",
         "temperature": 0.0,
         "max_tokens": 700,
+        "concurrency": {
+            "max_workers": 8,
+            "batch_size": 1,
+            "endpoints": [],  # optional multi-endpoint pool, overrides endpoint
+            "retry_backoff": [1, 2, 4],
+            "timeout_sec": 60
+        },
     },
     "lmstudio": {
         "endpoint": "http://127.0.0.1:1234/v1",

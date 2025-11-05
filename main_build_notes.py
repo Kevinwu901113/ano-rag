@@ -1,5 +1,6 @@
 import argparse
 import json
+import concurrent.futures
 import os
 from pathlib import Path
 
@@ -33,15 +34,55 @@ def build_notes(
     notes_path = Path(notes_out)
     notes_path.parent.mkdir(parents=True, exist_ok=True)
 
+    # Concurrency controls (per shard)
+    from config.config_loader import config as global_config
+    ccfg = (global_config.get("vllm", {}) or {}).get("concurrency", {})
+    max_workers = int(ccfg.get("max_workers", 8))
+    batch_size = int(ccfg.get("batch_size", 1))
+
+    def _process_one(chunk):
+        try:
+            return generator.generate_for_chunk(chunk)
+        except Exception as exc:
+            logger.warning("Shard {} chunk failed doc={} chunk={} err={}", shard_idx, chunk.get("doc_id"), chunk.get("chunk_id"), exc)
+            return []
+
     written = 0
     with open(notes_path, "w", encoding="utf-8") as handle:
-        for idx, (_doc, chunk) in enumerate(adapter(data_dir)):
-            if idx % shard_cnt != shard_idx:
-                continue
-            notes = generator.generate_for_chunk(chunk)
-            for note in notes:
-                handle.write(json.dumps(note, ensure_ascii=False) + "\n")
-                written += 1
+        if max_workers <= 1:
+            for idx, (_doc, chunk) in enumerate(adapter(data_dir)):
+                if idx % shard_cnt != shard_idx:
+                    continue
+                for note in _process_one(chunk):
+                    handle.write(json.dumps(note, ensure_ascii=False) + "\n")
+                    written += 1
+        else:
+            # Collect shard-specific chunks first to avoid scheduling overhead
+            shard_chunks = []
+            for idx, (_doc, chunk) in enumerate(adapter(data_dir)):
+                if idx % shard_cnt == shard_idx:
+                    shard_chunks.append(chunk)
+
+            # Saturate pool with continuous submission, not batch-gated
+            with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+                inflight = set()
+                i = 0
+                n = len(shard_chunks)
+                # Prime
+                while i < n and len(inflight) < max_workers:
+                    inflight.add(executor.submit(_process_one, shard_chunks[i]))
+                    i += 1
+                # Maintain saturation
+                while inflight:
+                    done, inflight = concurrent.futures.wait(inflight, return_when=concurrent.futures.FIRST_COMPLETED)
+                    for fut in done:
+                        notes = fut.result()
+                        for note in notes:
+                            handle.write(json.dumps(note, ensure_ascii=False) + "\n")
+                            written += 1
+                    while i < n and len(inflight) < max_workers:
+                        inflight.add(executor.submit(_process_one, shard_chunks[i]))
+                        i += 1
 
     logger.info("Notes written to {} (shard {}/{}; {} notes)", notes_out, shard_idx, shard_cnt, written)
 
