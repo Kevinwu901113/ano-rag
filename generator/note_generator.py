@@ -26,17 +26,18 @@ class NoteGenerator:
         max_tokens: int = 8000,
         parsing_config: Dict[str, Any] | None = None,
         schema_guard_config: Dict[str, Any] | None = None,
+        strict_endpoint: bool = False,
     ):
         # Concurrency config
         vllm_cfg = global_config.get("vllm", {}) or {}
         ccfg = vllm_cfg.get("concurrency", {}) or {}
 
-        # Endpoint pool: use provided list if non-empty; else fallback to single endpoint
-        endpoints = ccfg.get("endpoints") or []
-        if endpoints and isinstance(endpoints, list):
-            self._endpoints = [str(ep).rstrip("/") for ep in endpoints if ep]
-        else:
+        # Endpoint pool: prefer CLI endpoint in strict mode (e.g., shard builds)
+        endpoints_cfg = ccfg.get("endpoints") or []
+        if strict_endpoint or not (endpoints_cfg and isinstance(endpoints_cfg, list)):
             self._endpoints = [endpoint.rstrip("/")]
+        else:
+            self._endpoints = [str(ep).rstrip("/") for ep in endpoints_cfg if ep]
 
         # Round-robin iterator for endpoints (protected by lock for thread safety)
         self._endpoint_cycle = itertools.cycle(self._endpoints)
@@ -48,6 +49,8 @@ class NoteGenerator:
 
         # Thread-local HTTP session per worker for connection reuse
         self._local = threading.local()
+        # Remember strict endpoint behavior to adjust connection handling
+        self._strict_endpoint = bool(strict_endpoint)
 
         # Timeouts and backoff
         # Separate connect/read timeouts; defaults to (3.05s, 20s)
@@ -144,7 +147,17 @@ class NoteGenerator:
             )
             sess.mount("http://", adapter)
             sess.mount("https://", adapter)
-            sess.headers.update({"Connection": "keep-alive", "Accept": "application/json"})
+            # In strict endpoint (e.g., shard to dedicated port), disable keep-alive
+            # to avoid accumulating CLOSE_WAIT sockets on the server side.
+            if self._strict_endpoint:
+                sess.headers.update({"Connection": "close", "Accept": "application/json"})
+            else:
+                sess.headers.update({"Connection": "keep-alive", "Accept": "application/json"})
+            # Avoid inheriting system proxy settings that may misroute local endpoints
+            try:
+                sess.trust_env = False
+            except Exception:
+                pass
             self._local.session = sess
         return sess
 
@@ -183,8 +196,8 @@ class NoteGenerator:
     def _mark_endpoint_failure(self, endpoint: str, kind: str) -> None:
         h = self._health.setdefault(endpoint, {"score": 1.0, "blacklist_until": 0.0})
         h["blacklist_until"] = time.time() + max(0.0, self._blacklist_duration_sec)
-        # On timeouts, reset the thread-local session to avoid stale keep-alive sockets
-        if kind == "timeout":
+        # Reset the thread-local session on transport issues to avoid stale keep-alive sockets
+        if kind in ("timeout", "http"):
             self._reset_session()
 
     def _call(self, prompt: str, *, stop: List[str] | None = None, max_tokens: int | None = None) -> str:
@@ -210,13 +223,14 @@ class NoteGenerator:
                     except Exception:
                         pass
                 session = self._get_session()
-                response = session.post(
+                # Ensure the response is fully closed even on success to release the socket.
+                with session.post(
                     f"{endpoint}/chat/completions",
                     json=payload,
                     timeout=(self._connect_timeout_sec, self._read_timeout_sec),
-                )
-                response.raise_for_status()
-                data = response.json()
+                ) as response:
+                    response.raise_for_status()
+                    data = response.json()
                 # record latency
                 if self._adaptive:
                     self._adaptive.record_latency_ms(int((time.time() - t0) * 1000))

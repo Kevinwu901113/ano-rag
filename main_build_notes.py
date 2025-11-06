@@ -27,7 +27,13 @@ def build_notes(
     progress_path: str | None = None,
 ) -> dict:
     adapter = get_adapter(dataset)
-    generator = NoteGenerator(vllm_endpoint, vllm_model, temperature=temperature, max_tokens=max_tokens)
+    generator = NoteGenerator(
+        vllm_endpoint,
+        vllm_model,
+        temperature=temperature,
+        max_tokens=max_tokens,
+        strict_endpoint=True,
+    )
 
     if shard_cnt < 1:
         raise ValueError(f"shard_cnt must be >= 1 (got {shard_cnt})")
@@ -138,7 +144,7 @@ def build_notes(
                             handle.write(json.dumps(note, ensure_ascii=False) + "\n")
                             written += 1
                         processed_chunks += 1
-                        _emit_progress(total, completed=False, current_workers=target)
+                        _emit_progress(total, completed=False, current_workers=len(inflight))
                     _maybe_update_target()
                     while i < n and len(inflight) < target:
                         inflight.add(executor.submit(_process_one, shard_chunks[i]))
