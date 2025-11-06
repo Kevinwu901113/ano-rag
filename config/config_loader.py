@@ -6,7 +6,7 @@ from typing import Any, Dict
 
 DEFAULT_CONFIG: Dict[str, Any] = {
     "system": {"project_name": "ano-rag", "device": "cuda"},
-    "chunk": {"n_sent": 2, "overlap": 0, "max_tokens": 500},
+    "chunk": {"n_sent": 3, "overlap": 1, "max_tokens": 768},
     "vllm": {
         "endpoint": "http://127.0.0.1:8000/v1",
         "model": "qwen2.5-7b-instruct",
@@ -16,9 +16,31 @@ DEFAULT_CONFIG: Dict[str, Any] = {
             "max_workers": 8,
             "batch_size": 1,
             "endpoints": [],  # optional multi-endpoint pool, overrides endpoint
-            "retry_backoff": [1, 2, 4],
-            "timeout_sec": 60
+            "connect_timeout_sec": 3.05,
+            "read_timeout_sec": 20.0,
+            "retry_max_attempts": 2,
+            "retry_total_cap_sec": 30.0,
+            "retry_backoff_base": 1.0,
+            "retry_backoff_max_sec": 6.0,
+            "retry_jitter_frac": 0.5,
+            "pause_on_timeout_rate": 0.3,
+            "pause_sec": 7.0,
+            # Endpoint health controls
+            "blacklist_duration_sec": 15.0,
+            # Log endpoint selection every N successful calls (0=disabled)
+            "endpoint_log_every": 0,
         },
+        "adaptive": {
+            "enabled": False,
+            "min_workers": 2,
+            "max_workers": 16,
+            "target_p50_ms": 1200,
+            "target_p95_ms": 3500,
+            "step_up": 2,
+            "step_down": 2,
+            "window_size": 50,
+            "cool_down_sec": 5.0
+        }
     },
     "lmstudio": {
         "endpoint": "http://127.0.0.1:1234/v1",
@@ -33,8 +55,8 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "enable_bare_key_fix": True,
         "enable_loose_extractor": True,
         "loose_split_key": "subj",
-        "max_tokens": 1024,
-        "stop": ['"]\n', "\n]", "\n\nEND", "END_JSON"],
+        "max_tokens": 768,
+        "stop": ['"]\n', "\n]", "\n\nEND", "END_JSON", "\n\n"]
     },
     "schema_guard": {
         "min_evidence_len": 4,

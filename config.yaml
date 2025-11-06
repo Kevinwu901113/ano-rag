@@ -3,14 +3,35 @@ system:
   device: "cuda"
 
 chunk:
-  n_sent: 2
-  overlap: 128
-  max_tokens: 1024
+  n_sent: 3
+  overlap: 1
+  max_tokens: 768
 
 vllm:
   endpoint: "http://127.0.0.1:8000/v1"
   model: "qwen2.5-7b-instruct"
-  temperature: 0.7
+  temperature: 0.0
+  concurrency:
+    max_workers: 16
+    connect_timeout_sec: 3.05
+    read_timeout_sec: 20.0
+    retry_max_attempts: 2
+    retry_total_cap_sec: 30.0
+    retry_backoff_base: 1.0
+    retry_backoff_max_sec: 6.0
+    retry_jitter_frac: 0.5
+    pause_on_timeout_rate: 0.3
+    pause_sec: 7.0
+  adaptive:
+    enabled: false
+    min_workers: 4
+    max_workers: 32
+    target_p50_ms: 1200
+    target_p95_ms: 3500
+    step_up: 2
+    step_down: 2
+    window_size: 50
+    cool_down_sec: 5.0
 
 lmstudio:
   endpoint: "http://127.0.0.1:1234/v1"
@@ -26,12 +47,13 @@ parsing:
   enable_bare_key_fix: true
   enable_loose_extractor: true
   loose_split_key: "subj"
-  max_tokens: 1024
+  max_tokens: 768
   stop:
     - "]\n"
     - "\n]"
     - "\n\nEND"
     - "END_JSON"
+    - "\n\n"
 
 schema_guard:
   min_evidence_len: 4

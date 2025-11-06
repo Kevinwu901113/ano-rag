@@ -1,5 +1,6 @@
 import json
 import concurrent.futures
+import time
 from functools import partial
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -75,8 +76,14 @@ class StructuredBuilder:
         # Concurrency settings
         vllm_cfg = global_config.get("vllm", {}) if 'global_config' in globals() else {}
         ccfg = (vllm_cfg or {}).get("concurrency", {})
+        # 从配置读取；自适应关闭时上下限相同
         max_workers = int(ccfg.get("max_workers", 8))
-        batch_size = int(ccfg.get("batch_size", 1))
+        acfg = (vllm_cfg or {}).get("adaptive", {})
+        adaptive_enabled = bool(acfg.get("enabled", False))
+        upper_workers = int(acfg.get("max_workers", max_workers)) if adaptive_enabled else max_workers
+        # 提交退避参数：当最近超时率过高时暂停提交
+        timeout_pause_threshold = float(ccfg.get("pause_on_timeout_rate", 0.3))
+        pause_sec = float(ccfg.get("pause_sec", 7.0))
 
         def _process_one(chunk):
             try:
@@ -93,26 +100,65 @@ class StructuredBuilder:
                         handle.write(json.dumps(note, ensure_ascii=False) + "\n")
                         notes_written += 1
             else:
-                # Thread pool for parallel chunk processing, keep pool saturated
-                with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+                # Thread pool for parallel chunk processing, with adaptive target saturation
+                with concurrent.futures.ThreadPoolExecutor(max_workers=upper_workers) as executor:
                     inflight = set()
                     idx = 0
                     n_total = len(chunk_records)
+                    target = max_workers
+                    last_check = time.time()
+                    # 周期性检查并发建议与提交退避（无论是否开启自适应）
+                    check_interval = float((vllm_cfg or {}).get("adaptive", {}).get("cool_down_sec", 5.0))
+
+                    def _maybe_update_target():
+                        nonlocal target, last_check
+                        now = time.time()
+                        if (now - last_check) >= max(1.0, check_interval):
+                            try:
+                                suggested = self.generator.suggest_concurrency()
+                                target = max(1, min(suggested, upper_workers))
+                            except Exception:
+                                # 若建议失败，维持当前目标
+                                target = max(1, min(target, upper_workers))
+                            finally:
+                                last_check = now
+
+                    def _maybe_pause_submission():
+                        # 当最近超时率过高，暂停提交一段时间，避免重试风暴
+                        try:
+                            timeout_rate = getattr(self.generator, "recent_timeout_rate")()
+                        except Exception:
+                            timeout_rate = 0.0
+                        if timeout_rate >= max(0.0, min(1.0, timeout_pause_threshold)):
+                            logger.warning(
+                                "High timeout rate {:.1%} detected; pausing new submissions for {:.1f}s",
+                                timeout_rate,
+                                pause_sec,
+                            )
+                            time.sleep(pause_sec)
+
                     # Prime the pool
-                    while idx < n_total and len(inflight) < max_workers:
+                    while idx < n_total and len(inflight) < target:
+                        _maybe_pause_submission()
                         fut = executor.submit(_process_one, chunk_records[idx])
                         inflight.add(fut)
                         idx += 1
-                    # As each future completes, submit next to maintain saturation
+
+                    # As each future completes, submit next to maintain target saturation
                     while inflight:
-                        done, inflight = concurrent.futures.wait(inflight, return_when=concurrent.futures.FIRST_COMPLETED)
+                        done, inflight = concurrent.futures.wait(
+                            inflight, return_when=concurrent.futures.FIRST_COMPLETED
+                        )
                         for fut in done:
                             notes = fut.result()
                             for note in notes:
                                 handle.write(json.dumps(note, ensure_ascii=False) + "\n")
                                 notes_written += 1
-                        # Refill up to max_workers
-                        while idx < n_total and len(inflight) < max_workers:
+
+                        _maybe_update_target()
+                        # Refill up to target
+                        while idx < n_total and len(inflight) < target:
+                            _maybe_pause_submission()
                             fut = executor.submit(_process_one, chunk_records[idx])
                             inflight.add(fut)
                             idx += 1

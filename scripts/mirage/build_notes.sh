@@ -38,6 +38,21 @@ BUILD_PID1=""
 
 log() { printf "\033[1;34m[%s]\033[0m %s\n" "$(date +'%H:%M:%S')" "$*"; }
 
+# Read progress JSON and output: total processed notes
+progress_values() {
+  local path="$1"
+  python - "$path" <<'PY'
+import json, sys
+p = sys.argv[1]
+try:
+    with open(p, 'r', encoding='utf-8') as f:
+        d = json.load(f)
+    print(f"{d.get('total_chunks', 0)} {d.get('processed_chunks', 0)} {d.get('notes_written', 0)} {d.get('current_workers', 0)}")
+except Exception:
+    print("0 0 0 0")
+PY
+}
+
 wait_http_ok() {
   local url="$1" retries="${2:-60}" sleep_s="${3:-2}"
   local i=0
@@ -149,6 +164,8 @@ ensure_workspace() {
   BUILD_LOG1="$LOG_DIR/build_shard1.log"
   BUILD_PID0="$WORK_DIR/build_shard0.pid"
   BUILD_PID1="$WORK_DIR/build_shard1.pid"
+  PROG_SHARD0="$WORK_DIR/progress_shard0.json"
+  PROG_SHARD1="$WORK_DIR/progress_shard1.json"
 
   log "Workspace: $WORK_DIR"
   log "Dataset dir: $DATA_DIR"
@@ -210,6 +227,7 @@ build_notes_dual() {
     --vllm_endpoint "http://${VLLM_HOST}:${VLLM_PORT0}/v1" \
     --vllm_model "${VLLM_MODEL}" \
     --shard-idx 0 --shard-cnt "${SHARD_CNT}" \
+    --progress-path "${PROG_SHARD0}" \
     > "$BUILD_LOG0" 2>&1 & echo $! > "$BUILD_PID0"
 
   log "Launching shard1 -> ${OUT_SHARD1}"
@@ -221,11 +239,54 @@ build_notes_dual() {
     --vllm_endpoint "http://${VLLM_HOST}:${VLLM_PORT1}/v1" \
     --vllm_model "${VLLM_MODEL}" \
     --shard-idx 1 --shard-cnt "${SHARD_CNT}" \
+    --progress-path "${PROG_SHARD1}" \
     > "$BUILD_LOG1" 2>&1 & echo $! > "$BUILD_PID1"
 
+  # Progress monitor loop: show combined progress while waiting
   log "Waiting both shards to finish ..."
-  wait "$(cat "$BUILD_PID0")" || { log "shard0 failed"; exit 1; }
-  wait "$(cat "$BUILD_PID1")" || { log "shard1 failed"; exit 1; }
+  start_time=$(date +%s)
+  pid0=$(cat "$BUILD_PID0")
+  pid1=$(cat "$BUILD_PID1")
+  while kill -0 "$pid0" 2>/dev/null || kill -0 "$pid1" 2>/dev/null; do
+    # Read progress files if exist
+    total0=0; done0=0; notes0=0; workers0=0
+    total1=0; done1=0; notes1=0; workers1=0
+    if [[ -f "$PROG_SHARD0" ]]; then
+      read -r total0 done0 notes0 workers0 < <(progress_values "$PROG_SHARD0")
+    fi
+    if [[ -f "$PROG_SHARD1" ]]; then
+      read -r total1 done1 notes1 workers1 < <(progress_values "$PROG_SHARD1")
+    fi
+    total=$(( total0 + total1 ))
+    done=$(( done0 + done1 ))
+    notes=$(( notes0 + notes1 ))
+    workers=$(( workers0 > workers1 ? workers0 : workers1 ))
+    now=$(date +%s)
+    elapsed=$(( now - start_time ))
+    rate_str="0.00"
+    if (( elapsed > 0 )); then
+      rate_str=$(awk -v d="$done" -v e="$elapsed" 'BEGIN{printf "%.2f", d/e}')
+    fi
+    remaining=$(( total > done ? total - done : 0 ))
+    eta="N/A"
+    if [[ "$rate_str" != "0.00" && $remaining -gt 0 ]]; then
+      eta_sec=$(awk -v r="$rate_str" -v rem="$remaining" 'BEGIN{printf "%d", rem/r}')
+      eta="${eta_sec}s"
+    fi
+    # Render a simple text progress bar
+    width=40
+    filled=0
+    if (( total > 0 )); then
+      filled=$(( done * width / total ))
+    fi
+    bar=$(printf '%*s' "$filled" '' | tr ' ' '#')
+    empty=$(printf '%*s' $(( width - filled )) '' | tr ' ' '-')
+    printf "\rProgress [%s%s] %d/%d chunks | notes=%d | workers=%d | elapsed=%ds | eta=%s | rate=%s chunk/s" "$bar" "$empty" "$done" "$total" "$notes" "$workers" "$elapsed" "$eta" "$rate_str"
+    sleep 2
+  done
+  echo
+  wait "$pid0" || { log "shard0 failed"; exit 1; }
+  wait "$pid1" || { log "shard1 failed"; exit 1; }
   rm -f "$BUILD_PID0" "$BUILD_PID1"
 
   log "Merging shards -> ${OUT_MERGED}"

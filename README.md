@@ -106,6 +106,30 @@ python main_build_notes.py \
 - vLLM 参数配合：留意 `--max-num-batched-tokens`、`--gpu-memory-utilization` 等；当响应超时或队列过长时，适当降低 `max_workers` 或提高上述阈值。
 - 容错与回退：启用 `retry_backoff` 可降低短时错误的影响；在多端点场景下，轮询策略会在失败后切换端点。
 
+#### 自适应并发（可选）
+
+- 在 `config.yaml` 打开：
+
+```yaml
+vllm:
+  adaptive:
+    enabled: true
+    min_workers: 4
+    max_workers: 32
+    target_p50_ms: 1200
+    target_p95_ms: 3500
+    step_up: 2
+    step_down: 2
+    window_size: 50
+    cool_down_sec: 5.0
+```
+
+- 机制：生成器在每次 vLLM 调用后记录延迟，构建器每隔 `cool_down_sec` 读取建议并动态调整目标并发。线程池上限固定为 `adaptive.max_workers`，实际 `inflight` 会在建议值附近波动，趋近 GPU 的可承载吞吐。
+- 什么时候有用：
+  - 端点吞吐随时间波动（队列长度变化、临时降速）。
+  - 多端点轮询时，整体延迟特征变化明显。
+- 注意：如 vLLM 已通过 `--max-num-batched-tokens`/`--gpu-memory-utilization` 等充分调优，开启自适应并发通常仍能微调队列压力，但也可能引入轻微波动；保守做法是设置较小的 `step_up/step_down` 与适当的 `cool_down_sec`。
+
 ## 依赖
 
 - 见 `requirements.txt`。需准备可用的 vLLM 与 LM Studio 服务。
