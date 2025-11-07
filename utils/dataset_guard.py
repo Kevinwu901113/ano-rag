@@ -22,11 +22,14 @@ class EmptyRecallError(DatasetNamespaceError):
 
 
 class DatasetGuard:
-    """数据集命名空间守卫，用于验证和过滤笔记的命名空间归属"""
-    
-    def __init__(self, bm25_fallback_fn: Optional[Callable] = None):
+    """数据集命名空间守卫：验证与过滤笔记的命名空间归属，并支持 Vector-only 回退。
+
+    说明：去除 BM25 回退接口；如需回退，请提供向量-only 函数，通过 `set_vector_fallback` 注册。
+    """
+
+    def __init__(self, vector_fallback_fn: Optional[Callable] = None):
         self.logger = logger
-        self.bm25_fallback_fn = bm25_fallback_fn
+        self.vector_fallback_fn = vector_fallback_fn
         self.namespace_stats = defaultdict(lambda: {'hits': 0, 'misses': 0, 'fallbacks': 0})
         self.session_start_time = time.time()
     
@@ -202,15 +205,15 @@ class DatasetGuard:
         
         self.logger.info(f"Namespace assertion passed: {len(filtered_notes)} notes in {dataset}/{qid}")
     
-    def namespace_aware_retrieve(self, query: str, dataset: str, qid: str, 
-                                retrieval_fn: Callable, 
-                                top_k: int = 20,
-                                min_namespace_ratio: float = 0.3,
-                                enable_fallback: bool = True,
-                                **retrieval_kwargs) -> List[Dict[str, Any]]:
+    def namespace_aware_retrieve(self, query: str, dataset: str, qid: str,
+                                 retrieval_fn: Callable,
+                                 top_k: int = 20,
+                                 min_namespace_ratio: float = 0.3,
+                                 enable_fallback: bool = True,
+                                 **retrieval_kwargs) -> List[Dict[str, Any]]:
         """
-        命名空间感知的检索方法，带有BM25回退机制
-        
+        命名空间感知检索（支持 Vector-only 回退）
+
         Args:
             query: 查询字符串
             dataset: 数据集名称
@@ -220,10 +223,10 @@ class DatasetGuard:
             min_namespace_ratio: 最小命名空间命中比例阈值
             enable_fallback: 是否启用回退机制
             **retrieval_kwargs: 传递给检索函数的其他参数
-            
+
         Returns:
             List[Dict[str, Any]]: 检索结果列表
-            
+
         Raises:
             NamespaceMismatchError: 命名空间不匹配且回退失败
             EmptyRecallError: 检索结果为空
@@ -262,44 +265,44 @@ class DatasetGuard:
                 )
                 return result
             
-            # 第三阶段：BM25混合检索回退
-            if enable_fallback and self.bm25_fallback_fn:
+            # 第三阶段：Vector-only 回退
+            if enable_fallback and self.vector_fallback_fn:
                 self.logger.warning(
                     f"Namespace hit ratio {namespace_ratio:.2f} below threshold {min_namespace_ratio}, "
-                    f"triggering BM25 fallback for {namespace_key}"
+                    f"triggering Vector-only fallback for {namespace_key}"
                 )
-                
+
                 try:
-                    fallback_candidates = self.bm25_fallback_fn(
-                        query=query, 
-                        dataset=dataset, 
-                        qid=qid, 
+                    fallback_candidates = self.vector_fallback_fn(
+                        query=query,
+                        dataset=dataset,
+                        qid=qid,
                         top_k=top_k,
                         **retrieval_kwargs
                     )
-                    
+
                     if fallback_candidates:
                         # 验证回退结果的命名空间
                         fallback_namespace_candidates = self.filter_notes_by_namespace(
                             fallback_candidates, dataset, qid
                         )
-                        
+
                         if fallback_namespace_candidates:
                             self.namespace_stats[namespace_key]['fallbacks'] += 1
-                            
+
                             # 记录回退成功信息
                             fallback_ratio = len(fallback_namespace_candidates) / len(fallback_candidates)
                             sample_files = self._extract_sample_files(fallback_namespace_candidates, max_samples=3)
-                            
+
                             self.logger.warning(
-                                f"BM25 fallback successful - Dataset: {dataset}, QID: {qid}, "
+                                f"Vector-only fallback successful - Dataset: {dataset}, QID: {qid}, "
                                 f"Fallback ratio: {fallback_ratio:.2f}, Sample files: {', '.join(sample_files)}"
                             )
-                            
+
                             return fallback_namespace_candidates[:top_k]
-                        
+
                 except Exception as e:
-                    self.logger.error(f"BM25 fallback failed for {namespace_key}: {e}")
+                    self.logger.error(f"Vector-only fallback failed for {namespace_key}: {e}")
             
             # 第四阶段：最终错误处理
             self.namespace_stats[namespace_key]['misses'] += 1
@@ -313,7 +316,7 @@ class DatasetGuard:
                 'namespace_ratio': namespace_ratio,
                 'min_required_ratio': min_namespace_ratio,
                 'fallback_enabled': enable_fallback,
-                'fallback_available': self.bm25_fallback_fn is not None
+                'fallback_available': self.vector_fallback_fn is not None
             }
             
             self.logger.error(
@@ -446,15 +449,15 @@ class DatasetGuard:
                     f"hit rate: {hit_rate:.2f}, fallback rate: {fallback_rate:.2f}"
                 )
     
-    def set_bm25_fallback(self, fallback_fn: Callable) -> None:
+    def set_vector_fallback(self, fallback_fn: Callable) -> None:
         """
-        设置BM25回退函数
-        
+        设置 Vector-only 回退函数
+
         Args:
-            fallback_fn: BM25回退函数
+            fallback_fn: 回退函数（向量-only）
         """
-        self.bm25_fallback_fn = fallback_fn
-        self.logger.info("BM25 fallback function registered")
+        self.vector_fallback_fn = fallback_fn
+        self.logger.info("Vector-only fallback function registered")
     
     def validate_and_route(self, candidates: List[Dict[str, Any]], 
                           dataset: str, qid: str,
@@ -524,9 +527,9 @@ def namespace_aware_retrieve(query: str, dataset: str, qid: str,
     )
 
 
-def set_bm25_fallback(fallback_fn: Callable) -> None:
-    """设置BM25回退函数"""
-    return dataset_guard.set_bm25_fallback(fallback_fn)
+def set_vector_fallback(fallback_fn: Callable) -> None:
+    """设置 Vector-only 回退函数"""
+    return dataset_guard.set_vector_fallback(fallback_fn)
 
 
 def get_namespace_stats() -> Dict[str, Any]:

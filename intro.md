@@ -9,7 +9,7 @@
   - 可解释性：检索路径由显式边和节点构成（`graph_edges.jsonl`），证据可回溯至 `note_id` 与 `evidence` 字段。
   - 精准约束：通过类型边索引（`type_edge_index.json`）与谓词归一规则限制合法跳转，提高候选质量。
   - 别名稳健性：实体别名索引（`entity_alias_index.json`）在绑定阶段提升召回，支持归一、包含与松匹配。
-  - 结构内兜底：在结构范围内进行 BM25 的“弱信号补全”，比纯文本全局检索更具针对性与可控性。
+  - 结构内兜底：在结构范围内进行向量-only 的“弱信号补全”，比纯文本全局检索更具针对性与可控性。
 
 ## 2. 相关工作
 
@@ -64,7 +64,7 @@ index_builder.dump(out_dir)
   - 问题解析：`retriever/parser.py::parse_question` 将自然语言映射为 `QueryIR`（种子、谓词链、目标类型、fanout、max_hops）。
   - 绑定与扩展：`retriever/operators.py::BIND/EXPAND_from` 完成实体别名匹配与图邻接遍历。
   - 路径打分：`retriever/scorer.py::score_path` 按跳数惩罚；目标类型命中加分见 `pipeline._walk_chain`。
-  - 管线总控：`retriever/pipeline.py::retrieve_answer` 组织结构检索与兜底流程（属性收集、BM25结构内检索、候选重排）。
+  - 管线总控：`retriever/pipeline.py::retrieve_answer` 组织结构检索与兜底流程（属性收集、结构内向量检索兜底、候选重排）。
 
 - 检索阶段伪代码：
 
@@ -91,7 +91,7 @@ else:
     candidates = score_and_make_candidates(states)
 
 if not candidates:
-    structured = structured_fallback(seeds, intent)  # 结构范围内 BM25
+    structured = structured_fallback(seeds, intent)  # 结构范围内向量-only
     if structured: return structured
     return fallback_lookup(intent, indexes, note_store, ir, "no_path")
 
@@ -108,9 +108,9 @@ score(path) = 1.0 - 0.05 * (len(path) - 1) + type_bonus
 type_bonus = 0.1 if final_note.obj_type == ir.target_type else 0
 ```
 
-- 结构化兜底（BM25）策略：
+- 结构化兜底（Vector-only）策略：
   - 在绑定得到的实体作用域 `entities[:10]` 内收集其相关笔记 `[:200]`，形成 `scoped_notes`。
-  - 构建 BM25 语料（`evidence + obj` 拼接），查询用 `intent.entity`。
+  - 使用 `utils.vector_search.VectorSearcher` 对文本进行编码与相似度检索，编码文本优先级为：`meta.evidence_canonical` > `evidence` > `obj` > `meta.subject_profile.description`/`meta.object_profile.description`；查询使用原始 `question`。
   - Occupation 优先：对 `attribute in {occupation, title}` 的笔记加分或优先排序。
   - 返回单边“结构化命中路径”（标识 `fallback: true`）与证据 Top-5。
 
@@ -135,7 +135,7 @@ type_bonus = 0.1 if final_note.obj_type == ir.target_type else 0
 - 设置：
   - 数据集：`data/mirage/dataset`（问题集），对应结果位于 `result/019-mirage/answers.json`。
   - 索引：使用上述构建流程得到的 `indexes/`（别名、实体倒排、图边、类型边、字段倒排）。
-  - 参数：`fanout` 典型为 12–15；BM25 使用简化实现或 `rank_bm25`（如可用），`k1=1.5, b=0.75`。
+  - 参数：`fanout` 典型为 12–15；兜底检索采用 `VectorSearcher`（默认 `all-MiniLM-L6-v2`），其余参数与结构检索一致。
 
 - 统计（由 `answers.json` 解析）：
   - 总问题数：`20`
@@ -153,7 +153,7 @@ type_bonus = 0.1 if final_note.obj_type == ir.target_type else 0
 
 - 观察：
   - Occupation 类问题多为单边检索（mention→属性），结构化策略在别名与字段倒排的配合下命中较稳。
-  - 兜底场景集中在实体绑定失败时，通过结构范围内 BM25 仍可提取合理答案值。
+  - 兜底场景集中在实体绑定失败时，通过结构范围内向量检索仍可提取合理答案值。
 
 ## 5. 讨论与局限
 
@@ -165,12 +165,12 @@ type_bonus = 0.1 if final_note.obj_type == ir.target_type else 0
 - 局限与改进方向：
   - 谓词库（`PREDICATE_LIBRARY`）与复合规则有限，复杂问题需扩充规则或学习型解析；
   - 路径打分较简洁（固定线性惩罚），可引入基于质量分、实体流行度、属性一致性等多特征学习重排；
-  - 结构兜底目前以 BM25 为主，可加入属性感知的加权或向量检索与重排融合。
+  - 结构兜底目前采用向量检索（Vector-only），可进一步加入属性感知加权与与图路径重排的融合。
 
 ## 6. 结论
 
-ANO-RAG 以“结构化构建—结构检索—结构内兜底”的范式，形成了端到端可解释的 QA 流程。构建阶段通过验证与归一保证结构质量；检索阶段以别名绑定、图扩展与类型约束实现稳定召回；兜底在结构范围内以 BM25 提升弱信号场景鲁棒性。实验表明，Occupation 类问题在该范式下获得良好的结构命中率与证据覆盖，体现了结构化索引与检索的实用性与可扩展价值。
+ANO-RAG 以“结构化构建—结构检索—结构内兜底”的范式，形成了端到端可解释的 QA 流程。构建阶段通过验证与归一保证结构质量；检索阶段以别名绑定、图扩展与类型约束实现稳定召回；兜底在结构范围内以向量检索提升弱信号场景鲁棒性。实验表明，Occupation 类问题在该范式下获得良好的结构命中率与证据覆盖，体现了结构化索引与检索的实用性与可扩展价值。
 
 ——
 
-附：关键公式与伪代码均来自本仓库代码（`indexer/`, `retriever/`, `utils/` 等）中的具体实现，包括 BM25 参数与路径打分项。若需扩展为更复杂任务，可在不改变范式的前提下扩充谓词库与类型约束，并引入学习型重排模块。
+附：关键公式与伪代码均来自本仓库代码（`indexer/`, `retriever/`, `utils/` 等）中的具体实现。若需扩展为更复杂任务，可在不改变范式的前提下扩充谓词库与类型约束，并引入学习型重排模块与向量重排融合。

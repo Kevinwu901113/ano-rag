@@ -9,6 +9,8 @@ import requests
 from requests.adapters import HTTPAdapter
 import threading
 import itertools
+import os
+import re
 from loguru import logger
 
 from config.config_loader import config as global_config
@@ -32,25 +34,31 @@ class NoteGenerator:
         vllm_cfg = global_config.get("vllm", {}) or {}
         ccfg = vllm_cfg.get("concurrency", {}) or {}
 
-        # Endpoint pool: prefer CLI endpoint in strict mode (e.g., shard builds)
+        # Endpoint pool: prefer env-based endpoints in non-strict mode; fall back to config list
         endpoints_cfg = ccfg.get("endpoints") or []
-        if strict_endpoint or not (endpoints_cfg and isinstance(endpoints_cfg, list)):
+        self._endpoint_lock = threading.Lock()
+        self._strict_endpoint = bool(strict_endpoint)
+        # Resolve endpoint pool
+        if self._strict_endpoint:
             self._endpoints = [endpoint.rstrip("/")]
         else:
-            self._endpoints = [str(ep).rstrip("/") for ep in endpoints_cfg if ep]
+            env_eps = self._resolve_env_endpoints()
+            if env_eps:
+                self._endpoints = env_eps
+            elif endpoints_cfg and isinstance(endpoints_cfg, list):
+                self._endpoints = [str(ep).rstrip("/") for ep in endpoints_cfg if ep]
+            else:
+                # Fallback to single endpoint provided
+                self._endpoints = [endpoint.rstrip("/")]
 
-        # Round-robin iterator for endpoints (protected by lock for thread safety)
+        # Round-robin iterator and health map (boolean healthy flags)
         self._endpoint_cycle = itertools.cycle(self._endpoints)
-        self._endpoint_lock = threading.Lock()
-        # Basic per-endpoint health with temporary blacklist and half-open recovery
-        self._health: Dict[str, Dict[str, float]] = {
-            ep: {"score": 1.0, "blacklist_until": 0.0} for ep in self._endpoints
-        }
+        self._healthy: Dict[str, bool] = {ep: True for ep in self._endpoints}
+        # Recovery delay for half-open circuit (default 30s)
+        self._recovery_delay_sec = float(ccfg.get("blacklist_duration_sec", 30.0))
 
         # Thread-local HTTP session per worker for connection reuse
         self._local = threading.local()
-        # Remember strict endpoint behavior to adjust connection handling
-        self._strict_endpoint = bool(strict_endpoint)
 
         # Timeouts and backoff
         # Separate connect/read timeouts; defaults to (3.05s, 20s)
@@ -110,6 +118,35 @@ class NoteGenerator:
         self._parsing_max_tokens = parsing_config.get("max_tokens")
 
     # -----------------------------
+    # Backend pool helpers
+    # -----------------------------
+    def _resolve_env_endpoints(self) -> List[str]:
+        """Resolve endpoints strictly from environment variables VLLM_ENDPOINT{N}.
+
+        Returns an ordered list if any are set; otherwise returns empty.
+        """
+        pattern = re.compile(r"^VLLM_ENDPOINT(\d+)$")
+        pairs: List[tuple[int, str]] = []
+        for key, val in os.environ.items():
+            m = pattern.match(key)
+            if m and val:
+                try:
+                    idx = int(m.group(1))
+                except Exception:
+                    continue
+                pairs.append((idx, str(val).rstrip("/")))
+        if pairs:
+            pairs.sort(key=lambda x: x[0])
+            seen = set()
+            out: List[str] = []
+            for _, ep in pairs:
+                if ep and ep not in seen:
+                    out.append(ep)
+                    seen.add(ep)
+            return out
+        return []
+
+    # -----------------------------
     # Prompt：严格 JSON 输出
     # -----------------------------
     @staticmethod
@@ -129,7 +166,16 @@ class NoteGenerator:
             '       * "subject_profile" = {"type": <subj_type>, "aliases": [], "nationality": [], "birth": null, "death": null, "occupations": [], "titles": [], "categories": [], "same_as": []}. Fill lists when evidence gives the data; use [] when unknown.\n'
             f'       * "attribute" = {{"name": <same as pred>, "values": [{{"value": <raw>, "normalized": <canonical or same>, "confidence": 0-1, "source": "{doc_id}", "evidence": <snippet>}}]}}\n'
             '       * Set "object_profile" when the object is an entity (type + aliases). Otherwise omit or use null.\n'
-            "Use canonical vocabulary (e.g., map 'comic artist' -> 'cartoonist', 'American' -> 'United States') when obvious; otherwise repeat the raw value.\n"
+            "Use canonical vocabulary (e.g., map 'comic artist' -> 'cartoonist', 'American' -> 'United States') when obvious; otherwise repeat the raw value.\n\n"
+            "STYLE / 写作规范:\n"
+            "1) 不得使用代词（如 他/她/它/他们/其/该/this/that/they 等）作为主语。\n"
+            "2) 始终使用最具体、可辨识的实体全名或规范简称（如“Tim Berners-Lee”，“万科企业股份有限公司（万科）”）。\n"
+            "3) 若上下文能确定实体，统一回填实体全称，不要写‘他/她/其/该公司’。\n\n"
+            "Examples / 例子:\n"
+            "[Bad] 他在1998年加入公司。\n"
+            "[Good] Tim Berners-Lee 在 1998 年加入万维网联盟（W3C）。\n"
+            "[Bad] She was born in 1988.\n"
+            "[Good] Ada Lovelace was born in 1815.\n\n"
             "Text:\n"
             f'"""{source_text}"""\n'
             "Output only the JSON."
@@ -161,28 +207,21 @@ class NoteGenerator:
             self._local.session = sess
         return sess
 
-    def _next_endpoint(self) -> str:
-        try:
-            with self._endpoint_lock:
-                now = time.time()
-                # Try cycle until a non-blacklisted endpoint is found
-                for _ in range(len(self._endpoints)):
-                    candidate = next(self._endpoint_cycle)
-                    bl_until = (self._health.get(candidate) or {}).get("blacklist_until", 0.0)
-                    if bl_until <= now:
-                        return candidate
-                # If all are blacklisted, pick the one with nearest expiry
-                least = sorted(
-                    self._endpoints,
-                    key=lambda ep: (self._health.get(ep) or {}).get("blacklist_until", 0.0),
-                )[0]
-                return least
-        except Exception:
-            return self.endpoint
+    def _choose_endpoint(self) -> str:
+        """Round-robin with health preference; if all unhealthy, fall back to first.
+        Thread-safe via endpoint lock.
+        """
+        with self._endpoint_lock:
+            for _ in range(len(self._endpoints)):
+                ep = next(self._endpoint_cycle)
+                if self._healthy.get(ep, True):
+                    return ep
+            # All marked unhealthy: fall back to first and rely on short retries
+            return self._endpoints[0]
 
     def _mark_endpoint_success(self, endpoint: str) -> None:
-        h = self._health.setdefault(endpoint, {"score": 1.0, "blacklist_until": 0.0})
-        h["blacklist_until"] = 0.0
+        # On success, mark endpoint healthy
+        self._healthy[endpoint] = True
 
     def _reset_session(self) -> None:
         sess = getattr(self._local, "session", None)
@@ -193,10 +232,18 @@ class NoteGenerator:
                 pass
             self._local.session = None
 
+    def _mark_unhealthy(self, endpoint: str) -> None:
+        # Circuit-breaker: mark unhealthy and schedule half-open recovery
+        self._healthy[endpoint] = False
+        try:
+            threading.Timer(self._recovery_delay_sec, lambda: self._healthy.update({endpoint: True})).start()
+        except Exception:
+            # If timer fails, rely on next success to flip healthy
+            pass
+
     def _mark_endpoint_failure(self, endpoint: str, kind: str) -> None:
-        h = self._health.setdefault(endpoint, {"score": 1.0, "blacklist_until": 0.0})
-        h["blacklist_until"] = time.time() + max(0.0, self._blacklist_duration_sec)
-        # Reset the thread-local session on transport issues to avoid stale keep-alive sockets
+        # Mark endpoint unhealthy and reset session on transport issues
+        self._mark_unhealthy(endpoint)
         if kind in ("timeout", "http"):
             self._reset_session()
 
@@ -215,7 +262,7 @@ class NoteGenerator:
                 }
                 if stop:
                     payload["stop"] = stop
-                endpoint = self._next_endpoint()
+                endpoint = self._choose_endpoint()
                 if self._endpoint_log_every and attempt == 0:
                     try:
                         if (self._recent_calls % self._endpoint_log_every) == 0:

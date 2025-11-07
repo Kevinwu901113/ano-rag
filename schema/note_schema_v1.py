@@ -157,6 +157,17 @@ NOTE_JSON_SCHEMA = {
                         "additionalProperties": False,
                     },
                     "render_hint": {"type": ["string", "null"]},
+                    # Pronoun/alias tolerance fields
+                    "has_unresolved_pronoun": {"type": ["boolean", "null"]},
+                    "original_subject": {"type": ["string", "null"]},
+                    "subject_source": {"type": ["string", "null"]},
+                    "subject_confidence": {"type": ["number", "null"], "minimum": 0.0, "maximum": 1.0},
+                    "alias_map": {"type": ["object", "null"]},
+                    "entities": {"type": ["array", "null"], "items": {"type": "string", "minLength": 1}},
+                    # Canonical evidence and anchor fields
+                    "evidence_canonical": {"type": ["string", "null"], "minLength": 4},
+                    "anchor_entity": {"type": ["string", "null"], "minLength": 1},
+                    "lead_in_note_id": {"type": ["string", "null"], "minLength": 1},
                 },
                 "additionalProperties": False,
             },
@@ -170,6 +181,7 @@ ALLOWED_TYPES = ["PERSON", "WORK", "ORG", "PLACE", "EVENT", "CONCEPT", "TIME"]
 ALLOWED_PREDICATES = [
     "performed_by",
     "authored_by",
+    "directed_by",
     "spouse",
     "parent",
     "born_in",
@@ -209,11 +221,12 @@ PRED2ATTR = {
 
 PRED_SYNONYM_SETS = {
     "performed_by": {"recorded_by", "artist", "performed_by"},
-    "authored_by": {"written_by", "authored_by"},
-    "spouse": {"married_to", "partner", "spouse", "spouse_of"},
-    "parent": {"father", "mother", "parent"},
-    "born_in": {"place_of_birth", "born_in"},
-    "acted_in": {"starring", "cast_in", "acted_in"},
+    "authored_by": {"written_by", "authored_by", "author_of", "wrote"},
+    "directed_by": {"directed_by", "director_of", "directed", "who_directed"},
+    "spouse": {"married_to", "partner", "spouse", "spouse_of", "wife_of", "husband_of"},
+    "parent": {"father", "mother", "parent", "parent_of"},
+    "born_in": {"place_of_birth", "born_in", "born_at", "born_on", "native_of"},
+    "acted_in": {"starring", "cast_in", "acted_in", "starred_in", "played", "portrayed"},
     "located_in": {"located_in"},
     "produced_by": {"produced_by"},
     "released_in": {"released_in"},

@@ -71,6 +71,17 @@ DEFAULT_CONFIG: Dict[str, Any] = {
             "YEAR": "TIME",
         },
     },
+    "retrieval": {
+        "weights": {
+            # 规则权重：score = base_score * w
+            "corefers": 1.0,                    # 命中 COREFERS_TO：×1.0
+            "mentions": 0.9,                    # 命中 MENTIONS：×0.9
+            "unresolved_pronoun": 0.8,         # has_unresolved_pronoun=true：×0.8
+            "neighbor_bonus": 0.9,             # 邻域带出：额外×0.9
+            "alias_penalty": 0.95,             # 命中 alias 而非 canonical：×0.95
+            "fallback_contains_entity_boost": 1.05  # 全文回退：包含规范实体或别名加权
+        }
+    },
 }
 
 

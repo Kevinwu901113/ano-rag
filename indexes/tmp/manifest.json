@@ -1,0 +1,21 @@
+{
+  "generated_at": 1762448863,
+  "counts": {
+    "entities": 2,
+    "predicates": 1,
+    "notes": 1
+  },
+  "files": {
+    "entity_to_notes": "entity_to_notes.json",
+    "predicate_to_notes": "predicate_to_notes.json",
+    "domain_index": "domain_index.json",
+    "type_edge_index": "type_edge_index.json",
+    "graph_edges": "graph_edges.jsonl",
+    "inverse_edges": "inverse_edges.jsonl",
+    "field_index": "field_index.json",
+    "entity_alias_index": "entity_alias_index.json",
+    "mentions_edges": "mentions_edges.jsonl",
+    "corefers_edges": "corefers_edges.jsonl"
+  },
+  "version": 1
+}

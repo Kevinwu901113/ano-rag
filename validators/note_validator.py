@@ -51,10 +51,12 @@ def _type_pattern_ok(subj_type: str, pred: str, obj_type: str) -> float:
     allowed = {
         "performed_by": {("WORK", "PERSON")},
         "authored_by": {("WORK", "PERSON")},
+        "directed_by": {("WORK", "PERSON")},
         "spouse": {("PERSON", "PERSON")},
         "parent": {("PERSON", "PERSON")},
         "born_in": {("PERSON", "PLACE")},
         "acted_in": {("PERSON", "WORK")},
+        "headquartered_in": {("ORG", "PLACE")},
         "occupation": {("PERSON", "CONCEPT"), ("PERSON", "ORG")},
         "title": {("PERSON", "CONCEPT"), ("PERSON", "WORK"), ("ORG", "CONCEPT")},
         "category": {
@@ -229,6 +231,8 @@ def validate_and_normalize(raw_text: str, doc_id: str, chunk_id: str):
                     "evidence": patched_obj.get("evidence", ""),
                 }
             ]
+        # Preserve optional tolerance fields
+        # has_unresolved_pronoun, original_subject, alias_map, entities may be present in meta; keep as-is.
         meta["attribute"] = {
             "name": attr_name,
             "values": attr_values,
@@ -304,7 +308,11 @@ def validate_and_normalize(raw_text: str, doc_id: str, chunk_id: str):
         base_conf = float(item["meta"]["confidence"])
         final_conf = round(base_conf * pred_weight * type_weight, 4)
 
-        quality = _compute_quality(item["evidence"], subject_profile, normalized_values, alias_hits)
+        evidence_text = item["evidence"].strip()
+        meta_ev_canon = (item.get("meta", {}) or {}).get("evidence_canonical")
+        # canonical 版本用于检索/排序；原文 evidence 保持可核验
+        canonical_evidence = meta_ev_canon.strip() if isinstance(meta_ev_canon, str) and meta_ev_canon.strip() else evidence_text
+        quality = _compute_quality(evidence_text, subject_profile, normalized_values, alias_hits)
 
         note_id = f"{doc_id}#{chunk_id}#{idx}"
         notes.append(
@@ -315,12 +323,13 @@ def validate_and_normalize(raw_text: str, doc_id: str, chunk_id: str):
                 "obj": normalized_values[0].get("normalized") or item["obj"].strip(),
                 "subj_type": item["subj_type"],
                 "obj_type": item["obj_type"],
-                "evidence": item["evidence"].strip(),
+                "evidence": evidence_text,
                 "meta": {
                     **item["meta"],
                     "source": item["meta"]["source"],
                     "confidence": base_conf,
                     "final_conf": final_conf,
+                    "evidence_canonical": canonical_evidence,
                     "attribute": {
                         # 保证 occupation 的规范输出
                         "name": pred,

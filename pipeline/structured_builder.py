@@ -11,7 +11,8 @@ from config.config_loader import config as global_config
 from doc import make_chunks
 from generator.note_generator import NoteGenerator
 from indexer.index_builder import IndexBuilder
-from utils import FileUtils
+from utils import FileUtils, TextUtils
+from postprocess.notes_postprocess import backfill_pronoun_subjects
 
 
 def _read_text(path: Path) -> str:
@@ -85,9 +86,111 @@ class StructuredBuilder:
         timeout_pause_threshold = float(ccfg.get("pause_on_timeout_rate", 0.3))
         pause_sec = float(ccfg.get("pause_sec", 7.0))
 
+        def _canonicalize_sentence(subject: str | None, sentence: str) -> str:
+            # 仅句首独立代词替换；避免宾语/物主误替换
+            if not sentence:
+                return sentence
+            s = sentence.strip()
+            if not subject:
+                return s
+            parts = s.split()
+            if parts and TextUtils.is_pronoun(parts[0]):
+                return (subject or parts[0]) + " " + " ".join(parts[1:])
+            # 中文句首
+            import re as _re
+            m = _re.match(rf"^({'|'.join(TextUtils.ZH_PRONOUNS)})", s)
+            if m:
+                return (subject or s[: m.end()]).strip() + s[m.end():]
+            return s
+
         def _process_one(chunk):
             try:
-                return self.generator.generate_for_chunk(chunk)
+                # Generate notes for chunk
+                notes = self.generator.generate_for_chunk(chunk)
+                # Perform minimal postprocess: pronoun backfill and alias map for this chunk
+                try:
+                    stubs, alias_map, alias_to_canonical = backfill_pronoun_subjects(chunk)
+                except Exception:
+                    stubs, alias_map, alias_to_canonical = [], {}, {}
+                # Attach alias_map into each note's meta; mark unresolved pronoun if detected
+                enriched: List[Dict] = []
+                for note in notes:
+                    meta = (note.get("meta") or {})
+                    # Set alias map only once per chunk in meta (small duplication acceptable in JSONL)
+                    meta["alias_map"] = alias_map
+                    # Entities mentioned in evidence mapped to canonical via alias_to_canonical
+                    ev_text = (note.get("evidence") or "")
+                    entities_surface = TextUtils.extract_entity_candidates(ev_text)
+                    entities_canonical = []
+                    for surf in entities_surface:
+                        canon = alias_to_canonical.get(surf.lower()) or surf
+                        if canon not in entities_canonical:
+                            entities_canonical.append(canon)
+                    meta["entities"] = entities_canonical
+                    # anchor_entity: 若该块存在唯一实体，记录之；用于检索时的回填
+                    uniq_entities = [e for e in entities_canonical]
+                    if len(uniq_entities) == 1:
+                        meta["anchor_entity"] = uniq_entities[0]
+
+                    # lead_in_note_id: 若发生了回拉或前置拼接，记录来源 stub 的 note_id
+                    lead_in_note_id = None
+
+                    # If pronoun unresolved in stub for same sentence, propagate flag
+                    # We attempt to match evidence start with sentence text
+                    has_unresolved = False
+                    original_subject = None
+                    resolved_subject = None
+                    for stub in stubs:
+                        if (stub.get("meta", {}) or {}).get("has_unresolved_pronoun"):
+                            # Weak heuristic: if stub evidence is contained in note evidence
+                            ev = (note.get("evidence") or "")
+                            sev = (stub.get("evidence") or "")
+                            if sev and ev and sev in ev:
+                                has_unresolved = True
+                                original_subject = (stub.get("meta", {}) or {}).get("original_subject")
+                                lead_in_note_id = stub.get("note_id")
+                                break
+                        # Also allow positive subject backfill when stub has resolved subject and matches evidence
+                        subj_stub = stub.get("subj")
+                        if subj_stub:
+                            ev = (note.get("evidence") or "")
+                            sev = (stub.get("evidence") or "")
+                            if sev and ev and sev in ev:
+                                resolved_subject = subj_stub
+                                # do not break: prefer unresolved flag detection above; but keep a candidate
+                    # Fallback: direct pronoun lead detection on evidence
+                    if not has_unresolved and TextUtils.is_pronoun_subject_sentence(ev_text):
+                        has_unresolved = True
+                        original_subject = ev_text.split(" ")[0]
+                    if has_unresolved:
+                        meta["has_unresolved_pronoun"] = True
+                        if original_subject:
+                            meta["original_subject"] = original_subject
+                    if lead_in_note_id:
+                        meta["lead_in_note_id"] = lead_in_note_id
+                    # If note subject looks like a pronoun, try backfill using stub's resolved subject
+                    subj_text = (note.get("subj") or "").strip()
+                    if subj_text and TextUtils.is_pronoun(subj_text) and resolved_subject:
+                        note["subj"] = resolved_subject
+                        meta["subject_source"] = "window_backfill"
+                        meta["subject_confidence"] = 0.8
+
+                    # evidence canonical：句首代词在置信条件满足时替换为最近主体
+                    # 触发条件：句内无第二实体名，且与上一句间隔≤1句（借助 stub 匹配）
+                    canonical_ev = ev_text
+                    try:
+                        if resolved_subject:
+                            # 简单检查：若该证据中的实体候选最多1个，才做替换
+                            ev_entities = TextUtils.extract_entity_candidates(ev_text)
+                            if len(ev_entities) <= 1:
+                                canonical_ev = _canonicalize_sentence(resolved_subject, ev_text)
+                    except Exception:
+                        canonical_ev = ev_text
+                    meta["evidence_canonical"] = canonical_ev
+
+                    note["meta"] = meta
+                    enriched.append(note)
+                return enriched
             except Exception as exc:
                 logger.warning("Chunk generation failed doc={} chunk={} err={}", chunk.get("doc_id"), chunk.get("chunk_id"), exc)
                 return []

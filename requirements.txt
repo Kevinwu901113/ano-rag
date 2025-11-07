@@ -7,3 +7,6 @@ python-docx>=0.8.11
 jsonlines>=3.1.0
 regex>=2024.5.15
 orjson>=3.10.3
+pyarrow>=14.0.2
+fastparquet>=2024.5.0
+pandas>=2.0.0

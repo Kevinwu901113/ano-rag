@@ -32,7 +32,8 @@ def build_notes(
         vllm_model,
         temperature=temperature,
         max_tokens=max_tokens,
-        strict_endpoint=True,
+        # Use dynamic backend pool rather than pinning to a strict endpoint
+        strict_endpoint=False,
     )
 
     if shard_cnt < 1:
@@ -69,8 +70,6 @@ def build_notes(
         if not progress_path:
             return
         payload = {
-            "shard_idx": shard_idx,
-            "shard_cnt": shard_cnt,
             "total_chunks": int(total),
             "processed_chunks": int(processed_chunks),
             "start_time": float(start_ts),
@@ -83,20 +82,19 @@ def build_notes(
             with open(progress_path, "w", encoding="utf-8") as handle:
                 json.dump(payload, handle, ensure_ascii=False)
         except Exception as exc:
-            logger.warning("Failed to write progress shard={} path={} err={}", shard_idx, progress_path, exc)
+            logger.warning("Failed to write progress path={} err={}", progress_path, exc)
 
     with open(notes_path, "w", encoding="utf-8") as handle:
-        # Collect shard-specific chunks to compute total for progress
-        shard_chunks = []
-        for idx, (_doc, chunk) in enumerate(adapter(data_dir)):
-            if idx % shard_cnt == shard_idx:
-                shard_chunks.append(chunk)
+        # Collect ALL chunks into a shared task list (no static sharding)
+        chunk_records = []
+        for _idx, (_doc, chunk) in enumerate(adapter(data_dir)):
+            chunk_records.append(chunk)
 
-        total = len(shard_chunks)
+        total = len(chunk_records)
         _emit_progress(total, completed=False)
 
         if max_workers <= 1:
-            for chunk in shard_chunks:
+            for chunk in chunk_records:
                 notes = _process_one(chunk)
                 for note in notes:
                     handle.write(json.dumps(note, ensure_ascii=False) + "\n")
@@ -104,7 +102,7 @@ def build_notes(
                 processed_chunks += 1
                 _emit_progress(total, completed=False, current_workers=1)
         else:
-            # Saturate pool with adaptive target
+            # Saturate pool with adaptive target over the shared task list
             with concurrent.futures.ThreadPoolExecutor(max_workers=upper_workers) as executor:
                 inflight = set()
                 i = 0
@@ -133,7 +131,7 @@ def build_notes(
 
                 # Prime
                 while i < n and len(inflight) < target:
-                    inflight.add(executor.submit(_process_one, shard_chunks[i]))
+                    inflight.add(executor.submit(_process_one, chunk_records[i]))
                     i += 1
                 # Maintain saturation
                 while inflight:
@@ -147,20 +145,18 @@ def build_notes(
                         _emit_progress(total, completed=False, current_workers=len(inflight))
                     _maybe_update_target()
                     while i < n and len(inflight) < target:
-                        inflight.add(executor.submit(_process_one, shard_chunks[i]))
+                        inflight.add(executor.submit(_process_one, chunk_records[i]))
                         i += 1
 
     _emit_progress(total, completed=True)
 
-    logger.info("Notes written to {} (shard {}/{}; {} notes)", notes_out, shard_idx, shard_cnt, written)
+    logger.info("Notes written to {} ({} notes)", notes_out, written)
 
-    if shard_cnt == 1:
-        builder = IndexBuilder()
-        builder.build_from_jsonl(str(notes_path))
-        builder.dump(indexes_dir)
-        logger.info("Indexes dumped to {}", indexes_dir)
-    else:
-        logger.info("Skipping index build for shard mode (shard_cnt={})", shard_cnt)
+    # Always build indexes in dynamic task mode
+    builder = IndexBuilder()
+    builder.build_from_jsonl(str(notes_path))
+    builder.dump(indexes_dir)
+    logger.info("Indexes dumped to {}", indexes_dir)
 
     return {"notes_written": written, "shard_idx": shard_idx, "shard_cnt": shard_cnt}
 

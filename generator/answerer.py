@@ -6,7 +6,7 @@ from loguru import logger
 
 ANS_PROMPT = """You are a factual answerer. Use ONLY the provided evidence sentences to answer the question. If the evidence is insufficient, say "Insufficient evidence".
 Question: {q}
-Evidence:
+Evidence (canonical | original):
 {ev}
 Instruction: Provide a concise answer. Do not add facts not present in the evidence.
 Answer:
@@ -21,7 +21,12 @@ def call_lmstudio(
     temperature: float = 0.2,
     max_tokens: int = 64,
 ) -> str:
-    ev_text = "\n".join(f"{idx + 1}) {item['evidence']}" for idx, item in enumerate(evidences))
+    def _fmt(item, idx):
+        canon = item.get("canonical") or item.get("evidence") or ""
+        raw = item.get("evidence") or ""
+        nid = item.get("note_id") or ""
+        return f"{idx + 1}) [{nid}] {canon} | {raw}"
+    ev_text = "\n".join(_fmt(item, idx) for idx, item in enumerate(evidences))
     ev_text = ev_text.replace("{", "{{").replace("}", "}}")
     prompt = ANS_PROMPT.format(q=question.replace("{", "{{").replace("}", "}}"), ev=ev_text)
 

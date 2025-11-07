@@ -8,10 +8,20 @@ from schema.note_schema_v1 import PRED_SYNONYM_SETS
 
 
 QUESTION_TYPE_PATTERNS = {
-    "who": re.compile(r"^\s*who\b", re.I),
-    "where": re.compile(r"^\s*where\b", re.I),
-    "when": re.compile(r"^\s*when\b", re.I),
-    "what": re.compile(r"^\s*what\b", re.I),
+    "who": [re.compile(r"^\s*who\b", re.I), re.compile(r"\bwho\b", re.I)],
+    "where": [re.compile(r"^\s*where\b", re.I), re.compile(r"\bwhere\b", re.I)],
+    "when": [re.compile(r"^\s*when\b", re.I), re.compile(r"\bwhen\b", re.I)],
+    "what": [re.compile(r"^\s*what\b", re.I), re.compile(r"\bwhat\b", re.I)],
+    "which": [re.compile(r"^\s*which\b", re.I), re.compile(r"\bwhich\b", re.I)],
+    "whom": [re.compile(r"^\s*whom\b", re.I), re.compile(r"\bwhom\b", re.I)],
+    "whose": [re.compile(r"^\s*whose\b", re.I), re.compile(r"\bwhose\b", re.I)],
+    "how": [re.compile(r"^\s*how\b", re.I), re.compile(r"\bhow\b", re.I)],
+    "how_many": [re.compile(r"^\s*how\s+many\b", re.I), re.compile(r"\bhow\s+many\b", re.I)],
+    "in_which": [re.compile(r"^\s*in\s+which\b", re.I), re.compile(r"\bin\s+which\b", re.I)],
+    "what_is": [re.compile(r"^\s*what\s+(?:is|was|are|’s|'s)\b", re.I), re.compile(r"\bwhat\s+(?:is|was|are|’s|'s)\b", re.I)],
+    "name_of": [re.compile(r"^\s*name\s+of\b", re.I), re.compile(r"\bname\s+of\b", re.I)],
+    "title_of": [re.compile(r"^\s*title\s+of\b", re.I), re.compile(r"\btitle\s+of\b", re.I)],
+    "capital_of": [re.compile(r"^\s*capital\s+of\b", re.I), re.compile(r"\bcapital\s+of\b", re.I)],
 }
 
 
@@ -78,6 +88,53 @@ ATTRIBUTE_HINTS = [
             re.compile(r"headquarters of (?P<entity>.+?)(?:\?|$)", re.I),
         ],
         "keywords": ["headquarters", "headquartered"]
+    },
+    {
+        "name": "authored_by",
+        "weight": 0.85,
+        "regex": [
+            re.compile(r"who\s+(?:wrote|authored)\s+(?P<entity>.+?)(?:\?|$)", re.I),
+            re.compile(r"written\s+by\s+(?P<entity>.+?)(?:\?|$)", re.I),
+            re.compile(r"author\s+of\s+(?P<entity>.+?)(?:\?|$)", re.I),
+        ],
+        "keywords": ["written by", "wrote", "author of"],
+    },
+    {
+        "name": "born_in",
+        "weight": 0.85,
+        "regex": [
+            re.compile(r"where\s+was\s+(?P<entity>.+?)\s+born", re.I),
+            re.compile(r"(?P<entity>.+?)\s+was\s+born\s+(?:in|at|on)\s+.+", re.I),
+            re.compile(r"birthplace\s+of\s+(?P<entity>.+?)(?:\?|$)", re.I),
+        ],
+        "keywords": ["born in", "birthplace", "native of"],
+    },
+    {
+        "name": "spouse",
+        "weight": 0.8,
+        "regex": [
+            re.compile(r"spouse\s+of\s+(?P<entity>.+?)(?:\?|$)", re.I),
+            re.compile(r"who\s+is\s+(?P<entity>.+?)'?s\s+(?:husband|wife|spouse)", re.I),
+        ],
+        "keywords": ["spouse of", "wife of", "husband of"],
+    },
+    {
+        "name": "directed_by",
+        "weight": 0.8,
+        "regex": [
+            re.compile(r"who\s+directed\s+(?P<entity>.+?)(?:\?|$)", re.I),
+            re.compile(r"directed\s+by\s+(?P<entity>.+?)(?:\?|$)", re.I),
+            re.compile(r"director\s+of\s+(?P<entity>.+?)(?:\?|$)", re.I),
+        ],
+        "keywords": ["directed by", "director of"],
+    },
+    {
+        "name": "acted_in",
+        "weight": 0.8,
+        "regex": [
+            re.compile(r"who\s+(?:starred|acted)\s+in\s+(?P<entity>.+?)(?:\?|$)", re.I),
+        ],
+        "keywords": ["starred in", "acted in"],
     },
 ]
 
@@ -153,9 +210,18 @@ class AnswerIntentDetector:
 
     @staticmethod
     def _detect_question_type(lowered_question: str) -> Optional[str]:
-        for qtype, pattern in QUESTION_TYPE_PATTERNS.items():
-            if pattern.search(lowered_question):
+        # 先尝试句首命中，再尝试宽松命中
+        for qtype, patterns in QUESTION_TYPE_PATTERNS.items():
+            if not isinstance(patterns, list):
+                patterns = [patterns]
+            if patterns and patterns[0].search(lowered_question):
                 return qtype
+        for qtype, patterns in QUESTION_TYPE_PATTERNS.items():
+            if not isinstance(patterns, list):
+                patterns = [patterns]
+            for pattern in patterns[1:]:
+                if pattern.search(lowered_question):
+                    return qtype
         return None
 
     def _detect_attribute(self, lowered: str, original: str) -> tuple[Optional[str], float, Optional[str]]:

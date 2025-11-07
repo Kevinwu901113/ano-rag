@@ -12,7 +12,8 @@ GPU1="${GPU1:-1}"
 DTYPE="${DTYPE:-float16}"
 MAX_MODEL_LEN="${MAX_MODEL_LEN:-8192}"
 RESULT_ROOT="${RESULT_ROOT:-result}"
-SHARD_CNT=${SHARD_CNT:-2}
+# Single-process build by default
+SHARD_CNT=${SHARD_CNT:-1}
 VLLM_BIN="${VLLM_BIN:-python -m vllm.entrypoints.openai.api_server}"
 VLLM_DOWNLOAD_DIR="${VLLM_DOWNLOAD_DIR:-}"
 STARTED_VLLM=0
@@ -22,19 +23,14 @@ WORK_DIR=""
 LOG_DIR=""
 NOTES_DIR=""
 IDX_DIR=""
-OUT_SHARD0=""
-OUT_SHARD1=""
 OUT_MERGED=""
-IDX_TMP0=""
-IDX_TMP1=""
 VLLM_LOG0=""
 VLLM_LOG1=""
 VLLM_PID0=""
 VLLM_PID1=""
-BUILD_LOG0=""
-BUILD_LOG1=""
-BUILD_PID0=""
-BUILD_PID1=""
+BUILD_LOG=""
+BUILD_PID=""
+PROG_SINGLE=""
 
 log() { printf "\033[1;34m[%s]\033[0m %s\n" "$(date +'%H:%M:%S')" "$*"; }
 
@@ -150,22 +146,15 @@ ensure_workspace() {
   IDX_DIR="$WORK_DIR/indexes"
   mkdir -p "$NOTES_DIR" "$IDX_DIR"
 
-  OUT_SHARD0="$NOTES_DIR/notes.${DATASET}.shard0.jsonl"
-  OUT_SHARD1="$NOTES_DIR/notes.${DATASET}.shard1.jsonl"
   OUT_MERGED="$NOTES_DIR/notes.${DATASET}.jsonl"
-  IDX_TMP0="$WORK_DIR/indexes.tmp0"
-  IDX_TMP1="$WORK_DIR/indexes.tmp1"
 
   VLLM_LOG0="$LOG_DIR/vllm_gpu0.log"
   VLLM_LOG1="$LOG_DIR/vllm_gpu1.log"
   VLLM_PID0="$WORK_DIR/vllm_gpu0.pid"
   VLLM_PID1="$WORK_DIR/vllm_gpu1.pid"
-  BUILD_LOG0="$LOG_DIR/build_shard0.log"
-  BUILD_LOG1="$LOG_DIR/build_shard1.log"
-  BUILD_PID0="$WORK_DIR/build_shard0.pid"
-  BUILD_PID1="$WORK_DIR/build_shard1.pid"
-  PROG_SHARD0="$WORK_DIR/progress_shard0.json"
-  PROG_SHARD1="$WORK_DIR/progress_shard1.json"
+  BUILD_LOG="$LOG_DIR/build_single.log"
+  BUILD_PID="$WORK_DIR/build_single.pid"
+  PROG_SINGLE="$WORK_DIR/progress.json"
 
   log "Workspace: $WORK_DIR"
   log "Dataset dir: $DATA_DIR"
@@ -209,58 +198,37 @@ start_vllm_dual() {
   STARTED_VLLM=1
 }
 
-build_notes_dual() {
-  if (( SHARD_CNT != 2 )); then
-    log "Current script supports SHARD_CNT=2 (got ${SHARD_CNT})"
+build_notes_single() {
+  if (( SHARD_CNT != 1 )); then
+    log "Single-process mode: please set SHARD_CNT=1 (got ${SHARD_CNT})"
     exit 1
   fi
 
-  rm -rf "$IDX_TMP0" "$IDX_TMP1"
-  mkdir -p "$IDX_TMP0" "$IDX_TMP1"
+  # Export two endpoints to be picked up by NoteGenerator (env priority)
+  export VLLM_ENDPOINT0="http://${VLLM_HOST}:${VLLM_PORT0}/v1"
+  export VLLM_ENDPOINT1="http://${VLLM_HOST}:${VLLM_PORT1}/v1"
 
-  log "Launching shard0 -> ${OUT_SHARD0}"
-  CUDA_VISIBLE_DEVICES="${GPU0}" python main_build_notes.py \
+  log "Launching single builder -> ${OUT_MERGED}"
+  CUDA_VISIBLE_DEVICES="${GPU0},${GPU1}" python main_build_notes.py \
     --dataset "${DATASET}" \
     --data_dir "${DATA_DIR}" \
-    --out "${OUT_SHARD0}" \
-    --indexes_dir "${IDX_TMP0}" \
+    --out "${OUT_MERGED}" \
+    --indexes_dir "${IDX_DIR}" \
     --vllm_endpoint "http://${VLLM_HOST}:${VLLM_PORT0}/v1" \
     --vllm_model "${VLLM_MODEL}" \
-    --shard-idx 0 --shard-cnt "${SHARD_CNT}" \
-    --progress-path "${PROG_SHARD0}" \
-    > "$BUILD_LOG0" 2>&1 & echo $! > "$BUILD_PID0"
+    --shard-cnt 1 \
+    --progress-path "${PROG_SINGLE}" \
+    > "$BUILD_LOG" 2>&1 & echo $! > "$BUILD_PID"
 
-  log "Launching shard1 -> ${OUT_SHARD1}"
-  CUDA_VISIBLE_DEVICES="${GPU1}" python main_build_notes.py \
-    --dataset "${DATASET}" \
-    --data_dir "${DATA_DIR}" \
-    --out "${OUT_SHARD1}" \
-    --indexes_dir "${IDX_TMP1}" \
-    --vllm_endpoint "http://${VLLM_HOST}:${VLLM_PORT1}/v1" \
-    --vllm_model "${VLLM_MODEL}" \
-    --shard-idx 1 --shard-cnt "${SHARD_CNT}" \
-    --progress-path "${PROG_SHARD1}" \
-    > "$BUILD_LOG1" 2>&1 & echo $! > "$BUILD_PID1"
-
-  # Progress monitor loop: show combined progress while waiting
-  log "Waiting both shards to finish ..."
+  # Progress monitor loop
+  log "Waiting build to finish ..."
   start_time=$(date +%s)
-  pid0=$(cat "$BUILD_PID0")
-  pid1=$(cat "$BUILD_PID1")
-  while kill -0 "$pid0" 2>/dev/null || kill -0 "$pid1" 2>/dev/null; do
-    # Read progress files if exist
-    total0=0; done0=0; notes0=0; workers0=0
-    total1=0; done1=0; notes1=0; workers1=0
-    if [[ -f "$PROG_SHARD0" ]]; then
-      read -r total0 done0 notes0 workers0 < <(progress_values "$PROG_SHARD0")
+  pid=$(cat "$BUILD_PID")
+  while kill -0 "$pid" 2>/dev/null; do
+    total=0; done=0; notes=0; workers=0
+    if [[ -f "$PROG_SINGLE" ]]; then
+      read -r total done notes workers < <(progress_values "$PROG_SINGLE")
     fi
-    if [[ -f "$PROG_SHARD1" ]]; then
-      read -r total1 done1 notes1 workers1 < <(progress_values "$PROG_SHARD1")
-    fi
-    total=$(( total0 + total1 ))
-    done=$(( done0 + done1 ))
-    notes=$(( notes0 + notes1 ))
-    workers=$(( workers0 > workers1 ? workers0 : workers1 ))
     now=$(date +%s)
     elapsed=$(( now - start_time ))
     rate_str="0.00"
@@ -273,7 +241,6 @@ build_notes_dual() {
       eta_sec=$(awk -v r="$rate_str" -v rem="$remaining" 'BEGIN{printf "%d", rem/r}')
       eta="${eta_sec}s"
     fi
-    # Render a simple text progress bar
     width=40
     filled=0
     if (( total > 0 )); then
@@ -285,45 +252,11 @@ build_notes_dual() {
     sleep 2
   done
   echo
-  wait "$pid0" || { log "shard0 failed"; exit 1; }
-  wait "$pid1" || { log "shard1 failed"; exit 1; }
-  rm -f "$BUILD_PID0" "$BUILD_PID1"
+  wait "$pid" || { log "build failed"; exit 1; }
+  rm -f "$BUILD_PID"
 
-  log "Merging shards -> ${OUT_MERGED}"
-  OUT_SHARD0="${OUT_SHARD0}" OUT_SHARD1="${OUT_SHARD1}" OUT_MERGED="${OUT_MERGED}" python - <<'PY'
-import json, os
-paths = [os.getenv("OUT_SHARD0"), os.getenv("OUT_SHARD1")]
-merged = os.getenv("OUT_MERGED")
-seen = set()
-with open(merged, "w", encoding="utf-8") as fout:
-    for path in paths:
-        with open(path, "r", encoding="utf-8") as handle:
-            for line in handle:
-                line = line.strip()
-                if not line:
-                    continue
-                note = json.loads(line)
-                nid = note["note_id"]
-                if nid in seen:
-                    continue
-                seen.add(nid)
-                fout.write(json.dumps(note, ensure_ascii=False) + "\n")
-print(f"merged {len(seen)} notes to {merged}")
-PY
-
-  log "Building final indexes ..."
-  OUT_MERGED="${OUT_MERGED}" IDX_DIR="${IDX_DIR}" python - <<'PY'
-import os
-from indexer.index_builder import IndexBuilder
-notes = os.getenv("OUT_MERGED")
-idx_dir = os.getenv("IDX_DIR")
-builder = IndexBuilder()
-builder.build_from_jsonl(notes)
-builder.dump(idx_dir)
-print("indexes built into", idx_dir)
-PY
-
-  rm -rf "$IDX_TMP0" "$IDX_TMP1"
+  log "Notes written to ${OUT_MERGED}"
+  log "Indexes stored at ${IDX_DIR}"
 }
 
 stop_vllm_and_wait() {
@@ -372,7 +305,7 @@ done
 
 ensure_workspace
 start_vllm_dual
-build_notes_dual
+build_notes_single
 stop_vllm_and_wait
 
 log "Notes written to ${OUT_MERGED}"

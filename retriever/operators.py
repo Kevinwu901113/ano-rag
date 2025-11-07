@@ -62,6 +62,40 @@ class Indexes:
                 row = json.loads(line)
                 self.inverse_edges[row["obj"]].extend(row["edges"])
 
+        # Mentions edges (note -> [entity])
+        self.mentions_edges = defaultdict(list)
+        mentions_path = os.path.join(directory, "mentions_edges.jsonl")
+        if os.path.exists(mentions_path):
+            with open(mentions_path, "r", encoding="utf-8") as handle:
+                for line in handle:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    row = json.loads(line)
+                    self.mentions_edges[row["note_id"]].extend(row.get("mentions", []))
+
+        # Corefers edges (note -> [entity])
+        self.corefers_edges = defaultdict(list)
+        corefers_path = os.path.join(directory, "corefers_edges.jsonl")
+        if os.path.exists(corefers_path):
+            with open(corefers_path, "r", encoding="utf-8") as handle:
+                for line in handle:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    row = json.loads(line)
+                    self.corefers_edges[row["note_id"]].extend(row.get("corefers_to", []))
+
+        # Anchor index
+        self.anchor_index = {}
+        anchor_path = os.path.join(directory, "anchor_index.json")
+        if os.path.exists(anchor_path):
+            with open(anchor_path, "r", encoding="utf-8") as handle:
+                try:
+                    self.anchor_index = json.load(handle)
+                except Exception:
+                    self.anchor_index = {}
+
 
 def BIND(indexes: Indexes, alias: str, type_candidates: List[str], limit: int = 50) -> List[str]:
     matches: List[str] = []
@@ -158,7 +192,7 @@ def _normalize_alias_query(text: str) -> str:
     if not value:
         return ""
     value = re.sub(r"\([^)]*\)", "", value)
-    value = value.replace("-", " ").replace(".", " ")
     value = unicodedata.normalize("NFKC", value)
+    value = re.sub(r"[\W_]+", " ", value)
     value = re.sub(r"\s+", " ", value)
     return value.strip().lower()

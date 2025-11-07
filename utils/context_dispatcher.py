@@ -130,14 +130,15 @@ class ContextDispatcher:
     def _select_paths(self, candidates: List[Dict[str, Any]], query: str) -> List[Dict[str, Any]]:
         """第一阶段：路径选择"""
         # 提取种子节点
-        semantic_seeds = [c.get("note_id") for c in candidates 
-                         if c.get("tags", {}).get("source") != "graph" and c.get("note_id") is not None]
-        bm25_seeds = [c.get("note_id") for c in candidates 
-                     if c.get("tags", {}).get("source") == "bm25" and c.get("note_id") is not None]
-        
+        semantic_seeds = [c.get("note_id") for c in candidates
+                          if c.get("tags", {}).get("source") != "graph" and c.get("note_id") is not None]
+        # 向量-only 回退来源的种子（替代旧 BM25 标签）
+        fallback_seeds = [c.get("note_id") for c in candidates
+                          if c.get("tags", {}).get("source") == "vector" and c.get("note_id") is not None]
+
         # 生成和选择路径
         paths = self.graph_retriever.generate_and_select_paths(
-            query, semantic_seeds, bm25_seeds
+            query, semantic_seeds, fallback_seeds
         )
         
         # 将路径转换为候选节点，保留路径信息

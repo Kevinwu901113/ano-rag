@@ -7,6 +7,7 @@ import re
 import unicodedata
 
 from schema.note_schema_v1 import PRED2ATTR
+from utils import TextUtils
 
 
 class IndexBuilder:
@@ -19,6 +20,11 @@ class IndexBuilder:
         self.type_edge_index = defaultdict(list)
         self.field_index = defaultdict(lambda: defaultdict(list))
         self.alias_to_entities = defaultdict(list)
+        # Mentions and coreference edges (note-centric)
+        self.mentions_edges = defaultdict(list)  # note_id -> [entity]
+        self.corefers_edges = defaultdict(list)  # note_id -> [entity]
+        # Anchor index: note_id -> anchor_entity
+        self.anchor_index = {}
 
     def add_note(self, note: Dict) -> None:
         note_id = note["note_id"]
@@ -67,6 +73,37 @@ class IndexBuilder:
                 continue
             if note["subj"] not in self.alias_to_entities[alias_key]:
                 self.alias_to_entities[alias_key].append(note["subj"])
+        # Merge alias_map from meta into alias index
+        alias_map = (note.get("meta") or {}).get("alias_map") or {}
+        if isinstance(alias_map, dict):
+            for canonical, aliases in alias_map.items():
+                for alias in aliases or []:
+                    alias_key = self._normalize_alias(alias)
+                    if not alias_key:
+                        continue
+                    if canonical not in self.alias_to_entities[alias_key]:
+                        self.alias_to_entities[alias_key].append(canonical)
+
+        # Build MENTIONS edges from evidence text
+        evidence = (note.get("evidence") or "").strip()
+        if evidence:
+            for entity in TextUtils.extract_entity_candidates(evidence):
+                # 去噪：丢弃或强降权仅含单字母/破碎 token 的 mention（如 O、S）
+                if not entity or len(entity.strip()) <= 1:
+                    continue
+                if entity not in self.mentions_edges[note_id]:
+                    self.mentions_edges[note_id].append(entity)
+
+        # Build COREFERS_TO edge: note -> subject entity
+        if subj:
+            if subj not in self.corefers_edges[note_id]:
+                self.corefers_edges[note_id].append(subj)
+
+        # Anchor entity from meta if present and unique
+        meta = (note.get("meta") or {})
+        anchor = meta.get("anchor_entity")
+        if isinstance(anchor, str) and anchor.strip():
+            self.anchor_index[note_id] = anchor.strip()
 
     @staticmethod
     def _normalize_alias(text: str) -> str:
@@ -142,6 +179,7 @@ class IndexBuilder:
         }
         dump_json(field_index_serializable, "field_index.json")
         dump_json(self.alias_to_entities, "entity_alias_index.json")
+        dump_json(self.anchor_index, "anchor_index.json")
 
         graph_path = os.path.join(out_dir, "graph_edges.jsonl")
         with open(graph_path, "w", encoding="utf-8") as handle:
@@ -157,6 +195,16 @@ class IndexBuilder:
                 handle.write(
                     json.dumps({"obj": obj, "edges": edges}, ensure_ascii=False) + "\n"
                 )
+
+        mentions_path = os.path.join(out_dir, "mentions_edges.jsonl")
+        with open(mentions_path, "w", encoding="utf-8") as handle:
+            for nid, entities in self.mentions_edges.items():
+                handle.write(json.dumps({"note_id": nid, "mentions": entities}, ensure_ascii=False) + "\n")
+
+        corefers_path = os.path.join(out_dir, "corefers_edges.jsonl")
+        with open(corefers_path, "w", encoding="utf-8") as handle:
+            for nid, entities in self.corefers_edges.items():
+                handle.write(json.dumps({"note_id": nid, "corefers_to": entities}, ensure_ascii=False) + "\n")
 
         note_ids = {nid for notes in self.entity_to_notes.values() for nid in notes}
 
@@ -176,6 +224,9 @@ class IndexBuilder:
                 "inverse_edges": "inverse_edges.jsonl",
                 "field_index": "field_index.json",
                 "entity_alias_index": "entity_alias_index.json",
+                "mentions_edges": "mentions_edges.jsonl",
+                "corefers_edges": "corefers_edges.jsonl",
+                "anchor_index": "anchor_index.json",
             },
             "version": 1,
         }

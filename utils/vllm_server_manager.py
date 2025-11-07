@@ -179,6 +179,24 @@ class VLLMServerManager:
             failures.append(f"{spec.name}@{spec.host}:{spec.port} ({reason})")
         return failures
 
+    def get_process_info(self) -> List[Dict[str, Any]]:
+        """Return metadata for launched processes: name, pid, port, cuda devices.
+
+        Useful for logging PID and GPU binding to run logs.
+        """
+        out: List[Dict[str, Any]] = []
+        for info in self._processes:
+            proc = info.get("process")
+            spec: VLLMServerSpec = info.get("spec")
+            out.append({
+                "name": spec.name,
+                "pid": getattr(proc, "pid", None),
+                "host": spec.host,
+                "port": spec.port,
+                "cuda_devices": spec.cuda_devices,
+            })
+        return out
+
     # -- internal helpers --------------------------------------------------------
     def _build_command(self, python_executable: str, spec: VLLMServerSpec) -> List[str]:
         cmd: List[str] = [
