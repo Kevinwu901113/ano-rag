@@ -20,6 +20,7 @@ def call_lmstudio(
     evidences: list,
     temperature: float = 0.2,
     max_tokens: int = 64,
+    retries: int = 2,
 ) -> str:
     def _fmt(item, idx):
         canon = item.get("canonical") or item.get("evidence") or ""
@@ -30,7 +31,6 @@ def call_lmstudio(
     ev_text = ev_text.replace("{", "{{").replace("}", "}}")
     prompt = ANS_PROMPT.format(q=question.replace("{", "{{").replace("}", "}}"), ev=ev_text)
 
-    retries = 2
     for attempt in range(retries + 1):
         try:
             response = requests.post(

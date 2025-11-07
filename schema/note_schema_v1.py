@@ -1,3 +1,6 @@
+import json
+from pathlib import Path
+
 PROFILE_SCHEMA = {
     "type": "object",
     "required": ["type", "aliases"],
@@ -178,6 +181,7 @@ NOTE_JSON_SCHEMA = {
 
 ALLOWED_TYPES = ["PERSON", "WORK", "ORG", "PLACE", "EVENT", "CONCEPT", "TIME"]
 
+# 默认允许的谓词集合；若存在 schema/predicates.json 则以文件为准（小写化）
 ALLOWED_PREDICATES = [
     "performed_by",
     "authored_by",
@@ -205,6 +209,18 @@ ALLOWED_PREDICATES = [
     "same_as",
     "type",
 ]
+
+# 尝试从配置文件加载替换
+try:
+    _PRED_PATH = Path(__file__).resolve().parents[1] / "schema" / "predicates.json"
+    if _PRED_PATH.exists():
+        with open(_PRED_PATH, "r", encoding="utf-8") as fh:
+            _preds = json.load(fh)
+            if isinstance(_preds, list) and _preds:
+                ALLOWED_PREDICATES = [str(p).strip().lower() for p in _preds if str(p).strip()]
+except Exception:
+    # 若加载失败，保留默认集合
+    pass
 
 # 属性映射表：谓词到规范化属性名，用于索引层归一
 PRED2ATTR = {
@@ -259,3 +275,5 @@ PRED_SYNONYM_SETS = {
     "same_as": {"same_as", "identical_to"},
     "type": {"type", "entity_type", "category_type"},
 }
+import json
+from pathlib import Path

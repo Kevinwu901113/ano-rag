@@ -14,7 +14,12 @@ def make_chunks(doc_id: str, text: str, chunk_id_prefix: str = "p") -> List[Dict
         spans = [{"text": cleaned, "start": 0, "end": len(cleaned)}]
 
     n_sent = max(1, int(config.get("chunk.n_sent", 4)))
-    overlap = max(0, int(config.get("chunk.overlap", 1)))
+    # Ensure overlap is sentence-based and clamped to 1–2 sentences
+    try:
+        _overlap_cfg = int(config.get("chunk.overlap", 1))
+    except Exception:
+        _overlap_cfg = 1
+    overlap = max(1, min(2, _overlap_cfg))
     # Sliding step
     step = max(1, n_sent - overlap)
     # Optional token/size cap (simple char cap here; could be bytes/tokens)

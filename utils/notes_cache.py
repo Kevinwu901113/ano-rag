@@ -3,6 +3,9 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+import threading
+import uuid
+import time
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import pandas as pd
@@ -25,6 +28,8 @@ class NotesCache:
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._df: Optional[pd.DataFrame] = None
+        # Guard concurrent writers (producer threads) to avoid tmp-file races
+        self._lock = threading.RLock()
 
     def _load(self) -> None:
         if self._df is not None:
@@ -78,33 +83,36 @@ class NotesCache:
         self._load()
         assert self._df is not None
         serialized = json.dumps(notes, ensure_ascii=False)
-        df = self._df
-        idxs = df.index[df["hash"] == hash_key].tolist()
-        if idxs:
-            # overwrite
-            df.loc[idxs[0], "notes_json"] = serialized
-        else:
-            df = pd.concat([df, pd.DataFrame({"hash": [hash_key], "notes_json": [serialized]})], ignore_index=True)
-        self._df = df
-        self._persist()
+        with self._lock:
+            df = self._df
+            idxs = df.index[df["hash"] == hash_key].tolist()
+            if idxs:
+                # overwrite
+                df.loc[idxs[0], "notes_json"] = serialized
+            else:
+                df = pd.concat([df, pd.DataFrame({"hash": [hash_key], "notes_json": [serialized]})], ignore_index=True)
+            self._df = df
+            self._persist()
 
     def put_many(self, items: Iterable[Tuple[str, List[Dict[str, Any]]]]) -> None:
         self._load()
         assert self._df is not None
-        df = self._df
-        for key, notes in items:
-            serialized = json.dumps(notes, ensure_ascii=False)
-            idxs = df.index[df["hash"] == key].tolist()
-            if idxs:
-                df.loc[idxs[0], "notes_json"] = serialized
-            else:
-                df = pd.concat([df, pd.DataFrame({"hash": [key], "notes_json": [serialized]})], ignore_index=True)
-        self._df = df
-        self._persist()
+        with self._lock:
+            df = self._df
+            for key, notes in items:
+                serialized = json.dumps(notes, ensure_ascii=False)
+                idxs = df.index[df["hash"] == key].tolist()
+                if idxs:
+                    df.loc[idxs[0], "notes_json"] = serialized
+                else:
+                    df = pd.concat([df, pd.DataFrame({"hash": [key], "notes_json": [serialized]})], ignore_index=True)
+            self._df = df
+            self._persist()
 
     def contains(self, hash_key: str) -> bool:
         self._load()
         assert self._df is not None
+        # Read path does not strictly need locking; keep simple
         return not self._df[self._df["hash"] == hash_key].empty
 
     def keys(self) -> List[str]:
@@ -114,10 +122,18 @@ class NotesCache:
 
     def _persist(self) -> None:
         assert self._df is not None
-        try:
-            # Write atomically by temp file and replace
-            tmp = self.path.with_suffix(self.path.suffix + ".tmp")
-            self._df.to_parquet(tmp, index=False)
-            os.replace(tmp, self.path)
-        except Exception as exc:
-            logger.error("Failed to persist notes cache '{}' : {}", self.path, exc)
+        # Serialize writes to avoid concurrent rename races
+        with self._lock:
+            try:
+                # Write atomically using a unique temp file per write
+                unique = f".tmp.{uuid.uuid4().hex}.{os.getpid()}.{threading.get_ident()}"
+                tmp = self.path.parent / f"{self.path.name}{unique}"
+                # Ensure parent exists
+                self.path.parent.mkdir(parents=True, exist_ok=True)
+                self._df.to_parquet(tmp, index=False)
+                # Robustness: verify file exists before replace
+                if not tmp.exists():
+                    raise FileNotFoundError(f"Temp parquet not found: {tmp}")
+                os.replace(tmp, self.path)
+            except Exception as exc:
+                logger.error("Failed to persist notes cache '{}' : {}", self.path, exc)
