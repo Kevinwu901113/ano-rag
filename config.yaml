@@ -37,6 +37,49 @@ lmstudio:
   endpoint: "http://127.0.0.1:1234/v1"
   model: "openai/gpt-oss-20b"
 
+retriever:
+  structured:
+    enabled: true
+    fanout: 8
+  embedding:
+    enabled: true
+    provider: "qwen3"
+    model: "Qwen/Qwen3-Embedding-8B"
+    offline_index_path: "indexes/faiss/notes.faiss"
+    meta_path: "indexes/faiss/notes.meta.parquet"
+    max_len_note: 256
+    topn: 200
+    faiss:
+      kind: "HNSW32"
+      nprobe: 16
+      efSearch: 128
+    normalize: true
+  bm25:
+    enabled: true
+    backend: "pyserini"
+    store_path: "indexes/bm25/notes"
+    k1: 0.9
+    b: 0.4
+    ngram: [1, 2]
+    field_weights: {subj: 2.0, pred: 1.6, obj: 1.2, ctx: 1.0}
+    topn: 200
+  fusion:
+    method: "rrf"
+    rrf_k: 60
+    weights: {struct: 0.5, emb: 0.3, bm25: 0.2}
+    pre_topM: 128
+    final_topK: 64
+
+reranker:
+  enabled: true
+  type: "llm"
+  llm:
+    endpoint: "${lmstudio.endpoint}"
+    model: "${lmstudio.model}"
+    batch: 16
+    timeout_s: 8
+  final_weights: {pre: 0.3, rerank: 0.5, struct: 0.2}
+
 notes:
   out_path: "notes/notes.jsonl"
   indexes_dir: "indexes/"

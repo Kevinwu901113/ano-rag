@@ -4,41 +4,13 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 import numpy as np
 from sklearn.metrics.pairwise import cosine_similarity
 from loguru import logger
+from .text_builders import build_note_text_for_embed
 
 try:
     from sentence_transformers import SentenceTransformer
 except Exception as exc:
     SentenceTransformer = None  # type: ignore
     logger.warning("sentence_transformers not available: {}. Vector search disabled.", exc)
-
-
-def _note_text(note: Dict[str, Any]) -> str:
-    """构造用于向量编码的笔记文本。
-
-    优先使用结构化证据与简短字段，避免引入噪声：
-    - evidence（原句/规范化句）
-    - obj（若为字符串）
-    - meta.subject_profile.description / meta.object_profile.description（若存在）
-    """
-    parts: List[str] = []
-    meta = (note.get("meta", {}) or {})
-    canonical = meta.get("evidence_canonical")
-    if isinstance(canonical, str) and canonical.strip():
-        parts.append(canonical.strip())
-    else:
-        ev = note.get("evidence")
-        if isinstance(ev, str) and ev.strip():
-            parts.append(ev.strip())
-    obj = note.get("obj")
-    if isinstance(obj, str) and obj.strip():
-        parts.append(obj.strip())
-    subj_prof = ((meta.get("subject_profile") or {}) or {}).get("description")
-    if isinstance(subj_prof, str) and subj_prof.strip():
-        parts.append(subj_prof.strip())
-    obj_prof = ((meta.get("object_profile") or {}) or {}).get("description")
-    if isinstance(obj_prof, str) and obj_prof.strip():
-        parts.append(obj_prof.strip())
-    return " \n".join(parts)
 
 
 class VectorSearcher:
@@ -81,7 +53,7 @@ class VectorSearcher:
         texts: List[str] = []
         valid_notes: List[Dict[str, Any]] = []
         for note in notes:
-            text = _note_text(note)
+            text = build_note_text_for_embed(note, max_len=512)
             if text:
                 texts.append(text)
                 valid_notes.append(note)

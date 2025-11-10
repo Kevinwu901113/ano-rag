@@ -13,6 +13,7 @@ from .operators import BIND, EXPAND_from, Indexes
 from utils.vector_search import VectorSearcher
 from .parser import parse_question
 from .scorer import score_path
+from config import config as config_loader
 
 
 @dataclass
@@ -71,6 +72,11 @@ def retrieve_answer(question: str, indexes: Indexes, note_store: NoteStore) -> D
         )
     except Exception:
         pass
+    # Hybrid retrieval path (structured + embedding + BM25)
+    hybrid_result = _maybe_run_hybrid(question, ir, intent, candidates, note_store)
+    if hybrid_result is not None:
+        return hybrid_result
+
     if not candidates:
         # 结构化兜底：在绑定实体范围内做向量-only检索补全
         structured = _structured_fallback(seed_entities, intent, indexes, note_store)
@@ -535,6 +541,23 @@ def _structured_fallback(entities: List[str], intent: AnswerIntent, indexes: Ind
         "fallback": {"used": True, "stage": "structured_fallback", "status": "ok" if answer_value else "no_match", "intent": intent.to_dict(), "candidates": [{"entity": top_note.get("subj"), "attribute": canonical_attr, "note_id": top_note.get("note_id"), "score": 0.0}]},
         "intent": intent.to_dict(),
     }
+
+
+def _maybe_run_hybrid(question, ir, intent, candidates, note_store):
+    cfg = config_loader.load_config()
+    retr_cfg = cfg.get("retriever") or {}
+    embedding_on = bool((retr_cfg.get("embedding") or {}).get("enabled"))
+    bm25_on = bool((retr_cfg.get("bm25") or {}).get("enabled"))
+    rerank_on = bool((cfg.get("reranker") or {}).get("enabled"))
+    if not (embedding_on or bm25_on or rerank_on):
+        return None
+    try:
+        from .hybrid import HybridRetriever
+    except Exception as exc:
+        logger.error("Hybrid retriever unavailable: {}", exc)
+        return None
+    hybrid = HybridRetriever(cfg)
+    return hybrid.retrieve(question, ir, intent, candidates, note_store)
 
 
 def _rerank_candidates(candidates: List[Candidate], attribute: Optional[str]) -> List[Candidate]:
