@@ -73,15 +73,25 @@ def _replace_pronoun_subject(sentence: str, subject: str) -> str:
     s = sentence.strip()
     if not s or not subject:
         return sentence
+    out = s
     # English: ^Pronoun + verb → Subject + verb
     parts = s.split()
     if parts and parts[0].lower() in TextUtils.EN_PRONOUNS:
-        return subject + " " + " ".join(parts[1:])
-    # Chinese: ^Pronoun + trigger
-    m = re.match(rf"^({'|'.join(TextUtils.ZH_PRONOUNS)})", s)
-    if m:
-        return subject + s[m.end():]
-    return sentence
+        out = subject + " " + " ".join(parts[1:])
+    else:
+        # Chinese: ^Pronoun + trigger
+        m = re.match(rf"^({'|'.join(TextUtils.ZH_PRONOUNS)})", s)
+        if m:
+            out = subject + s[m.end():]
+
+    # Also handle clause starts after punctuation: ; . : ,
+    # e.g., "..., He joined ..." → 
+    out = re.sub(r"([.;:,]\s+)\b(he|she|they)\b", r"\\1" + subject, out, flags=re.I)
+    out = re.sub(r"([.;:,]\s+)\b(his|her|their)\b", r"\\1" + subject + "'s", out, flags=re.I)
+
+    # Possessive at sentence start
+    out = re.sub(r"^\b(his|her|their)\b", subject + "'s", out, flags=re.I)
+    return out
 
 
 def backfill_pronoun_subjects(chunk: Dict[str, Any]) -> Tuple[List[Dict[str, Any]], Dict[str, List[str]], Dict[str, str]]:
@@ -97,6 +107,8 @@ def backfill_pronoun_subjects(chunk: Dict[str, Any]) -> Tuple[List[Dict[str, Any
     alias_map, alias_to_canonical = build_alias_map(sentences)
 
     m = 3  # window size for backfill search; could be config-driven
+    # Lightweight entity stack within this chunk: push on new entities, reset on apparent subject change
+    entity_stack: List[Tuple[str, int]] = []
     updated_notes: List[Dict[str, Any]] = []
 
     # We expect upstream generator to produce notes; here we only prepare meta hints
@@ -105,6 +117,18 @@ def backfill_pronoun_subjects(chunk: Dict[str, Any]) -> Tuple[List[Dict[str, Any
         original = s
         is_pronoun_lead = TextUtils.is_pronoun_subject_sentence(s)
         subject = None
+        # Heuristic: detect new full-name entity and push stack
+        entities = TextUtils.extract_entity_candidates(s)
+        # If we see a capitalized multi-word and it's not top of stack, push
+        for e in entities:
+            if not entity_stack or entity_stack[-1][0] != e:
+                entity_stack.append((e, idx))
+                break
+        # Reset stack on strong subject change: if sentence contains an entity different from top and looks like a title line
+        if entities and entity_stack and entities[0] != entity_stack[-1][0]:
+            # crude title line check: all caps words or colon
+            if any(tok.isupper() and len(tok) >= 2 for tok in s.split()) or (":" in s):
+                entity_stack = [(entities[0], idx)]
         if is_pronoun_lead:
             # search backward up to m sentences for entity candidates
             start = max(0, idx - m)
@@ -123,6 +147,14 @@ def backfill_pronoun_subjects(chunk: Dict[str, Any]) -> Tuple[List[Dict[str, Any
                     canonical = alias_to_canonical.get(cand.lower()) or cand
                     subject = canonical
                     break
+            # Stack-based fallback: use top entity if available
+            if not subject and entity_stack:
+                subject = entity_stack[-1][0]
+
+        # Apply inline backfill for evidence canonical if we have subject
+        evidence_canonical = original
+        if subject:
+            evidence_canonical = _replace_pronoun_subject(original, subject)
 
         # Record meta backfill info as a synthetic note stub for downstream merging
         note_stub = {
@@ -141,9 +173,9 @@ def backfill_pronoun_subjects(chunk: Dict[str, Any]) -> Tuple[List[Dict[str, Any
                 "has_unresolved_pronoun": bool(is_pronoun_lead and not subject),
                 "original_subject": original.split(" ")[0] if is_pronoun_lead else None,
                 "subject_source": "window_backfill" if subject else None,
+                "evidence_canonical": evidence_canonical if subject else None,
             },
         }
         updated_notes.append(note_stub)
 
     return updated_notes, alias_map, alias_to_canonical
-
