@@ -188,6 +188,18 @@ class StructuredBuilder:
                         canonical_ev = ev_text
                     meta["evidence_canonical"] = canonical_ev
 
+                    # 产出级硬约束：若 subj/obj 为代词且无法回填，直接跳过此 note
+                    subj_is_pronoun = TextUtils.is_pronoun((note.get("subj") or "").strip())
+                    obj_is_pronoun = TextUtils.is_pronoun((note.get("obj") or "").strip())
+                    if (subj_is_pronoun or obj_is_pronoun) and not resolved_subject:
+                        # 记录违规上下文，便于调表
+                        meta.setdefault("violations", {})
+                        meta["violations"]["coref_unresolved"] = True
+                        meta["violations"]["evidence"] = ev_text
+                        meta["violations"]["chunk_id"] = chunk.get("chunk_id")
+                        # Skip adding this note
+                        continue
+
                     note["meta"] = meta
                     enriched.append(note)
                 return enriched

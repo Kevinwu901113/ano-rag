@@ -106,9 +106,17 @@ NOTE_JSON_SCHEMA = {
         ],
         "properties": {
             "note_id": {"type": ["string", "null"], "minLength": 1},
-            "subj": {"type": "string", "minLength": 1},
+            "subj": {
+                "type": "string",
+                "minLength": 1,
+                "not": {"pattern": "(?i)^(he|she|they|his|her|their)$"}
+            },
             "pred": {"type": "string", "minLength": 1},
-            "obj": {"type": "string", "minLength": 1},
+            "obj": {
+                "type": "string",
+                "minLength": 1,
+                "not": {"pattern": "(?i)^(he|she|they|his|her|their)$"}
+            },
             "subj_type": {
                 "type": "string",
                 "enum": [

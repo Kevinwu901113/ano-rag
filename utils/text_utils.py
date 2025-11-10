@@ -49,7 +49,7 @@ class TextUtils:
         Split text into sentences with span offsets, supporting English and Chinese.
 
         Rules:
-        - English: split on [.!?]+(\s+|$), keep punctuation.
+        - English: split on [.!?]+(\\s+|$), keep punctuation.
         - Chinese: split on [。！？]+, keep punctuation.
         Returns list of dicts: {"text": str, "start": int, "end": int}
         """
@@ -63,7 +63,7 @@ class TextUtils:
         # Combined terminator regex: a sentence terminator and following spaces (English),
         # or just Chinese terminators.
         # Match either Chinese terminators (no trailing space required) or English terminators followed by space/EOS
-        terminator_re = re.compile(r"([。！？]+)|([.!?]+)(\s+|$)")
+        terminator_re = re.compile(r"([。！？]+)|([.!?;]+)(\s+|$)")
         for m in terminator_re.finditer(cleaned):
             end = m.end()
             sentence = cleaned[start:end].strip()

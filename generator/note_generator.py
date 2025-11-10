@@ -167,6 +167,11 @@ class NoteGenerator:
             f'       * "attribute" = {{"name": <same as pred>, "values": [{{"value": <raw>, "normalized": <canonical or same>, "confidence": 0-1, "source": "{doc_id}", "evidence": <snippet>}}]}}\n'
             '       * Set "object_profile" when the object is an entity (type + aliases). Otherwise omit or use null.\n'
             "Use canonical vocabulary (e.g., map 'comic artist' -> 'cartoonist', 'American' -> 'United States') when obvious; otherwise repeat the raw value.\n\n"
+            "Extraction Priority / 抽取优先级（携带主体）：\n"
+            "A) FULLNAME was/is a/an <NOUN> → (subj=FULLNAME, pred=occupation, obj=<NOUN>)\n"
+            "B) FULLNAME married <NAME> → (subj=FULLNAME, pred=spouse, obj=<NAME>)\n"
+            "C) FULLNAME was born in <PLACE> → (subj=FULLNAME, pred=born_in, obj=<PLACE>)\n"
+            "当句子以代词开头且无法确定代词指代实体时，跳过该句的抽取。\n\n"
             "STYLE / 写作规范:\n"
             "1) 不得使用代词（如 他/她/它/他们/其/该/this/that/they 等）作为主语。\n"
             "2) 始终使用最具体、可辨识的实体全名或规范简称（如“Tim Berners-Lee”，“万科企业股份有限公司（万科）”）。\n"

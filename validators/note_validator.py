@@ -345,15 +345,36 @@ def validate_and_normalize(raw_text: str, doc_id: str, chunk_id: str):
         patched_obj["meta"] = meta
         patched.append(patched_obj)
 
+    # 在整体校验前，记录可能的代词违规并做逐条过滤（避免整块失败）
+    pronoun_re = re.compile(r"^(he|she|they|his|her|their)$", re.IGNORECASE)
+    filtered: List[Dict[str, Any]] = []
+    pronoun_violations: List[Dict[str, Any]] = []
+    for idx, item in enumerate(patched):
+        subj = (item.get("subj") or "").strip()
+        obj = (item.get("obj") or "").strip()
+        ev = (item.get("evidence") or "").strip()
+        if pronoun_re.match(subj) or pronoun_re.match(obj):
+            viol = {
+                "index": idx,
+                "subj": subj,
+                "obj": obj,
+                "evidence": ev,
+                "source": f"{doc_id}#{chunk_id}",
+            }
+            pronoun_violations.append(viol)
+            # 代词未回填的条目跳过，不进入 schema 验证阶段
+            continue
+        filtered.append(item)
+
     try:
-        Draft7Validator(NOTE_JSON_SCHEMA).validate(patched)
+        Draft7Validator(NOTE_JSON_SCHEMA).validate(filtered)
     except ValidationError as exc:
         return False, [], {"violations": {"json_schema": str(exc)}}
 
     notes: List[Dict[str, Any]] = []
     unmatched_counter: Dict[str, int] = {}
     skipped_count = 0
-    for idx, item in enumerate(patched):
+    for idx, item in enumerate(filtered):
         subject_profile = _ensure_profile(
             item["meta"].get("subject_profile"),
             default_type=item["subj_type"],
@@ -489,4 +510,6 @@ def validate_and_normalize(raw_text: str, doc_id: str, chunk_id: str):
             {"phrase": k, "count": v} for k, v in top_unmatched
         ],
     }
+    if pronoun_violations:
+        metrics["pronoun_violations"] = pronoun_violations
     return ok, notes, metrics
