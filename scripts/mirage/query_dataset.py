@@ -3,13 +3,12 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 from pathlib import Path
 from typing import List
 
 from loguru import logger
-
-from query.query_processor import QueryProcessor
 
 
 def _list_workspaces(root: Path, dataset: str) -> List[Path]:
@@ -39,6 +38,20 @@ def _select_workspace(root: Path, dataset: str, new: bool) -> Path:
     return workspaces[-1]
 
 
+def _strip_reasoning(answer: str) -> str:
+    text = answer
+    while True:
+        start = text.find("<think>")
+        if start == -1:
+            break
+        end = text.find("</think>", start + 7)
+        if end == -1:
+            text = text[:start] + text[start + 7 :]
+            break
+        text = text[:start] + text[end + len("</think>") :]
+    return text.strip()
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run LM Studio answers for MIRAGE dataset")
     parser.add_argument("--dataset", default="mirage", help="Dataset name (used for workspace naming)")
@@ -51,6 +64,7 @@ def main() -> None:
     parser.add_argument("--lmstudio-model", required=True)
     parser.add_argument("--limit", type=int, default=5)
     parser.add_argument("--out", default=None, help="Output JSON path")
+    parser.add_argument("--qa-log", default=None, help="Optional plain text QA log path (question \t answer)")
     parser.add_argument("--new", action="store_true", help="Force create a new workspace copy")
     args = parser.parse_args()
 
@@ -68,6 +82,10 @@ def main() -> None:
         work_dir = _select_workspace(result_root, dataset_name, args.new)
     logger.info("Using workspace: {}", work_dir)
 
+    override_cfg = work_dir / "config.override.yaml"
+    if override_cfg.exists():
+        os.environ["ANO_RAG_CONFIG"] = str(override_cfg)
+
     indexes_dir = Path(args.indexes_dir) if args.indexes_dir else work_dir / "indexes"
     notes_path = Path(args.notes) if args.notes else work_dir / "notes" / f"notes.{dataset_name}.jsonl"
     if not indexes_dir.exists():
@@ -76,12 +94,15 @@ def main() -> None:
         raise FileNotFoundError(f"Notes file not found: {notes_path}")
 
     output_path = Path(args.out) if args.out else work_dir / "answers.json"
+    qa_log_path = Path(args.qa_log) if args.qa_log else work_dir / "qa.tsv"
 
     with open(dataset_path, "r", encoding="utf-8") as handle:
         dataset = json.load(handle)
 
     if args.limit > 0:
         dataset = dataset[: args.limit]
+
+    from query.query_processor import QueryProcessor
 
     qp = QueryProcessor(
         indexes_dir=str(indexes_dir),
@@ -91,6 +112,7 @@ def main() -> None:
     )
 
     results = []
+    qa_lines: List[str] = []
     for item in dataset:
         question = item.get("query") or item.get("question")
         if not question:
@@ -104,11 +126,23 @@ def main() -> None:
                 "structured": res.get("structured"),
             }
         )
+        answer_text = res.get("answer")
+        if answer_text is None:
+            clean_answer = ""
+        else:
+            stripped = _strip_reasoning(str(answer_text))
+            clean_answer = " ".join(stripped.splitlines())
+        qa_lines.append(f"{question}\t{clean_answer}")
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     with open(output_path, "w", encoding="utf-8") as handle:
         json.dump(results, handle, ensure_ascii=False, indent=2)
     logger.info("Wrote {} answers to {}", len(results), output_path)
+
+    if qa_log_path:
+        qa_log_path.parent.mkdir(parents=True, exist_ok=True)
+        qa_log_path.write_text("\n".join(qa_lines), encoding="utf-8")
+        logger.info("Wrote QA log to {}", qa_log_path)
 
 
 if __name__ == "__main__":

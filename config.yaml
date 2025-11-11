@@ -35,7 +35,7 @@ vllm:
 
 lmstudio:
   endpoint: "http://127.0.0.1:1234/v1"
-  model: "openai/gpt-oss-20b"
+  model: "qwen/qwen3-30b-a3b"
 
 retriever:
   structured:
@@ -45,6 +45,12 @@ retriever:
     enabled: true
     provider: "qwen3"
     model: "Qwen/Qwen3-Embedding-8B"
+    model_path_override: "/home/wjk/models/qwen3-emb"
+    cache_dir: "/home/wjk/models/hf-cache"
+    download_dir: null
+    device: null
+    dtype: "bfloat16"
+    auto_build: true
     offline_index_path: "indexes/faiss/notes.faiss"
     meta_path: "indexes/faiss/notes.meta.parquet"
     max_len_note: 256

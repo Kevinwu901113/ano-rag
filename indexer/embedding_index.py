@@ -42,8 +42,18 @@ class EmbeddingIndexBuilder:
         meta_path.parent.mkdir(parents=True, exist_ok=True)
 
         provider = self.embed_cfg.get("provider", "qwen3")
-        model = self.embed_cfg.get("model", "Qwen/Qwen3-Embedding-8B")
-        encoder = _EmbeddingEncoder(provider, model, int(self.embed_cfg.get("max_len_note", 256)))
+        model = self._resolve_model_name()
+        cache_dir = self._clean_path(self.embed_cfg.get("cache_dir"))
+        device = self._resolve_device()
+        dtype = self.embed_cfg.get("dtype")
+        encoder = EmbeddingEncoder(
+            provider,
+            model,
+            int(self.embed_cfg.get("max_len_note", 256)),
+            cache_dir=cache_dir,
+            device=device,
+            dtype=dtype,
+        )
 
         existing_meta = self._load_existing_meta(meta_path)
         seen_note_ids = set(existing_meta["note_id"]) if existing_meta is not None else set()
@@ -144,6 +154,28 @@ class EmbeddingIndexBuilder:
             return index
         logger.warning("Unknown faiss.kind '{}', falling back to IndexFlatIP.", kind)
         return faiss.IndexFlatIP(dim)
+
+    def _clean_path(self, value: Any) -> Optional[str]:
+        if not value:
+            return None
+        return str(Path(str(value)).expanduser())
+
+    def _resolve_model_name(self) -> str:
+        override = self.embed_cfg.get("model_path_override")
+        base = self.embed_cfg.get("model", "Qwen/Qwen3-Embedding-8B")
+        candidate = str(override or base).strip()
+        if not candidate:
+            raise ValueError("Embedding model name is not configured")
+        if override:
+            logger.info("Embedding model override detected: {}", candidate)
+        return candidate
+
+    def _resolve_device(self) -> Optional[str]:
+        device = self.embed_cfg.get("device")
+        if device:
+            return str(device)
+        system_cfg = self.cfg.get("system") or {}
+        return system_cfg.get("device")
 
 
 def main() -> None:

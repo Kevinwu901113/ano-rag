@@ -1,7 +1,12 @@
+import os
+import re
 import yaml
 from copy import deepcopy
 from pathlib import Path
 from typing import Any, Dict
+
+
+CONFIG_ENV_VAR = "ANO_RAG_CONFIG"
 
 
 DEFAULT_CONFIG: Dict[str, Any] = {
@@ -54,6 +59,12 @@ DEFAULT_CONFIG: Dict[str, Any] = {
             "enabled": True,
             "provider": "qwen3",
             "model": "Qwen/Qwen3-Embedding-8B",
+            "model_path_override": None,
+            "cache_dir": None,
+            "download_dir": None,
+            "device": None,
+            "dtype": None,
+            "auto_build": False,
             "offline_index_path": "indexes/faiss/notes.faiss",
             "meta_path": "indexes/faiss/notes.meta.parquet",
             "max_len_note": 256,
@@ -121,6 +132,14 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     },
 }
 
+ENV_OVERRIDES = {
+    "retriever.embedding.cache_dir": "EMB_CACHE_DIR",
+    "retriever.embedding.model_path_override": "EMB_MODEL_PATH",
+    "retriever.embedding.download_dir": "EMB_DOWNLOAD_DIR",
+    "retriever.embedding.device": "EMB_DEVICE",
+    "retriever.embedding.dtype": "EMB_DTYPE",
+}
+
 
 def _deep_merge(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any]:
     merged = deepcopy(base)
@@ -132,12 +151,71 @@ def _deep_merge(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any
     return merged
 
 
+def _set_nested(config: Dict[str, Any], path: str, value: Any) -> None:
+    cursor = config
+    parts = path.split(".")
+    for part in parts[:-1]:
+        next_value = cursor.get(part)
+        if not isinstance(next_value, dict):
+            next_value = {}
+            cursor[part] = next_value
+        cursor = next_value
+    cursor[parts[-1]] = value
+
+
+def _apply_env_overrides(config: Dict[str, Any]) -> None:
+    for dotted_key, env_var in ENV_OVERRIDES.items():
+        env_val = os.environ.get(env_var)
+        if env_val:
+            _set_nested(config, dotted_key, env_val)
+
+
+def _finalize_config(config: Dict[str, Any]) -> None:
+    retriever_cfg = config.get("retriever") or {}
+    embedding_cfg = retriever_cfg.get("embedding")
+    system_device = (config.get("system") or {}).get("device")
+    if isinstance(embedding_cfg, dict) and system_device and not embedding_cfg.get("device"):
+        embedding_cfg["device"] = system_device
+
+
+def _get_nested(config: Dict[str, Any], path: str) -> Any:
+    cursor: Any = config
+    for part in path.split("."):
+        if not isinstance(cursor, dict) or part not in cursor:
+            return None
+        cursor = cursor[part]
+    return cursor
+
+
+def _resolve_placeholders(config: Dict[str, Any]) -> Dict[str, Any]:
+    def _resolve(value: Any) -> Any:
+        if isinstance(value, dict):
+            for key, val in value.items():
+                value[key] = _resolve(val)
+            return value
+        if isinstance(value, list):
+            return [_resolve(item) for item in value]
+        if isinstance(value, str):
+            def _replace(match: re.Match[str]) -> str:
+                ref = match.group(1)
+                replacement = _get_nested(config, ref)
+                return str(replacement) if replacement is not None else match.group(0)
+            return PLACEHOLDER_PATTERN.sub(_replace, value)
+        return value
+
+    return _resolve(config)
+
+
 class ConfigLoader:
     """Minimal configuration loader for the structured RAG pipeline."""
 
     def __init__(self, config_path: str | None = None):
         if config_path is None:
-            config_path = Path(__file__).resolve().parent.parent / "config.yaml"
+            env_path = os.environ.get(CONFIG_ENV_VAR)
+            if env_path:
+                config_path = Path(env_path)
+            else:
+                config_path = Path(__file__).resolve().parent.parent / "config.yaml"
         self.config_path = Path(config_path)
         self._config: Dict[str, Any] | None = None
 
@@ -149,6 +227,9 @@ class ConfigLoader:
             else:
                 user_config = {}
             self._config = _deep_merge(DEFAULT_CONFIG, user_config)
+            _apply_env_overrides(self._config)
+            _finalize_config(self._config)
+            self._config = _resolve_placeholders(self._config)
         return self._config
 
     def get(self, key: str, default: Any = None) -> Any:
@@ -178,3 +259,4 @@ class ConfigLoader:
 
 
 config = ConfigLoader()
+PLACEHOLDER_PATTERN = re.compile(r"\$\{([^}]+)\}")

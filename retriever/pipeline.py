@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Sequence
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Sequence
 from loguru import logger
 
 from schema.note_schema_v1 import PRED_SYNONYM_SETS
@@ -15,6 +15,9 @@ from .parser import parse_question
 from .scorer import score_path
 from config import config as config_loader
 
+if TYPE_CHECKING:
+    from .hybrid import HybridRetriever
+
 
 @dataclass
 class Candidate:
@@ -27,7 +30,14 @@ class Candidate:
 INTENT_DETECTOR = AnswerIntentDetector()
 
 
-def retrieve_answer(question: str, indexes: Indexes, note_store: NoteStore) -> Dict[str, Any]:
+def retrieve_answer(
+    question: str,
+    indexes: Indexes,
+    note_store: NoteStore,
+    *,
+    cfg: Optional[Dict[str, Any]] = None,
+    hybrid: Optional["HybridRetriever"] = None,
+) -> Dict[str, Any]:
     intent = INTENT_DETECTOR.detect(question)
     ir = parse_question(question)
     # 逐层诊断日志（定位常见失败点）
@@ -73,7 +83,7 @@ def retrieve_answer(question: str, indexes: Indexes, note_store: NoteStore) -> D
     except Exception:
         pass
     # Hybrid retrieval path (structured + embedding + BM25)
-    hybrid_result = _maybe_run_hybrid(question, ir, intent, candidates, note_store)
+    hybrid_result = _maybe_run_hybrid(question, ir, intent, candidates, note_store, cfg=cfg, hybrid=hybrid)
     if hybrid_result is not None:
         return hybrid_result
 
@@ -543,21 +553,32 @@ def _structured_fallback(entities: List[str], intent: AnswerIntent, indexes: Ind
     }
 
 
-def _maybe_run_hybrid(question, ir, intent, candidates, note_store):
-    cfg = config_loader.load_config()
-    retr_cfg = cfg.get("retriever") or {}
+def _maybe_run_hybrid(
+    question,
+    ir,
+    intent,
+    candidates,
+    note_store,
+    *,
+    cfg: Optional[Dict[str, Any]] = None,
+    hybrid: Optional["HybridRetriever"] = None,
+):
+    cfg_obj = cfg or getattr(hybrid, "cfg", None) or config_loader.load_config()
+    retr_cfg = cfg_obj.get("retriever") or {}
     embedding_on = bool((retr_cfg.get("embedding") or {}).get("enabled"))
     bm25_on = bool((retr_cfg.get("bm25") or {}).get("enabled"))
-    rerank_on = bool((cfg.get("reranker") or {}).get("enabled"))
+    rerank_on = bool((cfg_obj.get("reranker") or {}).get("enabled"))
     if not (embedding_on or bm25_on or rerank_on):
         return None
-    try:
-        from .hybrid import HybridRetriever
-    except Exception as exc:
-        logger.error("Hybrid retriever unavailable: {}", exc)
-        return None
-    hybrid = HybridRetriever(cfg)
-    return hybrid.retrieve(question, ir, intent, candidates, note_store)
+    hybrid_inst = hybrid
+    if hybrid_inst is None:
+        try:
+            from .hybrid import HybridRetriever
+        except Exception as exc:
+            logger.error("Hybrid retriever unavailable: {}", exc)
+            return None
+        hybrid_inst = HybridRetriever(cfg_obj)
+    return hybrid_inst.retrieve(question, ir, intent, candidates, note_store)
 
 
 def _rerank_candidates(candidates: List[Candidate], attribute: Optional[str]) -> List[Candidate]:

@@ -42,9 +42,12 @@ class EmbeddingClient:
         self._meta_df = pd.read_parquet(meta_path).sort_values("vector_id")
         self._meta_by_id = {int(row["vector_id"]): row.to_dict() for _, row in self._meta_df.iterrows()}
         provider = self.cfg.get("provider", "qwen3")
-        model = self.cfg.get("model", "Qwen/Qwen3-Embedding-8B")
+        model = self._resolve_model_name()
         max_len = int(self.cfg.get("max_len_note", 256))
-        self._encoder = EmbeddingEncoder(provider, model, max_len)
+        cache_dir = self._clean_path(self.cfg.get("cache_dir"))
+        device = self._resolve_device()
+        dtype = self.cfg.get("dtype")
+        self._encoder = EmbeddingEncoder(provider, model, max_len, cache_dir=cache_dir, device=device, dtype=dtype)
 
     def search(self, question: str, topn: int) -> List[Dict[str, Any]]:
         if not self.enabled or not question.strip():
@@ -85,3 +88,24 @@ class EmbeddingClient:
                 }
             )
         return ranked
+
+    def _resolve_model_name(self) -> str:
+        override = self.cfg.get("model_path_override")
+        base = self.cfg.get("model", "Qwen/Qwen3-Embedding-8B")
+        candidate = str(override or base).strip()
+        if not candidate:
+            raise ValueError("Embedding model name is not configured")
+        if override:
+            logger.info("Embedding model override detected: {}", candidate)
+        return candidate
+
+    def _clean_path(self, value: Any) -> Optional[str]:
+        if not value:
+            return None
+        return str(Path(str(value)).expanduser())
+
+    def _resolve_device(self) -> Optional[str]:
+        device = self.cfg.get("device")
+        if device:
+            return str(device)
+        return None

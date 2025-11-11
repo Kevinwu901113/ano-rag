@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+cd "$ROOT_DIR"
+
 DATASET="${DATASET:-mirage}"
 DATA_DIR="${DATA_DIR:-data/${DATASET}_sample}"
 VLLM_MODEL="${VLLM_MODEL:-qwen2.5-7b-instruct}"
@@ -16,6 +19,7 @@ RESULT_ROOT="${RESULT_ROOT:-result}"
 SHARD_CNT=${SHARD_CNT:-1}
 VLLM_BIN="${VLLM_BIN:-python -m vllm.entrypoints.openai.api_server}"
 VLLM_DOWNLOAD_DIR="${VLLM_DOWNLOAD_DIR:-}"
+VLLM_GPU_MEMORY_UTIL="${VLLM_GPU_MEMORY_UTIL:-0.7}"
 STARTED_VLLM=0
 
 NEW_RUN=0
@@ -31,8 +35,53 @@ VLLM_PID1=""
 BUILD_LOG=""
 BUILD_PID=""
 PROG_SINGLE=""
+RUN_CONFIG=""
 
 log() { printf "\033[1;34m[%s]\033[0m %s\n" "$(date +'%H:%M:%S')" "$*"; }
+
+prepare_run_config() {
+  local base_cfg="$ROOT_DIR/config.yaml"
+  local faiss_dir="$IDX_DIR/faiss"
+  local bm25_store="$IDX_DIR/bm25/notes"
+  mkdir -p "$faiss_dir" "$bm25_store"
+  RUN_CONFIG="$WORK_DIR/config.override.yaml"
+  python - "$base_cfg" "$RUN_CONFIG" "$OUT_MERGED" "$IDX_DIR" "$faiss_dir" "$bm25_store" <<'PY'
+import os, sys, yaml
+base_cfg, out_cfg, notes_path, idx_dir, faiss_dir, bm25_store = sys.argv[1:7]
+cfg = {}
+if os.path.exists(base_cfg):
+    with open(base_cfg, 'r', encoding='utf-8') as handle:
+        cfg = yaml.safe_load(handle) or {}
+notes_cfg = cfg.setdefault('notes', {})
+notes_cfg['out_path'] = notes_path
+notes_cfg['indexes_dir'] = idx_dir
+retr = cfg.setdefault('retriever', {})
+emb = retr.setdefault('embedding', {})
+emb['offline_index_path'] = os.path.join(faiss_dir, 'notes.faiss')
+emb['meta_path'] = os.path.join(faiss_dir, 'notes.meta.parquet')
+bm25 = retr.setdefault('bm25', {})
+bm25['store_path'] = bm25_store
+with open(out_cfg, 'w', encoding='utf-8') as handle:
+    yaml.safe_dump(cfg, handle, allow_unicode=True, sort_keys=False)
+PY
+  export ANO_RAG_CONFIG="$RUN_CONFIG"
+  log "Using run config: $ANO_RAG_CONFIG"
+}
+
+auto_build_indexes_if_needed() {
+  local flag
+  flag=$(python - <<'PY'
+from config import config as loader
+cfg = loader.load_config()
+emb = (cfg.get("retriever") or {}).get("embedding") or {}
+print("1" if emb.get("auto_build") else "0")
+PY
+  )
+  if [[ "$flag" == "1" ]]; then
+    log "retriever.embedding.auto_build=true -> running scripts/build_indexes.sh"
+    bash "$ROOT_DIR/scripts/build_indexes.sh"
+  fi
+}
 
 # Read progress JSON and output: total processed notes
 progress_values() {
@@ -174,6 +223,9 @@ start_vllm_dual() {
   if [[ -n "$VLLM_DOWNLOAD_DIR" ]]; then
     extra_args+=(--download-dir "$VLLM_DOWNLOAD_DIR")
   fi
+  if [[ -n "$VLLM_GPU_MEMORY_UTIL" ]]; then
+    extra_args+=(--gpu-memory-utilization "$VLLM_GPU_MEMORY_UTIL")
+  fi
 
   CUDA_VISIBLE_DEVICES="${GPU0}" nohup ${VLLM_BIN} \
     --model "${VLLM_MODEL_RESOLVED}" \
@@ -209,7 +261,7 @@ build_notes_single() {
   export VLLM_ENDPOINT1="http://${VLLM_HOST}:${VLLM_PORT1}/v1"
 
   log "Launching single builder -> ${OUT_MERGED}"
-  CUDA_VISIBLE_DEVICES="${GPU0},${GPU1}" python main_build_notes.py \
+  CUDA_VISIBLE_DEVICES="${GPU0},${GPU1}" python "$ROOT_DIR/main_build_notes.py" \
     --dataset "${DATASET}" \
     --data_dir "${DATA_DIR}" \
     --out "${OUT_MERGED}" \
@@ -304,9 +356,11 @@ while [[ $# -gt 0 ]]; do
 done
 
 ensure_workspace
+prepare_run_config
 start_vllm_dual
 build_notes_single
 stop_vllm_and_wait
+auto_build_indexes_if_needed
 
 log "Notes written to ${OUT_MERGED}"
 log "Indexes stored at ${IDX_DIR}"

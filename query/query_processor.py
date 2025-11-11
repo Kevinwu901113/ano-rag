@@ -1,5 +1,5 @@
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import TYPE_CHECKING, Any, Dict, Optional
 
 from loguru import logger
 
@@ -9,6 +9,9 @@ from retriever.note_store import NoteStore
 from retriever.operators import Indexes
 from retriever.pipeline import retrieve_answer
 from utils import TextUtils
+
+if TYPE_CHECKING:
+    from retriever.hybrid import HybridRetriever
 
 
 class QueryProcessor:
@@ -22,7 +25,8 @@ class QueryProcessor:
         lmstudio_endpoint: Optional[str] = None,
         lmstudio_model: Optional[str] = None,
     ) -> None:
-        cfg = config.load_config()
+        self.cfg = config.load_config()
+        cfg = self.cfg
         self.indexes_dir = indexes_dir or cfg.get("notes.indexes_dir", "indexes")
         self.notes_path = notes_path or cfg.get("notes.out_path", "notes/notes.jsonl")
 
@@ -60,10 +64,18 @@ class QueryProcessor:
 
         self.indexes = Indexes(self.indexes_dir)
         self.note_store = NoteStore(self.notes_path)
+        self._hybrid: Optional["HybridRetriever"] = None
+        self._hybrid_initialized = False
 
     def process(self, question: str) -> Dict[str, Any]:
         logger.info("Running structured retrieval for question: {}", question)
-        structured = retrieve_answer(question, self.indexes, self.note_store)
+        structured = retrieve_answer(
+            question,
+            self.indexes,
+            self.note_store,
+            cfg=self.cfg,
+            hybrid=self._get_hybrid_retriever(),
+        )
 
         evidences = structured.get("evidence", []) or []
         # 当判 "Insufficient evidence" 的自检：
@@ -96,6 +108,27 @@ class QueryProcessor:
 
         final_answer, diagnostics = self._select_final_answer(question, structured, evidences)
         return {"structured": structured, "answer": final_answer, "diagnostics": diagnostics}
+
+    def _get_hybrid_retriever(self) -> Optional["HybridRetriever"]:
+        if self._hybrid_initialized:
+            return self._hybrid
+        self._hybrid_initialized = True
+        cfg = self.cfg
+        retr_cfg = cfg.get("retriever") or {}
+        embedding_on = bool((retr_cfg.get("embedding") or {}).get("enabled"))
+        bm25_on = bool((retr_cfg.get("bm25") or {}).get("enabled"))
+        rerank_on = bool((cfg.get("reranker") or {}).get("enabled"))
+        if not (embedding_on or bm25_on or rerank_on):
+            self._hybrid = None
+            return None
+        try:
+            from retriever.hybrid import HybridRetriever
+
+            self._hybrid = HybridRetriever(cfg)
+        except Exception as exc:
+            logger.warning("Hybrid retriever initialization failed, fallback to structured only: {}", exc)
+            self._hybrid = None
+        return self._hybrid
 
     @staticmethod
     def _singularize(token: str) -> str:
