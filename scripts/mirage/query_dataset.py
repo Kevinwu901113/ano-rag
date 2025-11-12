@@ -117,7 +117,12 @@ def main() -> None:
         question = item.get("query") or item.get("question")
         if not question:
             continue
-        res = qp.process(question)
+        attr_hint = "occupation" if "occupation" in question.lower() else None
+        qid = item.get("query_id")
+        doc_hint = None
+        if qid:
+            doc_hint = f"{dataset_name}/{qid}"
+        res = qp.process(question, doc_hint=doc_hint, attribute_hint=attr_hint)
         results.append(
             {
                 "query_id": item.get("query_id"),

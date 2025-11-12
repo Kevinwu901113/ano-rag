@@ -1,7 +1,124 @@
-from typing import Dict, List
+import re
+from typing import Dict, List, Tuple
 
 from config import config
 from utils import TextUtils
+
+CLAUSE_SPLIT_RE = re.compile(r"(?<=,|;)\s+|\s+(?=(?:and|but|which)\b)", re.IGNORECASE)
+CLAUSE_LEN_THRESHOLD = 200
+
+
+def _merge_entity_clauses(clauses: List[str]) -> List[str]:
+    cleaned = [cl.strip() for cl in clauses if cl and cl.strip()]
+    if not cleaned:
+        return []
+    merged: List[str] = []
+    i = 0
+    while i < len(cleaned):
+        clause = cleaned[i]
+        if TextUtils.is_entity_sentence(clause):
+            left = merged.pop() if merged else ""
+            right = ""
+            if (i + 1) < len(cleaned):
+                nxt = cleaned[i + 1]
+                if not TextUtils.is_entity_sentence(nxt):
+                    right = nxt
+                    i += 1
+            combined_parts = [part for part in (left, clause, right) if part]
+            merged.append(" ".join(combined_parts).strip())
+        else:
+            merged.append(clause)
+        i += 1
+    return merged
+
+
+def _split_into_clauses(spans: List[Dict]) -> List[Dict]:
+    clause_threshold = int(config.get("chunk.clause_split_len", CLAUSE_LEN_THRESHOLD))
+    expanded: List[Dict] = []
+    for span in spans:
+        text = (span.get("text") or "").strip()
+        if len(text) <= clause_threshold:
+            expanded.append(span)
+            continue
+        parts = CLAUSE_SPLIT_RE.split(span["text"])
+        if len(parts) <= 1:
+            expanded.append(span)
+            continue
+        merged = _merge_entity_clauses(parts)
+        original = span["text"]
+        cursor = 0
+        for clause in merged:
+            if not clause:
+                continue
+            local_idx = original.find(clause, cursor)
+            if local_idx == -1:
+                local_idx = cursor
+            clause_span = {
+                "text": clause.strip(),
+                "start": span["start"] + local_idx,
+                "end": span["start"] + local_idx + len(clause.strip()),
+            }
+            expanded.append(clause_span)
+            cursor = local_idx + len(clause)
+    return expanded
+
+
+def _cluster_sentences(spans: List[Dict]) -> List[List[Dict]]:
+    cluster_max_len = max(3, int(config.get("chunk.cluster_max_len", 5)))
+    pronoun_cap = max(3, int(config.get("chunk.pronoun_run_cap", 5)))
+    clusters: List[List[Dict]] = []
+    pending: List[Dict] = []
+    current: List[Dict] = []
+    has_entity = False
+    for span in spans:
+        text = span.get("text") or ""
+        is_entity = TextUtils.is_entity_sentence(text)
+        is_pronoun = TextUtils.starts_with_pronoun(text)
+
+        if is_entity:
+            if not has_entity and pending:
+                current = pending + [span]
+                pending = []
+            else:
+                if current:
+                    clusters.append(current)
+                current = [span]
+            has_entity = True
+        else:
+            if not has_entity:
+                pending.append(span)
+                if len(pending) > pronoun_cap:
+                    pending = pending[-pronoun_cap:]
+                continue
+            current.append(span)
+        if has_entity and len(current) >= cluster_max_len:
+            clusters.append(current)
+            current = []
+            has_entity = False
+
+    if current:
+        clusters.append(current)
+    if pending:
+        if clusters:
+            clusters[-1].extend(pending)
+        else:
+            clusters.append(pending)
+    return clusters
+
+
+def _flatten_clusters(clusters: List[List[Dict]]) -> Tuple[List[Dict], Dict[int, int]]:
+    flat: List[Dict] = []
+    cluster_start: Dict[int, int] = {}
+    idx = 0
+    for cluster_id, bucket in enumerate(clusters):
+        if cluster_id not in cluster_start:
+            cluster_start[cluster_id] = idx
+        for span in bucket:
+            cloned = dict(span)
+            cloned["_cluster_id"] = cluster_id
+            flat.append(cloned)
+            idx += 1
+    return flat, cluster_start
 
 
 def make_chunks(doc_id: str, text: str, chunk_id_prefix: str = "p") -> List[Dict]:
@@ -12,6 +129,18 @@ def make_chunks(doc_id: str, text: str, chunk_id_prefix: str = "p") -> List[Dict
     spans = TextUtils.split_with_spans(cleaned)
     if not spans:
         spans = [{"text": cleaned, "start": 0, "end": len(cleaned)}]
+    clause_spans = _split_into_clauses(spans)
+    clusters = _cluster_sentences(clause_spans)
+    if not clusters:
+        clusters = [clause_spans]
+    flat_spans, cluster_start_indices = _flatten_clusters(clusters)
+    if not flat_spans:
+        flat_spans = []
+        for idx, span in enumerate(clause_spans):
+            cloned = dict(span)
+            cloned["_cluster_id"] = 0
+            flat_spans.append(cloned)
+        cluster_start_indices = {0: 0}
 
     n_sent = max(1, int(config.get("chunk.n_sent", 4)))
     # Ensure overlap is sentence-based and clamped to 1–2 sentences
@@ -25,6 +154,7 @@ def make_chunks(doc_id: str, text: str, chunk_id_prefix: str = "p") -> List[Dict
     # Optional token/size cap (simple char cap here; could be bytes/tokens)
     max_total_sent = int(config.get("chunk.max_total_sent", 8))
 
+    adaptive_back_limit = max(1, int(config.get("chunk.adaptive_overlap_cap", 3)))
     chunks: List[Dict] = []
     idx = 0
     cursor = 0
@@ -37,56 +167,42 @@ def make_chunks(doc_id: str, text: str, chunk_id_prefix: str = "p") -> List[Dict
                     uniq.append(e)
         return uniq
 
-    while cursor < len(spans):
-        # Base window
-        window = spans[cursor : cursor + n_sent]
-        if not window:
-            break
+    while cursor < len(flat_spans):
+        start = cursor
+        window: List[Dict] = []
+        end = start
+        while end < len(flat_spans) and len(window) < n_sent:
+            window.append(flat_spans[end])
+            end += 1
+        # Do not cut within a cluster
+        while (
+            end < len(flat_spans)
+            and len(window) < max_total_sent
+            and flat_spans[end]["_cluster_id"] == flat_spans[end - 1]["_cluster_id"]
+        ):
+            window.append(flat_spans[end])
+            end += 1
 
-        # Pronoun-aware front merge: if first sentence is pronoun-subject, merge tail of previous
-        # up to min(overlap,2) sentences, and continue merging backward until we hit an entity sentence
-        # or reach window cap.
-        if TextUtils.is_pronoun_subject_sentence(window[0]["text"]) and cursor > 0:
-            back = []
-            # take min(overlap,2) from previous window tail
-            take = min(overlap, 2)
-            start_back = max(0, cursor - take)
-            back = spans[start_back:cursor]
-            merged = back + window
-            # If still pronoun subject, keep extending backward until entity sentence or cap
-            back_cursor = start_back - 1
-            while TextUtils.is_pronoun_subject_sentence(merged[0]["text"]) and back_cursor >= 0 and len(merged) < max_total_sent:
-                merged = [spans[back_cursor]] + merged
-                if TextUtils.is_entity_sentence(merged[0]["text"]):
+        # Ensure at least one entity sentence when possible
+        if window and not any(TextUtils.is_entity_sentence(s["text"]) for s in window):
+            lookahead = end
+            while lookahead < len(flat_spans) and len(window) < max_total_sent:
+                window.append(flat_spans[lookahead])
+                if TextUtils.is_entity_sentence(flat_spans[lookahead]["text"]):
+                    lookahead += 1
                     break
-                back_cursor -= 1
-            # 伪规则：若上一窗口（或其末句）仅包含唯一实体名，则前置其末句
-            if len(merged) > 0 and TextUtils.is_pronoun_subject_sentence(merged[0]["text"]) and cursor > 0:
-                prev_block = spans[max(0, cursor - n_sent):cursor]
-                prev_sents = [s["text"] for s in prev_block] if prev_block else []
-                ents = _unique_entities(prev_sents)
-                if len(ents) == 1 and prev_block:
-                    # 前置上一块的最后一句（最多1句）
-                    merged = [prev_block[-1]] + merged
-            window = merged
+                lookahead += 1
+            end = lookahead
 
-        # 最小上下文保障：若窗口内出现代词 he/she/they 等，但窗口中没有任何实体句，则强制回拉上一句
-        if window:
-            has_pronoun_any = any(TextUtils.is_pronoun_subject_sentence(s["text"]) or any(p in s["text"].lower() for p in (" he ", " she ", " they ", " his ", " her ", " their ")) for s in window)
-            has_entity_any = any(TextUtils.is_entity_sentence(s["text"]) for s in window)
-            if has_pronoun_any and not has_entity_any and cursor > 0:
-                prev_idx = cursor - 1
-                prev_sent = spans[prev_idx]
-                window = [prev_sent] + window
-
-        # Assemble text and metadata
-        chunk_text = " ".join([s["text"] for s in window]).strip()
+        sentences = [s["text"] for s in window]
+        chunk_text = " ".join(sentences).strip()
         if not chunk_text:
-            cursor += step
+            cursor = end
             continue
         chunk_meta = {
-            "sent_spans": [{"text": s["text"], "start": s["start"], "end": s["end"]} for s in window],
+            "sent_spans": [{"text": s["text"], "start": s.get("start"), "end": s.get("end")} for s in window],
             "has_pronoun_lead": TextUtils.is_pronoun_subject_sentence(window[0]["text"]) if window else False,
+            "recent_entities": _unique_entities(sentences)[:3],
         }
         chunks.append(
             {
@@ -97,7 +213,28 @@ def make_chunks(doc_id: str, text: str, chunk_id_prefix: str = "p") -> List[Dict
             }
         )
         idx += 1
-        cursor += step
+        # Adaptive overlap anchored on nearest entity sentence
+        anchor_idx = None
+        backtrack = 0
+        while backtrack < adaptive_back_limit and (end - backtrack - 1) >= start:
+            candidate_idx = end - backtrack - 1
+            if TextUtils.is_entity_sentence(flat_spans[candidate_idx]["text"]):
+                anchor_idx = candidate_idx
+                break
+            backtrack += 1
+
+        if anchor_idx is not None and anchor_idx > start:
+            anchor_cluster = flat_spans[anchor_idx]["_cluster_id"]
+            cursor = cluster_start_indices.get(anchor_cluster, anchor_idx)
+        else:
+            cursor = max(start, end - overlap)
+            if cursor < len(flat_spans):
+                cluster_id = flat_spans[cursor]["_cluster_id"]
+                cursor = cluster_start_indices.get(cluster_id, cursor)
+        if cursor <= start:
+            cursor = end
+        if cursor <= start:
+            cursor = start + 1
 
     if not chunks:
         chunks.append(

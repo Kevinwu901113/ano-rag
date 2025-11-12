@@ -20,6 +20,7 @@ SHARD_CNT=${SHARD_CNT:-1}
 VLLM_BIN="${VLLM_BIN:-python -m vllm.entrypoints.openai.api_server}"
 VLLM_DOWNLOAD_DIR="${VLLM_DOWNLOAD_DIR:-}"
 VLLM_GPU_MEMORY_UTIL="${VLLM_GPU_MEMORY_UTIL:-0.7}"
+VLLM_EXTRA_ARGS="${VLLM_EXTRA_ARGS:-}"
 STARTED_VLLM=0
 
 NEW_RUN=0
@@ -232,7 +233,7 @@ start_vllm_dual() {
     --host 0.0.0.0 --port "${VLLM_PORT0}" \
     --dtype "${DTYPE}" \
     --max-model-len "${MAX_MODEL_LEN}" \
-    ${extra_args[@]} \
+    ${extra_args[@]} ${VLLM_EXTRA_ARGS} \
     > "$VLLM_LOG0" 2>&1 & echo $! > "$VLLM_PID0"
 
   CUDA_VISIBLE_DEVICES="${GPU1}" nohup ${VLLM_BIN} \
@@ -240,7 +241,7 @@ start_vllm_dual() {
     --host 0.0.0.0 --port "${VLLM_PORT1}" \
     --dtype "${DTYPE}" \
     --max-model-len "${MAX_MODEL_LEN}" \
-    ${extra_args[@]} \
+    ${extra_args[@]} ${VLLM_EXTRA_ARGS} \
     > "$VLLM_LOG1" 2>&1 & echo $! > "$VLLM_PID1"
 
   log "Waiting for vLLM endpoints ready ..."

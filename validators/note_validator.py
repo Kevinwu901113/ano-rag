@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 import re
 import json
 from pathlib import Path
@@ -92,22 +92,25 @@ def _normalize_pred(raw_pred: str) -> Tuple[str, float]:
     value = (raw_pred or "").strip().lower()
     if not value:
         return "", 0.5
+    alias_value = value.replace("_", " ")
+    variants = {value, alias_value, alias_value.replace(" ", "_")}
     # 先用正则别名匹配
     for pat, target in _COMPILED_ALIAS_PATTERNS:
-        if pat.search(value):
+        if pat.search(alias_value):
             return target, 0.95
     # 再用同义集合归一
     for canon, synonyms in PRED_SYNONYM_SETS.items():
-        if value == canon:
+        if canon in variants:
             return canon, 1.0
-        if value in synonyms:
+        if variants & synonyms:
             return canon, 0.95
     # 属性映射表强归一（例如 profession/job/works as → occupation）
-    mapped = PRED2ATTR.get(value)
-    if mapped:
-        return mapped, 0.95
+    for variant in variants:
+        mapped = PRED2ATTR.get(variant)
+        if mapped:
+            return mapped, 0.95
     # 兜底：X is/was/became a/an <NOUN> 且 <NOUN> 像职业
-    m = re.search(r"\b(is|was|became|becomes)\b .*?\b([A-Za-z- ]+)\b", value)
+    m = re.search(r"\b(is|was|became|becomes)\b .*?\b([A-Za-z- ]+)\b", alias_value)
     if m and _looks_like_occupation(m.group(2)):
         return "occupation", 0.9
     return value, 0.9
@@ -252,6 +255,18 @@ def _compute_quality(evidence: str, profile: Dict[str, Any], values: List[Dict[s
     }
 
 
+def _chunk_rank(chunk_id: str) -> Optional[int]:
+    if not chunk_id:
+        return None
+    match = re.search(r"(\d+)", chunk_id)
+    if not match:
+        return None
+    try:
+        return int(match.group(1))
+    except ValueError:
+        return None
+
+
 def validate_and_normalize(raw_text: str, doc_id: str, chunk_id: str):
     try:
         parsed = json.loads(raw_text)
@@ -278,6 +293,12 @@ def validate_and_normalize(raw_text: str, doc_id: str, chunk_id: str):
             meta["source"] = f"{doc_id}#{chunk_id}"
 
         meta["confidence"] = _clamp(meta.get("confidence"), default=0.8)
+        section_rank = _chunk_rank(chunk_id)
+        if section_rank is not None:
+            meta["section_rank"] = section_rank
+            meta["anchor"] = bool(section_rank == 0)
+        else:
+            meta.setdefault("anchor", False)
 
         subj_type = patched_obj.get("subj_type") or "CONCEPT"
         subj_profile = meta.get("subject_profile")

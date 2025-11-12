@@ -8,14 +8,15 @@ import random
 import requests
 from requests.adapters import HTTPAdapter
 import threading
-import itertools
 import os
 import re
 from loguru import logger
 
 from config.config_loader import config as global_config
+from config.attributes_loader import load_attributes_config
 from generator.note_parsing import NoteParsingPipeline
 from validators.note_validator import validate_and_normalize
+from utils import TextUtils
 from utils.adaptive_concurrency import AdaptiveConcurrencyController, AdaptiveConfig
 
 
@@ -33,6 +34,7 @@ class NoteGenerator:
         # Concurrency config
         vllm_cfg = global_config.get("vllm", {}) or {}
         ccfg = vllm_cfg.get("concurrency", {}) or {}
+        routing_cfg = global_config.get("routing", {}) or {}
 
         # Endpoint pool: prefer env-based endpoints in non-strict mode; fall back to config list
         endpoints_cfg = ccfg.get("endpoints") or []
@@ -51,8 +53,18 @@ class NoteGenerator:
                 # Fallback to single endpoint provided
                 self._endpoints = [endpoint.rstrip("/")]
 
-        # Round-robin iterator and health map (boolean healthy flags)
-        self._endpoint_cycle = itertools.cycle(self._endpoints)
+        # Token-budget-aware load tracking
+        raw_budget = routing_cfg.get("token_budget_hint")
+        if raw_budget is None:
+            raw_budget = ccfg.get("token_budget_hint", 320000)
+        try:
+            self._token_budget_hint = max(0, int(raw_budget))
+        except (TypeError, ValueError):
+            self._token_budget_hint = 0
+        self._inflight_tokens: Dict[str, int] = {ep: 0 for ep in self._endpoints}
+        self._endpoint_rt_ms: Dict[str, List[int]] = {ep: [] for ep in self._endpoints}
+
+        # Health map (boolean healthy flags)
         self._healthy: Dict[str, bool] = {ep: True for ep in self._endpoints}
         # Recovery delay for half-open circuit (default 30s)
         self._recovery_delay_sec = float(ccfg.get("blacklist_duration_sec", 30.0))
@@ -152,6 +164,7 @@ class NoteGenerator:
     @staticmethod
     def build_prompt(doc_text: str, doc_id: str) -> str:
         source_text = doc_text or ""
+        attr_rules = NoteGenerator._attribute_instruction_block()
         return (
             "You are an ontology-aligned information extraction system. From the following text, extract factual notes.\n"
             "Return ONLY valid JSON (RFC 8259). Prefer a JSON array; JSONL is allowed if necessary (one object per line, no surrounding brackets).\n"
@@ -172,13 +185,15 @@ class NoteGenerator:
             "B) FULLNAME married <NAME> → (subj=FULLNAME, pred=spouse, obj=<NAME>)\n"
             "C) FULLNAME was born in <PLACE> → (subj=FULLNAME, pred=born_in, obj=<PLACE>)\n"
             "当句子以代词开头且无法确定代词指代实体时，跳过该句的抽取。\n\n"
+            f"{attr_rules}\n"
             "STYLE / 写作规范:\n"
             "1) 不得使用代词（如 他/她/它/他们/其/该/this/that/they 等）作为主语。\n"
             "2) 始终使用最具体、可辨识的实体全名或规范简称（如“Tim Berners-Lee”，“万科企业股份有限公司（万科）”）。\n"
             "3) 若上下文能确定实体，统一回填实体全称，不要写‘他/她/其/该公司’。\n"
             "4) Replace ALL pronouns with resolved entity names: he, she, it, they, this, that, these, those, his, her, their（以及中文代词：他、她、它、他们、其、该、这、那、这些、那些）均需替换为明确实体或名词。不得在“subj”“obj”“attribute.values”中保留代词。\n"
-            "5) Evidence must be verbatim. 同时尽可能提供 meta.evidence_canonical（在不改变事实的前提下，将句首或指代代词替换为正确实体名）。\n"
-            "6) 若无法确定代词指代的实体，请跳过该条笔记。\n\n"
+            "5) 主语/宾语字段若仍是代词属于严重违规（Subject/Object fields may NOT contain pronouns），必须回填具体实体；如无法确认，请不要输出该三元组。\n"
+            "6) Evidence must remain verbatim—even when 由多句拼接而成，也只能使用原文；如需替换代词，仅在 meta.evidence_canonical 中进行。\n"
+            "7) 若无法确定代词指代的实体，请跳过该条笔记。\n\n"
             "Examples / 例子:\n"
             "[Bad] 他在1998年加入公司。\n"
             "[Good] Tim Berners-Lee 在 1998 年加入万维网联盟（W3C）。\n"
@@ -188,6 +203,42 @@ class NoteGenerator:
             f'"""{source_text}"""\n'
             "Output only the JSON."
         )
+
+    @staticmethod
+    def _attribute_instruction_block() -> str:
+        cache = getattr(NoteGenerator, "_cached_attr_rules", None)
+        if cache is not None:
+            return cache
+        cfg = load_attributes_config()
+        if not cfg:
+            NoteGenerator._cached_attr_rules = ""
+            return ""
+        lines = ["Attribute-specific rules (配置驱动):"]
+        for name, payload in cfg.items():
+            title = name.upper()
+            defs = payload.get("definition_patterns") or []
+            appos = payload.get("appositive_patterns") or []
+            negatives = payload.get("negative_verbs") or []
+            examples = payload.get("examples") or {}
+            allowed = payload.get("value_lexicon") or []
+            lines.append(f"- {title}:")
+            if defs:
+                lines.append(f"  • Accept only definition/appositive sentences such as: {', '.join(defs[:2])}.")
+            if appos:
+                lines.append(f"  • Appositive cues: {', '.join(appos[:2])}.")
+            if negatives:
+                lines.append(f"  • Reject sentences containing narrative verbs: {', '.join(negatives[:6])}.")
+            if allowed:
+                lines.append(f"  • Canonical values subset: {', '.join(str(v) for v in allowed[:10])} (normalize synonyms).")
+            good_examples = (examples.get("good") if isinstance(examples, dict) else []) or []
+            bad_examples = (examples.get("bad") if isinstance(examples, dict) else []) or []
+            if good_examples:
+                lines.append(f"  • Good evidence: {good_examples[0]}")
+            if bad_examples:
+                lines.append(f"  • Reject evidence like: {bad_examples[0]}")
+        block = "\n".join(lines) + "\n"
+        NoteGenerator._cached_attr_rules = block
+        return block
 
     def _get_session(self) -> requests.Session:
         sess = getattr(self._local, "session", None)
@@ -215,17 +266,30 @@ class NoteGenerator:
             self._local.session = sess
         return sess
 
-    def _choose_endpoint(self) -> str:
-        """Round-robin with health preference; if all unhealthy, fall back to first.
-        Thread-safe via endpoint lock.
-        """
+    def _choose_endpoint(self, hint_tokens: int = 0) -> str:
+        """Pick the least congested healthy endpoint (tokens + recent latency)."""
+
+        def _p50_latency(ep: str) -> int:
+            samples = self._endpoint_rt_ms.get(ep) or []
+            if not samples:
+                return 0
+            ordered = sorted(samples)
+            idx = min(len(ordered) - 1, len(ordered) // 2)
+            return ordered[idx]
+
         with self._endpoint_lock:
-            for _ in range(len(self._endpoints)):
-                ep = next(self._endpoint_cycle)
-                if self._healthy.get(ep, True):
-                    return ep
-            # All marked unhealthy: fall back to first and rely on short retries
-            return self._endpoints[0]
+            candidates = [ep for ep in self._endpoints if self._healthy.get(ep, True)]
+            if not candidates:
+                return self._endpoints[0]
+            candidates.sort(
+                key=lambda ep: (self._inflight_tokens.get(ep, 0), _p50_latency(ep))
+            )
+            if hint_tokens and self._token_budget_hint and len(candidates) > 1:
+                best = candidates[0]
+                projected = self._inflight_tokens.get(best, 0) + hint_tokens
+                if projected > self._token_budget_hint:
+                    return candidates[1]
+            return candidates[0]
 
     def _mark_endpoint_success(self, endpoint: str) -> None:
         # On success, mark endpoint healthy
@@ -259,18 +323,22 @@ class NoteGenerator:
         attempts = max(1, self._retry_max_attempts)
         last_exc: Exception | None = None
         total_wait: float = 0.0
+        call_max_tokens = int(max_tokens or min(self.max_tokens, 2000))
+        call_max_tokens = max(1, call_max_tokens)
+        req_tokens = max(1, TextUtils.rough_token_len(prompt) + call_max_tokens)
         for attempt in range(attempts):
+            endpoint = self._choose_endpoint(req_tokens)
+            self._inflight_tokens[endpoint] = self._inflight_tokens.get(endpoint, 0) + req_tokens
+            t0 = time.time()
             try:
-                t0 = time.time()
                 payload: Dict[str, Any] = {
                     "model": self.model,
                     "temperature": self.temperature,
-                    "max_tokens": max_tokens or min(self.max_tokens, 2000),
+                    "max_tokens": call_max_tokens,
                     "messages": [{"role": "user", "content": prompt}],
                 }
                 if stop:
                     payload["stop"] = stop
-                endpoint = self._choose_endpoint()
                 if self._endpoint_log_every and attempt == 0:
                     try:
                         if (self._recent_calls % self._endpoint_log_every) == 0:
@@ -293,6 +361,11 @@ class NoteGenerator:
                 # success accounting
                 self._mark_endpoint_success(endpoint)
                 self._recent_calls += 1
+                rt_ms = int((time.time() - t0) * 1000)
+                samples = self._endpoint_rt_ms.setdefault(endpoint, [])
+                samples.append(rt_ms)
+                if len(samples) > 60:
+                    del samples[: len(samples) - 60]
                 return data["choices"][0]["message"]["content"]
             except requests.Timeout as exc:  # noqa: PERF203
                 last_exc = exc
@@ -350,6 +423,10 @@ class NoteGenerator:
                 if wait > 0:
                     time.sleep(wait)
                     total_wait += wait
+            finally:
+                self._inflight_tokens[endpoint] = max(
+                    0, self._inflight_tokens.get(endpoint, 0) - req_tokens
+                )
 
     def generate_for_chunk(self, chunk: Dict[str, Any]) -> List[Dict[str, Any]]:
         doc_id, chunk_id = chunk["doc_id"], chunk["chunk_id"]
@@ -362,6 +439,16 @@ class NoteGenerator:
         t1 = time.time()
 
         parsed_notes = self.parser.parse(raw, doc_id)
+        if parsed_notes:
+            try:
+                self._resolve_pronoun_subjects(chunk, parsed_notes)
+            except Exception as exc:  # noqa: BLE001
+                logger.debug(
+                    "Pronoun resolution skipped doc={} chunk={} err={}",
+                    doc_id,
+                    chunk_id,
+                    exc,
+                )
         t2 = time.time()
         parser_run_stats = self.parser.get_stats(cumulative=False)
         if parser_run_stats.get("json_parse_failures"):
@@ -452,6 +539,123 @@ class NoteGenerator:
         for k in self._stage_times:
             if len(self._stage_times[k]) > self._stage_window_size:
                 self._stage_times[k] = self._stage_times[k][-self._stage_window_size :]
+
+    @staticmethod
+    def _normalize_text(value: str) -> str:
+        return re.sub(r"\s+", " ", (value or "").strip())
+
+    @staticmethod
+    def _pick_entity_candidate(candidates: List[str], subj_type: str | None) -> str | None:
+        if not candidates:
+            return None
+        prefer_person = (subj_type or "").upper() == "PERSON"
+        if prefer_person:
+            for cand in candidates:
+                tokens = cand.split()
+                if len(tokens) >= 2:
+                    return cand
+        return candidates[0]
+
+    def _resolve_pronoun_subjects(self, chunk: Dict[str, Any], notes: List[Dict[str, Any]]) -> None:
+        """Best-effort coref: replace pronoun-only subjects using nearby context."""
+        if not chunk or not notes:
+            return
+        text = chunk.get("text") or ""
+        if not text.strip():
+            return
+        cleaned_chunk = self._normalize_text(text)
+        sent_spans = chunk.get("meta", {}).get("sent_spans")
+        if not isinstance(sent_spans, list) or not sent_spans:
+            sent_spans = TextUtils.split_with_spans(text)
+
+        sentence_records: List[Dict[str, Any]] = []
+        for span in sent_spans:
+            if isinstance(span, dict):
+                sentence_text = span.get("text") or ""
+                start = int(span.get("start", 0))
+                end = int(span.get("end", start))
+            else:
+                sentence_text = str(span)
+                normalized_sentence = self._normalize_text(sentence_text)
+                start = cleaned_chunk.find(normalized_sentence)
+                end = start + len(normalized_sentence) if start >= 0 else start
+            entities = TextUtils.extract_entity_candidates(sentence_text)
+            sentence_records.append(
+                {
+                    "text": sentence_text,
+                    "start": max(0, start),
+                    "end": max(0, end),
+                    "entities": [e for e in entities if not TextUtils.is_pronoun(e)],
+                }
+            )
+
+        if not sentence_records:
+            return
+
+        def locate_sentence(evidence_text: str) -> int | None:
+            if not evidence_text:
+                return None
+            needle = self._normalize_text(evidence_text).lower()
+            if not needle:
+                return None
+            idx = cleaned_chunk.lower().find(needle)
+            if idx == -1:
+                return None
+            for i, record in enumerate(sentence_records):
+                if record["start"] <= idx < record["end"]:
+                    return i
+            # fallback: substring containment
+            for i, record in enumerate(sentence_records):
+                if needle in self._normalize_text(record["text"]).lower():
+                    return i
+            return None
+
+        for note in notes:
+            subj = (note.get("subj") or "").strip()
+            if not subj or not TextUtils.is_pronoun(subj):
+                continue
+            meta = note.setdefault("meta", {})
+            profile = meta.get("subject_profile")
+            subj_type = note.get("subj_type") or "CONCEPT"
+            resolved = None
+            if isinstance(profile, dict):
+                aliases = profile.get("aliases") or []
+                for alias in aliases:
+                    if alias and not TextUtils.is_pronoun(alias):
+                        resolved = alias
+                        break
+            target_sentence = locate_sentence(note.get("evidence") or "")
+            if not resolved and target_sentence is not None:
+                for idx in range(target_sentence - 1, -1, -1):
+                    candidate = self._pick_entity_candidate(sentence_records[idx]["entities"], subj_type)
+                    if candidate:
+                        resolved = candidate
+                        break
+            if not resolved:
+                continue
+
+            note["subj"] = resolved
+            if not isinstance(profile, dict):
+                profile = {
+                    "type": subj_type,
+                    "aliases": [],
+                    "nationality": [],
+                    "birth": None,
+                    "death": None,
+                    "occupations": [],
+                    "titles": [],
+                    "categories": [],
+                    "same_as": [],
+                    "description": None,
+                }
+            profile.setdefault("aliases", [])
+            if resolved not in profile["aliases"]:
+                profile["aliases"].insert(0, resolved)
+            profile["type"] = subj_type
+            meta["subject_profile"] = profile
+            meta["subject_source"] = meta.get("subject_source") or "chunk_context"
+            prior_conf = float(meta.get("subject_confidence") or 0.0)
+            meta["subject_confidence"] = max(prior_conf, 0.75)
 
     def _maybe_log_stage_p95(self) -> None:
         # Every 100 chunks, log p95 stage timings and recent error/timeout rates

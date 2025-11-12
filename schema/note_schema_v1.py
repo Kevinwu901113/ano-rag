@@ -159,6 +159,10 @@ NOTE_JSON_SCHEMA = {
                     },
                     "domain": {"type": ["string", "null"]},
                     "year": {"type": ["string", "number", "null"]},
+                    "section_rank": {"type": ["integer", "null"], "minimum": 0},
+                    "anchor": {"type": ["boolean", "null"]},
+                    "validation": {"type": ["string", "null"], "minLength": 1},
+                    "violations": {"type": ["object", "null"], "additionalProperties": True},
                     "entity_links": {
                         "type": ["object", "null"],
                         "properties": {

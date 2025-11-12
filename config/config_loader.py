@@ -11,14 +11,22 @@ CONFIG_ENV_VAR = "ANO_RAG_CONFIG"
 
 DEFAULT_CONFIG: Dict[str, Any] = {
     "system": {"project_name": "ano-rag", "device": "cuda"},
+    "policies": {
+        "strict_definition_extraction": True,
+        "doc_entity_isolation": True,
+        "allow_cross_doc": False,
+        "answer_only_label": True,
+        "enable_evidence_canonical": True,
+    },
     "chunk": {"n_sent": 3, "overlap": 1, "max_tokens": 768},
     "vllm": {
         "endpoint": "http://127.0.0.1:8000/v1",
         "model": "qwen2.5-7b-instruct",
         "temperature": 0.0,
-        "max_tokens": 700,
+        "max_tokens": 256,
+        "max_new_tokens": 256,
         "concurrency": {
-            "max_workers": 8,
+            "max_workers": 16,
             "batch_size": 1,
             "endpoints": [],  # optional multi-endpoint pool, overrides endpoint
             "connect_timeout_sec": 3.05,
@@ -34,6 +42,13 @@ DEFAULT_CONFIG: Dict[str, Any] = {
             "blacklist_duration_sec": 15.0,
             # Log endpoint selection every N successful calls (0=disabled)
             "endpoint_log_every": 0,
+            "buckets": {
+                "0_256": {"workers": 8},
+                "256_512": {"workers": 6},
+                "512_1024": {"workers": 4},
+                "1024_plus": {"workers": 2},
+            },
+            "refill_factor": 1.5,
         },
         "adaptive": {
             "enabled": False,
@@ -52,6 +67,9 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "model": "openai/gpt-oss-20b",
         "temperature": 0.2,
         "max_tokens": 64,
+    },
+    "routing": {
+        "token_budget_hint": 320000,
     },
     "retriever": {
         "structured": {"enabled": True, "fanout": 8},

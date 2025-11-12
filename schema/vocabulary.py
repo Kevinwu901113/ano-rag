@@ -5,6 +5,8 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Dict, Tuple
 
+from config.attributes_loader import load_attributes_config
+
 
 _DATA_DIR = Path(__file__).resolve().parent
 
@@ -56,6 +58,30 @@ def _compiled_slot_maps() -> Dict[str, Dict[str, str]]:
             if not alias_norm:
                 continue
             slot_map[alias_norm] = canonical
+
+    # Inject dynamic attribute config (value lexicon + aliases)
+    attr_cfg = load_attributes_config()
+    for slot, payload in attr_cfg.items():
+        if not isinstance(payload, dict):
+            continue
+        slot_map = compiled.setdefault(slot, {})
+        lexicon = payload.get("value_lexicon") or []
+        for entry in lexicon:
+            if not isinstance(entry, str):
+                continue
+            canon = entry.strip()
+            if not canon:
+                continue
+            slot_map[canon.lower()] = canon
+        aliases = payload.get("value_aliases") or {}
+        if isinstance(aliases, dict):
+            for alias, canonical in aliases.items():
+                if not isinstance(alias, str) or not isinstance(canonical, str):
+                    continue
+                alias_norm = alias.strip().lower()
+                canon = canonical.strip()
+                if alias_norm and canon:
+                    slot_map[alias_norm] = canon
     return compiled
 
 

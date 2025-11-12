@@ -2,8 +2,12 @@ from __future__ import annotations
 
 import json
 import re
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 import threading
+
+from config.attributes_loader import load_attributes_config
+from schema.vocabulary import normalize_slot_value
+from telemetry.metrics import record_attribute_guard
 
 
 class NoteParsingPipeline:
@@ -60,6 +64,7 @@ class NoteParsingPipeline:
         self._stats: Dict[str, int] = {}
         self._last_stats: Dict[str, int] = {}
         self._lock = threading.Lock()
+        self._attribute_guard = AttributeGuard()
 
     def parse(self, text: str, doc_id: str | None = None) -> List[Dict[str, Any]]:
         normalized = self._normalize_json_text(text)
@@ -112,6 +117,10 @@ class NoteParsingPipeline:
             run_stats["schema_drops"] = run_stats.get("schema_drops", 0) + drops
         if coerced:
             run_stats["type_coercions"] = run_stats.get("type_coercions", 0) + coerced
+        if ready and self._attribute_guard:
+            ready, guard_drops = self._attribute_guard.filter_notes(ready)
+            if guard_drops:
+                run_stats["attribute_guard_drops"] = run_stats.get("attribute_guard_drops", 0) + guard_drops
         self._record_stats(run_stats)
         with self._lock:
             self._last_stats = dict(run_stats)
@@ -316,12 +325,37 @@ class NoteParsingPipeline:
         if not subj_type or not obj_type:
             return None, False
 
-        meta = note.get("meta")
-        if not isinstance(meta, dict):
-            meta = {}
+        raw_meta = note.get("meta")
+        meta = dict(raw_meta) if isinstance(raw_meta, dict) else {}
         source = (meta.get("source") or "").strip() or (doc_id or "")
         confidence = self._coerce_confidence(meta.get("confidence"))
-        meta = {"source": source, "confidence": confidence}
+        meta["source"] = source
+        meta["confidence"] = confidence
+
+        attribute_meta = meta.get("attribute")
+        if not isinstance(attribute_meta, dict):
+            attribute_meta = {}
+        attr_name = attribute_meta.get("name") or fields["pred"]
+        attr_name = str(attr_name or "").strip()
+        attribute_meta["name"] = attr_name
+        values = attribute_meta.get("values")
+        if not isinstance(values, list) or not values:
+            values = [
+                {
+                    "value": fields["obj"],
+                    "normalized": fields["obj"],
+                    "confidence": confidence,
+                    "source": source,
+                    "evidence": fields["evidence"],
+                }
+            ]
+        attribute_meta["values"] = values
+        meta["attribute"] = attribute_meta
+
+        canonical_evidence = self._canonicalize_evidence(fields["evidence"], fields["subj"], subj_type)
+        if canonical_evidence:
+            meta["evidence_canonical"] = canonical_evidence
+        meta.setdefault("validation", "strict")
 
         normalized_note = {
             "subj": fields["subj"],
@@ -360,3 +394,115 @@ class NoteParsingPipeline:
         except Exception:
             value = 0.0
         return min(1.0, max(0.0, value))
+
+    @staticmethod
+    def _canonicalize_evidence(evidence: str, subject: str, subj_type: str) -> Optional[str]:
+        if not evidence or not subject or (subj_type or "").upper() != "PERSON":
+            return None
+        pronouns = (
+            "he",
+            "she",
+            "they",
+            "his",
+            "her",
+            "their",
+            "him",
+            "hers",
+        )
+        pattern = re.compile(rf"^({'|'.join(pronouns)})\b", re.IGNORECASE)
+        match = pattern.search(evidence.strip())
+        if not match:
+            return None
+        replaced = pattern.sub(subject.strip(), evidence.strip(), count=1)
+        return replaced
+
+
+class AttributeGuard:
+    def __init__(self) -> None:
+        cfg = load_attributes_config()
+        self.rules: Dict[str, Dict[str, Any]] = {}
+        for name, payload in cfg.items():
+            if not isinstance(payload, dict):
+                continue
+            entry: Dict[str, Any] = {}
+            entry["lexicon"] = {
+                str(val).strip().lower() for val in payload.get("value_lexicon", []) if isinstance(val, str) and val.strip()
+            }
+            blacklist = payload.get("value_blacklist") or []
+            entry["blacklist"] = [str(val).strip().lower() for val in blacklist if isinstance(val, str) and val.strip()]
+            def_patterns = payload.get("definition_patterns") or []
+            entry["definition_patterns"] = [re.compile(pat, re.IGNORECASE) for pat in def_patterns if isinstance(pat, str)]
+            appos_patterns = payload.get("appositive_patterns") or []
+            entry["appositive_patterns"] = [re.compile(pat, re.IGNORECASE) for pat in appos_patterns if isinstance(pat, str)]
+            negatives = payload.get("negative_verbs") or []
+            entry["negative_verbs"] = [re.compile(rf"\b{re.escape(word)}\b", re.IGNORECASE) for word in negatives if isinstance(word, str)]
+            self.rules[name] = entry
+
+    def filter_notes(self, notes: List[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]], int]:
+        kept: List[Dict[str, Any]] = []
+        dropped = 0
+        for note in notes:
+            if self._accept(note):
+                kept.append(note)
+            else:
+                dropped += 1
+        return kept, dropped
+
+    def _accept(self, note: Dict[str, Any]) -> bool:
+        attr_meta = (note.get("meta") or {}).get("attribute") or {}
+        attr_name = (attr_meta.get("name") or note.get("pred") or "").strip().lower()
+        if not attr_name:
+            return True
+        rules = self.rules.get(attr_name)
+        if not rules:
+            return True
+
+        evidence = (note.get("evidence") or "").strip()
+        if evidence and not self._evidence_allowed(evidence, rules):
+            record_attribute_guard(attr_name, "definition_miss")
+            return False
+        if evidence and self._has_negative_verb(evidence, rules):
+            record_attribute_guard(attr_name, "negative_verb")
+            return False
+
+        # Normalize value & enforce lexicon
+        obj = (note.get("obj") or "").strip()
+        normalized_value, _ = normalize_slot_value(attr_name, obj)
+        normalized_lower = (normalized_value or "").strip().lower()
+        blacklist = rules.get("blacklist") or []
+        if normalized_lower:
+            for bad in blacklist:
+                if bad and bad in normalized_lower:
+                    record_attribute_guard(attr_name, "blacklist")
+                    return False
+        lexicon = rules.get("lexicon") or set()
+        if lexicon and normalized_lower and normalized_lower not in lexicon:
+            record_attribute_guard(attr_name, "out_of_lexicon")
+            return False
+
+        if normalized_value:
+            note["obj"] = normalized_value
+            if isinstance(attr_meta, dict):
+                values = attr_meta.get("values")
+                if isinstance(values, list):
+                    for item in values:
+                        if isinstance(item, dict):
+                            item["normalized"] = normalized_value
+        record_attribute_guard(attr_name, "kept")
+        return True
+
+    @staticmethod
+    def _evidence_allowed(evidence: str, rules: Dict[str, Any]) -> bool:
+        patterns: List[re.Pattern] = rules.get("definition_patterns") or []
+        appos: List[re.Pattern] = rules.get("appositive_patterns") or []
+        if patterns and any(pat.search(evidence) for pat in patterns):
+            return True
+        if appos and any(pat.search(evidence) for pat in appos):
+            return True
+        # fallback: check simple "is a/an" pattern
+        return bool(re.search(r"\b(is|was|are|were)\b\s+(?:an?|the)\s+[A-Za-z]", evidence))
+
+    @staticmethod
+    def _has_negative_verb(evidence: str, rules: Dict[str, Any]) -> bool:
+        verbs: List[re.Pattern] = rules.get("negative_verbs") or []
+        return any(pat.search(evidence) for pat in verbs)

@@ -30,6 +30,16 @@ class FileUtils:
                 handle.write(json.dumps(row, ensure_ascii=False) + "\n")
 
     @staticmethod
+    def write_jsonl_batch(handle, rows: Iterable[Dict[str, Any]]) -> int:
+        """Write a batch of rows to an open JSONL handle and flush."""
+        count = 0
+        for row in rows:
+            handle.write(json.dumps(row, ensure_ascii=False) + "\n")
+            count += 1
+        handle.flush()
+        return count
+
+    @staticmethod
     def get_file_hash(path: str) -> str:
         import hashlib
 

@@ -9,6 +9,60 @@
 - 别名稳健：实体别名索引与查询端归一协同，跨语体/噪声条件下仍保持稳定召回。
 - 易于扩展：索引是轻量 JSON/JSONL；可增量构建嵌入与 BM25 以增强弱信号。
 
+## 架构图
+
+端到端流程示意：
+
+```mermaid
+flowchart LR
+  subgraph Build [构建阶段]
+    A[Documents (.txt/.md/.jsonl/.json)] --> B[Chunker]
+    B --> C[NoteGenerator (vLLM)]
+    C --> D[Validators & Normalization]
+    D --> E[IndexBuilder]
+    E --> F[(Indexes)]
+  end
+
+  subgraph Query [检索与答案阶段]
+    Q[Question] --> ID[IntentDetector]
+    ID --> PR[Parser → IR]
+    PR --> OP{Operators\nBIND / EXPAND}
+    OP --> RP[Retriever Pipeline]
+    RP --> EV[Evidence Extraction]
+    EV --> AN[Answerer → LM Studio]
+    RP -. Fallback: Vector / BM25 .-> EV
+  end
+
+  F --> RP
+```
+
+索引结构示意：
+
+```mermaid
+flowchart TB
+  subgraph IDX [Indexes]
+    E1[(entity_to_notes.json)]
+    E2[(predicate_to_notes.json)]
+    T[(type_edge_index.json)]
+    GE[(graph_edges.jsonl)]
+    IE[(inverse_edges.jsonl)]
+    FI[(field_index.json)]
+    AL[(entity_alias_index.json)]
+    ME[(mentions_edges.jsonl)]
+    CE[(corefers_edges.jsonl)]
+    AC[(anchor_index.json)]
+  end
+
+  S[Subject] -->|pred| O[Object]
+  S --> GE
+  O --> IE
+  STP[(subj_type, pred, obj_type)] --> T
+  Alias --> AL
+  AttrValue --> FI
+```
+
+更多详图可在 `doc/architecture.mmd` 中查看与维护。
+
 ## 快速开始
 
 - 依赖安装：`pip install -r requirements.txt`（可选安装嵌入/FAISS/BM25 相关包）

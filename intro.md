@@ -27,6 +27,24 @@ ANO-RAG 是一个以“结构化事实笔记（subj–pred–obj）”为核心�
   - 清单：`manifest.json`
 - 检索与答案：`retriever/pipeline.py` 执行 BIND/EXPAND、路径打分与兜底；`generator/answerer.py` 把证据传给 LM Studio 生成答案。
 
+### 架构图
+
+```mermaid
+flowchart LR
+  A[Documents] --> B[Chunker]
+  B --> C[NoteGenerator]
+  C --> D[Validation & Normalization]
+  D --> E[IndexBuilder]
+  E --> F[(Indexes)]
+  Q[Question] --> P[Parser → IR]
+  P --> O{BIND / EXPAND}
+  O --> R[Retriever Pipeline]
+  R --> V[Evidence]
+  V --> L[LM Studio]
+  R -. Vector / BM25 Fallback .-> V
+  F --> R
+```
+
 ## 使用方式（概要）
 
 - 构建：

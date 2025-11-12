@@ -95,6 +95,18 @@ class Indexes:
                     self.anchor_index = json.load(handle)
                 except Exception:
                     self.anchor_index = {}
+        weak_path = os.path.join(directory, "weak_entity_to_notes.json")
+        if os.path.exists(weak_path):
+            with open(weak_path, "r", encoding="utf-8") as handle:
+                self.weak_entity_to_notes = json.load(handle)
+        else:
+            self.weak_entity_to_notes = {}
+        weak_pred_path = os.path.join(directory, "weak_predicate_to_notes.json")
+        if os.path.exists(weak_pred_path):
+            with open(weak_pred_path, "r", encoding="utf-8") as handle:
+                self.weak_predicate_to_notes = json.load(handle)
+        else:
+            self.weak_predicate_to_notes = {}
 
 
 def BIND(indexes: Indexes, alias: str, type_candidates: List[str], limit: int = 50) -> List[str]:

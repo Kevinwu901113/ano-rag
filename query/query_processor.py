@@ -9,6 +9,9 @@ from retriever.note_store import NoteStore
 from retriever.operators import Indexes
 from retriever.pipeline import retrieve_answer
 from utils import TextUtils
+from schema.vocabulary import normalize_slot_value
+from config.attributes_loader import get_selection_priority, allowed_values
+from telemetry.metrics import record_answer_outcome
 
 if TYPE_CHECKING:
     from retriever.hybrid import HybridRetriever
@@ -63,11 +66,25 @@ class QueryProcessor:
             )
 
         self.indexes = Indexes(self.indexes_dir)
-        self.note_store = NoteStore(self.notes_path)
+        preferred_weak = Path(self.notes_path).parent / "weak" / "weak_notes.jsonl"
+        legacy_weak = Path(self.notes_path).with_name("weak_notes.jsonl")
+        if preferred_weak.exists():
+            weak_path: Optional[str] = str(preferred_weak)
+        elif legacy_weak.exists():
+            weak_path = str(legacy_weak)
+        else:
+            weak_path = None
+        self.note_store = NoteStore(self.notes_path, weak_path)
         self._hybrid: Optional["HybridRetriever"] = None
         self._hybrid_initialized = False
 
-    def process(self, question: str) -> Dict[str, Any]:
+    def process(
+        self,
+        question: str,
+        *,
+        doc_hint: Optional[str] = None,
+        attribute_hint: Optional[str] = None,
+    ) -> Dict[str, Any]:
         logger.info("Running structured retrieval for question: {}", question)
         structured = retrieve_answer(
             question,
@@ -75,6 +92,8 @@ class QueryProcessor:
             self.note_store,
             cfg=self.cfg,
             hybrid=self._get_hybrid_retriever(),
+            doc_hint=doc_hint,
+            attribute_hint=attribute_hint,
         )
 
         evidences = structured.get("evidence", []) or []
@@ -130,95 +149,6 @@ class QueryProcessor:
             self._hybrid = None
         return self._hybrid
 
-    @staticmethod
-    def _singularize(token: str) -> str:
-        t = (token or "").strip().lower()
-        if not t:
-            return t
-        if t.endswith("ses") and not t.endswith("sses"):
-            return t[:-2]  # e.g., actresses -> actress
-        if t.endswith("ies"):
-            return t[:-3] + "y"
-        if t.endswith("s") and not t.endswith("ss"):
-            return t[:-1]
-        return t
-
-    @classmethod
-    def _canonicalize_occupation(cls, text: str) -> str:
-        raw = (text or "").strip()
-        if not raw:
-            return raw
-        lowered = raw.lower()
-        fillers = {
-            "film", "television", "tv", "stage", "screen", "movie",
-            "commercial", "radio", "theatre", "theater",
-            "former", "retired", "senior", "chief", "award-winning",
-        }
-        nationalities = {
-            "american", "british", "scottish", "english", "canadian", "australian",
-            "french", "german", "italian", "spanish", "mexican", "chinese", "japanese",
-            "korean", "indian", "russian", "irish", "welsh", "dutch", "swedish",
-            "norwegian", "danish", "finnish", "polish", "portuguese", "brazilian",
-            "argentinian", "iranian", "iraqi", "egyptian", "turkish", "saudi", "thai",
-            "indonesian", "malaysian", "singaporean", "pakistani", "bangladeshi",
-            "nepalese", "sri lankan", "afghan", "ethiopian", "kenyan", "nigerian",
-            "south african",
-        }
-        parts: list[str] = []
-        for tok in lowered.replace("/", " and ").replace(",", " and ").split():
-            if tok in fillers or tok in nationalities:
-                continue
-            parts.append(tok)
-        cleaned = " ".join(parts)
-        candidates: list[str] = []
-        for chunk in [c.strip() for c in cleaned.split(" and ") if c.strip()]:
-            chunk = chunk.replace("-", " ").strip()
-            candidates.append(chunk)
-        synonyms = {
-            # actor family
-            "actress": "actor",
-            "television actor": "actor",
-            "tv actor": "actor",
-            "film actor": "actor",
-            "screen actor": "actor",
-            # business family
-            "executive": "businessperson",
-            "business executive": "businessperson",
-            "advertising executive": "businessperson",
-            "businessman": "businessperson",
-            "businesswoman": "businessperson",
-            "entrepreneur": "businessperson",
-            "industrialist": "businessperson",
-            # law/judiciary family
-            "barrister": "lawyer",
-            "solicitor": "lawyer",
-            "attorney": "lawyer",
-            "advocate": "lawyer",
-            "jurist": "judge",
-            "justice": "judge",
-            "chief justice": "judge",
-            "lord chief justice": "judge",
-            # politics family
-            "statesman": "politician",
-            "government minister": "politician",
-            "prime minister": "politician",
-            "member of parliament": "politician",
-            "mp": "politician",
-        }
-        # 主职业优先级（若并列，优先选择此序中的头部项）
-        priority = ["actor", "politician", "judge", "lawyer", "cartoonist", "businessperson"]
-        normalized: list[str] = []
-        for cand in candidates:
-            mapped = synonyms.get(cand) or cand
-            mapped = cls._singularize(mapped)
-            normalized.append(mapped)
-        for head in priority:
-            if head in normalized:
-                return head
-        # handle composite like "cartoonist and illustrator"
-        if "illustrator" in normalized and "cartoonist" in normalized:
-            return "cartoonist"
-        return normalized[0] if normalized else raw.strip().lower()
 
     def _select_final_answer(self, question: str, structured: Dict[str, Any], evidences: list[Dict[str, Any]]):
         status = (structured.get("fallback") or {}).get("status")
@@ -241,38 +171,36 @@ class QueryProcessor:
                     conf = ((note.get("meta", {}) or {}).get("final_conf"))
         except Exception:
             pass
-        weak = False
-        if support_paths <= 1 or (len(evidences) < 3):
-            weak = True
-        if isinstance(conf, (int, float)) and conf < 0.5:
-            weak = True
+        weak = support_paths <= 1 or (len(evidences) < 3) or (isinstance(conf, (int, float)) and conf < 0.5)
 
-        # 1) 结构化命中：直接用结构化答案；occupation 归一化且不改写
-        if status == "structured_hit" and ans:
-            if attribute == "occupation":
-                return self._canonicalize_occupation(ans), {
-                    "weak_evidence": weak,
-                    "support_paths": support_paths,
-                    "conf": conf,
-                    "source": "structured_hit",
-                }
-            return ans, {
+        candidate_labels = self._collect_candidate_labels(paths, attribute)
+        normalized_ans = self._normalize_answer(attribute, ans)
+        if normalized_ans:
+            candidate_labels = self._merge_answer(candidate_labels, normalized_ans)
+
+        primary_label = candidate_labels[0] if candidate_labels else normalized_ans
+
+        if status == "structured_hit" and primary_label:
+            record_answer_outcome(attribute, "hit")
+            return primary_label, {
                 "weak_evidence": weak,
                 "support_paths": support_paths,
                 "conf": conf,
                 "source": "structured_hit",
             }
-        # 2) occupation 弱证据：若存在链路且有结构化候选值，尽量归一化使用
-        if ans and attribute == "occupation":
-            return self._canonicalize_occupation(ans), {
+
+        if primary_label:
+            source = "structured_weak" if normalized_ans else "candidate_path"
+            record_answer_outcome(attribute, "hit")
+            return primary_label, {
                 "weak_evidence": weak,
                 "support_paths": support_paths,
                 "conf": conf,
-                "source": "structured_weak",
+                "source": source,
             }
 
-        # 3) 仅当 IR 真没命中（无谓词链）才硬失败
         if status != "structured_hit" and pred_chain_len == 0:
+            record_answer_outcome(attribute, "reject")
             return "Insufficient evidence", {
                 "weak_evidence": True,
                 "support_paths": support_paths,
@@ -280,17 +208,29 @@ class QueryProcessor:
                 "source": "no_chain",
             }
 
-        # 4) 存在链路但结构化答案为空：如配置了 LM，则尝试一次生成；否则保留空答案并打标
-        if (not ans) and self.lmstudio_endpoint and self.lmstudio_model and evidences:
+        # LM 兜底：限定可选标签，仍然不输出解释
+        if self.lmstudio_endpoint and self.lmstudio_model and evidences:
+            allowed_pool = candidate_labels or allowed_values(attribute)
             try:
-                lm_answer = call_lmstudio(self.lmstudio_endpoint, self.lmstudio_model, question, evidences)
-                return lm_answer, {
-                    "weak_evidence": weak,
-                    "support_paths": support_paths,
-                    "conf": conf,
-                    "source": "lmstudio",
-                }
+                lm_answer = call_lmstudio(
+                    self.lmstudio_endpoint,
+                    self.lmstudio_model,
+                    question,
+                    evidences,
+                    allowed_labels=allowed_pool,
+                    attribute_name=attribute,
+                )
+                normalized_lm = self._normalize_answer(attribute, lm_answer)
+                if normalized_lm:
+                    record_answer_outcome(attribute, "hit")
+                    return normalized_lm, {
+                        "weak_evidence": True,
+                        "support_paths": support_paths,
+                        "conf": conf,
+                        "source": "lmstudio",
+                    }
             except Exception:
+                record_answer_outcome(attribute, "reject")
                 return "Insufficient evidence", {
                     "weak_evidence": True,
                     "support_paths": support_paths,
@@ -298,10 +238,56 @@ class QueryProcessor:
                     "source": "lm_error",
                 }
 
-        # 5) 默认保留结构化的原样（不改写），并提供诊断标记
-        return ans or "", {
-            "weak_evidence": weak,
+        record_answer_outcome(attribute, "reject")
+        return "Insufficient evidence", {
+            "weak_evidence": True,
             "support_paths": support_paths,
             "conf": conf,
-            "source": "structured_no_lm",
+            "source": "no_answer",
         }
+
+    def _normalize_answer(self, attribute: Optional[str], value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return None
+        text = str(value).strip()
+        if not text:
+            return None
+        if attribute:
+            canonical, _ = normalize_slot_value(attribute, text)
+            text = canonical or text
+        return text.strip() or None
+
+    def _collect_candidate_labels(self, paths: list, attribute: Optional[str]) -> list[str]:
+        labels: list[str] = []
+        for path in paths:
+            if not isinstance(path, list) or not path:
+                continue
+            obj = path[-1].get("obj")
+            label = self._normalize_answer(attribute, obj)
+            if label:
+                labels.append(label)
+        return self._apply_label_priority(labels, attribute)
+
+    def _apply_label_priority(self, labels: list[str], attribute: Optional[str]) -> list[str]:
+        deduped: list[str] = []
+        seen: set[str] = set()
+        for label in labels:
+            key = label.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(label)
+        priority = get_selection_priority(attribute)
+        if not priority:
+            return deduped
+        priority_map = {val: idx for idx, val in enumerate(priority)}
+        deduped.sort(key=lambda lbl: priority_map.get(lbl.lower(), len(priority_map)))
+        return deduped
+
+    def _merge_answer(self, labels: list[str], answer: Optional[str]) -> list[str]:
+        if not answer:
+            return labels
+        lowered = [lbl.lower() for lbl in labels]
+        if answer.lower() in lowered:
+            return labels
+        return [answer] + labels

@@ -2,7 +2,7 @@ import json
 import os
 import time
 from collections import defaultdict
-from typing import Dict, List
+from typing import Any, Dict, List, Optional
 import re
 import unicodedata
 
@@ -20,6 +20,8 @@ class IndexBuilder:
         self.type_edge_index = defaultdict(list)
         self.field_index = defaultdict(lambda: defaultdict(list))
         self.alias_to_entities = defaultdict(list)
+        self.weak_entity_to_notes: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+        self.weak_predicate_to_notes: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
         # Mentions and coreference edges (note-centric)
         self.mentions_edges = defaultdict(list)  # note_id -> [entity]
         self.corefers_edges = defaultdict(list)  # note_id -> [entity]
@@ -29,12 +31,16 @@ class IndexBuilder:
     def add_note(self, note: Dict) -> None:
         note_id = note["note_id"]
         subj, obj, pred = note["subj"], note["obj"], note["pred"]
+        meta = (note.get("meta") or {})
+
+        if meta.get("filter_out_strict"):
+            return
 
         self.entity_to_notes[subj].append(note_id)
         self.entity_to_notes[obj].append(note_id)
         self.predicate_to_notes[pred].append(note_id)
 
-        domain = (note.get("meta", {}) or {}).get("domain")
+        domain = meta.get("domain")
         if domain:
             self.domain_index[domain].append(note_id)
 
@@ -44,7 +50,7 @@ class IndexBuilder:
         type_key = (note["subj_type"], pred, note["obj_type"])
         self.type_edge_index[type_key].append(note_id)
 
-        attribute = (note.get("meta") or {}).get("attribute") or {}
+        attribute = meta.get("attribute") or {}
         raw_attr_name = attribute.get("name") or pred
         # 谓词归一到属性名（例如 profession/job → occupation）
         attr_name = PRED2ATTR.get((raw_attr_name or "").lower(), raw_attr_name)
@@ -66,7 +72,7 @@ class IndexBuilder:
             if stemmed_key and stemmed_key != normalized_key:
                 self.field_index[attr_name][stemmed_key].append(note_id)
 
-        subject_profile = (note.get("meta") or {}).get("subject_profile") or {}
+        subject_profile = meta.get("subject_profile") or {}
         for alias in subject_profile.get("aliases") or []:
             alias_key = self._normalize_alias(alias)
             if not alias_key:
@@ -74,7 +80,7 @@ class IndexBuilder:
             if note["subj"] not in self.alias_to_entities[alias_key]:
                 self.alias_to_entities[alias_key].append(note["subj"])
         # Merge alias_map from meta into alias index
-        alias_map = (note.get("meta") or {}).get("alias_map") or {}
+        alias_map = meta.get("alias_map") or {}
         if isinstance(alias_map, dict):
             for canonical, aliases in alias_map.items():
                 for alias in aliases or []:
@@ -100,10 +106,37 @@ class IndexBuilder:
                 self.corefers_edges[note_id].append(subj)
 
         # Anchor entity from meta if present and unique
-        meta = (note.get("meta") or {})
         anchor = meta.get("anchor_entity")
         if isinstance(anchor, str) and anchor.strip():
             self.anchor_index[note_id] = anchor.strip()
+
+    def add_weak_note(self, note: Dict[str, Any]) -> None:
+        note_id = note.get("note_id")
+        if not note_id:
+            return
+        meta = (note.get("meta") or {}) or {}
+        candidates = meta.get("coref_candidates") or []
+        if isinstance(candidates, list):
+            for cand in candidates:
+                if not isinstance(cand, dict):
+                    continue
+                entity = cand.get("entity")
+                if not entity:
+                    continue
+                try:
+                    score = float(cand.get("score", 0.0))
+                except (TypeError, ValueError):
+                    score = 0.0
+                weight = max(0.0, min(score * 0.5, 1.0))
+                self.weak_entity_to_notes[entity].append({"note_id": note_id, "weight": round(weight, 3)})
+        pred = note.get("pred")
+        if pred:
+            try:
+                base_conf = float(meta.get("coref_confidence") or 0.3)
+            except (TypeError, ValueError):
+                base_conf = 0.3
+            weight = max(0.0, min(base_conf * 0.5, 1.0))
+            self.weak_predicate_to_notes[pred].append({"note_id": note_id, "weight": round(weight, 3)})
 
     @staticmethod
     def _normalize_alias(text: str) -> str:
@@ -162,6 +195,20 @@ class IndexBuilder:
                 note = json.loads(line)
                 self.add_note(note)
 
+    def build_weak_from_jsonl(self, weak_notes_path: Optional[str]) -> None:
+        if not weak_notes_path or not os.path.exists(weak_notes_path):
+            return
+        with open(weak_notes_path, "r", encoding="utf-8") as handle:
+            for line in handle:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    note = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                self.add_weak_note(note)
+
     def dump(self, out_dir: str) -> None:
         os.makedirs(out_dir, exist_ok=True)
 
@@ -180,6 +227,8 @@ class IndexBuilder:
         dump_json(field_index_serializable, "field_index.json")
         dump_json(self.alias_to_entities, "entity_alias_index.json")
         dump_json(self.anchor_index, "anchor_index.json")
+        dump_json(dict(self.weak_entity_to_notes), "weak_entity_to_notes.json")
+        dump_json(dict(self.weak_predicate_to_notes), "weak_predicate_to_notes.json")
 
         graph_path = os.path.join(out_dir, "graph_edges.jsonl")
         with open(graph_path, "w", encoding="utf-8") as handle:
@@ -227,6 +276,8 @@ class IndexBuilder:
                 "mentions_edges": "mentions_edges.jsonl",
                 "corefers_edges": "corefers_edges.jsonl",
                 "anchor_index": "anchor_index.json",
+                "weak_entity_to_notes": "weak_entity_to_notes.json",
+                "weak_predicate_to_notes": "weak_predicate_to_notes.json",
             },
             "version": 1,
         }

@@ -18,7 +18,16 @@ from retriever.pipeline import retrieve_answer
 
 cfg = config.load_config()
 indexes = Indexes(cfg.get("notes.indexes_dir", "indexes"))
-store = NoteStore(cfg.get("notes.out_path", "notes/notes.jsonl"))
+notes_path = cfg.get("notes.out_path", "notes/notes.jsonl")
+weak_new = os.path.join(os.path.dirname(notes_path), "weak", "weak_notes.jsonl")
+weak_legacy = os.path.join(os.path.dirname(notes_path), "weak_notes.jsonl")
+if os.path.exists(weak_new):
+    weak_path = weak_new
+elif os.path.exists(weak_legacy):
+    weak_path = weak_legacy
+else:
+    weak_path = None
+store = NoteStore(notes_path, weak_path)
 
 question = os.environ["QUESTION"]
 result = retrieve_answer(question, indexes, store)

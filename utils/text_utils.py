@@ -1,13 +1,46 @@
 import re
-from typing import List, Dict
+from typing import List, Dict, Optional
 
 
 class TextUtils:
+    @staticmethod
+    def rough_token_len(s: str) -> int:
+        """Heuristic char-to-token estimator for routing/scheduling."""
+        if not s:
+            return 0
+        return int(len(s) / 3.2) + 1
+
     # --- Pronoun lists (non-exhaustive, practical) ---
-    EN_PRONOUNS = {
-        "he", "she", "it", "they", "him", "her", "them", "his", "her", "its", "their",
+    EN_PERSONAL_PRONOUNS = {
+        "he",
+        "she",
+        "it",
+        "they",
+        "him",
+        "her",
+        "them",
+    }
+    EN_POSSESSIVE_PRONOUNS = {
+        "his",
+        "her",
+        "its",
+        "their",
+    }
+    EN_DEMONSTRATIVES = {
         "this", "that", "these", "those", "former", "latter", "the former", "the latter",
     }
+    EN_PRONOUNS = EN_PERSONAL_PRONOUNS | EN_POSSESSIVE_PRONOUNS
+    EN_TITLE_PREFIXES = ("mr.", "mrs.", "ms.", "miss", "dr.", "prof.", "sir", "madam", "lord", "lady")
+    EN_ORG_HINTS = (
+        "university", "college", "party", "republic", "revolutionary", "committee", "council",
+        "company", "limited", "ltd", "inc", "llc", "press", "newspaper", "bank", "association",
+        "foundation", "society", "team", "government", "ministry", "agency", "agency", "church",
+    )
+    EN_PLACE_HINTS = (
+        "city", "county", "province", "state", "republic", "kingdom", "village", "municipality",
+        "river", "lake", "mount", "mountain", "bay", "harbor", "harbour", "island", "peninsula",
+    )
+    REPORTING_VERBS = ("said", "stated", "told", "wrote", "added", "according to")
     ZH_PRONOUNS = {
         "他", "她", "它", "他们", "她们", "它们", "其", "该", "此", "本", "前者", "后者", "上述",
         "该公司", "该机构", "该团队", "该部门",
@@ -15,8 +48,8 @@ class TextUtils:
 
     # Common English verb triggers for subject position
     EN_SUBJECT_VERBS = (
-        "be", "was", "were", "is", "are", "said", "announced", "joined", "founded", "born",
-        "died", "won", "created", "wrote", "worked", "served", "became",
+        "be", "was", "were", "is", "are", "has", "have", "had", "said", "announced", "joined",
+        "founded", "born", "died", "won", "created", "wrote", "worked", "served", "became",
     )
     # Chinese triggers following subject pronouns
     ZH_SUBJECT_TRIGGERS = (
@@ -81,7 +114,35 @@ class TextUtils:
         t = (token or "").strip().lower()
         if not t:
             return False
-        return t in TextUtils.EN_PRONOUNS or token in TextUtils.ZH_PRONOUNS
+        return t in TextUtils.EN_PRONOUNS or t in TextUtils.ZH_PRONOUNS
+
+    @staticmethod
+    def _normalize_pronoun_token(token: str) -> str:
+        cleaned = (token or "").strip()
+        if not cleaned:
+            return ""
+        cleaned = cleaned.replace("’", "'")
+        cleaned = cleaned.strip(" \"'“”‘’()[]{}.,;:!?-")
+        cleaned = cleaned.lower()
+        cleaned = re.sub(r"[^a-z']", "", cleaned)
+        return cleaned
+
+    @staticmethod
+    def starts_with_pronoun(sentence: str) -> bool:
+        s = (sentence or "").strip()
+        if not s:
+            return False
+        parts = s.split()
+        if not parts:
+            return False
+        first = TextUtils._normalize_pronoun_token(parts[0])
+        if not first:
+            return False
+        if first in TextUtils.EN_PERSONAL_PRONOUNS or first in TextUtils.EN_POSSESSIVE_PRONOUNS:
+            return True
+        if parts[0] in TextUtils.ZH_PRONOUNS:
+            return True
+        return False
 
     @staticmethod
     def is_pronoun_subject_sentence(sentence: str) -> bool:
@@ -91,25 +152,48 @@ class TextUtils:
         # English: ^Pronoun + verb trigger
         en = s.split()
         if en:
-            first = en[0].lower()
-            if first in TextUtils.EN_PRONOUNS:
-                if len(en) > 1:
-                    second = en[1].lower()
-                    if second in TextUtils.EN_SUBJECT_VERBS:
-                        return True
-                # This/That/These/Those formerly included
-                return True
+            first_raw = en[0]
+            first_norm = TextUtils._normalize_pronoun_token(first_raw)
+            second_norm: Optional[str] = None
+            english_candidate = False
+            # Handle contractions such as He's/She's/It's → ("he", "is")
+            if first_norm.endswith("'s"):
+                base = first_norm[:-2]
+                if base in TextUtils.EN_PERSONAL_PRONOUNS:
+                    first_norm = base
+                    second_norm = "is"
+                    english_candidate = True
+            allowed_pronouns = TextUtils.EN_PRONOUNS
+            if first_norm in allowed_pronouns:
+                english_candidate = True
+                if len(en) > 1 and second_norm is None:
+                    second_norm = TextUtils._normalize_pronoun_token(en[1])
+                if second_norm in TextUtils.EN_SUBJECT_VERBS:
+                    return True
+                return False
+            if english_candidate:
+                return False
         # Chinese: ^Pronoun + trigger
-        zh_match = re.match(rf"^({'|'.join(TextUtils.ZH_PRONOUNS)})({ '|'.join(TextUtils.ZH_SUBJECT_TRIGGERS) })", s)
-        if zh_match:
-            return True
-        return False
+        zh_pronoun = "|".join(re.escape(p) for p in TextUtils.ZH_PRONOUNS)
+        zh_triggers = "|".join(re.escape(t) for t in TextUtils.ZH_SUBJECT_TRIGGERS)
+        pattern = rf"^({zh_pronoun})({zh_triggers})"
+        return re.match(pattern, s) is not None
 
     @staticmethod
     def is_entity_sentence(sentence: str) -> bool:
         s = (sentence or "").strip()
         if not s:
             return False
+        lowered = s.lower()
+        # Explicit reporting constructions: "..., said John Doe"
+        if TextUtils._has_reporting_clause(s):
+            return True
+        if TextUtils._looks_like_titled_name(s):
+            return True
+        if any(token in lowered for token in TextUtils.EN_ORG_HINTS):
+            return True
+        if any(token in lowered for token in TextUtils.EN_PLACE_HINTS):
+            return True
         # English entity candidates
         for pat in TextUtils.EN_ENTITY_PATTERNS:
             if pat.search(s):
@@ -126,6 +210,27 @@ class TextUtils:
         if re.search(r"^[\u4e00-\u9fa5]{2,3}.*(先生|女士|教授|博士|主席|市长|部长)", s):
             return True
         return False
+
+    @staticmethod
+    def _looks_like_titled_name(sentence: str) -> bool:
+        lowered = (sentence or "").strip().lower()
+        if not lowered:
+            return False
+        for prefix in TextUtils.EN_TITLE_PREFIXES:
+            if lowered.startswith(prefix + " "):
+                return True
+        if re.search(r"\b(Dr|Sir|Prof|Mr|Mrs|Ms)\.?\s+[A-Z][a-z]+", sentence):
+            return True
+        if re.search(r"[A-Z][a-z]+\s+[A-Z][a-z]+", sentence):
+            return True
+        return False
+
+    @staticmethod
+    def _has_reporting_clause(sentence: str) -> bool:
+        if not sentence:
+            return False
+        pattern = r"[\"“”‘’'].+?[\"“”‘’']\s*,?\s*(%s)\s+[A-Z][a-z]+" % "|".join(TextUtils.REPORTING_VERBS)
+        return bool(re.search(pattern, sentence, flags=re.IGNORECASE))
 
     @staticmethod
     def extract_entity_candidates(sentence: str) -> List[str]:
@@ -161,3 +266,27 @@ class TextUtils:
             if val and val not in candidates:
                 candidates.append(val)
         return candidates
+
+    @staticmethod
+    def guess_entity_type(entity: Optional[str]) -> Optional[str]:
+        text = (entity or "").strip()
+        if not text:
+            return None
+        lowered = text.lower()
+        if re.match(r"[A-Z][a-z]+\s+[A-Z][a-z]+", text):
+            return "PERSON"
+        if any(lowered.startswith(prefix) for prefix in TextUtils.EN_TITLE_PREFIXES):
+            return "PERSON"
+        if any(token in lowered for token in TextUtils.EN_ORG_HINTS):
+            return "ORG"
+        if any(token in lowered for token in TextUtils.EN_PLACE_HINTS):
+            return "PLACE"
+        if re.search(r"(?:Inc|LLC|Ltd|Co)\.?$", text):
+            return "ORG"
+        if re.search(r"(City|County|Province|Village|Town)$", text):
+            return "PLACE"
+        if re.search(r"大学|公司|集团|研究院", text):
+            return "ORG"
+        if re.search(r"省|市|县|镇|乡|河|湖|山", text):
+            return "PLACE"
+        return None

@@ -9,6 +9,7 @@ from pathlib import Path
 from loguru import logger
 
 from adapters import get_adapter
+from config.config_loader import config as global_config
 from generator.note_generator import NoteGenerator
 from indexer.index_builder import IndexBuilder
 
@@ -23,15 +24,25 @@ def build_notes(
     shard_idx: int = 0,
     shard_cnt: int = 1,
     temperature: float = 0.0,
-    max_tokens: int = 700,
+    max_tokens: int | None = None,
     progress_path: str | None = None,
 ) -> dict:
     adapter = get_adapter(dataset)
+    vllm_cfg = (global_config.get("vllm", {}) or {})
+    default_max_tokens = (
+        vllm_cfg.get("max_new_tokens") or vllm_cfg.get("max_tokens") or 700
+    )
+    try:
+        resolved_max_tokens = int(max_tokens if max_tokens is not None else default_max_tokens)
+    except (TypeError, ValueError):
+        resolved_max_tokens = int(default_max_tokens)
+    if resolved_max_tokens <= 0:
+        resolved_max_tokens = 1
     generator = NoteGenerator(
         vllm_endpoint,
         vllm_model,
         temperature=temperature,
-        max_tokens=max_tokens,
+        max_tokens=resolved_max_tokens,
         # Use dynamic backend pool rather than pinning to a strict endpoint
         strict_endpoint=False,
     )
@@ -45,8 +56,6 @@ def build_notes(
     notes_path.parent.mkdir(parents=True, exist_ok=True)
 
     # Concurrency controls (per shard)
-    from config.config_loader import config as global_config
-    vllm_cfg = (global_config.get("vllm", {}) or {})
     ccfg = vllm_cfg.get("concurrency", {})
     # 从配置读取并发参数；若关闭自适应，上下限一致
     max_workers = int(ccfg.get("max_workers", 8))
@@ -170,7 +179,7 @@ def main() -> None:
     parser.add_argument("--vllm_endpoint", required=True)
     parser.add_argument("--vllm_model", required=True)
     parser.add_argument("--temperature", type=float, default=0.0)
-    parser.add_argument("--max_tokens", type=int, default=700)
+    parser.add_argument("--max_tokens", type=int, default=None)
     parser.add_argument("--shard-idx", type=int, default=0)
     parser.add_argument("--shard-cnt", type=int, default=1)
     parser.add_argument("--progress-path", default=None)
