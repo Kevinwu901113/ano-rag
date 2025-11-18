@@ -18,6 +18,7 @@ from generator.note_generator import NoteGenerator
 from indexer.index_builder import IndexBuilder
 from utils import FileUtils, TextUtils
 from utils.weak_notes import close_weak_note_writer, write_weak_note
+from telemetry.metrics import record_pronoun_stat
 from postprocess.notes_postprocess import (
     backfill_pronoun_subjects,
     stitch_pronoun_notes,
@@ -405,10 +406,13 @@ class StructuredBuilder:
 
                     if subj_is_pronoun and resolved_subject:
                         note["subj"] = resolved_subject
-                        meta["subject_source"] = resolved_source or "window_backfill"
+                        if not meta.get("subject_source"):
+                            meta["subject_source"] = resolved_source or "window_backfill"
                         conf_hint = max(0.75, (resolved_confidence or 0.8))
                         _bump_conf("subject_confidence", conf_hint)
                         _bump_conf("coref_confidence", conf_hint)
+                        prev_coref = meta.get("coref_confidence") or 0.0
+                        meta["coref_confidence"] = max(prev_coref, conf_hint)
                         subj_is_pronoun = False
                         canonical_subject = resolved_subject
                     elif subj_is_pronoun and not resolved_subject:
@@ -624,6 +628,9 @@ class StructuredBuilder:
             stats["pronoun_resolved_strong"],
             stats["weak_written"],
         )
+        record_pronoun_stat("pronoun_subj_before", stats["pronoun_subj_before"])
+        record_pronoun_stat("pronoun_resolved_strong", stats["pronoun_resolved_strong"])
+        record_pronoun_stat("weak_written", stats["weak_written"])
 
         weak_notes_path_str = str(weak_notes_path) if weak_notes_path.exists() else None
         if notes_written:

@@ -13,7 +13,7 @@ If the evidence is insufficient, respond EXACTLY with "Insufficient evidence".
 Prioritize high-confidence evidence. Weak evidence may provide hints but is unreliable on its own.
 {label_instruction}
 Question: {q}
-[STRONG EVIDENCE]
+[STRUCTURED EVIDENCE]
 {strong_block}
 [WEAK EVIDENCE – lower confidence]
 {weak_block}

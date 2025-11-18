@@ -7,7 +7,7 @@ from loguru import logger
 from schema.note_schema_v1 import PRED_SYNONYM_SETS
 from schema.vocabulary import normalize_slot_value
 from config.attributes_loader import get_selection_priority, allowed_values
-from telemetry.metrics import record_binding_strength, record_anchor_usage
+from telemetry.metrics import record_binding_strength, record_anchor_usage, record_weak_ratio
 
 from .ir import PredicateStep, QueryIR, Seed
 from .intent_detector import AnswerIntent, AnswerIntentDetector
@@ -146,7 +146,9 @@ def retrieve_answer(
             note_store,
             normalized_doc_hint,
         )
-    evidences, weak_ids = _merge_evidence_with_weak(evidences, weak_evidences, max_ratio=0.3)
+    evidences, weak_ids, weak_ratio = _merge_evidence_with_weak(evidences, weak_evidences, max_ratio=0.3)
+    if weak_ratio > 0:
+        record_weak_ratio(weak_ratio)
     support_note_ids = _merge_support_ids(support_note_ids, weak_ids)
 
     result = {
@@ -584,9 +586,9 @@ def _merge_evidence_with_weak(
     strong: List[Dict[str, Any]],
     weak: List[Dict[str, Any]],
     max_ratio: float = 0.3,
-) -> Tuple[List[Dict[str, Any]], List[str]]:
+) -> Tuple[List[Dict[str, Any]], List[str], float]:
     if not weak:
-        return strong, []
+        return strong, [], 0.0
     strong = strong or []
     strong_ids = {ev.get("note_id") for ev in strong if ev.get("note_id")}
     filtered = [ev for ev in weak if ev.get("note_id") not in strong_ids]
@@ -599,7 +601,8 @@ def _merge_evidence_with_weak(
     selected = filtered[:allowed]
     merged = strong + selected
     weak_ids = [ev.get("note_id") for ev in selected if ev.get("note_id")]
-    return merged, weak_ids
+    ratio = len(selected) / max(1, len(merged))
+    return merged, weak_ids, ratio
 
 
 def _merge_support_ids(primary: List[str], extra: List[str]) -> List[str]:

@@ -38,5 +38,17 @@ def record_anchor_usage(anchor: bool) -> None:
     _REGISTRY.incr(key)
 
 
+def record_pronoun_stat(stat: str, value: int = 1) -> None:
+    key = f"coref.pronoun.{stat}"
+    _REGISTRY.incr(key, value)
+
+
+def record_weak_ratio(ratio: float) -> None:
+    clamped = max(0.0, min(1.0, ratio))
+    scaled = int(round(clamped * 1000))
+    _REGISTRY.incr("weak_ratio.sum", scaled)
+    _REGISTRY.incr("weak_ratio.count", 1)
+
+
 def export_metrics() -> Dict[str, int]:
     return _REGISTRY.snapshot()
