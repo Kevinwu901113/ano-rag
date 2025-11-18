@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 from typing import Any, Dict, List, Optional, Tuple
 import re
-import json
 from pathlib import Path
 
 from jsonschema import Draft7Validator, ValidationError
@@ -11,6 +10,7 @@ from jsonschema import Draft7Validator, ValidationError
 from schema.note_schema_v1 import NOTE_JSON_SCHEMA, PRED_SYNONYM_SETS, PRED2ATTR
 from schema.note_schema_v1 import ALLOWED_PREDICATES
 from schema.vocabulary import normalize_entity_name, normalize_slot_value
+from utils import TextUtils
 
 
 PROFILE_SLOT_MAP = {
@@ -367,14 +367,21 @@ def validate_and_normalize(raw_text: str, doc_id: str, chunk_id: str):
         patched.append(patched_obj)
 
     # 在整体校验前，记录可能的代词违规并做逐条过滤（避免整块失败）
-    pronoun_re = re.compile(r"^(he|she|they|his|her|their)$", re.IGNORECASE)
     filtered: List[Dict[str, Any]] = []
     pronoun_violations: List[Dict[str, Any]] = []
     for idx, item in enumerate(patched):
         subj = (item.get("subj") or "").strip()
         obj = (item.get("obj") or "").strip()
         ev = (item.get("evidence") or "").strip()
-        if pronoun_re.match(subj) or pronoun_re.match(obj):
+        meta = item.get("meta")
+        meta = meta if isinstance(meta, dict) else {}
+        subj_is_pronoun = TextUtils.is_pronoun(subj)
+        obj_is_pronoun = TextUtils.is_pronoun(obj)
+        if subj_is_pronoun:
+            meta["pronoun_subj"] = True
+        if obj_is_pronoun:
+            meta["pronoun_obj"] = True
+        if subj_is_pronoun or obj_is_pronoun:
             viol = {
                 "index": idx,
                 "subj": subj,
@@ -383,8 +390,7 @@ def validate_and_normalize(raw_text: str, doc_id: str, chunk_id: str):
                 "source": f"{doc_id}#{chunk_id}",
             }
             pronoun_violations.append(viol)
-            # 代词未回填的条目跳过，不进入 schema 验证阶段
-            continue
+        item["meta"] = meta
         filtered.append(item)
 
     try:

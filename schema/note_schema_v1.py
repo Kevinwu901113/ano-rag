@@ -178,6 +178,8 @@ NOTE_JSON_SCHEMA = {
                     "subject_source": {"type": ["string", "null"]},
                     "subject_confidence": {"type": ["number", "null"], "minimum": 0.0, "maximum": 1.0},
                     "alias_map": {"type": ["object", "null"]},
+                    "pronoun_subj": {"type": ["boolean", "null"]},
+                    "pronoun_obj": {"type": ["boolean", "null"]},
                     "entities": {"type": ["array", "null"], "items": {"type": "string", "minLength": 1}},
                     # Canonical evidence and anchor fields
                     "evidence_canonical": {"type": ["string", "null"], "minLength": 4},

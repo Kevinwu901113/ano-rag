@@ -16,12 +16,13 @@ def _merge_entity_clauses(clauses: List[str]) -> List[str]:
     i = 0
     while i < len(cleaned):
         clause = cleaned[i]
-        if TextUtils.is_entity_sentence(clause):
+        clause_has_entity = bool(TextUtils.extract_entities(clause)) or TextUtils.is_entity_sentence(clause)
+        if clause_has_entity:
             left = merged.pop() if merged else ""
             right = ""
             if (i + 1) < len(cleaned):
                 nxt = cleaned[i + 1]
-                if not TextUtils.is_entity_sentence(nxt):
+                if not (TextUtils.extract_entities(nxt) or TextUtils.is_entity_sentence(nxt)):
                     right = nxt
                     i += 1
             combined_parts = [part for part in (left, clause, right) if part]
@@ -72,8 +73,8 @@ def _cluster_sentences(spans: List[Dict]) -> List[List[Dict]]:
     has_entity = False
     for span in spans:
         text = span.get("text") or ""
-        is_entity = TextUtils.is_entity_sentence(text)
-        is_pronoun = TextUtils.starts_with_pronoun(text)
+        is_entity = bool(TextUtils.extract_entities(text)) or TextUtils.is_entity_sentence(text)
+        is_pronoun = TextUtils.is_pronoun_at_start(text)
 
         if is_entity:
             if not has_entity and pending:
@@ -121,11 +122,26 @@ def _flatten_clusters(clusters: List[List[Dict]]) -> Tuple[List[Dict], Dict[int,
     return flat, cluster_start
 
 
-def make_chunks(doc_id: str, text: str, chunk_id_prefix: str = "p") -> List[Dict]:
+def _cluster_start_indices(flat_spans: List[Dict]) -> Dict[int, int]:
+    mapping: Dict[int, int] = {}
+    for idx, span in enumerate(flat_spans):
+        cid = span.get("_cluster_id")
+        if cid is None:
+            continue
+        try:
+            cid_int = int(cid)
+        except Exception:
+            continue
+        if cid_int not in mapping:
+            mapping[cid_int] = idx
+    return mapping
+
+
+def split_into_entity_aware_spans(text: str) -> List[Dict]:
+    """Split text into sentence/clause spans with light entity awareness."""
     cleaned = (text or "").strip()
     if not cleaned:
         return []
-
     spans = TextUtils.split_with_spans(cleaned)
     if not spans:
         spans = [{"text": cleaned, "start": 0, "end": len(cleaned)}]
@@ -133,14 +149,24 @@ def make_chunks(doc_id: str, text: str, chunk_id_prefix: str = "p") -> List[Dict
     clusters = _cluster_sentences(clause_spans)
     if not clusters:
         clusters = [clause_spans]
-    flat_spans, cluster_start_indices = _flatten_clusters(clusters)
-    if not flat_spans:
-        flat_spans = []
-        for idx, span in enumerate(clause_spans):
-            cloned = dict(span)
-            cloned["_cluster_id"] = 0
-            flat_spans.append(cloned)
-        cluster_start_indices = {0: 0}
+    flat_spans, _ = _flatten_clusters(clusters)
+    if flat_spans:
+        return flat_spans
+    fallback: List[Dict] = []
+    for span in clause_spans:
+        cloned = dict(span)
+        cloned["_cluster_id"] = 0
+        fallback.append(cloned)
+    return fallback
+
+
+def make_chunks(doc_id: str, text: str, chunk_id_prefix: str = "p") -> List[Dict]:
+    cleaned = (text or "").strip()
+    if not cleaned:
+        return []
+
+    flat_spans = split_into_entity_aware_spans(cleaned)
+    cluster_start_indices = _cluster_start_indices(flat_spans)
 
     n_sent = max(1, int(config.get("chunk.n_sent", 4)))
     # Ensure overlap is sentence-based and clamped to 1–2 sentences
@@ -149,8 +175,6 @@ def make_chunks(doc_id: str, text: str, chunk_id_prefix: str = "p") -> List[Dict
     except Exception:
         _overlap_cfg = 1
     overlap = max(1, min(2, _overlap_cfg))
-    # Sliding step
-    step = max(1, n_sent - overlap)
     # Optional token/size cap (simple char cap here; could be bytes/tokens)
     max_total_sent = int(config.get("chunk.max_total_sent", 8))
 
@@ -162,13 +186,17 @@ def make_chunks(doc_id: str, text: str, chunk_id_prefix: str = "p") -> List[Dict
     def _unique_entities(sentences: List[str]) -> List[str]:
         uniq: List[str] = []
         for s in sentences:
-            for e in TextUtils.extract_entity_candidates(s):
+            for e in TextUtils.extract_entities(s):
                 if e not in uniq:
                     uniq.append(e)
         return uniq
 
     while cursor < len(flat_spans):
         start = cursor
+        # Prevent pronoun-leading spans from starting a chunk when possible
+        while start > 0 and TextUtils.is_pronoun_at_start(flat_spans[start]["text"]):
+            start -= 1
+
         window: List[Dict] = []
         end = start
         while end < len(flat_spans) and len(window) < n_sent:

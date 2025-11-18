@@ -117,6 +117,30 @@ class TextUtils:
         return t in TextUtils.EN_PRONOUNS or t in TextUtils.ZH_PRONOUNS
 
     @staticmethod
+    def is_pronoun_at_start(sentence: str) -> bool:
+        """Lightweight check for pronoun at sentence start (first 1–2 tokens)."""
+        s = (sentence or "").strip()
+        if not s:
+            return False
+        parts = s.split()
+        if not parts:
+            return False
+        first_raw = parts[0]
+        first_norm = TextUtils._normalize_pronoun_token(first_raw)
+        if TextUtils.is_pronoun(first_norm):
+            return True
+        # Chinese pronouns may appear without whitespace; also consider short prefixes/punctuation
+        zh_pronoun_pat = rf"^({'|'.join(re.escape(p) for p in TextUtils.ZH_PRONOUNS)})"
+        if re.match(zh_pronoun_pat, s):
+            return True
+        # Allow simple two-token English noun phrases like "the company"
+        if len(parts) >= 2:
+            lead_two = " ".join(parts[:2]).lower()
+            if lead_two in {"the company", "the organization", "the team", "the group"}:
+                return True
+        return False
+
+    @staticmethod
     def _normalize_pronoun_token(token: str) -> str:
         cleaned = (token or "").strip()
         if not cleaned:
@@ -129,20 +153,7 @@ class TextUtils:
 
     @staticmethod
     def starts_with_pronoun(sentence: str) -> bool:
-        s = (sentence or "").strip()
-        if not s:
-            return False
-        parts = s.split()
-        if not parts:
-            return False
-        first = TextUtils._normalize_pronoun_token(parts[0])
-        if not first:
-            return False
-        if first in TextUtils.EN_PERSONAL_PRONOUNS or first in TextUtils.EN_POSSESSIVE_PRONOUNS:
-            return True
-        if parts[0] in TextUtils.ZH_PRONOUNS:
-            return True
-        return False
+        return TextUtils.is_pronoun_at_start(sentence)
 
     @staticmethod
     def is_pronoun_subject_sentence(sentence: str) -> bool:
@@ -266,6 +277,25 @@ class TextUtils:
             if val and val not in candidates:
                 candidates.append(val)
         return candidates
+
+    @staticmethod
+    def extract_entities(sentence: str) -> List[str]:
+        """Lightweight entity extractor using common English/Chinese patterns."""
+        s = (sentence or "").strip()
+        if not s:
+            return []
+        entities: List[str] = []
+        for pat in TextUtils.EN_ENTITY_PATTERNS:
+            for m in pat.finditer(s):
+                val = m.group(1)
+                if val and val not in entities:
+                    entities.append(val)
+        zh_pattern = re.compile(rf"([\u4e00-\u9fa5]{{2,}}(?:{TextUtils.ZH_ENTITY_SUFFIX}))")
+        for m in zh_pattern.finditer(s):
+            val = m.group(1)
+            if val and val not in entities:
+                entities.append(val)
+        return entities
 
     @staticmethod
     def guess_entity_type(entity: Optional[str]) -> Optional[str]:

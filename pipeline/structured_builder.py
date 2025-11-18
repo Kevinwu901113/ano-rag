@@ -1,7 +1,5 @@
 import concurrent.futures
-import json
 import math
-import queue
 import threading
 import time
 from collections import deque
@@ -15,6 +13,7 @@ from config.config_loader import config as global_config
 
 from doc import make_chunks
 from generator.note_generator import NoteGenerator
+from generator.pronoun_resolver import resolve_pronouns_for_doc
 from indexer.index_builder import IndexBuilder
 from utils import FileUtils, TextUtils
 from utils.weak_notes import close_weak_note_writer, write_weak_note
@@ -519,100 +518,82 @@ class StructuredBuilder:
                 return _process_with_ledger(chunk, ledger)
 
         notes_written = 0
-        save_queue: "queue.SimpleQueue[Dict[str, Any]]" = queue.SimpleQueue()
-        writer_stop = object()
+        doc_notes: Dict[str, List[Dict[str, Any]]] = {}
+        doc_order: List[str] = []
+        doc_lock = threading.Lock()
+
+        def _stash_notes(doc_id: str, notes: List[Dict[str, Any]]) -> None:
+            if not notes:
+                return
+            key = doc_id or "__default__"
+            with doc_lock:
+                if key not in doc_notes:
+                    doc_notes[key] = []
+                    doc_order.append(key)
+                doc_notes[key].extend(notes)
+
+        if total_workers <= 1:
+            for chunk in chunk_records:
+                _stash_notes(chunk.get("doc_id") or "__default__", _process_one(chunk))
+        else:
+            with ExitStack() as stack:
+                executors: Dict[str, concurrent.futures.ThreadPoolExecutor] = {}
+                for spec in active_specs:
+                    executors[spec["name"]] = stack.enter_context(
+                        concurrent.futures.ThreadPoolExecutor(
+                            max_workers=spec["workers"],
+                            thread_name_prefix=f"bucket-{spec['name']}",
+                        )
+                    )
+
+                inflight: Dict[str, Set[concurrent.futures.Future]] = {
+                    spec["name"]: set() for spec in active_specs
+                }
+                bucket_indices: Dict[str, int] = {spec["name"]: 0 for spec in active_specs}
+                bucket_limits: Dict[str, int] = {
+                    spec["name"]: max(spec["workers"], math.ceil(spec["workers"] * refill_factor))
+                    for spec in active_specs
+                }
+                future_bucket: Dict[concurrent.futures.Future, str] = {}
+                future_doc: Dict[concurrent.futures.Future, str] = {}
+                all_futures: Set[concurrent.futures.Future] = set()
+
+                def _refill() -> None:
+                    for spec in active_specs:
+                        name = spec["name"]
+                        records = bucket_records[name]
+                        if not records:
+                            continue
+                        inflight_set = inflight[name]
+                        limit = bucket_limits[name]
+                        while bucket_indices[name] < len(records) and len(inflight_set) < limit:
+                            _maybe_pause_submission()
+                            chunk = records[bucket_indices[name]]
+                            fut = executors[name].submit(_process_one, chunk)
+                            inflight_set.add(fut)
+                            future_bucket[fut] = name
+                            future_doc[fut] = chunk.get("doc_id") or "__default__"
+                            all_futures.add(fut)
+                            bucket_indices[name] += 1
+
+                _refill()
+                while all_futures:
+                    done, _ = concurrent.futures.wait(all_futures, return_when=concurrent.futures.FIRST_COMPLETED)
+                    for fut in done:
+                        all_futures.discard(fut)
+                        bucket_name = future_bucket.pop(fut, None)
+                        if bucket_name:
+                            inflight[bucket_name].discard(fut)
+                        notes = fut.result()
+                        _stash_notes(future_doc.pop(fut, "__default__"), notes)
+                    _refill()
 
         with open(notes_path, "w", encoding="utf-8") as handle:
-
-            writer_batch_size = max(1, int(ccfg.get("writer_batch_size", 64)))
-            flush_interval_sec = max(0.05, float(ccfg.get("writer_flush_interval_sec", 0.35)))
-
-            def _flush_buffer(buffer: List[Dict[str, Any]]) -> None:
-                nonlocal notes_written
-                if not buffer:
-                    return
-                notes_written += FileUtils.write_jsonl_batch(handle, buffer)
-                buffer.clear()
-
-            def _writer_loop() -> None:
-                buffer: List[Dict[str, Any]] = []
-                last_flush = time.time()
-                while True:
-                    item = save_queue.get()
-                    if item is writer_stop:
-                        break
-                    buffer.append(item)
-                    now = time.time()
-                    if len(buffer) >= writer_batch_size or (now - last_flush) >= flush_interval_sec:
-                        _flush_buffer(buffer)
-                        last_flush = now
-                if buffer:
-                    _flush_buffer(buffer)
-
-            writer_thread = threading.Thread(target=_writer_loop, name="notes-writer", daemon=True)
-            writer_thread.start()
-
-            try:
-                if total_workers <= 1:
-                    for chunk in chunk_records:
-                        for note in _process_one(chunk):
-                            save_queue.put(note)
-                else:
-                    with ExitStack() as stack:
-                        executors: Dict[str, concurrent.futures.ThreadPoolExecutor] = {}
-                        for spec in active_specs:
-                            executors[spec["name"]] = stack.enter_context(
-                                concurrent.futures.ThreadPoolExecutor(
-                                    max_workers=spec["workers"],
-                                    thread_name_prefix=f"bucket-{spec['name']}",
-                                )
-                            )
-
-                        inflight: Dict[str, Set[concurrent.futures.Future]] = {
-                            spec["name"]: set() for spec in active_specs
-                        }
-                        bucket_indices: Dict[str, int] = {spec["name"]: 0 for spec in active_specs}
-                        bucket_limits: Dict[str, int] = {
-                            spec["name"]: max(spec["workers"], math.ceil(spec["workers"] * refill_factor))
-                            for spec in active_specs
-                        }
-                        future_bucket: Dict[concurrent.futures.Future, str] = {}
-                        all_futures: Set[concurrent.futures.Future] = set()
-
-                        def _refill() -> None:
-                            for spec in active_specs:
-                                name = spec["name"]
-                                records = bucket_records[name]
-                                if not records:
-                                    continue
-                                inflight_set = inflight[name]
-                                limit = bucket_limits[name]
-                                while bucket_indices[name] < len(records) and len(inflight_set) < limit:
-                                    _maybe_pause_submission()
-                                    chunk = records[bucket_indices[name]]
-                                    fut = executors[name].submit(_process_one, chunk)
-                                    inflight_set.add(fut)
-                                    future_bucket[fut] = name
-                                    all_futures.add(fut)
-                                    bucket_indices[name] += 1
-
-                        _refill()
-                        while all_futures:
-                            done, _ = concurrent.futures.wait(
-                                all_futures, return_when=concurrent.futures.FIRST_COMPLETED
-                            )
-                            for fut in done:
-                                all_futures.discard(fut)
-                                bucket_name = future_bucket.pop(fut, None)
-                                if bucket_name:
-                                    inflight[bucket_name].discard(fut)
-                                notes = fut.result()
-                                for note in notes:
-                                    save_queue.put(note)
-                            _refill()
-            finally:
-                save_queue.put(writer_stop)
-                writer_thread.join()
+            for doc_id in doc_order:
+                resolved_notes = resolve_pronouns_for_doc(doc_id, doc_notes.get(doc_id, []))
+                if not resolved_notes:
+                    continue
+                notes_written += FileUtils.write_jsonl_batch(handle, resolved_notes)
 
         logger.info("Wrote {} notes to {}", notes_written, notes_path)
         close_weak_note_writer(weak_out_dir)

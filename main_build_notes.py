@@ -1,16 +1,17 @@
 import argparse
-import json
 import concurrent.futures
-import time
-import os
+import json
+import threading
 import time
 from pathlib import Path
+from typing import Dict, List
 
 from loguru import logger
 
 from adapters import get_adapter
 from config.config_loader import config as global_config
 from generator.note_generator import NoteGenerator
+from generator.pronoun_resolver import resolve_pronouns_for_doc
 from indexer.index_builder import IndexBuilder
 
 
@@ -74,6 +75,21 @@ def build_notes(
     written = 0
     processed_chunks = 0
     start_ts = time.time()
+    doc_notes: Dict[str, List[Dict]] = {}
+    doc_order: List[str] = []
+    doc_lock = threading.Lock()
+
+    def _stash_notes(doc_id: str, notes: List[Dict]) -> None:
+        nonlocal written
+        if not notes:
+            return
+        key = doc_id or "__default__"
+        with doc_lock:
+            if key not in doc_notes:
+                doc_notes[key] = []
+                doc_order.append(key)
+            doc_notes[key].extend(notes)
+        written += len(notes)
 
     def _emit_progress(total: int, completed: bool = False, current_workers: int | None = None) -> None:
         if not progress_path:
@@ -93,69 +109,83 @@ def build_notes(
         except Exception as exc:
             logger.warning("Failed to write progress path={} err={}", progress_path, exc)
 
-    with open(notes_path, "w", encoding="utf-8") as handle:
-        # Collect ALL chunks into a shared task list (no static sharding)
-        chunk_records = []
-        for _idx, (_doc, chunk) in enumerate(adapter(data_dir)):
-            chunk_records.append(chunk)
+    # Collect ALL chunks into a shared task list (no static sharding)
+    chunk_records = []
+    for _idx, (_doc, chunk) in enumerate(adapter(data_dir)):
+        chunk_records.append(chunk)
 
-        total = len(chunk_records)
-        _emit_progress(total, completed=False)
+    total = len(chunk_records)
+    _emit_progress(total, completed=False)
 
-        if max_workers <= 1:
-            for chunk in chunk_records:
-                notes = _process_one(chunk)
-                for note in notes:
-                    handle.write(json.dumps(note, ensure_ascii=False) + "\n")
-                    written += 1
-                processed_chunks += 1
-                _emit_progress(total, completed=False, current_workers=1)
-        else:
-            # Saturate pool with adaptive target over the shared task list
-            with concurrent.futures.ThreadPoolExecutor(max_workers=upper_workers) as executor:
-                inflight = set()
-                i = 0
-                n = total
-                target = max_workers
-                last_check = time.time()
-                # 根据自适应开关决定是否周期性检查
-                check_interval = float(acfg.get("cool_down_sec", 5.0)) if adaptive_enabled else 1e9
+    if max_workers <= 1:
+        for chunk in chunk_records:
+            notes = _process_one(chunk)
+            _stash_notes(chunk.get("doc_id") or "__default__", notes)
+            processed_chunks += 1
+            _emit_progress(total, completed=False, current_workers=1)
+    else:
+        # Saturate pool with adaptive target over the shared task list
+        with concurrent.futures.ThreadPoolExecutor(max_workers=upper_workers) as executor:
+            inflight = set()
+            i = 0
+            n = total
+            target = max_workers
+            last_check = time.time()
+            future_doc: Dict[concurrent.futures.Future, str] = {}
+            # 根据自适应开关决定是否周期性检查
+            check_interval = float(acfg.get("cool_down_sec", 5.0)) if adaptive_enabled else 1e9
 
-                def _maybe_update_target():
-                    nonlocal target, last_check
-                    now = time.time()
-                    if (now - last_check) >= max(1.0, check_interval):
-                        if adaptive_enabled:
-                            try:
-                                suggested = generator.suggest_concurrency()
-                                target = max(1, min(suggested, upper_workers))
-                            except Exception:
-                                pass
-                            finally:
-                                last_check = now
-                        else:
-                            # 关闭自适应：保持固定目标
-                            target = upper_workers
+            def _maybe_update_target():
+                nonlocal target, last_check
+                now = time.time()
+                if (now - last_check) >= max(1.0, check_interval):
+                    if adaptive_enabled:
+                        try:
+                            suggested = generator.suggest_concurrency()
+                            target = max(1, min(suggested, upper_workers))
+                        except Exception:
+                            pass
+                        finally:
                             last_check = now
+                    else:
+                        # 关闭自适应：保持固定目标
+                        target = upper_workers
+                        last_check = now
 
-                # Prime
+            def _submit(idx: int) -> None:
+                fut = executor.submit(_process_one, chunk_records[idx])
+                inflight.add(fut)
+                future_doc[fut] = chunk_records[idx].get("doc_id") or "__default__"
+
+            # Prime
+            while i < n and len(inflight) < target:
+                _submit(i)
+                i += 1
+            # Maintain saturation
+            while inflight:
+                done, inflight = concurrent.futures.wait(inflight, return_when=concurrent.futures.FIRST_COMPLETED)
+                for fut in done:
+                    doc_id = future_doc.pop(fut, "__default__")
+                    notes = fut.result()
+                    _stash_notes(doc_id, notes)
+                    processed_chunks += 1
+                    _emit_progress(total, completed=False, current_workers=len(inflight))
+                _maybe_update_target()
                 while i < n and len(inflight) < target:
-                    inflight.add(executor.submit(_process_one, chunk_records[i]))
+                    _submit(i)
                     i += 1
-                # Maintain saturation
-                while inflight:
-                    done, inflight = concurrent.futures.wait(inflight, return_when=concurrent.futures.FIRST_COMPLETED)
-                    for fut in done:
-                        notes = fut.result()
-                        for note in notes:
-                            handle.write(json.dumps(note, ensure_ascii=False) + "\n")
-                            written += 1
-                        processed_chunks += 1
-                        _emit_progress(total, completed=False, current_workers=len(inflight))
-                    _maybe_update_target()
-                    while i < n and len(inflight) < target:
-                        inflight.add(executor.submit(_process_one, chunk_records[i]))
-                        i += 1
+
+    # Persist after doc-level pronoun resolution
+    actual_written = 0
+    with open(notes_path, "w", encoding="utf-8") as handle:
+        for doc_id in doc_order:
+            resolved_notes = resolve_pronouns_for_doc(doc_id, doc_notes.get(doc_id, []))
+            if not resolved_notes:
+                continue
+            for note in resolved_notes:
+                handle.write(json.dumps(note, ensure_ascii=False) + "\n")
+                actual_written += 1
+    written = actual_written
 
     _emit_progress(total, completed=True)
 

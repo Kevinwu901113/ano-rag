@@ -17,6 +17,7 @@ from config.attributes_loader import load_attributes_config
 from generator.note_parsing import NoteParsingPipeline
 from validators.note_validator import validate_and_normalize
 from utils import TextUtils
+from doc import split_into_entity_aware_spans
 from utils.adaptive_concurrency import AdaptiveConcurrencyController, AdaptiveConfig
 
 
@@ -566,7 +567,7 @@ class NoteGenerator:
         cleaned_chunk = self._normalize_text(text)
         sent_spans = chunk.get("meta", {}).get("sent_spans")
         if not isinstance(sent_spans, list) or not sent_spans:
-            sent_spans = TextUtils.split_with_spans(text)
+            sent_spans = split_into_entity_aware_spans(text)
 
         sentence_records: List[Dict[str, Any]] = []
         for span in sent_spans:
