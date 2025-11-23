@@ -49,6 +49,7 @@ class NoteParsingPipeline:
         "loose_split_key": "subj",
         "max_tokens": 1024,
         "stop": ['"]\n', "\n]", "\n\nEND", "END_JSON"],
+        "assume_valid_json": False,
     }
 
     DEFAULT_SCHEMA_CONFIG: Dict[str, Any] = {
@@ -73,15 +74,25 @@ class NoteParsingPipeline:
         self._last_stats: Dict[str, int] = {}
         self._lock = threading.Lock()
         self._attribute_guard = AttributeGuard()
+        self.assume_valid_json = bool(self.parsing_config.get("assume_valid_json", False))
 
     def parse(self, text: str, doc_id: str | None = None) -> List[Dict[str, Any]]:
+        run_stats: Dict[str, int] = {}
+        if self.assume_valid_json:
+            try:
+                data = json.loads(text)
+                if isinstance(data, dict):
+                    data = [data]
+                if isinstance(data, list):
+                    return self._finalize(data, doc_id, run_stats, "strict_json_ok")
+            except Exception:
+                pass
+
         normalized = self._normalize_json_text(text)
         if self.parsing_config.get("enable_bracket_balance_fix", True):
             balanced = self._balance_brackets(normalized)
             if balanced != normalized:
                 normalized = balanced
-
-        run_stats: Dict[str, int] = {}
         packed_text: str | None = None
 
         if self._looks_like_array(normalized):

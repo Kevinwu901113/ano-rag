@@ -195,6 +195,34 @@ NOTE_JSON_SCHEMA = {
 
 ALLOWED_TYPES = ["PERSON", "WORK", "ORG", "PLACE", "EVENT", "CONCEPT", "TIME"]
 
+# 简化版：用于生成阶段的 Guided JSON/Schema 约束，字段少、约束简单，生成后仍会用 NOTE_JSON_SCHEMA 做严格校验。
+NOTE_GEN_JSON_SCHEMA = {
+    "type": "array",
+    "items": {
+        "type": "object",
+        "properties": {
+            "subj": {"type": "string", "minLength": 1},
+            "pred": {"type": "string", "minLength": 1},
+            "obj": {"type": "string", "minLength": 1},
+            "subj_type": {"type": "string", "enum": ALLOWED_TYPES},
+            "obj_type": {"type": "string", "enum": ALLOWED_TYPES},
+            "evidence": {"type": "string", "minLength": 4},
+            "meta": {
+                "type": "object",
+                "properties": {
+                    "source": {"type": ["string", "null"]},
+                    "confidence": {"type": ["number", "null"], "minimum": 0.0, "maximum": 1.0},
+                    "subject_profile": {"type": ["object", "null"]},
+                    "attribute": {"type": ["object", "null"]},
+                },
+                "additionalProperties": True,
+            },
+        },
+        "required": ["subj", "pred", "obj", "subj_type", "obj_type", "evidence", "meta"],
+        "additionalProperties": False,
+    },
+}
+
 # 默认允许的谓词集合；若存在 schema/predicates.json 则以文件为准（小写化）
 ALLOWED_PREDICATES = [
     "performed_by",

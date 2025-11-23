@@ -15,6 +15,7 @@ from loguru import logger
 from config.config_loader import config as global_config
 from config.attributes_loader import load_attributes_config
 from generator.note_parsing import NoteParsingPipeline
+from schema.note_schema_v1 import NOTE_GEN_JSON_SCHEMA, NOTE_JSON_SCHEMA
 from validators.note_validator import validate_and_normalize
 from utils import TextUtils
 from doc import split_into_entity_aware_spans
@@ -36,6 +37,11 @@ class NoteGenerator:
         vllm_cfg = global_config.get("vllm", {}) or {}
         ccfg = vllm_cfg.get("concurrency", {}) or {}
         routing_cfg = global_config.get("routing", {}) or {}
+        json_cfg = vllm_cfg.get("json_mode", {}) or {}
+        self._use_guided_json = bool(json_cfg.get("use_guided_json", False))
+        self._use_response_format = bool(json_cfg.get("use_response_format", False))
+        self._schema_name = str(json_cfg.get("schema_name", "ano-note") or "ano-note")
+        self._note_schema = NOTE_GEN_JSON_SCHEMA or NOTE_JSON_SCHEMA
 
         # Endpoint pool: prefer env-based endpoints in non-strict mode; fall back to config list
         endpoints_cfg = ccfg.get("endpoints") or []
@@ -123,8 +129,13 @@ class NoteGenerator:
 
         if parsing_config is None:
             parsing_config = global_config.get("parsing", {}) or {}
+        parsing_config = dict(parsing_config)
+        if (self._use_guided_json or self._use_response_format) and "assume_valid_json" not in parsing_config:
+            parsing_config["assume_valid_json"] = True
         if schema_guard_config is None:
             schema_guard_config = global_config.get("schema_guard", {}) or {}
+        else:
+            schema_guard_config = dict(schema_guard_config)
 
         self.parser = NoteParsingPipeline(parsing_config, schema_guard_config)
         self._stop_sequences = parsing_config.get("stop") or ['"]\n', "\n]", "\n\nEND", "END_JSON"]
@@ -349,6 +360,38 @@ class NoteGenerator:
         if kind in ("timeout", "http"):
             self._reset_session()
 
+    @staticmethod
+    def _error_snippet(response: requests.Response | None) -> str:
+        if response is None:
+            return ""
+        try:
+            text = response.text or ""
+        except Exception:
+            return ""
+        text = text.strip().replace("\n", " ")
+        return text[:200]
+
+    def _maybe_disable_json_mode(self, response: requests.Response | None, body_snippet: str | None = None) -> bool:
+        if not (self._use_guided_json or self._use_response_format):
+            return False
+        status = getattr(response, "status_code", None)
+        if status is None or status >= 500:
+            return False
+        snippet = (body_snippet or "").lower()
+        if not snippet and response is not None:
+            try:
+                snippet = (response.text or "").lower()
+            except Exception:
+                snippet = ""
+        keywords = ("guided_json", "json_schema", "response_format", "schema")
+        if any(token in snippet for token in keywords):
+            if self._use_guided_json:
+                self._use_guided_json = False
+            elif self._use_response_format:
+                self._use_response_format = False
+            return True
+        return False
+
     def _call(self, prompt: str, *, stop: List[str] | None = None, max_tokens: int | None = None) -> str:
         attempts = max(1, self._retry_max_attempts)
         last_exc: Exception | None = None
@@ -369,6 +412,14 @@ class NoteGenerator:
                 }
                 if stop:
                     payload["stop"] = stop
+                if self._use_guided_json:
+                    payload.setdefault("extra_body", {})
+                    payload["extra_body"]["guided_json"] = self._note_schema
+                elif self._use_response_format:
+                    payload["response_format"] = {
+                        "type": "json_schema",
+                        "json_schema": {"name": self._schema_name, "schema": self._note_schema},
+                    }
                 if self._endpoint_log_every and attempt == 0:
                     try:
                         if (self._recent_calls % self._endpoint_log_every) == 0:
@@ -422,6 +473,52 @@ class NoteGenerator:
                     wait,
                     remain,
                     exc,
+                )
+                if wait > 0:
+                    time.sleep(wait)
+                    total_wait += wait
+            except requests.HTTPError as exc:  # noqa: PERF203
+                last_exc = exc
+                resp = exc.response if hasattr(exc, "response") else None
+                status = getattr(resp, "status_code", None)
+                snippet = self._error_snippet(resp)
+                if self._maybe_disable_json_mode(resp, snippet):
+                    logger.warning(
+                        "Disabling JSON mode after HTTP error status={} body_snippet={}",
+                        status,
+                        snippet,
+                    )
+                    continue
+                self._recent_errors.append("http")
+                self._recent_errors = self._recent_errors[-self._error_window_size :]
+                if status and status >= 500:
+                    try:
+                        self._mark_endpoint_failure(endpoint, "http")
+                    except Exception:
+                        pass
+                if attempt == attempts - 1:
+                    logger.error(
+                        "Note generator call failed after {} attempts (status={}): {} snippet={}",
+                        attempts,
+                        status,
+                        exc,
+                        snippet,
+                    )
+                    raise
+                nominal = self._retry_backoff_base * (2 ** attempt)
+                jitter = nominal * random.uniform(0.0, self._retry_jitter_frac)
+                wait = min(self._retry_backoff_max_sec, nominal + jitter)
+                remain = max(0.0, self._retry_total_cap_sec - total_wait)
+                wait = min(wait, remain)
+                logger.warning(
+                    "HTTP error (attempt={}/{} status={}); backing off {:.2f}s (cap left {:.2f}s): {} snippet={}",
+                    attempt + 1,
+                    attempts,
+                    status,
+                    wait,
+                    remain,
+                    exc,
+                    snippet,
                 )
                 if wait > 0:
                     time.sleep(wait)

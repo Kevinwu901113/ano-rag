@@ -60,7 +60,12 @@ DEFAULT_CONFIG: Dict[str, Any] = {
             "step_down": 2,
             "window_size": 50,
             "cool_down_sec": 5.0
-        }
+        },
+        "json_mode": {
+            "use_guided_json": False,
+            "use_response_format": False,
+            "schema_name": "ano-note",
+        },
     },
     "lmstudio": {
         "endpoint": "http://127.0.0.1:1234/v1",
@@ -133,7 +138,8 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "loose_split_key": "subj",
         "max_tokens": 768,
         "parse_retry": 1,
-        "stop": ['"]\n', "\n]", "\n\nEND", "END_JSON", "\n\n"]
+        "stop": ['"]\n', "\n]", "\n\nEND", "END_JSON", "\n\n"],
+        "assume_valid_json": False,
     },
     "schema_guard": {
         "min_evidence_len": 4,
