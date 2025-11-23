@@ -15,6 +15,9 @@ GPU1="${GPU1:-1}"
 DTYPE="${DTYPE:-float16}"
 MAX_MODEL_LEN="${MAX_MODEL_LEN:-8192}"
 RESULT_ROOT="${RESULT_ROOT:-result}"
+USE_GUIDED_JSON="${USE_GUIDED_JSON:-1}"
+JSON_SCHEMA_NAME="${JSON_SCHEMA_NAME:-ano-note}"
+VLLM_GUIDED_BACKEND="${VLLM_GUIDED_BACKEND:-xgrammar}"
 # Single-process build by default
 SHARD_CNT=${SHARD_CNT:-1}
 VLLM_BIN="${VLLM_BIN:-python -m vllm.entrypoints.openai.api_server}"
@@ -62,6 +65,15 @@ emb['offline_index_path'] = os.path.join(faiss_dir, 'notes.faiss')
 emb['meta_path'] = os.path.join(faiss_dir, 'notes.meta.parquet')
 bm25 = retr.setdefault('bm25', {})
 bm25['store_path'] = bm25_store
+# Guided JSON config for generator/parsing
+use_guided = os.environ.get("USE_GUIDED_JSON", "0") not in {"0", "false", "False", ""}
+schema_name = os.environ.get("JSON_SCHEMA_NAME", "ano-note")
+json_mode = cfg.setdefault('vllm', {}).setdefault('json_mode', {})
+json_mode.setdefault('schema_name', schema_name)
+if use_guided:
+    json_mode['use_guided_json'] = True
+    json_mode.setdefault('use_response_format', False)
+    cfg.setdefault('parsing', {}).setdefault('assume_valid_json', True)
 with open(out_cfg, 'w', encoding='utf-8') as handle:
     yaml.safe_dump(cfg, handle, allow_unicode=True, sort_keys=False)
 PY
@@ -226,6 +238,9 @@ start_vllm_dual() {
   fi
   if [[ -n "$VLLM_GPU_MEMORY_UTIL" ]]; then
     extra_args+=(--gpu-memory-utilization "$VLLM_GPU_MEMORY_UTIL")
+  fi
+  if [[ "$USE_GUIDED_JSON" != "0" && -n "$VLLM_GUIDED_BACKEND" ]]; then
+    extra_args+=(--guided-decoding-backend "$VLLM_GUIDED_BACKEND")
   fi
 
   CUDA_VISIBLE_DEVICES="${GPU0}" nohup ${VLLM_BIN} \

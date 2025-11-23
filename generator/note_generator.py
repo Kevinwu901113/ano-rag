@@ -130,7 +130,7 @@ class NoteGenerator:
         if parsing_config is None:
             parsing_config = global_config.get("parsing", {}) or {}
         parsing_config = dict(parsing_config)
-        if (self._use_guided_json or self._use_response_format) and "assume_valid_json" not in parsing_config:
+        if self._use_guided_json or self._use_response_format:
             parsing_config["assume_valid_json"] = True
         if schema_guard_config is None:
             schema_guard_config = global_config.get("schema_guard", {}) or {}
