@@ -1,0 +1,84 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+from pathlib import Path
+from typing import List
+
+from loguru import logger
+
+ROOT = Path(__file__).resolve().parents[2]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from baselines.naive_rag import NaiveRAGRunner
+
+
+def _select_workspace(root: Path, prefix: str, force_new: bool) -> Path:
+    root.mkdir(parents=True, exist_ok=True)
+    existing: List[Path] = sorted(p for p in root.iterdir() if p.is_dir() and p.name.startswith(prefix))
+    if force_new or not existing:
+        next_idx = len(existing)
+        target = root / f"{prefix}_{next_idx:03d}"
+        target.mkdir(parents=True, exist_ok=True)
+        return target
+    return existing[-1]
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Run naive RAG baseline on MIRAGE dataset.json")
+    parser.add_argument("--dataset-path", default="data/mirage_sample/dataset.json")
+    parser.add_argument("--index-dir", default="result/mirage_naive", help="Directory containing index.faiss + chunks.jsonl")
+    parser.add_argument("--index-path", default=None, help="Optional explicit FAISS index path")
+    parser.add_argument("--chunks-path", default=None, help="Optional explicit chunks.jsonl path")
+    parser.add_argument("--topk", type=int, default=5)
+    parser.add_argument("--limit", type=int, default=0, help="Limit number of questions (0=all)")
+    parser.add_argument("--result-root", default="result")
+    parser.add_argument("--work-dir", default=None, help="Where to write qa.tsv etc. Default: auto under result_root")
+    parser.add_argument("--new", action="store_true", help="Force creating a new workspace (do not reuse latest)")
+    parser.add_argument("--lmstudio-endpoint", default=None)
+    parser.add_argument("--lmstudio-model", default=None)
+    parser.add_argument("--temperature", type=float, default=None)
+    parser.add_argument("--max-new-tokens", type=int, default=None)
+    parser.add_argument("--no-debug", action="store_true", help="Skip writing retrieval debug JSONL")
+    args = parser.parse_args()
+
+    dataset_path = Path(args.dataset_path)
+    if not dataset_path.exists():
+        raise FileNotFoundError(f"Dataset not found: {dataset_path}")
+    with dataset_path.open("r", encoding="utf-8") as handle:
+        dataset = json.load(handle)
+
+    index_dir = Path(args.index_dir)
+    index_path = Path(args.index_path) if args.index_path else index_dir / "index.faiss"
+    chunks_path = Path(args.chunks_path) if args.chunks_path else index_dir / "chunks.jsonl"
+    if not index_path.exists():
+        raise FileNotFoundError(f"index.faiss missing: {index_path}")
+    if not chunks_path.exists():
+        raise FileNotFoundError(f"chunks.jsonl missing: {chunks_path}")
+
+    if args.work_dir:
+        work_dir = Path(args.work_dir)
+        work_dir.mkdir(parents=True, exist_ok=True)
+    else:
+        work_dir = _select_workspace(Path(args.result_root), "mirage_naive", args.new)
+    logger.info("Writing outputs to {}", work_dir)
+
+    runner = NaiveRAGRunner(
+        str(index_path),
+        str(chunks_path),
+        topk=args.topk,
+        lm_endpoint=args.lmstudio_endpoint,
+        lm_model=args.lmstudio_model,
+        temperature=args.temperature,
+        max_tokens=args.max_new_tokens,
+    )
+    limit = args.limit if args.limit and args.limit > 0 else None
+    artifacts = runner.run_dataset(dataset, work_dir=str(work_dir), limit=limit, debug=not args.no_debug)
+    logger.info("Naive RAG finished. qa.tsv: {}", artifacts.get("qa"))
+
+
+if __name__ == "__main__":
+    main()

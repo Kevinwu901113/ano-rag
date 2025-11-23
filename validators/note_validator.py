@@ -271,16 +271,23 @@ def validate_and_normalize(raw_text: str, doc_id: str, chunk_id: str):
     try:
         parsed = json.loads(raw_text)
     except Exception as exc:  # noqa: BLE001
-        return False, [], {"violations": {"json_parse": str(exc)}}
+        return {
+            "valid_notes": [],
+            "pronoun_notes": [],
+            "errors": [{"type": "json_parse", "message": str(exc)}],
+            "stats": {"json_parse_failures": 1},
+        }
 
     if not isinstance(parsed, list):
-        return False, [], {
-            "violations": {
-                "json_type": f"expect array, got {type(parsed).__name__}",
-            }
+        return {
+            "valid_notes": [],
+            "pronoun_notes": [],
+            "errors": [{"type": "json_type", "message": f"expect array, got {type(parsed).__name__}"}],
+            "stats": {"json_type_failures": 1},
         }
 
     patched: List[Dict[str, Any]] = []
+    stats: Dict[str, Any] = {}
     for obj in parsed:
         if not isinstance(obj, dict):
             continue
@@ -332,15 +339,12 @@ def validate_and_normalize(raw_text: str, doc_id: str, chunk_id: str):
                     "evidence": patched_obj.get("evidence", ""),
                 }
             ]
-        # Preserve optional tolerance fields
-        # has_unresolved_pronoun, original_subject, alias_map, entities may be present in meta; keep as-is.
         meta["attribute"] = {
             "name": attr_name,
             "values": attr_values,
             "role": attr.get("role"),
             "target_type": attr.get("target_type"),
         }
-        # 若 pred 为空，尝试从 attribute.name 或 evidence 文本归一；失败则标记违规并给占位
         raw_pred = str(patched_obj.get("pred") or "").strip().lower()
         if not raw_pred:
             fixed_pred = str(attr_name).strip().lower()
@@ -359,66 +363,35 @@ def validate_and_normalize(raw_text: str, doc_id: str, chunk_id: str):
                 meta["violations"]["pred_missing"] = True
                 fixed_pred = "__missing__"
             patched_obj["pred"] = fixed_pred
-            # 同步 attribute.name，确保通过 JSON Schema
             if not attr_name:
                 meta["attribute"]["name"] = fixed_pred
 
         patched_obj["meta"] = meta
         patched.append(patched_obj)
 
-    # 在整体校验前，记录可能的代词违规并做逐条过滤（避免整块失败）
-    filtered: List[Dict[str, Any]] = []
-    pronoun_violations: List[Dict[str, Any]] = []
-    for idx, item in enumerate(patched):
-        subj = (item.get("subj") or "").strip()
-        obj = (item.get("obj") or "").strip()
-        ev = (item.get("evidence") or "").strip()
-        meta = item.get("meta")
-        meta = meta if isinstance(meta, dict) else {}
-        subj_is_pronoun = TextUtils.is_pronoun(subj)
-        obj_is_pronoun = TextUtils.is_pronoun(obj)
-        if subj_is_pronoun:
-            meta["pronoun_subj"] = True
-        if obj_is_pronoun:
-            meta["pronoun_obj"] = True
-        if subj_is_pronoun or obj_is_pronoun:
-            viol = {
-                "index": idx,
-                "subj": subj,
-                "obj": obj,
-                "evidence": ev,
-                "source": f"{doc_id}#{chunk_id}",
-            }
-            pronoun_violations.append(viol)
-        item["meta"] = meta
-        filtered.append(item)
+    per_item_validator = Draft7Validator(NOTE_JSON_SCHEMA["items"])
 
-    try:
-        Draft7Validator(NOTE_JSON_SCHEMA).validate(filtered)
-    except ValidationError as exc:
-        return False, [], {"violations": {"json_schema": str(exc)}}
+    def _is_pronoun_violation(error: ValidationError) -> bool:
+        schema = error.schema or {}
+        not_schema = schema.get("not") if isinstance(schema, dict) else {}
+        pattern = not_schema.get("pattern") if isinstance(not_schema, dict) else None
+        if pattern and "he|she|they" in pattern.lower():
+            return True
+        msg = str(error.message or "")
+        return "should not be valid under" in msg and "he|she|they" in msg.lower()
 
-    notes: List[Dict[str, Any]] = []
+    valid_notes: List[Dict[str, Any]] = []
+    pronoun_notes: List[Dict[str, Any]] = []
+    errors: List[Dict[str, Any]] = []
     unmatched_counter: Dict[str, int] = {}
     skipped_count = 0
-    for idx, item in enumerate(filtered):
-        subject_profile = _ensure_profile(
-            item["meta"].get("subject_profile"),
-            default_type=item["subj_type"],
-            entity_name=item["subj"],
-        )
-        object_profile = _ensure_profile(
-            item["meta"].get("object_profile"),
-            default_type=item["obj_type"],
-            entity_name=item["obj"],
-            allow_null=True,
-        )
 
+    def _normalize_one(idx: int, item: Dict[str, Any]) -> dict | None:
+        nonlocal skipped_count
         attr = item["meta"].get("attribute") or {}
         raw_attr_name = (attr.get("name") or item.get("pred") or "").strip()
         evidence_text = (item.get("evidence") or "").strip()
         pred, pred_weight = _normalize_pred(raw_attr_name)
-        # 当谓词为空时，尝试使用证据文本进行别名匹配或职业兜底
         if not pred or pred.strip() == "":
             for pat, target in _COMPILED_ALIAS_PATTERNS:
                 if pat.search(evidence_text):
@@ -430,16 +403,13 @@ def validate_and_normalize(raw_text: str, doc_id: str, chunk_id: str):
                 if m and _looks_like_occupation(m.group(2)):
                     pred = "occupation"
                     pred_weight = max(pred_weight, 0.9)
-        # 如果是title但非honorific/position_title则并入occupation
         if raw_attr_name and raw_attr_name.strip().lower() in {"title", "titles"}:
             role = (attr.get("role") or "").strip().lower()
             if role not in {"honorific", "position_title"}:
                 pred = "occupation"
                 pred_weight = min(pred_weight, 0.95)
 
-        # 强制：谓词必须在允许集合中，否则尝试证据文本别名匹配，仍失败则跳过此条
         if pred not in ALLOWED_PREDICATES:
-            # 证据文本再尝试一次归一
             for pat, target in _COMPILED_ALIAS_PATTERNS:
                 if pat.search(evidence_text):
                     pred = target
@@ -449,8 +419,7 @@ def validate_and_normalize(raw_text: str, doc_id: str, chunk_id: str):
             key = raw_attr_name or "<blank>"
             unmatched_counter[key] = unmatched_counter.get(key, 0) + 1
             skipped_count += 1
-            # 跳过不入库
-            continue
+            return None
 
         raw_values = attr.get("values")
         if not isinstance(raw_values, list) or not raw_values:
@@ -483,60 +452,94 @@ def validate_and_normalize(raw_text: str, doc_id: str, chunk_id: str):
                 }
             )
 
+        subject_profile = _ensure_profile(
+            item["meta"].get("subject_profile"),
+            default_type=item["subj_type"],
+            entity_name=item["subj"],
+        )
+        object_profile = _ensure_profile(
+            item["meta"].get("object_profile"),
+            default_type=item["obj_type"],
+            entity_name=item["obj"],
+            allow_null=True,
+        )
         _update_profile_with_attr(subject_profile, pred, normalized_values)
 
         type_weight = _type_pattern_ok(item["subj_type"], pred, item["obj_type"])
         base_conf = float(item["meta"]["confidence"])
         final_conf = round(base_conf * pred_weight * type_weight, 4)
 
-        # evidence 已经在上方读取
         meta_ev_canon = (item.get("meta", {}) or {}).get("evidence_canonical")
-        # canonical 版本用于检索/排序；原文 evidence 保持可核验
         canonical_evidence = meta_ev_canon.strip() if isinstance(meta_ev_canon, str) and meta_ev_canon.strip() else evidence_text
         quality = _compute_quality(evidence_text, subject_profile, normalized_values, alias_hits)
 
         note_id = f"{doc_id}#{chunk_id}#{idx}"
-        notes.append(
-            {
-                "note_id": note_id,
-                "subj": normalize_entity_name(item["subj"])[0],
-                "pred": pred,
-                "obj": normalized_values[0].get("normalized") or item["obj"].strip(),
-                "subj_type": item["subj_type"],
-                "obj_type": item["obj_type"],
-                "evidence": evidence_text,
-                "meta": {
-                    **item["meta"],
-                    "source": item["meta"]["source"],
-                    "confidence": base_conf,
-                    "final_conf": final_conf,
-                    "evidence_canonical": canonical_evidence,
-                    "attribute": {
-                        # 保证 occupation 的规范输出
-                        "name": pred,
-                        "values": normalized_values,
-                        "role": attr.get("role"),
-                        "target_type": attr.get("target_type"),
-                    },
-                    "quality": quality,
-                    "quality_score": quality.get("score"),
-                    "subject_profile": subject_profile,
-                    "object_profile": object_profile,
+        return {
+            "note_id": note_id,
+            "subj": normalize_entity_name(item["subj"])[0],
+            "pred": pred,
+            "obj": normalized_values[0].get("normalized") or item["obj"].strip(),
+            "subj_type": item["subj_type"],
+            "obj_type": item["obj_type"],
+            "evidence": evidence_text,
+            "meta": {
+                **item["meta"],
+                "source": item["meta"]["source"],
+                "confidence": base_conf,
+                "final_conf": final_conf,
+                "evidence_canonical": canonical_evidence,
+                "attribute": {
+                    "name": pred,
+                    "values": normalized_values,
+                    "role": attr.get("role"),
+                    "target_type": attr.get("target_type"),
                 },
-            }
-        )
+                "quality": quality,
+                "quality_score": quality.get("score"),
+                "subject_profile": subject_profile,
+                "object_profile": object_profile,
+            },
+        }
 
-    ok = len(notes) > 0
-    # 统计未归一成功短语 Top 20
-    top_unmatched = sorted(unmatched_counter.items(), key=lambda x: x[1], reverse=True)[:20]
-    metrics = {
-        "count": len(notes),
-        "skipped": skipped_count,
-        "violations": {"pred_unrecognized": sum(unmatched_counter.values())},
-        "top_unmatched_pred_phrases": [
-            {"phrase": k, "count": v} for k, v in top_unmatched
-        ],
+    for idx, item in enumerate(patched):
+        subj = (item.get("subj") or "").strip()
+        obj = (item.get("obj") or "").strip()
+        meta = item.get("meta")
+        meta = meta if isinstance(meta, dict) else {}
+        if TextUtils.is_pronoun(subj):
+            meta["pronoun_subj"] = True
+        if TextUtils.is_pronoun(obj):
+            meta["pronoun_obj"] = True
+        item["meta"] = meta
+
+        normalized = _normalize_one(idx, item)
+        if normalized is None:
+            continue
+
+        try:
+            per_item_validator.validate(item)
+            valid_notes.append(normalized)
+        except ValidationError as exc:
+            if _is_pronoun_violation(exc):
+                pronoun_notes.append(
+                    {
+                        "note": normalized,
+                        "field": str(exc.path[-1]) if exc.path else None,
+                        "doc_id": doc_id,
+                        "chunk_id": chunk_id,
+                    }
+                )
+                stats["pronoun_schema_hits"] = stats.get("pronoun_schema_hits", 0) + 1
+            else:
+                errors.append({"index": idx, "message": str(exc), "doc_id": doc_id, "chunk_id": chunk_id})
+
+    if skipped_count:
+        stats["unmatched_predicates"] = unmatched_counter
+        stats["skipped_count"] = skipped_count
+
+    return {
+        "valid_notes": valid_notes,
+        "pronoun_notes": pronoun_notes,
+        "errors": errors,
+        "stats": stats,
     }
-    if pronoun_violations:
-        metrics["pronoun_violations"] = pronoun_violations
-    return ok, notes, metrics

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import ast
 import re
 from typing import Any, Dict, List, Optional, Tuple
 import threading
@@ -17,7 +18,7 @@ class NoteParsingPipeline:
     _UNTERMINATED_FIX = re.compile(r'"\s*([}\]])')
     _ADJACENT_OBJECTS = re.compile(r'}\s*{')
     _FIELD_PATTERN = re.compile(
-        r'"(?P<key>subj|pred|obj|subj_type|obj_type|evidence|meta)"\s*:\s*(?P<value>"(?:\\.|[^"])*"|\{[^{}]*\}|[^,\n]+)',
+        r'(?P<quote>["\'])(?P<key>subj|pred|obj|subj_type|obj_type|evidence|meta|subject|predicate|object|evidence_text|evid)\1\s*:\s*(?P<value>"(?:\\.|[^"])*"|\'(?:\\.|[^\'])*\'|\{[^{}]*\}|[^,\n]+)',
         re.IGNORECASE,
     )
 
@@ -29,6 +30,11 @@ class NoteParsingPipeline:
         "obj_type": "obj_type",
         "evidence": "evidence",
         "meta": "meta",
+        "subject": "subj",
+        "predicate": "pred",
+        "object": "obj",
+        "evidence_text": "evidence",
+        "evid": "evidence",
     }
 
     _ALLOWED_TYPES = {"PERSON", "WORK", "ORG", "PLACE", "EVENT", "CONCEPT", "TIME"}
@@ -37,6 +43,8 @@ class NoteParsingPipeline:
         "allow_jsonl": True,
         "enable_array_packer": True,
         "enable_bare_key_fix": True,
+        "enable_error_repair": True,
+        "enable_bracket_balance_fix": True,
         "enable_loose_extractor": True,
         "loose_split_key": "subj",
         "max_tokens": 1024,
@@ -68,6 +76,11 @@ class NoteParsingPipeline:
 
     def parse(self, text: str, doc_id: str | None = None) -> List[Dict[str, Any]]:
         normalized = self._normalize_json_text(text)
+        if self.parsing_config.get("enable_bracket_balance_fix", True):
+            balanced = self._balance_brackets(normalized)
+            if balanced != normalized:
+                normalized = balanced
+
         run_stats: Dict[str, int] = {}
         packed_text: str | None = None
 
@@ -89,6 +102,12 @@ class NoteParsingPipeline:
             parsed = self._try_load_array(quoted)
             if parsed is not None:
                 return self._finalize(parsed, doc_id, run_stats, "bare_key_fix_used")
+
+        if self.parsing_config.get("enable_error_repair", True):
+            target = quoted or packed_text or normalized
+            repaired, repair_flag = self._error_guided_repair(target)
+            if repaired is not None:
+                return self._finalize(repaired, doc_id, run_stats, repair_flag or "error_repair_used")
 
         if self.parsing_config.get("enable_loose_extractor", True):
             loose = self._loose_extract(normalized)
@@ -207,18 +226,90 @@ class NoteParsingPipeline:
 
     @staticmethod
     def _try_load_array(text: str) -> List[Dict[str, Any]] | None:
+        parsed, _ = NoteParsingPipeline._load_json(text)
+        return parsed
+
+    @staticmethod
+    def _load_json(text: str) -> Tuple[List[Dict[str, Any]] | None, Exception | None]:
         try:
             data = json.loads(text)
-        except Exception:
-            return None
+        except Exception as exc:
+            json_err = exc
+            try:
+                data = ast.literal_eval(text)
+            except Exception:
+                return None, json_err
         if isinstance(data, dict):
             data = [data]
         if not isinstance(data, list):
-            return None
+            return None, TypeError("json_not_array")
         if not data:
-            return []
+            return [], None
         objs = [obj for obj in data if isinstance(obj, dict)]
-        return objs if objs else None
+        return (objs if objs else None), None
+
+    @staticmethod
+    def _balance_brackets(text: str) -> str:
+        stack: List[str] = []
+        in_string = False
+        escaped = False
+        for ch in text:
+            if in_string:
+                if escaped:
+                    escaped = False
+                elif ch == "\\":
+                    escaped = True
+                elif ch == '"':
+                    in_string = False
+                continue
+            if ch == '"':
+                in_string = True
+            elif ch in "{[":
+                stack.append(ch)
+            elif ch in "}]":
+                if stack:
+                    stack.pop()
+        if not stack:
+            return text
+        closers = "".join("}" if ch == "{" else "]" for ch in reversed(stack))
+        return text + closers
+
+    def _error_guided_repair(self, text: str) -> Tuple[List[Dict[str, Any]] | None, str | None]:
+        parsed, err = self._load_json(text)
+        if parsed is not None:
+            return parsed, "strict_json_ok"
+        if not isinstance(err, json.JSONDecodeError):
+            return None, None
+
+        trimmed = self._trim_extra_data(text, err)
+        if trimmed and trimmed != text:
+            parsed, _ = self._load_json(trimmed)
+            if parsed is not None:
+                return parsed, "extra_data_trimmed"
+
+        balanced = self._balance_brackets(text)
+        if balanced != text:
+            parsed, _ = self._load_json(balanced)
+            if parsed is not None:
+                return parsed, "balance_fix_used"
+
+        stripped = text.strip().rstrip(",")
+        if stripped.startswith("{") and stripped.endswith("}"):
+            wrapped = "[\n" + stripped + "\n]"
+            parsed, _ = self._load_json(wrapped)
+            if parsed is not None:
+                return parsed, "array_wrap_used"
+
+        return None, None
+
+    @staticmethod
+    def _trim_extra_data(text: str, err: json.JSONDecodeError) -> Optional[str]:
+        message = (err.msg or "").lower()
+        if "extra data" in message:
+            cut = max(0, err.pos)
+            candidate = text[:cut].rstrip()
+            return candidate if candidate else None
+        return None
 
     def _loose_extract(self, text: str) -> List[Dict[str, Any]]:
         matches = list(self._FIELD_PATTERN.finditer(text))
@@ -252,12 +343,17 @@ class NoteParsingPipeline:
         value = raw.strip()
         if not value:
             return ""
-        if value.startswith('"') and value.endswith('"'):
+        if (value.startswith('"') and value.endswith('"')) or (value.startswith("'") and value.endswith("'")):
             inner = value[1:-1]
+            quote = value[0]
             try:
-                return json.loads(f'"{inner}"')
+                # Use the matching quote to avoid escaping issues.
+                escaped = inner.replace("\\" + quote, quote)
+                if quote == '"':
+                    return json.loads(f'"{escaped}"')
+                return ast.literal_eval(f"{quote}{escaped}{quote}")
             except Exception:
-                return inner.replace('\\"', '"')
+                return inner.replace('\\"', '"').replace("\\'", "'")
         if value.startswith('{') and value.endswith('}'):
             try:
                 return json.loads(value)

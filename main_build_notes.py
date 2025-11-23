@@ -13,6 +13,7 @@ from config.config_loader import config as global_config
 from generator.note_generator import NoteGenerator
 from generator.pronoun_resolver import resolve_pronouns_for_doc
 from indexer.index_builder import IndexBuilder
+from postprocess.notes_postprocess import build_doc_alias_lookup, normalize_subject
 
 
 def build_notes(
@@ -69,26 +70,33 @@ def build_notes(
             return generator.generate_for_chunk(chunk)
         except Exception as exc:
             logger.warning("Shard {} chunk failed doc={} chunk={} err={}", shard_idx, chunk.get("doc_id"), chunk.get("chunk_id"), exc)
-            return []
+            return {"valid_notes": [], "pronoun_notes": []}
 
     # Progress state
     written = 0
     processed_chunks = 0
     start_ts = time.time()
     doc_notes: Dict[str, List[Dict]] = {}
+    doc_pronoun_notes: Dict[str, List[Dict]] = {}
     doc_order: List[str] = []
     doc_lock = threading.Lock()
 
-    def _stash_notes(doc_id: str, notes: List[Dict]) -> None:
+    def _stash_notes(doc_id: str, payload: Dict[str, List[Dict]]) -> None:
         nonlocal written
-        if not notes:
+        if not payload:
             return
         key = doc_id or "__default__"
+        notes = payload.get("valid_notes") or []
+        pronoun_notes = payload.get("pronoun_notes") or []
         with doc_lock:
             if key not in doc_notes:
                 doc_notes[key] = []
                 doc_order.append(key)
+            if pronoun_notes and key not in doc_pronoun_notes:
+                doc_pronoun_notes[key] = []
             doc_notes[key].extend(notes)
+            if pronoun_notes:
+                doc_pronoun_notes[key].extend(pronoun_notes)
         written += len(notes)
 
     def _emit_progress(total: int, completed: bool = False, current_workers: int | None = None) -> None:
@@ -111,16 +119,21 @@ def build_notes(
 
     # Collect ALL chunks into a shared task list (no static sharding)
     chunk_records = []
-    for _idx, (_doc, chunk) in enumerate(adapter(data_dir)):
+    doc_titles: Dict[str, str] = {}
+    for _idx, (doc, chunk) in enumerate(adapter(data_dir)):
         chunk_records.append(chunk)
+        doc_id = chunk.get("doc_id") or "__default__"
+        if doc_id not in doc_titles:
+            title = (chunk.get("meta") or {}).get("doc_title") or (doc or {}).get("title") or doc_id
+            doc_titles[doc_id] = title
 
     total = len(chunk_records)
     _emit_progress(total, completed=False)
 
     if max_workers <= 1:
         for chunk in chunk_records:
-            notes = _process_one(chunk)
-            _stash_notes(chunk.get("doc_id") or "__default__", notes)
+            result = _process_one(chunk)
+            _stash_notes(chunk.get("doc_id") or "__default__", result)
             processed_chunks += 1
             _emit_progress(total, completed=False, current_workers=1)
     else:
@@ -166,8 +179,8 @@ def build_notes(
                 done, inflight = concurrent.futures.wait(inflight, return_when=concurrent.futures.FIRST_COMPLETED)
                 for fut in done:
                     doc_id = future_doc.pop(fut, "__default__")
-                    notes = fut.result()
-                    _stash_notes(doc_id, notes)
+                    result = fut.result()
+                    _stash_notes(doc_id, result)
                     processed_chunks += 1
                     _emit_progress(total, completed=False, current_workers=len(inflight))
                 _maybe_update_target()
@@ -179,10 +192,18 @@ def build_notes(
     actual_written = 0
     with open(notes_path, "w", encoding="utf-8") as handle:
         for doc_id in doc_order:
-            resolved_notes = resolve_pronouns_for_doc(doc_id, doc_notes.get(doc_id, []))
+            doc_title = doc_titles.get(doc_id) or doc_id
+            resolved_notes, _unresolved = resolve_pronouns_for_doc(
+                doc_id,
+                doc_notes.get(doc_id, []),
+                doc_pronoun_notes.get(doc_id, []),
+                {"title": doc_title},
+            )
             if not resolved_notes:
                 continue
+            alias_lookup = build_doc_alias_lookup(resolved_notes)
             for note in resolved_notes:
+                normalize_subject(note, doc_title, alias_lookup)
                 handle.write(json.dumps(note, ensure_ascii=False) + "\n")
                 actual_written += 1
     written = actual_written

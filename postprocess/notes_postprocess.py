@@ -39,6 +39,149 @@ OBJECT_TYPE_HINTS = {
     "elected": "ORG",
 }
 
+PRONOUN_SUBJECTS = {
+    "he",
+    "she",
+    "they",
+    "it",
+    "this",
+    "that",
+    "these",
+    "those",
+    "him",
+    "her",
+    "them",
+    "his",
+    "hers",
+    "theirs",
+    "its",
+    "it's",
+    "it’s",
+    "this person",
+    "this man",
+    "this woman",
+    "该人",
+    "该市",
+    "该公司",
+    "该组织",
+    "该地",
+}
+
+
+def build_doc_alias_lookup(notes: List[Dict[str, Any]]) -> Dict[str, str]:
+    """Aggregate alias -> canonical mappings across all notes in a document."""
+    lookup: Dict[str, str] = {}
+
+    def _register_alias(alias: str, canonical: str) -> None:
+        alias_norm = (alias or "").strip()
+        canonical_norm = (canonical or "").strip()
+        if not alias_norm or not canonical_norm:
+            return
+        lookup.setdefault(alias_norm.lower(), canonical_norm)
+
+    for note in notes or []:
+        meta = note.get("meta") or {}
+        alias_map = meta.get("alias_map") or {}
+        if isinstance(alias_map, dict):
+            for canonical, aliases in alias_map.items():
+                canonical_norm = (canonical or "").strip()
+                if not canonical_norm:
+                    continue
+                _register_alias(canonical_norm, canonical_norm)
+                for alias in aliases or []:
+                    _register_alias(alias, canonical_norm)
+
+        profile = meta.get("subject_profile") or {}
+        subj_aliases = profile.get("aliases") if isinstance(profile, dict) else None
+        subj_name = (note.get("subj") or "").strip()
+        if subj_name:
+            _register_alias(subj_name, subj_name)
+        if isinstance(subj_aliases, list):
+            for alias in subj_aliases:
+                _register_alias(alias, subj_name or alias)
+
+    return lookup
+
+
+def normalize_subject(note: Dict[str, Any], doc_title: str | None, aliases: Dict[str, str] | None = None) -> Dict[str, Any]:
+    """Ensure subject is an explicit entity (no pronouns) and penalize low-evidence subjects."""
+    if not isinstance(note, dict):
+        return note
+    meta = note.get("meta")
+    if not isinstance(meta, dict):
+        meta = {}
+        note["meta"] = meta
+
+    alias_lookup: Dict[str, str] = {}
+    if isinstance(aliases, dict):
+        alias_lookup.update(aliases)
+    if doc_title:
+        alias_lookup.setdefault(doc_title.strip().lower(), doc_title.strip())
+    alias_map = meta.get("alias_map")
+    if isinstance(alias_map, dict):
+        for canonical, alias_list in alias_map.items():
+            canonical_norm = (canonical or "").strip()
+            if canonical_norm:
+                alias_lookup.setdefault(canonical_norm.lower(), canonical_norm)
+            for alias in alias_list or []:
+                alias_norm = (alias or "").strip()
+                if alias_norm:
+                    alias_lookup.setdefault(alias_norm.lower(), canonical_norm or alias_norm)
+
+    def _resolve(surface: str) -> str | None:
+        token = (surface or "").strip()
+        if not token:
+            return doc_title
+        lowered = token.lower()
+        if lowered in PRONOUN_SUBJECTS:
+            return doc_title or token
+        if lowered in alias_lookup:
+            return alias_lookup[lowered]
+        # Light normalization: collapse whitespace/case
+        normalized = re.sub(r"\s+", " ", token).strip()
+        canon = alias_lookup.get(normalized.lower())
+        return canon or normalized
+
+    original_subj = note.get("subj")
+    resolved = _resolve(original_subj)
+    # Anchor notes必须回到文档主语，避免“Japanese manga artist”类描述性主语导致下游无法绑定
+    meta_anchor = bool((note.get("meta") or {}).get("anchor"))
+    evidence_text = (note.get("evidence") or "") + " " + ((note.get("meta") or {}).get("evidence_canonical") or "")
+    evidence_lower = evidence_text.lower()
+    if meta_anchor and doc_title and resolved and resolved.lower() != doc_title.lower() and doc_title.lower() not in evidence_lower:
+        resolved = doc_title
+    if resolved:
+        note["subj"] = resolved
+        if original_subj != resolved:
+            # 标记回填来源：默认以标题/别名兜底，避免下游误判
+            if not meta.get("subject_source"):
+                meta["subject_source"] = "doc_title_fallback" if (original_subj and TextUtils.is_pronoun(original_subj)) else "alias_normalize"
+            try:
+                prev_conf = float(meta.get("subject_confidence", 0.0))
+            except (TypeError, ValueError):
+                prev_conf = 0.0
+            meta["subject_confidence"] = max(prev_conf, 0.55)
+
+    # Penalize if evidence never mentions the resolved subject
+    evidence = (note.get("evidence") or "").lower()
+    canonical_evidence = (meta.get("evidence_canonical") or "").lower()
+    subject_lower = (resolved or "").lower()
+    if subject_lower and subject_lower not in evidence and subject_lower not in canonical_evidence:
+        quality = meta.get("quality")
+        penalty = 0.1
+        if isinstance(quality, dict):
+            try:
+                prev = float(quality.get("score", 0.0))
+            except (TypeError, ValueError):
+                prev = 0.0
+            quality["score"] = max(0.0, prev - penalty)
+        try:
+            prev_q = float(meta.get("quality_score", 0.0))
+            meta["quality_score"] = max(0.0, prev_q - penalty)
+        except (TypeError, ValueError):
+            pass
+    return note
+
 
 def build_alias_map(sentences: List[str]) -> Tuple[Dict[str, List[str]], Dict[str, str]]:
     """Construct document-level alias_map and alias_to_canonical using heuristics.

@@ -72,7 +72,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "token_budget_hint": 320000,
     },
     "retriever": {
-        "structured": {"enabled": True, "fanout": 8},
+        "structured": {"enabled": True, "fanout": 8, "entity_match_threshold": 0.5, "path_consistency_threshold": 0.9},
         "embedding": {
             "enabled": True,
             "provider": "qwen3",
@@ -89,6 +89,16 @@ DEFAULT_CONFIG: Dict[str, Any] = {
             "topn": 200,
             "faiss": {"kind": "HNSW32", "nprobe": 16, "efSearch": 128},
             "normalize": True,
+        },
+        "hybrid": {
+            "agreement_threshold": 2,
+            "weights": {
+                "bm25": 1.0,
+                "embedding": 1.0,
+                "structured": 1.5,
+                "subject_match": 2.0,
+                "source_agree": 1.0,
+            },
         },
         "bm25": {
             "enabled": True,
@@ -111,7 +121,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "reranker": {
         "enabled": True,
         "type": "llm",
-        "llm": {"endpoint": "${lmstudio.endpoint}", "model": "${lmstudio.model}", "batch": 16, "timeout_s": 8},
+        "llm": {"endpoint": "${lmstudio.endpoint}", "model": "${lmstudio.model}", "batch": 16, "timeout_s": 60},
         "final_weights": {"pre": 0.3, "rerank": 0.5, "struct": 0.2},
     },
     "notes": {"out_path": "notes/notes.jsonl", "indexes_dir": "indexes/"},
@@ -122,6 +132,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "enable_loose_extractor": True,
         "loose_split_key": "subj",
         "max_tokens": 768,
+        "parse_retry": 1,
         "stop": ['"]\n', "\n]", "\n\nEND", "END_JSON", "\n\n"]
     },
     "schema_guard": {

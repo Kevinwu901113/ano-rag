@@ -149,14 +149,24 @@ def BIND(indexes: Indexes, alias: str, type_candidates: List[str], limit: int = 
                     if len(matches) >= limit:
                         return matches
 
+    exact_norm: List[str] = []
+    loose_norm: List[str] = []
     for entity in indexes.entity_to_notes.keys():
-        name = entity.lower()
-        if target in name or name in target:
+        norm_name = _normalize_alias_query(entity)
+        if not norm_name or len(norm_name) < 3:
+            continue
+        if norm_name == target:
+            exact_norm.append(entity)
+        elif target in norm_name or norm_name in target or _loose_match(target, norm_name):
+            loose_norm.append(entity)
+    for bucket in (exact_norm, loose_norm):
+        for entity in bucket:
+            if entity in matches:
+                continue
             matches.append(entity)
-        elif _loose_match(target, name):
-            matches.append(entity)
-        if len(matches) >= limit:
-            break
+            bind_reason = bind_reason or "entity_norm"
+            if len(matches) >= limit:
+                return matches
     # 记录绑定理由（不改变返回结构，供上层日志使用）
     if bind_reason:
         # Attach to a sentinel attribute on the list for tracing (optional usage upstream)
@@ -173,20 +183,42 @@ def EXPAND_from(
     predicate: str,
     direction: str = "out",
     limit: int = 200,
-) -> List[Tuple[str, str]]:
-    output: List[Tuple[str, str]] = []
+) -> List[Tuple[str, str, float]]:
+    output: List[Tuple[str, str, float]] = []
     if direction == "in":
         edge_source = indexes.inverse_edges.get(entity, [])
-        for pred, subj, note_id in edge_source:
-            if pred == predicate:
-                output.append((subj, note_id))
+        for edge in edge_source:
+            if isinstance(edge, dict):
+                pred_val = edge.get("pred")
+                subj = edge.get("subj")
+                note_id = edge.get("note_id")
+                conf = float(edge.get("conf", 0.0))
+            elif isinstance(edge, (list, tuple)) and len(edge) >= 3:
+                pred_val, subj, note_id = edge[:3]
+                conf = 0.0
+            else:
+                continue
+            if pred_val != predicate:
+                continue
+            output.append((subj, note_id, conf))
             if len(output) >= limit:
                 break
         return output
 
-    for pred, obj, note_id in indexes.graph_edges.get(entity, []):
-        if pred == predicate:
-            output.append((obj, note_id))
+    for edge in indexes.graph_edges.get(entity, []):
+        if isinstance(edge, dict):
+            pred_val = edge.get("pred")
+            obj = edge.get("obj")
+            note_id = edge.get("note_id")
+            conf = float(edge.get("conf", 0.0))
+        elif isinstance(edge, (list, tuple)) and len(edge) >= 3:
+            pred_val, obj, note_id = edge[:3]
+            conf = 0.0
+        else:
+            continue
+        if pred_val != predicate:
+            continue
+        output.append((obj, note_id, conf))
         if len(output) >= limit:
             break
     return output

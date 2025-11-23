@@ -41,7 +41,13 @@ def _paragraphs_from_record(record: Dict) -> List[str]:
     return []
 
 
-def _make_chunks(doc_id: str, paragraphs: List[str], n_sent: int = 2, overlap: int = 0) -> Iterator[Dict]:
+def _make_chunks(
+    doc_id: str,
+    paragraphs: List[str],
+    n_sent: int = 2,
+    overlap: int = 0,
+    doc_title: str | None = None,
+) -> Iterator[Dict]:
     step = max(1, n_sent - overlap)
     chunk_idx = 0
 
@@ -61,7 +67,7 @@ def _make_chunks(doc_id: str, paragraphs: List[str], n_sent: int = 2, overlap: i
                     "doc_id": doc_id,
                     "chunk_id": f"p{chunk_idx:04d}",
                     "text": text,
-                    "meta": {"lang": "en"},
+                    "meta": {"lang": "en", "doc_title": doc_title or doc_id},
                 }
                 chunk_idx += 1
             cursor += step
@@ -106,5 +112,5 @@ def iter_docs_and_chunks(
         if not paragraphs:
             continue
 
-        for chunk in _make_chunks(doc["doc_id"], paragraphs, n_sent=2, overlap=0):
+        for chunk in _make_chunks(doc["doc_id"], paragraphs, n_sent=2, overlap=0, doc_title=doc.get("title")):
             yield doc, chunk

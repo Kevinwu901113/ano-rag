@@ -129,6 +129,11 @@ class NoteGenerator:
         self.parser = NoteParsingPipeline(parsing_config, schema_guard_config)
         self._stop_sequences = parsing_config.get("stop") or ['"]\n', "\n]", "\n\nEND", "END_JSON"]
         self._parsing_max_tokens = parsing_config.get("max_tokens")
+        self._retry_reminder_enabled = bool(parsing_config.get("enable_retry_reminder", True))
+        try:
+            self._parse_retry = max(0, int(parsing_config.get("parse_retry", 0)))
+        except Exception:
+            self._parse_retry = 0
 
     # -----------------------------
     # Backend pool helpers
@@ -163,12 +168,14 @@ class NoteGenerator:
     # Prompt：严格 JSON 输出
     # -----------------------------
     @staticmethod
-    def build_prompt(doc_text: str, doc_id: str) -> str:
+    def build_prompt(doc_text: str, doc_id: str, doc_title: str | None = None) -> str:
         source_text = doc_text or ""
         attr_rules = NoteGenerator._attribute_instruction_block()
+        main_entity = (doc_title or doc_id or "").strip() or doc_id
         return (
             "You are an ontology-aligned information extraction system. From the following text, extract factual notes.\n"
-            "Return ONLY valid JSON (RFC 8259). Prefer a JSON array; JSONL is allowed if necessary (one object per line, no surrounding brackets).\n"
+            "Return ONLY valid JSON (RFC 8259). Output MUST be a JSON array; if nothing is found, return an empty array []. JSONL is allowed if necessary (one object per line, no surrounding brackets).\n"
+            'Format example (do NOT add prose): [{"subj":"Ada Lovelace","pred":"occupation","obj":"mathematician","subj_type":"PERSON","obj_type":"CONCEPT","evidence":"Ada was a mathematician.","meta":{"source":"DOC_ID","confidence":0.8,"subject_profile":{"type":"PERSON","aliases":[],"nationality":[],"birth":null,"death":null,"occupations":[],"titles":[],"categories":[],"same_as":[]},"attribute":{"name":"occupation","values":[{"value":"mathematician","normalized":"mathematician","confidence":0.8,"source":"DOC_ID","evidence":"Ada was a mathematician."}]}}}]\n'
             "Each note object MUST contain the keys:\n"
             '  "subj", "pred", "obj", "subj_type", "obj_type", "evidence", "meta"\n'
             "Populate them as follows:\n"
@@ -181,6 +188,15 @@ class NoteGenerator:
             f'       * "attribute" = {{"name": <same as pred>, "values": [{{"value": <raw>, "normalized": <canonical or same>, "confidence": 0-1, "source": "{doc_id}", "evidence": <snippet>}}]}}\n'
             '       * Set "object_profile" when the object is an entity (type + aliases). Otherwise omit or use null.\n'
             "Use canonical vocabulary (e.g., map 'comic artist' -> 'cartoonist', 'American' -> 'United States') when obvious; otherwise repeat the raw value.\n\n"
+            "SUBJECT & PRONOUN GUIDANCE:\n"
+            f"• Treat the document title or provided entity (“{main_entity}”) as the PRIMARY SUBJECT. At least ~80% of notes should anchor on this subject or a direct alias unless the text clearly switches to a new entity.\n"
+            "• When the text introduces a different person/place/organization, you may emit notes for that entity, but the subject must be the explicit name of that entity—not the primary subject.\n"
+            "• Never leave Subject/Object fields as pronouns. Resolve he/she/they/it/this/该人/此地等 pronouns to their concrete entity names based on context. If you cannot resolve the pronoun, skip the note.\n"
+            "• Keep subject/object capitalization and parentheses consistent (e.g., “National Basketball Association (NBA)” vs “NBA”).\n"
+            "\n"
+            "RELATION COVERAGE:\n"
+            "Capture every important relation tied to the primary subject, including but not limited to birth/death dates, birthplaces, citizenship/nationality, occupations/titles, employers/affiliations, works, awards, spouse/parents, capital_of/located_in, cause/effect, authored_by/authored_of, and key events. When a relation has multiple values (e.g., multiple occupations or spouses), emit one note per value. Skipping these core schema relations makes structured retrieval impossible.\n"
+            "\n"
             "Extraction Priority / 抽取优先级（携带主体）：\n"
             "A) FULLNAME was/is a/an <NOUN> → (subj=FULLNAME, pred=occupation, obj=<NOUN>)\n"
             "B) FULLNAME married <NAME> → (subj=FULLNAME, pred=spouse, obj=<NAME>)\n"
@@ -204,6 +220,19 @@ class NoteGenerator:
             f'"""{source_text}"""\n'
             "Output only the JSON."
         )
+
+    @staticmethod
+    def _attach_format_reminder(prompt: str) -> str:
+        reminder = (
+            "\n\nREMINDER: 上一次输出不是可解析的 JSON。请仅输出合法的 JSON 数组（无任何说明文字），"
+            "若无可抽取信息则输出空数组 []。格式示例: "
+            '[{"subj":"Alice","pred":"occupation","obj":"engineer","subj_type":"PERSON","obj_type":"CONCEPT",'
+            '"evidence":"Alice is an engineer.","meta":{"source":"DOC_ID","confidence":0.8,"subject_profile":'
+            '{"type":"PERSON","aliases":[],"nationality":[],"birth":null,"death":null,"occupations":[],"titles":[],'
+            '"categories":[],"same_as":[]},"attribute":{"name":"occupation","values":[{"value":"engineer","normalized":'
+            '"engineer","confidence":0.8,"source":"DOC_ID","evidence":"Alice is an engineer."}]}}}]\n'
+        )
+        return prompt + reminder
 
     @staticmethod
     def _attribute_instruction_block() -> str:
@@ -432,36 +461,109 @@ class NoteGenerator:
     def generate_for_chunk(self, chunk: Dict[str, Any]) -> List[Dict[str, Any]]:
         doc_id, chunk_id = chunk["doc_id"], chunk["chunk_id"]
         chunk_text = chunk["text"]
-        prompt = self.build_prompt(chunk_text, doc_id)
+        doc_title = (chunk.get("meta") or {}).get("doc_title") or chunk.get("doc_title") or doc_id
+        prompt = self.build_prompt(chunk_text, doc_id, doc_title=doc_title)
         stop_sequences = self._stop_sequences or None
         call_max_tokens = self._parsing_max_tokens or self.max_tokens
-        t0 = time.time()
-        raw = self._call(prompt, stop=stop_sequences, max_tokens=call_max_tokens)
-        t1 = time.time()
 
-        parsed_notes = self.parser.parse(raw, doc_id)
-        if parsed_notes:
-            try:
-                self._resolve_pronoun_subjects(chunk, parsed_notes)
-            except Exception as exc:  # noqa: BLE001
-                logger.debug(
-                    "Pronoun resolution skipped doc={} chunk={} err={}",
+        attempts = max(1, self._parse_retry + 1)
+        parsed_notes: List[Dict[str, Any]] = []
+        parser_run_stats: Dict[str, Any] = {}
+        last_raw = ""
+        t0 = t1 = t2 = time.time()
+        max_attempts = attempts
+        prompt_for_attempt = prompt
+        reminder_used = False
+        attempt = 0
+        while attempt < max_attempts:
+            t0 = time.time()
+            raw = self._call(prompt_for_attempt, stop=stop_sequences, max_tokens=call_max_tokens)
+            last_raw = raw
+            t1 = time.time()
+
+            parsed_notes = self.parser.parse(raw, doc_id)
+            if parsed_notes:
+                try:
+                    self._resolve_pronoun_subjects(chunk, parsed_notes)
+                except Exception as exc:  # noqa: BLE001
+                    logger.debug(
+                        "Pronoun resolution skipped doc={} chunk={} err={}",
+                        doc_id,
+                        chunk_id,
+                        exc,
+                    )
+            t2 = time.time()
+            parser_run_stats = self.parser.get_stats(cumulative=False)
+            total_budget = max_attempts + (1 if self._retry_reminder_enabled and not reminder_used else 0)
+            if parser_run_stats.get("json_parse_failures"):
+                logger.warning(
+                    "Parsing failed doc={} chunk={} attempt={}/{} stats={}",
                     doc_id,
                     chunk_id,
-                    exc,
+                    attempt + 1,
+                    total_budget,
+                    parser_run_stats,
                 )
-        t2 = time.time()
-        parser_run_stats = self.parser.get_stats(cumulative=False)
-        if parser_run_stats.get("json_parse_failures"):
-            logger.warning(
-                "Parsing failed doc={} chunk={} stats={}",
-                doc_id,
-                chunk_id,
-                parser_run_stats,
+            if parsed_notes:
+                break
+
+            should_remind = (
+                self._retry_reminder_enabled
+                and not reminder_used
+                and parser_run_stats.get("json_parse_failures")
             )
+            attempt += 1
+            if should_remind and attempt >= max_attempts:
+                max_attempts += 1
+            if attempt >= max_attempts:
+                break
+
+            if should_remind:
+                prompt_for_attempt = self._attach_format_reminder(prompt)
+                reminder_used = True
+            else:
+                prompt_for_attempt = prompt
+            # Light backoff before reissuing the prompt to reduce upstream churn.
+            time.sleep(min(1.0, 0.25 * attempt))
+
+        # Final salvage: if仍然无法解析，则请求模型把上一次输出修正为严格 JSON
+        if not parsed_notes and last_raw:
+            try:
+                repair_prompt = (
+                    "The previous response failed to parse as JSON.\n"
+                    "You must return a valid JSON array of objects with keys "
+                    '["subj","pred","obj","subj_type","obj_type","evidence","meta"]. '
+                    "Use the same factual content but fix formatting and quoting. "
+                    "Return ONLY the JSON array, nothing else.\n"
+                    f"Previous response:\n{last_raw}"
+                )
+                t0 = time.time()
+                repaired_raw = self._call(repair_prompt, stop=stop_sequences, max_tokens=call_max_tokens)
+                t1 = time.time()
+                parsed_notes = self.parser.parse(repaired_raw, doc_id)
+                if parsed_notes:
+                    try:
+                        self._resolve_pronoun_subjects(chunk, parsed_notes)
+                    except Exception as exc:  # noqa: BLE001
+                        logger.debug(
+                            "Pronoun resolution skipped after repair doc={} chunk={} err={}",
+                            doc_id,
+                            chunk_id,
+                            exc,
+                        )
+                t2 = time.time()
+                parser_run_stats = self.parser.get_stats(cumulative=False)
+                if parser_run_stats.get("json_parse_failures"):
+                    logger.warning(
+                        "Parsing failed after repair doc={} chunk={} stats={}",
+                        doc_id,
+                        chunk_id,
+                        parser_run_stats,
+                    )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Repair attempt failed doc={} chunk={} err={}", doc_id, chunk_id, exc)
+
         if not parsed_notes:
-            # Do NOT heavy-retry on parsing quality; at most one light retry could be added here
-            # but we prefer to return empty to avoid storming upstream.
             self._record_stage_times(int((t1 - t0) * 1000), int((t2 - t1) * 1000), 0)
             self._processed_chunks += 1
             self._maybe_log_stage_p95()
@@ -469,19 +571,16 @@ class NoteGenerator:
 
         serialized = json.dumps(parsed_notes, ensure_ascii=False)
         t3 = time.time()
-        ok, notes_out, metrics = validate_and_normalize(serialized, doc_id, chunk_id)
+        validation_result = validate_and_normalize(serialized, doc_id, chunk_id)
         t4 = time.time()
-        if not ok:
-            logger.warning("Validation failed doc={} chunk={} details={}", doc_id, chunk_id, metrics)
+        errors = validation_result.get("errors") or []
+        if errors:
+            logger.warning("Validation issues doc={} chunk={} details={}", doc_id, chunk_id, errors)
             self._stats["validation_failures"] = self._stats.get("validation_failures", 0) + 1
-            self._record_stage_times(int((t1 - t0) * 1000), int((t2 - t1) * 1000), int((t4 - t3) * 1000))
-            self._processed_chunks += 1
-            self._maybe_log_stage_p95()
-            return []
         self._record_stage_times(int((t1 - t0) * 1000), int((t2 - t1) * 1000), int((t4 - t3) * 1000))
         self._processed_chunks += 1
         self._maybe_log_stage_p95()
-        return notes_out
+        return validation_result
 
     def export_stats(self) -> Dict[str, int]:
         combined = self.parser.get_stats()

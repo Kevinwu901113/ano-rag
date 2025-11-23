@@ -4,7 +4,6 @@ from typing import TYPE_CHECKING, Any, Dict, Optional
 from loguru import logger
 
 from config import config
-from generator.answerer import call_lmstudio
 from retriever.note_store import NoteStore
 from retriever.operators import Indexes
 from retriever.pipeline import retrieve_answer
@@ -77,6 +76,12 @@ class QueryProcessor:
         self.note_store = NoteStore(self.notes_path, weak_path)
         self._hybrid: Optional["HybridRetriever"] = None
         self._hybrid_initialized = False
+        retr_cfg = self.cfg.get("retriever") or {}
+        structured_cfg = retr_cfg.get("structured") or {}
+        hybrid_cfg = retr_cfg.get("hybrid") or {}
+        self.path_consistency_threshold = float(structured_cfg.get("path_consistency_threshold", 0.9))
+        self.entity_consistency_threshold = float(structured_cfg.get("entity_match_threshold", 0.5))
+        self.hybrid_agreement_threshold = int(hybrid_cfg.get("agreement_threshold", 2))
 
     def process(
         self,
@@ -125,8 +130,8 @@ class QueryProcessor:
         except Exception:
             pass
 
-        final_answer, diagnostics = self._select_final_answer(question, structured, evidences)
-        return {"structured": structured, "answer": final_answer, "diagnostics": diagnostics}
+        final_answer, diagnostics, decision = self._select_final_answer(question, structured, evidences)
+        return {"structured": structured, "answer": final_answer, "decision": decision, "diagnostics": diagnostics}
 
     def _get_hybrid_retriever(self) -> Optional["HybridRetriever"]:
         if self._hybrid_initialized:
@@ -173,31 +178,90 @@ class QueryProcessor:
             pass
         weak = support_paths <= 1 or (len(evidences) < 3) or (isinstance(conf, (int, float)) and conf < 0.5)
 
+        allowed_label_list = self._ordered_allowed_labels(attribute)
+        allowed_label_map = {val.lower(): val for val in allowed_label_list}
+
         candidate_labels = self._collect_candidate_labels(paths, attribute)
+        candidate_labels = self._filter_allowed_labels(candidate_labels, allowed_label_map)
         normalized_ans = self._normalize_answer(attribute, ans)
+        if normalized_ans and allowed_label_map and normalized_ans.lower() not in allowed_label_map:
+            normalized_ans = None
         if normalized_ans:
             candidate_labels = self._merge_answer(candidate_labels, normalized_ans)
 
         primary_label = candidate_labels[0] if candidate_labels else normalized_ans
+        structured_meta = structured.get("meta") or {}
+        path_consistency = float(structured_meta.get("path_consistency", 0.0) or 0.0)
+        entity_consistency = float(structured_meta.get("entity_consistency", 0.0) or 0.0)
+        decision = {"source": "fallback", "reason": "no_reliable_evidence"}
+        hybrid_block = structured.get("hybrid") or {}
+        consensus_candidates = hybrid_block.get("consensus") or []
+        if allowed_label_map:
+            consensus_candidates = [
+                c for c in consensus_candidates if allowed_label_map.get((c.get("label") or "").lower())
+            ]
+        top_consensus = next(
+            (
+                c
+                for c in consensus_candidates
+                if int(c.get("agreement") or 0) >= self.hybrid_agreement_threshold
+                and (c.get("support_notes") or [])
+            ),
+            None,
+        )
+        consensus_label = (top_consensus or {}).get("label")
+        consensus_agreement = int((top_consensus or {}).get("agreement") or 0)
 
-        if status == "structured_hit" and primary_label:
+        if (
+            status == "structured_hit"
+            and primary_label
+            and path_consistency >= self.path_consistency_threshold
+            and entity_consistency >= self.entity_consistency_threshold
+        ):
             record_answer_outcome(attribute, "hit")
+            decision = {"source": "structured", "reason": "path_consistent_entity_consistent"}
             return primary_label, {
                 "weak_evidence": weak,
                 "support_paths": support_paths,
                 "conf": conf,
                 "source": "structured_hit",
-            }
+                "consensus_agreement": consensus_agreement,
+            }, decision
 
-        if primary_label:
-            source = "structured_weak" if normalized_ans else "candidate_path"
+        if consensus_label:
             record_answer_outcome(attribute, "hit")
+            decision = {"source": "hybrid", "reason": "multi_source_agreement"}
+            return consensus_label, {
+                "weak_evidence": weak,
+                "support_paths": support_paths,
+                "conf": conf,
+                "source": "hybrid_hit",
+                "consensus_agreement": consensus_agreement,
+            }, decision
+
+        # 结构化或兜底已限定在 doc_hint 内时，如果有合规标签，直接使用以避免过度缺证
+        if status in {"ok", "weak_index", "structured_fallback"} and primary_label:
+            record_answer_outcome(attribute, "hit")
+            decision = {"source": "fallback", "reason": "doc_constrained_fallback"}
             return primary_label, {
                 "weak_evidence": weak,
                 "support_paths": support_paths,
                 "conf": conf,
-                "source": source,
-            }
+                "source": status,
+                "consensus_agreement": consensus_agreement,
+            }, decision
+
+        # 若已经有 doc 内支持（路径或证据）且标签在允许集合内，避免过度缺证
+        if primary_label and allowed_label_map and (support_paths > 0 or len(evidences) > 0):
+            record_answer_outcome(attribute, "hit")
+            decision = {"source": "fallback", "reason": "doc_supported_label"}
+            return primary_label, {
+                "weak_evidence": weak,
+                "support_paths": support_paths,
+                "conf": conf,
+                "source": status or "doc_supported",
+                "consensus_agreement": consensus_agreement,
+            }, decision
 
         if status != "structured_hit" and pred_chain_len == 0:
             record_answer_outcome(attribute, "reject")
@@ -206,45 +270,17 @@ class QueryProcessor:
                 "support_paths": support_paths,
                 "conf": conf,
                 "source": "no_chain",
-            }
-
-        # LM 兜底：限定可选标签，仍然不输出解释
-        if self.lmstudio_endpoint and self.lmstudio_model and evidences:
-            allowed_pool = candidate_labels or allowed_values(attribute)
-            try:
-                lm_answer = call_lmstudio(
-                    self.lmstudio_endpoint,
-                    self.lmstudio_model,
-                    question,
-                    evidences,
-                    allowed_labels=allowed_pool,
-                    attribute_name=attribute,
-                )
-                normalized_lm = self._normalize_answer(attribute, lm_answer)
-                if normalized_lm:
-                    record_answer_outcome(attribute, "hit")
-                    return normalized_lm, {
-                        "weak_evidence": True,
-                        "support_paths": support_paths,
-                        "conf": conf,
-                        "source": "lmstudio",
-                    }
-            except Exception:
-                record_answer_outcome(attribute, "reject")
-                return "Insufficient evidence", {
-                    "weak_evidence": True,
-                    "support_paths": support_paths,
-                    "conf": conf,
-                    "source": "lm_error",
-                }
+                "consensus_agreement": consensus_agreement,
+            }, decision
 
         record_answer_outcome(attribute, "reject")
         return "Insufficient evidence", {
             "weak_evidence": True,
             "support_paths": support_paths,
             "conf": conf,
-            "source": "no_answer",
-        }
+            "source": "no_consensus",
+            "consensus_agreement": consensus_agreement,
+        }, decision
 
     def _normalize_answer(self, attribute: Optional[str], value: Optional[str]) -> Optional[str]:
         if value is None:
@@ -291,3 +327,54 @@ class QueryProcessor:
         if answer.lower() in lowered:
             return labels
         return [answer] + labels
+
+    def _ordered_allowed_labels(self, attribute: Optional[str]) -> list[str]:
+        pool = allowed_values(attribute)
+        seen: set[str] = set()
+        deduped: list[str] = []
+        for val in pool:
+            if not isinstance(val, str):
+                continue
+            norm = val.strip()
+            if not norm:
+                continue
+            key = norm.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(norm)
+        return deduped
+
+    def _filter_allowed_labels(self, labels: list[str], allowed_map: dict[str, str]) -> list[str]:
+        if not labels or not allowed_map:
+            return labels
+        filtered: list[str] = []
+        seen: set[str] = set()
+        for label in labels:
+            key = label.lower()
+            canonical = allowed_map.get(key)
+            if not canonical:
+                continue
+            if canonical.lower() in seen:
+                continue
+            seen.add(canonical.lower())
+            filtered.append(canonical)
+        return filtered
+
+    def _build_allowed_pool(self, candidate_labels: list[str], allowed_labels: list[str]) -> list[str]:
+        if allowed_labels:
+            pool: list[str] = []
+            seen: set[str] = set()
+            for label in candidate_labels or []:
+                if label.lower() in seen:
+                    continue
+                pool.append(label)
+                seen.add(label.lower())
+            for label in allowed_labels:
+                lowered = label.lower()
+                if lowered in seen:
+                    continue
+                pool.append(label)
+                seen.add(lowered)
+            return pool
+        return candidate_labels or []

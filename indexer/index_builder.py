@@ -44,8 +44,14 @@ class IndexBuilder:
         if domain:
             self.domain_index[domain].append(note_id)
 
-        self.graph_edges[subj].append((pred, obj, note_id))
-        self.inverse_edges[obj].append((pred, subj, note_id))
+        norm_subj = self._normalize_surface(subj)
+        norm_obj = self._normalize_surface(obj)
+        norm_pred = self._normalize_predicate(pred)
+        conf = self._edge_confidence(note)
+
+        edge_payload = {"pred": norm_pred, "obj": norm_obj, "note_id": note_id, "conf": conf}
+        self.graph_edges[norm_subj].append(edge_payload)
+        self.inverse_edges[norm_obj].append({"pred": norm_pred, "subj": norm_subj, "note_id": note_id, "conf": conf})
 
         type_key = (note["subj_type"], pred, note["obj_type"])
         self.type_edge_index[type_key].append(note_id)
@@ -185,6 +191,34 @@ class IndexBuilder:
             "cartoonists": "cartoonist",
         }
         return mapping.get(text, text)
+
+    @staticmethod
+    def _normalize_surface(value: Optional[str]) -> str:
+        if not value:
+            return ""
+        normalized = re.sub(r"\s+", " ", value).strip()
+        return normalized
+
+    @staticmethod
+    def _normalize_predicate(pred: Optional[str]) -> str:
+        if not pred:
+            return ""
+        folded = PRED2ATTR.get(pred.lower(), pred)
+        return folded.strip()
+
+    @staticmethod
+    def _edge_confidence(note: Dict[str, Any]) -> float:
+        meta = note.get("meta") or {}
+        for key in ("quality_score", "final_conf", "confidence"):
+            value = meta.get(key)
+            try:
+                if value is None:
+                    continue
+                conf = float(value)
+                return max(0.0, min(conf, 1.0))
+            except (TypeError, ValueError):
+                continue
+        return 1.0
 
     def build_from_jsonl(self, notes_path: str) -> None:
         with open(notes_path, "r", encoding="utf-8") as handle:

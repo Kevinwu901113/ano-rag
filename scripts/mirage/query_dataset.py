@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import List
 
 from loguru import logger
+from baselines.direct_llm import DirectLLMRunner
 
 
 def _list_workspaces(root: Path, dataset: str) -> List[Path]:
@@ -66,6 +67,9 @@ def main() -> None:
     parser.add_argument("--out", default=None, help="Output JSON path")
     parser.add_argument("--qa-log", default=None, help="Optional plain text QA log path (question \t answer)")
     parser.add_argument("--new", action="store_true", help="Force create a new workspace copy")
+    parser.add_argument("--direct-llm", action="store_true", help="Skip retrieval and answer directly with LLM")
+    parser.add_argument("--temperature", type=float, default=None, help="Override LLM temperature")
+    parser.add_argument("--max-new-tokens", type=int, default=None, help="Override LLM max new tokens")
     args = parser.parse_args()
 
     dataset_name = args.dataset
@@ -86,13 +90,6 @@ def main() -> None:
     if override_cfg.exists():
         os.environ["ANO_RAG_CONFIG"] = str(override_cfg)
 
-    indexes_dir = Path(args.indexes_dir) if args.indexes_dir else work_dir / "indexes"
-    notes_path = Path(args.notes) if args.notes else work_dir / "notes" / f"notes.{dataset_name}.jsonl"
-    if not indexes_dir.exists():
-        raise FileNotFoundError(f"Indexes dir not found: {indexes_dir}")
-    if not notes_path.exists():
-        raise FileNotFoundError(f"Notes file not found: {notes_path}")
-
     output_path = Path(args.out) if args.out else work_dir / "answers.json"
     qa_log_path = Path(args.qa_log) if args.qa_log else work_dir / "qa.tsv"
 
@@ -101,6 +98,32 @@ def main() -> None:
 
     if args.limit > 0:
         dataset = dataset[: args.limit]
+
+    if args.direct_llm:
+        runner = DirectLLMRunner(
+            lm_endpoint=args.lmstudio_endpoint,
+            lm_model=args.lmstudio_model,
+            temperature=args.temperature,
+            max_tokens=args.max_new_tokens,
+        )
+        artifacts = runner.run_dataset(dataset, work_dir=str(work_dir))
+        logger.info("Direct LLM baseline complete: {}", artifacts.get("qa"))
+        if output_path and Path(artifacts["answers_json"]) != output_path:
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            output_path.write_text(Path(artifacts["answers_json"]).read_text(encoding="utf-8"), encoding="utf-8")
+            logger.info("Copied answers.json to {}", output_path)
+        if qa_log_path and Path(artifacts["qa"]) != qa_log_path:
+            qa_log_path.parent.mkdir(parents=True, exist_ok=True)
+            qa_log_path.write_text(Path(artifacts["qa"]).read_text(encoding="utf-8"), encoding="utf-8")
+            logger.info("Copied QA log to {}", qa_log_path)
+        return
+
+    indexes_dir = Path(args.indexes_dir) if args.indexes_dir else work_dir / "indexes"
+    notes_path = Path(args.notes) if args.notes else work_dir / "notes" / f"notes.{dataset_name}.jsonl"
+    if not indexes_dir.exists():
+        raise FileNotFoundError(f"Indexes dir not found: {indexes_dir}")
+    if not notes_path.exists():
+        raise FileNotFoundError(f"Notes file not found: {notes_path}")
 
     from query.query_processor import QueryProcessor
 
@@ -129,6 +152,7 @@ def main() -> None:
                 "question": question,
                 "answer": res.get("answer"),
                 "structured": res.get("structured"),
+                "decision": res.get("decision"),
             }
         )
         answer_text = res.get("answer")

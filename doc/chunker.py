@@ -1,5 +1,5 @@
 import re
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 from config import config
 from utils import TextUtils
@@ -160,10 +160,12 @@ def split_into_entity_aware_spans(text: str) -> List[Dict]:
     return fallback
 
 
-def make_chunks(doc_id: str, text: str, chunk_id_prefix: str = "p") -> List[Dict]:
+def make_chunks(doc_id: str, text: str, chunk_id_prefix: str = "p", doc_title: Optional[str] = None) -> List[Dict]:
     cleaned = (text or "").strip()
     if not cleaned:
         return []
+
+    resolved_title = (doc_title or doc_id or "").strip() or doc_id
 
     flat_spans = split_into_entity_aware_spans(cleaned)
     cluster_start_indices = _cluster_start_indices(flat_spans)
@@ -231,6 +233,7 @@ def make_chunks(doc_id: str, text: str, chunk_id_prefix: str = "p") -> List[Dict
             "sent_spans": [{"text": s["text"], "start": s.get("start"), "end": s.get("end")} for s in window],
             "has_pronoun_lead": TextUtils.is_pronoun_subject_sentence(window[0]["text"]) if window else False,
             "recent_entities": _unique_entities(sentences)[:3],
+            "doc_title": resolved_title,
         }
         chunks.append(
             {
@@ -270,7 +273,11 @@ def make_chunks(doc_id: str, text: str, chunk_id_prefix: str = "p") -> List[Dict
                 "doc_id": doc_id,
                 "chunk_id": f"{chunk_id_prefix}0000",
                 "text": cleaned,
-                "meta": {"sent_spans": [{"text": cleaned, "start": 0, "end": len(cleaned)}], "has_pronoun_lead": False},
+                "meta": {
+                    "sent_spans": [{"text": cleaned, "start": 0, "end": len(cleaned)}],
+                    "has_pronoun_lead": False,
+                    "doc_title": resolved_title,
+                },
             }
         )
 

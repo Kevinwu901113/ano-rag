@@ -20,6 +20,8 @@ from utils.weak_notes import close_weak_note_writer, write_weak_note
 from telemetry.metrics import record_pronoun_stat
 from postprocess.notes_postprocess import (
     backfill_pronoun_subjects,
+    build_doc_alias_lookup,
+    normalize_subject,
     stitch_pronoun_notes,
     SUBJECT_TYPE_HINTS,
     OBJECT_TYPE_HINTS,
@@ -153,11 +155,11 @@ class StructuredBuilder:
                     if not isinstance(text, str):
                         continue
                     chunks.extend(
-                        make_chunks(f"{doc_id}_{idx:04d}", text, chunk_id_prefix="c")
+                        make_chunks(f"{doc_id}_{idx:04d}", text, chunk_id_prefix="c", doc_title=doc_id)
                     )
             else:
                 text = _read_text(path)
-                chunks.extend(make_chunks(doc_id, text, chunk_id_prefix="c"))
+                chunks.extend(make_chunks(doc_id, text, chunk_id_prefix="c", doc_title=doc_id))
         return chunks
 
     def build(
@@ -237,9 +239,15 @@ class StructuredBuilder:
             return bucket_specs[-1]["name"]
 
         bucket_records: Dict[str, List[Dict[str, Any]]] = {spec["name"]: [] for spec in bucket_specs}
+        doc_titles: Dict[str, str] = {}
         for chunk in chunk_records:
             bucket_name = _which_bucket(chunk.get("text") or "")
             bucket_records[bucket_name].append(chunk)
+            doc_id = chunk.get("doc_id") or "__default__"
+            if doc_id not in doc_titles:
+                meta = chunk.get("meta") or {}
+                title = meta.get("doc_title") or chunk.get("doc_title") or doc_id
+                doc_titles[doc_id] = title
 
         active_specs = [spec for spec in bucket_specs if bucket_records.get(spec["name"])]
         if not active_specs:
@@ -283,7 +291,9 @@ class StructuredBuilder:
         def _process_with_ledger(chunk: Dict[str, Any], ledger: EntityLedger):
             try:
                 # Generate notes for chunk
-                notes = self.generator.generate_for_chunk(chunk)
+                result = self.generator.generate_for_chunk(chunk) or {}
+                notes = result.get("valid_notes") or []
+                pronoun_notes = result.get("pronoun_notes") or []
                 try:
                     notes = stitch_pronoun_notes(notes, chunk)
                 except Exception:
@@ -502,10 +512,10 @@ class StructuredBuilder:
                             meta.get("coref_confidence_obj") or 0.6,
                         )
                     enriched.append(note)
-                return enriched
+                return {"valid_notes": enriched, "pronoun_notes": pronoun_notes}
             except Exception as exc:
                 logger.warning("Chunk generation failed doc={} chunk={} err={}", chunk.get("doc_id"), chunk.get("chunk_id"), exc)
-                return []
+                return {"valid_notes": [], "pronoun_notes": pronoun_notes}
 
         def _process_one(chunk: Dict[str, Any]):
             doc_id = chunk.get("doc_id") or "__default__"
@@ -519,18 +529,25 @@ class StructuredBuilder:
 
         notes_written = 0
         doc_notes: Dict[str, List[Dict[str, Any]]] = {}
+        doc_pronoun_notes: Dict[str, List[Dict[str, Any]]] = {}
         doc_order: List[str] = []
         doc_lock = threading.Lock()
 
-        def _stash_notes(doc_id: str, notes: List[Dict[str, Any]]) -> None:
-            if not notes:
+        def _stash_notes(doc_id: str, payload: Dict[str, Any]) -> None:
+            if not payload:
                 return
+            notes = payload.get("valid_notes") or []
+            pronoun_notes = payload.get("pronoun_notes") or []
             key = doc_id or "__default__"
             with doc_lock:
                 if key not in doc_notes:
                     doc_notes[key] = []
                     doc_order.append(key)
+                if pronoun_notes and key not in doc_pronoun_notes:
+                    doc_pronoun_notes[key] = []
                 doc_notes[key].extend(notes)
+                if pronoun_notes:
+                    doc_pronoun_notes[key].extend(pronoun_notes)
 
         if total_workers <= 1:
             for chunk in chunk_records:
@@ -590,9 +607,18 @@ class StructuredBuilder:
 
         with open(notes_path, "w", encoding="utf-8") as handle:
             for doc_id in doc_order:
-                resolved_notes = resolve_pronouns_for_doc(doc_id, doc_notes.get(doc_id, []))
+                doc_title = doc_titles.get(doc_id) or doc_id
+                resolved_notes, unresolved_pronoun_notes = resolve_pronouns_for_doc(
+                    doc_id,
+                    doc_notes.get(doc_id, []),
+                    doc_pronoun_notes.get(doc_id, []),
+                    {"title": doc_title},
+                )
                 if not resolved_notes:
                     continue
+                alias_lookup = build_doc_alias_lookup(resolved_notes)
+                for note in resolved_notes:
+                    normalize_subject(note, doc_title, alias_lookup)
                 notes_written += FileUtils.write_jsonl_batch(handle, resolved_notes)
 
         logger.info("Wrote {} notes to {}", notes_written, notes_path)

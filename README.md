@@ -118,6 +118,7 @@ python main.py query \
 - `retriever/`：结构化检索（别名绑定、图扩展、打分与兜底），总控在 `retriever/pipeline.py`。
 - `generator/answerer.py`：将结构化证据传给 LM Studio 生成自然语言答案。
 - `main.py`：CLI 入口（`process` / `query`）。
+- `baselines/`：对比实验或外部基线（含 MIRAGE 用的 `naive_rag` 与直接无检索的 `direct_llm`，后续可放 LightRAG/GraphRAG 等）。
 
 ## 配置与并发
 

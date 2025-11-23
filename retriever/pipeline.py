@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Sequence, Tuple
 from loguru import logger
 
@@ -29,9 +29,44 @@ class Candidate:
     note_ids: List[str]
     score: float
     match_strength: str = "weak"
+    path_metrics: Dict[str, float] = field(default_factory=dict)
 
 
 INTENT_DETECTOR = AnswerIntentDetector()
+
+
+def _normalize_name(text: Optional[str]) -> str:
+    if not text:
+        return ""
+    return " ".join(str(text).strip().lower().split())
+
+
+def _build_seed_alias_lookup(
+    indexes: Indexes,
+    entities: Sequence[str],
+    seed_texts: Sequence[str],
+    doc_name: Optional[str],
+) -> Dict[str, str]:
+    lookup: Dict[str, str] = {}
+    for entity in entities:
+        norm = _normalize_name(entity)
+        if norm:
+            lookup.setdefault(norm, entity)
+    alias_index = getattr(indexes, "alias_to_entities", {}) or {}
+    for alias, mapped_entities in alias_index.items():
+        if not isinstance(mapped_entities, list):
+            continue
+        if any(entity in entities for entity in mapped_entities):
+            lookup.setdefault(alias.lower(), mapped_entities[0])
+    for seed in seed_texts:
+        norm = _normalize_name(seed)
+        if norm:
+            lookup.setdefault(norm, seed)
+    if doc_name:
+        norm = _normalize_name(doc_name)
+        if norm:
+            lookup.setdefault(norm, doc_name)
+    return lookup
 
 
 def retrieve_answer(
@@ -46,7 +81,13 @@ def retrieve_answer(
 ) -> Dict[str, Any]:
     intent = INTENT_DETECTOR.detect(question)
     ir = parse_question(question)
+    cfg = cfg or config_loader.load_config()
+    retr_cfg = cfg.get("retriever") or {}
+    structured_cfg = retr_cfg.get("structured") or {}
+    entity_match_threshold = float(structured_cfg.get("entity_match_threshold", 0.5))
+    path_consistency_threshold = float(structured_cfg.get("path_consistency_threshold", 0.9))
     normalized_doc_hint = _normalize_doc_hint(doc_hint)
+    relaxed_path_used = False
     # 逐层诊断日志（定位常见失败点）
     try:
         logger.info("Q: {}", question)
@@ -58,7 +99,9 @@ def retrieve_answer(
     except Exception:
         pass
     if ir is None or not ir.is_valid:
-        return _fallback_lookup(intent, indexes, note_store, None, "parse_failed", normalized_doc_hint)
+        result = _fallback_lookup(intent, indexes, note_store, None, "parse_failed", normalized_doc_hint)
+        result.setdefault("meta", {})["relaxed_path_retry"] = False
+        return result
 
     seed_entities = _bind_seeds(ir.seeds, indexes, ir.fanout)
     # 注入 doc_name 别名约束：若检测到实体名称，作为强别名参与绑定
@@ -75,16 +118,68 @@ def retrieve_answer(
     except Exception:
         pass
     if not seed_entities:
+        try:
+            logger.info("no seed entities bound; trigger fallback (doc_hint={})", normalized_doc_hint)
+        except Exception:
+            pass
         # 结构化优先兜底：尝试限制在别名索引范围内的弱信号补全（向量-only）
-        return _fallback_lookup(intent, indexes, note_store, ir, "no_seed_match", normalized_doc_hint)
+        result = _fallback_lookup(intent, indexes, note_store, ir, "no_seed_match", normalized_doc_hint)
+        result.setdefault("meta", {})["relaxed_path_retry"] = False
+        return result
 
     # 传递 doc_name 用于路径别名加权
     if attribute_hint:
         intent.attribute = attribute_hint
     doc_name = intent.entity if isinstance(intent.entity, str) else None
     normalized_doc_hint = _normalize_doc_hint(doc_hint)
-    candidates = _walk_chain(seed_entities, ir, indexes, note_store, doc_name)
+    seed_texts = [seed.text for seed in ir.seeds if seed.text]
+    alias_lookup = _build_seed_alias_lookup(indexes, seed_entities, seed_texts, doc_name)
+    candidates = _walk_chain(
+        seed_entities,
+        ir,
+        indexes,
+        note_store,
+        doc_name,
+        attribute=intent.attribute,
+        seed_texts=seed_texts,
+        alias_lookup=alias_lookup,
+        entity_match_threshold=entity_match_threshold,
+        path_match_threshold=path_consistency_threshold if ir.pred_chain else -1.0,
+    )
+    pre_doc_candidates = len(candidates or [])
     candidates = _filter_candidates_by_doc(candidates, normalized_doc_hint)
+    try:
+        if pre_doc_candidates and not candidates:
+            logger.info("all {} structured candidates dropped by doc_hint filter", pre_doc_candidates)
+        elif pre_doc_candidates != len(candidates or []):
+            logger.info("structured candidates filtered by doc_hint: {} -> {}", pre_doc_candidates, len(candidates or []))
+    except Exception:
+        pass
+    if not candidates and ir.pred_chain:
+        try:
+            logger.info("no structured path; retrying with relaxed thresholds")
+        except Exception:
+            pass
+        relaxed_candidates = _walk_chain(
+            seed_entities,
+            ir,
+            indexes,
+            note_store,
+            doc_name,
+            attribute=intent.attribute,
+            seed_texts=seed_texts,
+            alias_lookup=alias_lookup,
+            entity_match_threshold=max(0.25, entity_match_threshold * 0.6),
+            path_match_threshold=0.25,
+        )
+        relaxed_candidates = _filter_candidates_by_doc(relaxed_candidates, normalized_doc_hint)
+        if relaxed_candidates:
+            candidates = relaxed_candidates
+            relaxed_path_used = True
+            try:
+                logger.info("relaxed retry yielded {} candidates", len(relaxed_candidates))
+            except Exception:
+                pass
     try:
         logger.info(
             "paths_found={}  notes_collected={}",
@@ -102,8 +197,11 @@ def retrieve_answer(
         note_store,
         cfg=cfg,
         hybrid=hybrid,
+        alias_lookup=alias_lookup,
     )
     if hybrid_result is not None:
+        hybrid_result.setdefault("meta", {"path_consistency": 0.0, "entity_consistency": 0.0})
+        hybrid_result["meta"]["relaxed_path_retry"] = relaxed_path_used
         if normalized_doc_hint:
             _apply_doc_filter_to_result(hybrid_result, note_store, normalized_doc_hint)
         return hybrid_result
@@ -112,8 +210,11 @@ def retrieve_answer(
         # 结构化兜底：在绑定实体范围内做向量-only检索补全
         structured = _structured_fallback(seed_entities, intent, indexes, note_store, doc_hint=normalized_doc_hint)
         if structured:
+            structured.setdefault("meta", {})["relaxed_path_retry"] = relaxed_path_used
             return structured
-        return _fallback_lookup(intent, indexes, note_store, ir, "no_path", normalized_doc_hint)
+        result = _fallback_lookup(intent, indexes, note_store, ir, "no_path", normalized_doc_hint)
+        result.setdefault("meta", {})["relaxed_path_retry"] = relaxed_path_used
+        return result
 
     candidates.sort(key=lambda c: c.score, reverse=True)
     top_candidates = candidates[: ir.fanout]
@@ -169,6 +270,8 @@ def retrieve_answer(
     }
     if normalized_doc_hint:
         _apply_doc_filter_to_result(result, note_store, normalized_doc_hint)
+    _attach_meta(result, top_candidates[0].path_metrics if top_candidates else None)
+    result.setdefault("meta", {})["relaxed_path_retry"] = relaxed_path_used
     return result
 
 
@@ -194,9 +297,24 @@ def _walk_chain(
     indexes: Indexes,
     note_store: NoteStore,
     doc_name: Optional[str] = None,
+    attribute: Optional[str] = None,
+    *,
+    seed_texts: Optional[Sequence[str]] = None,
+    alias_lookup: Optional[Dict[str, str]] = None,
+    entity_match_threshold: float = 0.0,
+    path_match_threshold: float = -1.0,
 ) -> List[Candidate]:
     if not ir.pred_chain:
-        return _collect_entity_mentions(entities, indexes, note_store, ir, doc_name)
+        return _collect_entity_mentions(
+            entities,
+            indexes,
+            note_store,
+            ir,
+            doc_name,
+            seed_texts=seed_texts,
+            alias_lookup=alias_lookup,
+            entity_match_threshold=entity_match_threshold,
+        )
 
     states = [{"entity": entity, "path": []} for entity in entities]
     for step_idx, step in enumerate(ir.pred_chain[: ir.max_hops]):
@@ -211,13 +329,14 @@ def _walk_chain(
                 direction=step.direction,
                 limit=ir.fanout,
             )
-            for obj, note_id in expanded:
+            for obj, note_id, edge_conf in expanded:
                 new_path = state["path"] + [
                     {
                         "subj": state["entity"],
                         "pred": canon_pred,
                         "obj": obj,
                         "note_id": note_id,
+                        "conf": edge_conf,
                     }
                 ]
                 next_states.append({"entity": obj, "path": new_path})
@@ -233,20 +352,40 @@ def _walk_chain(
         if not path:
             continue
         note_ids = [edge["note_id"] for edge in path if edge.get("note_id")]
-        # 路径打分加入 doc_name（由上层传入的页面/标题别名约束）
-        score = score_path(path, doc_name=doc_name)
+        notes = note_store.get_many(note_ids)
+        score, metrics = score_path(
+            path,
+            notes=notes,
+            doc_name=doc_name,
+            seeds=seed_texts,
+            query_ir=ir,
+            alias_lookup=alias_lookup,
+        )
+        if metrics.get("entity_score", 0.0) < entity_match_threshold:
+            continue
+        if ir.pred_chain and metrics.get("pred_score", 0.0) < path_match_threshold:
+            continue
         final_note = note_store.get(note_ids[-1]) if note_ids else None
+        score += _attribute_note_bonus(final_note, attribute, indexes)
         if final_note and ir.target_type:
             obj_type = final_note.get("obj_type")
             if obj_type and obj_type.upper() == ir.target_type:
                 score += 0.1
         answer = path[-1]["obj"] if path else None
-        candidates.append(Candidate(answer=answer, path=path, note_ids=note_ids, score=score))
+        candidates.append(Candidate(answer=answer, path=path, note_ids=note_ids, score=score, path_metrics=metrics))
     return candidates
 
 
 def _collect_entity_mentions(
-    entities: Sequence[str], indexes: Indexes, note_store: NoteStore, ir: QueryIR, doc_name: Optional[str] = None
+    entities: Sequence[str],
+    indexes: Indexes,
+    note_store: NoteStore,
+    ir: QueryIR,
+    doc_name: Optional[str] = None,
+    *,
+    seed_texts: Optional[Sequence[str]] = None,
+    alias_lookup: Optional[Dict[str, str]] = None,
+    entity_match_threshold: float = 0.0,
 ) -> List[Candidate]:
     candidates: List[Candidate] = []
     for entity in entities:
@@ -258,10 +397,22 @@ def _collect_entity_mentions(
                     "pred": "__mention__",
                     "obj": entity,
                     "note_id": nid,
+                    "conf": 0.6,
                 }
             ]
-            score = score_path(path, doc_name=doc_name)
-            candidates.append(Candidate(answer=None, path=path, note_ids=[nid], score=score))
+            note = note_store.get(nid)
+            score, metrics = score_path(
+                path,
+                notes=[note] if note else None,
+                doc_name=doc_name,
+                seeds=seed_texts,
+                alias_lookup=alias_lookup,
+            )
+            if metrics.get("entity_score", 0.0) < entity_match_threshold:
+                continue
+            candidates.append(
+                Candidate(answer=None, path=path, note_ids=[nid], score=score, path_metrics=metrics)
+            )
     return candidates
 
 
@@ -326,6 +477,7 @@ def _fallback_lookup(
             },
             "intent": intent.to_dict(),
         }
+        _attach_meta(result, None)
         _apply_doc_filter_to_result(result, note_store, doc_hint_norm)
         return result
 
@@ -349,6 +501,7 @@ def _fallback_lookup(
             },
             "intent": intent.to_dict(),
         }
+        _attach_meta(result, None)
         _apply_doc_filter_to_result(result, note_store, doc_hint_norm)
         return result
 
@@ -384,6 +537,7 @@ def _fallback_lookup(
                 },
                 "intent": intent.to_dict(),
             }
+            _attach_meta(result, None)
             _apply_doc_filter_to_result(result, note_store, doc_hint_norm)
             return result
         # Neighbor expansion: bring notes where pronoun unresolved near the entity mentions
@@ -440,6 +594,7 @@ def _fallback_lookup(
             },
             "intent": intent.to_dict(),
         }
+        _attach_meta(result, None)
         _apply_doc_filter_to_result(result, note_store, doc_hint_norm)
         return result
 
@@ -499,6 +654,7 @@ def _fallback_lookup(
         },
         "intent": intent.to_dict(),
     }
+    _attach_meta(result, None)
     _apply_doc_filter_to_result(result, note_store, doc_hint_norm)
     return result
 
@@ -651,17 +807,70 @@ def _extract_answer_value(note: Dict[str, Any]) -> Optional[str]:
     return None
 
 
+def _attribute_note_bonus(note: Optional[Dict[str, Any]], attribute: Optional[str], indexes: Optional[Indexes]) -> float:
+    if not note or not attribute:
+        return 0.0
+    attr = attribute.strip().lower()
+    meta = note.get("meta", {}) or {}
+    attr_name = ((meta.get("attribute") or {}).get("name") or "").strip().lower()
+    quality = meta.get("quality_score")
+    bonus = 0.0
+
+    if attr == "occupation":
+        if isinstance(quality, (float, int)):
+            bonus += 0.25 * float(quality)
+        quality_flags = meta.get("quality") or {}
+        if isinstance(quality_flags, dict) and quality_flags.get("has_definition"):
+            bonus += 0.05
+        if attr_name == "occupation":
+            bonus += 0.08
+        elif attr_name == "title":
+            bonus += 0.04
+        else:
+            bonus -= 0.08
+        bonus += _field_hit_bias(note, "occupation", indexes)
+    else:
+        if isinstance(quality, (float, int)):
+            bonus += 0.1 * float(quality)
+        if attr_name == attr:
+            bonus += 0.03
+    return bonus
+
+
+def _field_hit_bias(note: Dict[str, Any], attribute: str, indexes: Optional[Indexes]) -> float:
+    if not indexes or not attribute:
+        return 0.0
+    field_index = getattr(indexes, "field_index", {}) or {}
+    bucket = field_index.get(attribute) or {}
+    if not bucket:
+        return 0.0
+    nid = note.get("note_id")
+    if not nid:
+        return 0.0
+    hit = any(isinstance(ids, list) and nid in ids for ids in bucket.values())
+    if hit:
+        return 0.05
+    return -0.05
+
+
 def _score_note(note: Dict[str, Any], attribute: str) -> float:
     meta = note.get("meta", {}) or {}
     score = float(meta.get("final_conf", 0.0))
     quality = meta.get("quality_score")
+    attr = (attribute or "").strip().lower()
+    qual_weight = 0.4 if attr == "occupation" else 0.3
     if isinstance(quality, (float, int)):
-        score += 0.3 * float(quality)
-    attr_name = (meta.get("attribute") or {}).get("name")
-    if attr_name == attribute:
-        score += 0.05
-    # occupation/title（职业相关）优先加权
-    if attribute == "occupation" and attr_name in {"occupation", "title"}:
+        score += qual_weight * float(quality)
+    attr_name = ((meta.get("attribute") or {}).get("name") or "").strip().lower()
+    if attr == "occupation":
+        if attr_name in {"occupation", "title"}:
+            score += 0.1
+        else:
+            score -= 0.05
+        quality_flags = meta.get("quality") or {}
+        if isinstance(quality_flags, dict) and quality_flags.get("has_definition"):
+            score += 0.05
+    elif attr_name == attr:
         score += 0.05
     # entity_presence_score：若 subj/obj 是代词或破碎 token，扣分
     def _is_broken(token: str | None) -> bool:
@@ -748,7 +957,7 @@ def _structured_fallback(
             "canonical": meta.get("evidence_canonical") or note.get("evidence", ""),
             "quality": meta.get("quality_score"),
         })
-    return {
+    result = {
         "ir": None,
         "answer": answer_value,
         "paths": paths,
@@ -758,6 +967,8 @@ def _structured_fallback(
         "fallback": {"used": True, "stage": "structured_fallback", "status": "ok" if answer_value else "no_match", "intent": intent.to_dict(), "candidates": [{"entity": top_note.get("subj"), "attribute": canonical_attr, "note_id": top_note.get("note_id"), "score": 0.0}]},
         "intent": intent.to_dict(),
     }
+    _attach_meta(result, None)
+    return result
 
 
 def _maybe_run_hybrid(
@@ -769,6 +980,7 @@ def _maybe_run_hybrid(
     *,
     cfg: Optional[Dict[str, Any]] = None,
     hybrid: Optional["HybridRetriever"] = None,
+    alias_lookup: Optional[Dict[str, str]] = None,
 ):
     cfg_obj = cfg or getattr(hybrid, "cfg", None) or config_loader.load_config()
     retr_cfg = cfg_obj.get("retriever") or {}
@@ -785,7 +997,7 @@ def _maybe_run_hybrid(
             logger.error("Hybrid retriever unavailable: {}", exc)
             return None
         hybrid_inst = HybridRetriever(cfg_obj)
-    return hybrid_inst.retrieve(question, ir, intent, candidates, note_store)
+    return hybrid_inst.retrieve(question, ir, intent, candidates, note_store, alias_lookup=alias_lookup)
 
 
 def _rerank_candidates(candidates: List[Candidate], attribute: Optional[str]) -> List[Candidate]:
@@ -866,6 +1078,14 @@ def _normalize_doc_hint(doc_hint: Optional[str]) -> Optional[str]:
     return doc_hint.strip().lower()
 
 
+def _attach_meta(result: Dict[str, Any], metrics: Optional[Dict[str, float]]) -> None:
+    payload = metrics or {}
+    result["meta"] = {
+        "path_consistency": float(payload.get("pred_score", 0.0)),
+        "entity_consistency": float(payload.get("entity_score", 0.0)),
+    }
+
+
 def _note_id_matches_doc(note_id: Optional[str], doc_hint: Optional[str]) -> bool:
     if not doc_hint or not note_id:
         return True
@@ -934,6 +1154,24 @@ def _apply_doc_filter_to_result(result: Dict[str, Any], note_store: NoteStore, d
         result["answer"] = _extract_answer_value(surviving) if surviving else result.get("answer")
     else:
         result["answer"] = None
+    hybrid = result.get("hybrid") or {}
+    consensus_candidates = hybrid.get("consensus") or []
+    if consensus_candidates:
+        filtered_consensus: list[dict[str, Any]] = []
+        for cand in consensus_candidates:
+            support_notes = cand.get("support_notes") or []
+            if not support_notes:
+                continue
+            if any(_note_id_matches_doc(nid, doc_hint_norm) for nid in support_notes if nid):
+                filtered_consensus.append(cand)
+        hybrid["consensus"] = filtered_consensus
+        best_meta = hybrid.get("best") or {}
+        consensus_label = best_meta.get("consensus_label")
+        if consensus_label and not any(c.get("label") == consensus_label for c in filtered_consensus):
+            best_meta.pop("consensus_label", None)
+            best_meta.pop("consensus_agreement", None)
+        hybrid["best"] = best_meta
+        result["hybrid"] = hybrid
 
 
 def _candidate_label(candidate: Candidate, attribute: str) -> str:
