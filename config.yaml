@@ -47,6 +47,12 @@ lmstudio:
   endpoint: "http://127.0.0.1:1234/v1"
   model: "qwen/qwen3-30b-a3b"
 
+structrag:
+  router: "llm"
+  supported_types: ["chunk", "graph"]
+  top_k: 10
+  llm_model: "gpt-oss-20b"
+
 retriever:
   structured:
     enabled: true

@@ -73,6 +73,12 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "temperature": 0.2,
         "max_tokens": 64,
     },
+    "structrag": {
+        "router": "llm",
+        "supported_types": ["chunk", "graph"],
+        "top_k": 10,
+        "llm_model": "gpt-oss-20b",
+    },
     "routing": {
         "token_budget_hint": 320000,
     },
