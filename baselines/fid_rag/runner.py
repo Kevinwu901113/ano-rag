@@ -130,15 +130,15 @@ class FiDRAGRunner:
             question = item.get("query") or item.get("question") or ""
             qid = item.get("query_id") or str(idx)
             hits = self.retriever.search(question, self.topk)
-            if not hits:
-                answer_text = "Insufficient evidence"
-                used_indices: List[int] = []
+            context = _format_fid_context(hits)
+            if not context.strip():
+                raw_output = "Insufficient evidence"
             else:
                 prompt = _build_fid_prompt(question, hits)
                 raw_output = self.lm.answer_raw_prompt(prompt)
-                answer_text, used_indices = _parse_fid_output(raw_output)
-                used_indices = _filter_indices(used_indices, len(hits))
-                answer_text = _enforce_short_answer(answer_text)
+            answer_text, used_indices = _parse_fid_output(raw_output)
+            used_indices = _filter_indices(used_indices, len(hits))
+            answer_text = _enforce_short_answer(answer_text)
             answers.append(
                 {
                     "query_id": qid,
