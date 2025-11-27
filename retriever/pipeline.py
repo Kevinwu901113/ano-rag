@@ -86,6 +86,7 @@ def retrieve_answer(
     structured_cfg = retr_cfg.get("structured") or {}
     entity_match_threshold = float(structured_cfg.get("entity_match_threshold", 0.5))
     path_consistency_threshold = float(structured_cfg.get("path_consistency_threshold", 0.9))
+    vector_fallback_enabled = bool(structured_cfg.get("vector_fallback_enabled", True))
     normalized_doc_hint = _normalize_doc_hint(doc_hint)
     relaxed_path_used = False
     # 逐层诊断日志（定位常见失败点）
@@ -208,7 +209,7 @@ def retrieve_answer(
 
     if not candidates:
         # 结构化兜底：在绑定实体范围内做向量-only检索补全
-        structured = _structured_fallback(seed_entities, intent, indexes, note_store, doc_hint=normalized_doc_hint)
+        structured = _structured_fallback(seed_entities, intent, indexes, note_store, doc_hint=normalized_doc_hint) if vector_fallback_enabled else None
         if structured:
             structured.setdefault("meta", {})["relaxed_path_retry"] = relaxed_path_used
             return structured
@@ -1090,7 +1091,22 @@ def _note_id_matches_doc(note_id: Optional[str], doc_hint: Optional[str]) -> boo
     if not doc_hint or not note_id:
         return True
     doc_part = note_id.split("#", 1)[0].lower()
-    return doc_hint in doc_part
+    hint = (doc_hint or "").strip().lower()
+    if not hint:
+        return True
+    if hint in doc_part:
+        return True
+    if "/" in hint:
+        ds, qid = hint.split("/", 1)
+        if not ds or not qid:
+            return False
+        if not doc_part.startswith(ds + "/"):
+            return False
+        suffix = doc_part.split("/", 1)[1]
+        if "__" in suffix:
+            return suffix.split("__")[-1] == qid
+        return suffix == qid
+    return False
 
 
 def _note_matches_source(note: Optional[Dict[str, Any]], doc_hint: Optional[str]) -> bool:
@@ -1099,7 +1115,7 @@ def _note_matches_source(note: Optional[Dict[str, Any]], doc_hint: Optional[str]
     meta = (note.get("meta", {}) or {})
     source = (meta.get("source") or "").strip().lower()
     if source:
-        return doc_hint in source
+        return _note_id_matches_doc(source, doc_hint)
     return _note_id_matches_doc(note.get("note_id"), doc_hint)
 
 
@@ -1131,18 +1147,41 @@ def _apply_doc_filter_to_result(result: Dict[str, Any], note_store: NoteStore, d
     if not doc_hint or not result:
         return
     doc_hint_norm = _normalize_doc_hint(doc_hint)
+    intent = result.get("intent") or {}
+    entity_name = (intent.get("entity") or "").strip()
+    desired_prefix: Optional[str] = None
+    if entity_name and "/" in doc_hint_norm:
+        ds, _ = doc_hint_norm.split("/", 1)
+        slug = "".join(ch.lower() if ch.isalnum() else ("_" if ch.isspace() or ch in "-_" else "") for ch in entity_name).strip("_")
+        if slug:
+            desired_prefix = f"{ds}/{slug}__"
     paths = result.get("paths") or []
     filtered_paths: List[List[Dict[str, Any]]] = []
     for path in paths:
         if not path:
             continue
         note_ids = [edge.get("note_id") for edge in path if edge.get("note_id")]
-        if not note_ids or all(_note_id_matches_doc(nid, doc_hint_norm) for nid in note_ids):
+        def _ok(nid: Optional[str]) -> bool:
+            if not _note_id_matches_doc(nid, doc_hint_norm):
+                return False
+            if desired_prefix and isinstance(nid, str):
+                nid_lower = nid.lower()
+                if not nid_lower.startswith(desired_prefix):
+                    return False
+            return True
+        if not note_ids or all(_ok(nid) for nid in note_ids):
             filtered_paths.append(path)
     result["paths"] = filtered_paths
-    result["support_note_ids"] = _filter_note_ids_by_doc(result.get("support_note_ids") or [], doc_hint_norm)
+    support_ids = result.get("support_note_ids") or []
+    support_ids = _filter_note_ids_by_doc(support_ids, doc_hint_norm)
+    if desired_prefix:
+        support_ids = [nid for nid in support_ids if isinstance(nid, str) and nid.lower().startswith(desired_prefix)]
+    result["support_note_ids"] = support_ids
     evidences = result.get("evidence") or []
-    result["evidence"] = [ev for ev in evidences if _note_id_matches_doc(ev.get("note_id"), doc_hint_norm)]
+    filtered_evs = [ev for ev in evidences if _note_id_matches_doc(ev.get("note_id"), doc_hint_norm)]
+    if desired_prefix:
+        filtered_evs = [ev for ev in filtered_evs if isinstance(ev.get("note_id"), str) and ev.get("note_id").lower().startswith(desired_prefix)]
+    result["evidence"] = filtered_evs
     if filtered_paths:
         # sync answer with first valid path
         first = filtered_paths[0]

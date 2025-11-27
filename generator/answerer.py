@@ -8,9 +8,9 @@ from loguru import logger
 from generator.extractor import judge_and_compress
 
 
-ANS_PROMPT = """You are a factual answerer. Use ONLY the provided evidence sentences to answer the question.
+ANS_PROMPT = """You are a factual answerer. Use the provided evidence sentences to answer the question.
 If the evidence is insufficient, respond EXACTLY with "Insufficient evidence".
-Prioritize high-confidence evidence. Weak evidence may provide hints but is unreliable on its own.
+Prioritize high-confidence evidence, but do not ignore weak evidence if it provides a reasonable answer and does not conflict with strong evidence.
 {label_instruction}
 Question: {q}
 [STRUCTURED EVIDENCE]
@@ -19,7 +19,7 @@ Question: {q}
 {weak_block}
 Rules:
 - Prefer answers supported by strong evidence.
-- Only rely on weak evidence if at least two independent weak entries support the SAME conclusion.
+- You can use weak evidence if it directly answers the question and is not contradicted by strong evidence.
 - If weak evidence conflicts with strong evidence, ignore the weak evidence.
 - If no sufficient evidence exists, answer "Insufficient evidence".
 Respond with exactly one label and nothing else.

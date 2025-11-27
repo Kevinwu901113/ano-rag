@@ -64,6 +64,16 @@ class QueryProcessor:
                 f"Notes file '{self.notes_path}' not found. Run 'main.py process' first."
             )
 
+        # 当 CLI 传入 indexes_dir 时，将 embedding/BM25 索引路径同步到该目录，确保混合检索使用对应索引
+        retr_cfg = self.cfg.setdefault("retriever", {})
+        embed_cfg = retr_cfg.setdefault("embedding", {})
+        bm25_cfg = retr_cfg.setdefault("bm25", {})
+        if indexes_dir:
+            base_idx = Path(self.indexes_dir)
+            embed_cfg["offline_index_path"] = str(base_idx / "faiss" / "notes.faiss")
+            embed_cfg["meta_path"] = str(base_idx / "faiss" / "notes.meta.parquet")
+            bm25_cfg["store_path"] = str(base_idx / "bm25" / "notes")
+
         self.indexes = Indexes(self.indexes_dir)
         preferred_weak = Path(self.notes_path).parent / "weak" / "weak_notes.jsonl"
         legacy_weak = Path(self.notes_path).with_name("weak_notes.jsonl")

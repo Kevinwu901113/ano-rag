@@ -59,6 +59,7 @@ retriever:
     fanout: 8
     entity_match_threshold: 0.5
     path_consistency_threshold: 0.9
+    vector_fallback_enabled: false
   embedding:
     enabled: true
     provider: "qwen3"
@@ -90,7 +91,7 @@ retriever:
   fusion:
     method: "rrf"
     rrf_k: 60
-    weights: {struct: 0.5, emb: 0.3, bm25: 0.2}
+    weights: {struct: 0.4, emb: 0.35, bm25: 0.25}
     pre_topM: 128
     final_topK: 64
   hybrid:

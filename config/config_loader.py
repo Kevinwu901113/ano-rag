@@ -83,7 +83,13 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "token_budget_hint": 320000,
     },
     "retriever": {
-        "structured": {"enabled": True, "fanout": 8, "entity_match_threshold": 0.5, "path_consistency_threshold": 0.9},
+        "structured": {
+            "enabled": True,
+            "fanout": 8,
+            "entity_match_threshold": 0.5,
+            "path_consistency_threshold": 0.9,
+            "vector_fallback_enabled": True,
+        },
         "embedding": {
             "enabled": True,
             "provider": "qwen3",

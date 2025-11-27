@@ -24,8 +24,16 @@ def subject_match(subject: str | None, seeds: Optional[Sequence[str]], alias_loo
             continue
         if subj_canon == seed_norm:
             return 1.0
-        if subj_canon in seed_norm or seed_norm in subj_canon:
-            best = max(best, 0.5)
+        # Reduce false positives from prefix/suffix containment (e.g., "John Dawson Mayne" vs "John Mayne")
+        subj_tokens = [t for t in subj_canon.split() if t]
+        seed_tokens = [t for t in seed_norm.split() if t]
+        if subj_tokens and seed_tokens:
+            if len(subj_tokens) > len(seed_tokens):
+                if subj_tokens[: len(seed_tokens)] == seed_tokens:
+                    best = max(best, 0.3)
+            elif len(seed_tokens) > len(subj_tokens):
+                if seed_tokens[: len(subj_tokens)] == subj_tokens:
+                    best = max(best, 0.3)
     return best
 
 

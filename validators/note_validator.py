@@ -403,6 +403,18 @@ def validate_and_normalize(raw_text: str, doc_id: str, chunk_id: str):
                 if m and _looks_like_occupation(m.group(2)):
                     pred = "occupation"
                     pred_weight = max(pred_weight, 0.9)
+            # Definitional noun phrase without explicit verb, e.g., "American cartoonist and illustrator"
+            if not pred and evidence_text:
+                try:
+                    from schema.vocabulary import load_vocab, load_alias_overrides
+                    occ_map = set(load_vocab().get("occupation", {}).keys())
+                    occ_over = set(load_alias_overrides().get("occupation", {}).keys())
+                    tokens = re.sub(r"[\W_]+", " ", evidence_text.lower()).split()
+                    if any(tok in occ_map or tok in occ_over for tok in tokens):
+                        pred = "occupation"
+                        pred_weight = max(pred_weight, 0.85)
+                except Exception:
+                    pass
         if raw_attr_name and raw_attr_name.strip().lower() in {"title", "titles"}:
             role = (attr.get("role") or "").strip().lower()
             if role not in {"honorific", "position_title"}:

@@ -16,6 +16,10 @@ from config import config as config_loader
 FID_PROMPT_TEMPLATE = """You are a question answering system.
 Use ONLY the information from the passages below to answer the question.
 If the passages are insufficient, reply EXACTLY with: Insufficient evidence.
+Respond with EXACTLY TWO lines and nothing else.
+  Line 1: ONLY the final answer as one short noun phrase (no quotes, no punctuation, no analysis).
+  Line 2: Passages used: i1, i2, ... (list the passage indices you relied on).
+Do NOT include any reasoning, explanation, bullet points, or extra lines.
 
 Question:
 {question}
@@ -23,8 +27,7 @@ Question:
 Passages:
 {passages}
 
-First, output ONLY the final answer in one short noun phrase on a single line.
-Then, on a new line, output: Passages used: i1, i2, ... (the indices of passages you relied on).
+First, output the two required lines.
 """
 
 
@@ -219,15 +222,20 @@ def _parse_fid_output(text: str) -> Tuple[str, List[int]]:
         return "Insufficient evidence", []
     answer_text = lines[0]
     used_indices: List[int] = []
-    for line in lines[1:]:
+    answer_before_used: Optional[str] = None
+    for idx, line in enumerate(lines):
         lower = line.lower()
         if lower.startswith("passages used"):
+            if idx > 0:
+                answer_before_used = lines[idx - 1]
             _, _, suffix = line.partition(":")
             candidates = suffix.replace(",", " ").split()
             for token in candidates:
                 if token.isdigit():
                     used_indices.append(int(token))
             break
+    if answer_before_used:
+        answer_text = answer_before_used
     return answer_text, used_indices
 
 

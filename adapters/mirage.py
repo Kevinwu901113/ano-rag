@@ -1,5 +1,6 @@
 import json
 import os
+import re
 from typing import Dict, Iterable, Iterator, List, Tuple
 
 from utils import TextUtils
@@ -91,20 +92,36 @@ def iter_docs_and_chunks(
         records = records[start:end]
 
     for record in records:
-        raw_id = str(
+        mapped_id = str(record.get("mapped_id") or "").strip()
+        doc_name = str(record.get("doc_name") or record.get("title") or "").strip()
+        other_id = str(
             record.get("id")
             or record.get("doc_id")
             or record.get("_id")
-            or record.get("mapped_id")
-            or record.get("doc_name")
             or ""
         ).strip()
+
+        def _slug(s: str) -> str:
+            if not s:
+                return ""
+            s = re.sub(r"\s+", "_", s.strip())
+            s = re.sub(r"[^A-Za-z0-9_\-]", "", s)
+            return s.lower()
+
+        if mapped_id and doc_name:
+            raw_id = f"{_slug(doc_name)}__{mapped_id}"
+        elif mapped_id:
+            raw_id = mapped_id
+        elif doc_name:
+            raw_id = _slug(doc_name)
+        else:
+            raw_id = other_id
         if not raw_id:
             continue
 
         doc = {
             "doc_id": f"mirage/{raw_id}",
-            "title": record.get("title") or record.get("doc_name") or "",
+            "title": doc_name or (record.get("title") or record.get("doc_name") or ""),
             "meta": {"dataset": "mirage"},
         }
 

@@ -339,7 +339,8 @@ def _enforce_short_answer(text: str) -> str:
             first = first[len(prefix) :].strip()
             break
     lowered = first.lower()
-    if "insufficient evidence" in lowered:
+    normalized = lowered.strip().rstrip(".")
+    if normalized == "insufficient evidence":
         return "Insufficient evidence"
     # Trim surrounding quotes
     if len(first) >= 2 and ((first.startswith('"') and first.endswith('"')) or (first.startswith("'") and first.endswith("'"))):
