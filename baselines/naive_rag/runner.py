@@ -168,10 +168,16 @@ class LLMClient:
         if self.stop:
             payload["stop"] = self.stop
 
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": "Bearer sk-no-key-required"
+        }
+
         for attempt in range(self.retries + 1):
             try:
                 resp = requests.post(
                     f"{self.endpoint}/chat/completions",
+                    headers=headers,
                     json=payload,
                     timeout=60,
                 )

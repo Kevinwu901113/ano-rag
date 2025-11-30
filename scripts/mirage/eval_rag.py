@@ -52,11 +52,14 @@ def contains_score(prediction, ground_truth):
     return (pred in gt) or (gt in pred)
 
 def metric_max_over_ground_truths(metric_fn, prediction, ground_truths):
+    if not ground_truths:
+        return 0
     scores_for_ground_truths = []
     for ground_truth in ground_truths:
         score = metric_fn(prediction, ground_truth)
         scores_for_ground_truths.append(score)
     return max(scores_for_ground_truths)
+
 
 def evaluate(dataset_path, predictions_path):
     with open(dataset_path, 'r') as f:

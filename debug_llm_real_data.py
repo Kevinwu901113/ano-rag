@@ -15,7 +15,10 @@ British lawyer (1828–1917) John Dawson Mayne (1828–1917) was a British lawye
     ]
 
     url = "http://127.0.0.1:8000/v1/chat/completions"
-    headers = {"Content-Type": "application/json"}
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": "Bearer sk-no-key-required"
+    }
     
     prompt_template = """Answer the question based on the context below. Keep the answer short and concise. Do not output reasoning.
 
