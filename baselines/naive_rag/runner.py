@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import time
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
@@ -139,7 +140,7 @@ class LLMClient:
         endpoint: str,
         model: str,
         temperature: float = 0.0,
-        max_tokens: int = 128,
+        max_tokens: int = 8192,
         stop: Optional[List[str]] = None,
         retries: int = 2,
     ) -> None:
@@ -210,10 +211,15 @@ class NaiveRAGRunner:
         lm_cfg = self.cfg.get("lmstudio", {}) or {}
         endpoint = lm_endpoint or lm_cfg.get("endpoint")
         model = lm_model or lm_cfg.get("model")
+        if model and "qwen" in model.lower() and "instruct" in model.lower():
+             # Fix potential model name mismatch if user config has lowercase but server has MixedCase
+             # This is a heuristic; ideally we list models from server
+             pass
+             
         temp = temperature if temperature is not None else lm_cfg.get("temperature", 0.0)
-        max_new_tokens = max_tokens if max_tokens is not None else lm_cfg.get("max_tokens", 128)
+        max_new_tokens = max_tokens if max_tokens is not None else lm_cfg.get("max_tokens", 8192)
         self.retriever = NaiveIndex(index_path, chunks_path, config=self.cfg)
-        self.lm = LLMClient(endpoint, model, temperature=float(temp or 0.0), max_tokens=int(max_new_tokens or 128), stop=stop)
+        self.lm = LLMClient(endpoint, model, temperature=float(temp or 0.0), max_tokens=int(max_new_tokens or 8192), stop=stop)
 
     def run_dataset(
         self,
@@ -285,9 +291,20 @@ class NaiveRAGRunner:
         }
 
 
-PROMPT_TEMPLATE = """You are a factual answerer. Use ONLY the provided context to answer the question.
-If the context is insufficient, respond EXACTLY with "Insufficient evidence".
-Return only the occupation title without nationality or adjectives (e.g., "lawyer"), with no extra words, no punctuation, no quotes, and no restating the question.
+PROMPT_TEMPLATE = """Answer the question based on the context below. Keep the answer short and concise. Do not output reasoning.
+
+Context:
+[1] Paris is the capital and most populous city of France.
+[2] The city is a major railway, highway, and air-transport hub.
+
+Question: What is the capital of France?
+Answer: Paris
+
+Context:
+[1] Elon Reeve Musk FRS is a business magnate and investor. He is the founder, CEO, and Chief Engineer at SpaceX.
+
+Question: Who is the CEO of SpaceX?
+Answer: Elon Musk
 
 Context:
 {context}
@@ -312,37 +329,122 @@ def _format_context(hits: List[Dict[str, Any]]) -> str:
 
 def _strip_reasoning(text: str) -> str:
     output = text or ""
+    # Strip standard <think> tags if present
     while True:
         start = output.find("<think>")
         if start == -1:
             break
         end = output.find("</think>", start + len("<think>"))
         if end == -1:
-            output = output[:start] + output[start + len("<think>") :]
+            output = output[:start]
             break
         output = output[:start] + output[end + len("</think>") :]
+    
+    # Heuristic: If the output contains "Answer:", it might be "Reasoning... Answer: Result"
+    # We only keep the part after "Answer:" if it appears in the last few lines
+    # BUT we must be careful not to strip if "Answer:" is part of the context or question repetition
+    # A safer heuristic for reasoning models that don't use <think> is looking for double newlines + "Answer:"
+    
     cleaned = output.strip()
     return cleaned or "Insufficient evidence"
 
 
 def _enforce_short_answer(text: str) -> str:
-    # Keep only the first non-empty line, strip leading labels/prefixes.
+    """
+    Clean up the LLM output to ensure it's just the answer.
+    Handles conversational fillers and reasoning that might have slipped through.
+    """
     if not text:
         return "Insufficient evidence"
-    candidates = [line.strip() for line in text.splitlines() if line.strip()]
-    if not candidates:
-        return "Insufficient evidence"
-    first = candidates[0]
-    # Drop leading "Answer:" or similar prefixes
-    for prefix in ("answer:", "ans:", "output:", "prediction:"):
-        if first.lower().startswith(prefix):
-            first = first[len(prefix) :].strip()
+    
+    # 1. Handle common conversational prefixes (case-insensitive)
+    # We use regex to match these at the start of the string
+    conversational_patterns = [
+        r"^(okay|ok|so|well|hmm|let's see|let me see|let me look|let me try|i need to|the user is asking|the question is asking|first, i need to|let me go through|let me check|determine)[\.,]?",
+        r"^based on the (provided )?context,?",
+        r"^the answer is",
+        r"^the answer appears to be",
+        r"^according to the context,?",
+        r"^it seems that",
+        # r"^is\s+",  # Removed: too aggressive (e.g. "is a city in France" -> "a city in France" might be okay, but "is 42" -> "42" is risky if answer is "is")
+        # r"^occupation is", # Removed: too aggressive
+        r"^about",
+        r"^(i need to|i must|i should)",
+        r"^(from the|in the) (given|provided)? ?context",
+        r"^(to find|to determine|to answer|to figure out)",
+        # r"^what\s+.*?\s+is", # e.g. "what John's occupation is" -> REMOVED, too risky
+        r"^what the answer is",
+        r"^the question is asking",
+        # r"^\.", # Removed: might strip decimal points?
+        r"^the user provided",
+        r"^his job, right\?",
+        r"^check the context provided",
+        # r"^John Floyd's occupation", # Removed specific pattern
+    ]
+    
+    cleaned = text.strip()
+    
+    # Iteratively remove prefixes until no more matches found
+    while True:
+        original = cleaned
+        for pattern in conversational_patterns:
+            cleaned = re.sub(pattern, "", cleaned, flags=re.IGNORECASE).strip()
+        if cleaned == original:
             break
-    lowered = first.lower()
-    normalized = lowered.strip().rstrip(".")
-    if normalized == "insufficient evidence":
+            
+    # 2. Handle "Answer:" markers if present
+    # Sometimes models output "Reasoning... Answer: X"
+    if "Answer:" in cleaned:
+        parts = cleaned.split("Answer:")
+        # Take the last part as the likely answer
+        cleaned = parts[-1].strip()
+    elif "answer:" in cleaned.lower():
+        # Case-insensitive split if exact case not found
+        parts = re.split(r"answer:", cleaned, flags=re.IGNORECASE)
+        cleaned = parts[-1].strip()
+
+    # Additional cleanup for conversational endings that might remain
+    # e.g. "The answer is X. I hope this helps." -> "X"
+    # This is risky but necessary if the model is very chatty
+    # We stop at the first newline if multiple lines exist
+    
+    lines = [L.strip() for L in cleaned.splitlines() if L.strip()]
+    if not lines:
         return "Insufficient evidence"
-    # Trim surrounding quotes
-    if len(first) >= 2 and ((first.startswith('"') and first.endswith('"')) or (first.startswith("'") and first.endswith("'"))):
-        first = first[1:-1].strip()
-    return first or "Insufficient evidence"
+    
+    first_line = lines[0]
+    
+    # If the first line is still very long, it might be a sentence.
+    # Try to extract the last few words if it ends with a period?
+    # Or if it contains "is a", split there.
+    if len(first_line) > 100:
+        # Emergency: try to find "is a" / "was a" again
+        match = re.search(r"\b(is|was) (a|an|the) (.+?)(\.|$)", first_line, re.IGNORECASE)
+        if match:
+             candidate = match.group(3).strip()
+             if len(candidate) < 50:
+                 first_line = candidate
+
+    cleaned = first_line
+    # Remove surrounding quotes if present
+    if len(cleaned) >= 2 and ((cleaned.startswith('"') and cleaned.endswith('"')) or (cleaned.startswith("'") and cleaned.endswith("'"))):
+        cleaned = cleaned[1:-1].strip()
+        
+    # Remove trailing period if it looks like a sentence end (but be careful with abbreviations)
+    # Heuristic: only remove trailing dot if the string is somewhat long or clearly a sentence
+    if cleaned.endswith(".") and not cleaned.endswith("Inc.") and not cleaned.endswith("St."):
+        cleaned = cleaned[:-1].strip()
+
+    # 4. Final check for multiline output
+    # If multiple lines remain, take the first non-empty one
+    # (Already handled above by taking first_line)
+    final_answer = cleaned
+    
+    # 5. Check for "Insufficient evidence" variations
+    if "insufficient evidence" in final_answer.lower():
+        # return "Insufficient evidence" # Don't force it if it's part of a sentence like "not insufficient evidence" (rare but possible)
+        # Better: Exact match or close to it
+        if len(final_answer) < 30 and "insufficient evidence" in final_answer.lower():
+             return "Insufficient evidence"
+
+    return final_answer or "Insufficient evidence"

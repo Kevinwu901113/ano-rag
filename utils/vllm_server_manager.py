@@ -1,4 +1,5 @@
 import os
+import signal
 import subprocess
 import sys
 import time
@@ -98,37 +99,49 @@ class VLLMServerManager:
             logger.warning("vLLM autostart enabled but no servers configured; skipping launch")
             return
 
+        # Ensure we don't carry over stale processes from previous attempts
+        if self._processes:
+            self.stop_all()
+
         # Reset readiness bookkeeping for this launch cycle
         self._ready_processes = {}
         self._failed_processes = []
         self._ready_endpoints = []
+        self._processes = []
 
         python_executable = sys.executable or "python"
-        for spec in self.servers:
-            cmd = self._build_command(python_executable, spec)
-            env = self._build_env(spec)
-            log_path = self.log_dir / f"{spec.name}.log"
-            logger.info(
-                "Starting vLLM server '{}' on {}:{} (model={}) -> log: {}",
-                spec.name,
-                spec.host,
-                spec.port,
-                spec.model,
-                log_path,
-            )
-            log_file = open(log_path, "w", encoding="utf-8")  # noqa: SIM115
-            process = subprocess.Popen(
-                cmd,
-                stdout=log_file,
-                stderr=subprocess.STDOUT,
-                env=env,
-                cwd=self._infer_repo_root(),
-            )
-            self._processes.append(
-                {"process": process, "log_file": log_file, "spec": spec, "log_path": log_path}
-            )
+        try:
+            for spec in self.servers:
+                cmd = self._build_command(python_executable, spec)
+                env = self._build_env(spec)
+                log_path = self.log_dir / f"{spec.name}.log"
+                logger.info(
+                    "Starting vLLM server '{}' on {}:{} (model={}) -> log: {}",
+                    spec.name,
+                    spec.host,
+                    spec.port,
+                    spec.model,
+                    log_path,
+                )
+                log_file = open(log_path, "w", encoding="utf-8")  # noqa: SIM115
+                process = subprocess.Popen(
+                    cmd,
+                    stdout=log_file,
+                    stderr=subprocess.STDOUT,
+                    env=env,
+                    cwd=self._infer_repo_root(),
+                    start_new_session=True,
+                )
+                self._processes.append(
+                    {"process": process, "log_file": log_file, "spec": spec, "log_path": log_path}
+                )
 
-        ready_map, failures = self._wait_until_ready()
+            ready_map, failures = self._wait_until_ready()
+        except Exception:
+            # If startup/probing fails midway, make sure we don't leak child processes
+            self.stop_all()
+            raise
+
         self._ready_processes = ready_map
         self._failed_processes = failures
         self._ready_endpoints = [
@@ -150,12 +163,18 @@ class VLLMServerManager:
 
             logger.info("Stopping vLLM server '%s' (pid=%s)", spec.name, process.pid)
             try:
-                process.terminate()
+                if hasattr(os, "killpg"):
+                    os.killpg(process.pid, signal.SIGTERM)  # type: ignore[arg-type]
+                else:
+                    process.terminate()
                 try:
                     process.wait(timeout=15)
                 except subprocess.TimeoutExpired:
                     logger.warning("vLLM server '%s' did not terminate gracefully; killing", spec.name)
-                    process.kill()
+                    if hasattr(os, "killpg"):
+                        os.killpg(process.pid, signal.SIGKILL)  # type: ignore[arg-type]
+                    else:
+                        process.kill()
                     process.wait(timeout=10)
             except Exception as exc:  # pragma: no cover - defensive
                 logger.error("Failed to stop vLLM server '%s': %s", spec.name, exc)

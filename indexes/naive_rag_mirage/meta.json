@@ -1,0 +1,12 @@
+{
+  "doc_pool": "/home/wjk/workplace/nq/ano-rag/data/mirage/doc_pool.json",
+  "chunk_count": 65913,
+  "vector_dim": 4096,
+  "index": "indexes/naive_rag_mirage/index.faiss",
+  "chunks": "indexes/naive_rag_mirage/chunks.jsonl",
+  "normalize": true,
+  "embedding_model": "/home/wjk/models/qwen3-emb",
+  "target_tokens": 320,
+  "max_tokens": 384,
+  "overlap_tokens": 64
+}

@@ -50,35 +50,53 @@ class EmbeddingEncoder:
             logger.info("Loading transformer embedding model: {}", self.model_name)
             tokenizer_kwargs = {"trust_remote_code": True}
             model_kwargs = {"trust_remote_code": True, "low_cpu_mem_usage": True}
+            target_device_str = self._resolve_device(torch)
+            target_device = torch.device(target_device_str)
+
             if self.cache_dir:
                 tokenizer_kwargs["cache_dir"] = self.cache_dir
                 model_kwargs["cache_dir"] = self.cache_dir
             self._tokenizer = AutoTokenizer.from_pretrained(self.model_name, **tokenizer_kwargs)
-            device = self._resolve_device(torch)
             torch_dtype = self._resolve_torch_dtype(torch)
             if torch_dtype is not None:
                 model_kwargs["dtype"] = torch_dtype
-            device_map = self._build_device_map(device)
-            if device_map is not None:
-                model_kwargs["device_map"] = device_map
+
+            # Let device selection prefer GPU and fall back to CPU on failure
+            model_kwargs["device_map"] = None
             try:
                 self._model = AutoModel.from_pretrained(self.model_name, **model_kwargs)
-                self._model_uses_device_map = device_map is not None
+                self._model_uses_device_map = False
+                if target_device.type == "cuda":
+                    try:
+                        self._model.to(target_device)
+                    except RuntimeError as exc:  # noqa: PERF203
+                        logger.warning(
+                            "Moving embedding model to {} failed ({}); falling back to CPU",
+                            target_device,
+                            exc,
+                        )
+                        target_device = torch.device("cpu")
+                        self._resolved_device = "cpu"
+                        self._model.to(target_device)
+                else:
+                    self._model.to(target_device)
             except (ValueError, ImportError) as exc:
-                if device_map is None:
+                if model_kwargs.get("device_map") is None:
                     raise
                 logger.warning("device_map loading failed ({}); retrying without device map", exc)
                 model_kwargs.pop("device_map", None)
                 self._model = AutoModel.from_pretrained(self.model_name, **model_kwargs)
                 self._model_uses_device_map = False
-            if not self._model_uses_device_map:
-                self._model.to(device)
+                self._model.to(target_device)
+
             self._model.eval()
+
         assert self._model is not None and self._tokenizer is not None
         vectors = []
         batch_size = 16
-        device = self._resolve_device(torch)
+        device = torch.device(self._resolved_device or "cpu")
         for start in range(0, len(texts), batch_size):
+
             batch = texts[start : start + batch_size]
             inputs = self._tokenizer(
                 batch,
