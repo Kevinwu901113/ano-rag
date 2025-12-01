@@ -57,6 +57,10 @@ def main() -> None:
         work_dir.mkdir(parents=True, exist_ok=True)
     else:
         work_dir = _select_workspace(Path(args.result_root), "mirage_simple_graphrag", args.new)
+    
+    # Add logger sink to work_dir
+    logger.add(work_dir / "simple_graphrag.log")
+    
     logger.info("Writing Simple GraphRAG outputs to {}", work_dir)
 
     # Determine index directory: if not provided, default to work_dir
@@ -169,7 +173,11 @@ def main() -> None:
         
     with open(qa_log_path, "w", encoding="utf-8") as f:
         f.write("\n".join(qa_lines))
-        
+    
+    # Also copy log file to work_dir if possible, or ensure logger writes there
+    # The logger is configured globally, but we can add a sink here
+    # Actually, let's just ensure we have a log file in work_dir
+    
     logger.info(f"Finished. Results saved to {work_dir}")
 
 if __name__ == "__main__":
