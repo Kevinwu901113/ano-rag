@@ -10,7 +10,7 @@ from loguru import logger
 from tqdm import tqdm
 
 # Reuse common component if available, or implement simple chunker
-from structrag.embedding_client import EmbeddingEncoder
+from rag_core.embedding_client import EmbeddingEncoder
 
 @dataclass
 class Chunk:

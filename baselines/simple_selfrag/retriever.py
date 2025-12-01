@@ -9,8 +9,8 @@ from loguru import logger
 from config.config_loader import config as global_config
 
 # Reuse common components
-from structrag.embedding_client import EmbeddingEncoder
-from structrag.llm_client import LLMChatClient
+from rag_core.embedding_client import EmbeddingEncoder
+from rag_core.llm_client import LLMChatClient
 
 class SimpleSelfRAGRetriever:
     def __init__(

@@ -74,7 +74,7 @@ def main():
         
         # Build index directly using SimpleSelfRAGIndexer
         from baselines.simple_selfrag.index import SimpleSelfRAGIndexer
-        from baselines.simple_selfrag.retriever import SimpleSelfRAGRetriever
+        # No need to import Retriever here for building index
         
         # Load docs
         with open(doc_pool_path, "r", encoding="utf-8") as f:
