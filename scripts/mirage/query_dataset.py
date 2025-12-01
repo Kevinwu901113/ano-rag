@@ -68,6 +68,7 @@ def main() -> None:
     parser.add_argument("--qa-log", default=None, help="Optional plain text QA log path (question \t answer)")
     parser.add_argument("--new", action="store_true", help="Force create a new workspace copy")
     parser.add_argument("--direct-llm", action="store_true", help="Skip retrieval and answer directly with LLM")
+    parser.add_argument("--vanilla-rag", action="store_true", help="Use Vanilla RAG baseline")
     parser.add_argument("--temperature", type=float, default=None, help="Override LLM temperature")
     parser.add_argument("--max-new-tokens", type=int, default=None, help="Override LLM max new tokens")
     args = parser.parse_args()
@@ -116,6 +117,62 @@ def main() -> None:
             qa_log_path.parent.mkdir(parents=True, exist_ok=True)
             qa_log_path.write_text(Path(artifacts["qa"]).read_text(encoding="utf-8"), encoding="utf-8")
             logger.info("Copied QA log to {}", qa_log_path)
+        return
+
+    if args.vanilla_rag:
+        from baselines.vanilla_rag import answer as vanilla_rag_answer
+        
+        # Assume vanilla rag index/chunks are in standard location or passed via args
+        # We can reuse indexes-dir to point to directory containing vanilla_rag_index.faiss
+        index_path = "indexes/vanilla_rag_index.faiss"
+        chunk_path = "indexes/vanilla_rag_chunk_store.pkl"
+        
+        if args.indexes_dir:
+             idx_root = Path(args.indexes_dir)
+             if (idx_root / "vanilla_rag_index.faiss").exists():
+                 index_path = str(idx_root / "vanilla_rag_index.faiss")
+                 chunk_path = str(idx_root / "vanilla_rag_chunk_store.pkl")
+             elif idx_root.is_file(): # user pointed directly to index
+                 index_path = str(idx_root)
+                 # try to guess chunk store
+                 chunk_path = str(idx_root.parent / "vanilla_rag_chunk_store.pkl")
+
+        logger.info(f"Running Vanilla RAG with index={index_path}")
+        
+        results = []
+        qa_lines = []
+        
+        for i, item in enumerate(dataset):
+            question = item.get("query") or item.get("question")
+            qid = item.get("query_id") or str(i)
+            
+            try:
+                ans = vanilla_rag_answer(question, index_path=index_path, chunk_store_path=chunk_path)
+                # Simple cleaning
+                if ans.lower().startswith("answer:"):
+                    ans = ans[7:].strip()
+                clean_ans = _strip_reasoning(ans)
+                clean_ans_line = " ".join(clean_ans.split())
+                
+                results.append({
+                    "query_id": qid,
+                    "question": question,
+                    "answer": clean_ans,
+                    "raw_answer": ans
+                })
+                qa_lines.append(f"{question}\t{clean_ans_line}")
+            except Exception as e:
+                logger.error(f"Error Q{i}: {e}")
+                
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(output_path, "w", encoding="utf-8") as handle:
+            json.dump(results, handle, ensure_ascii=False, indent=2)
+        
+        if qa_log_path:
+            qa_log_path.parent.mkdir(parents=True, exist_ok=True)
+            qa_log_path.write_text("\n".join(qa_lines), encoding="utf-8")
+            
+        logger.info("Vanilla RAG baseline complete.")
         return
 
     indexes_dir = Path(args.indexes_dir) if args.indexes_dir else work_dir / "indexes"
