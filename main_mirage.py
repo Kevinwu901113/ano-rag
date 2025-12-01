@@ -10,6 +10,7 @@ from loguru import logger
 
 from baselines.direct_llm import DirectLLMRunner
 from baselines.naive_rag import NaiveRAGRunner
+from baselines.simple_graphrag import SimpleGraphRAGRunner
 from config import config as global_config
 from structrag import StructRAGBaselineRunner
 from utils import setup_logging
@@ -38,7 +39,7 @@ def _load_dataset(path: Path) -> List[Dict]:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="MIRAGE/MuSiQue runner with StructRAG baseline")
-    parser.add_argument("--mode", choices=["structrag_baseline", "naive_rag", "direct_llm"], default="structrag_baseline")
+    parser.add_argument("--mode", choices=["structrag_baseline", "naive_rag", "direct_llm", "simple_graphrag"], default="structrag_baseline")
     parser.add_argument("--dataset-path", default="data/mirage_sample/dataset.json")
     parser.add_argument("--doc-pool", default="data/mirage_sample/doc_pool.json")
     parser.add_argument("--index-dir", default="result/mirage_naive")
@@ -127,6 +128,23 @@ def main() -> None:
         )
         artifacts = runner.run_dataset(dataset, work_dir=str(work_dir))
         logger.info("Direct LLM finished. answers at {}", artifacts.get("answers_jsonl"))
+
+    if args.mode == "simple_graphrag":
+        # For Simple GraphRAG, index_path/chunks_path usually are pkl files
+        # We assume standard naming if only index-dir is given, or specific paths if given
+        graph_pkl = index_path if args.index_path else index_dir / "simple_graphrag_graph.pkl"
+        chunk_store_pkl = chunks_path if args.chunks_path else index_dir / "simple_graphrag_chunk_store.pkl"
+        
+        runner = SimpleGraphRAGRunner(
+            str(graph_pkl),
+            str(chunk_store_pkl),
+            lm_endpoint=lm_endpoint,
+            lm_model=lm_model,
+            temperature=args.temperature,
+            max_tokens=args.max_new_tokens,
+        )
+        artifacts = runner.run_dataset(dataset, work_dir=str(work_dir), limit=args.limit)
+        logger.info("Simple GraphRAG finished. qa.tsv at {}", artifacts.get("qa"))
 
 
 if __name__ == "__main__":

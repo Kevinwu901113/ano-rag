@@ -3,12 +3,13 @@ from typing import Optional
 from structrag.llm_client import LLMChatClient
 from baselines.simple_graphrag.retriever import GraphRetriever
 from baselines.simple_graphrag.build_graph import GraphBuilder
+from baselines.simple_graphrag.runner import SimpleGraphRAGRunner
 from config.config_loader import config as global_config
 
 # Global retriever instance
 _retriever: Optional[GraphRetriever] = None
 
-def get_retriever() -> GraphRetriever:
+def get_retriever(index_dir: Optional[str] = None) -> GraphRetriever:
     global _retriever
     if _retriever is None:
         # Load config
@@ -22,19 +23,20 @@ def get_retriever() -> GraphRetriever:
         llm_client = LLMChatClient(endpoint=endpoint, model=model, temperature=0.0)
         
         # Paths
-        graph_path = "simple_graphrag_graph.pkl"
-        chunk_store_path = "simple_graphrag_chunk_store.pkl"
+        base_dir = index_dir if index_dir else "."
+        graph_path = os.path.join(base_dir, "simple_graphrag_graph.pkl")
+        chunk_store_path = os.path.join(base_dir, "simple_graphrag_chunk_store.pkl")
         
         if not os.path.exists(graph_path) or not os.path.exists(chunk_store_path):
-            raise FileNotFoundError("Graph files not found. Run build_graph first.")
+            raise FileNotFoundError(f"Graph files not found in {base_dir}. Run build_graph first.")
             
         _retriever = GraphRetriever(graph_path, chunk_store_path, llm_client)
         
     return _retriever
 
-def answer(question: str) -> str:
+def answer(question: str, index_dir: Optional[str] = None) -> str:
     """
     Main entry point for the baseline.
     """
-    retriever = get_retriever()
+    retriever = get_retriever(index_dir)
     return retriever.answer(question)

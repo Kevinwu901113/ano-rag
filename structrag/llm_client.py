@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import time
+import asyncio
+import aiohttp
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
@@ -77,6 +79,47 @@ class LLMChatClient:
                 backoff = 2**attempt
                 logger.warning("LLM call failed (attempt {}): {}; retrying in {}s", attempt + 1, exc, backoff)
                 time.sleep(backoff)
+        raise RuntimeError(f"LLM call failed after {self.retries + 1} attempts: {last_exc}")
+
+    async def chat_async(
+        self,
+        messages: List[Dict[str, str]],
+        *,
+        temperature: Optional[float] = None,
+        max_tokens: Optional[int] = None,
+        response_format: Optional[Dict[str, Any]] = None,
+    ) -> LLMResponse:
+        payload: Dict[str, Any] = {
+            "model": self.model,
+            "messages": messages,
+            "temperature": self.temperature if temperature is None else temperature,
+            "max_tokens": self.max_tokens if max_tokens is None else max_tokens,
+        }
+        if self.stop:
+            payload["stop"] = self.stop
+        if response_format:
+            payload["response_format"] = response_format
+
+        last_exc: Optional[Exception] = None
+        async with aiohttp.ClientSession() as session:
+            for attempt in range(self.retries + 1):
+                try:
+                    async with session.post(
+                        f"{self.endpoint}/chat/completions",
+                        json=payload,
+                        timeout=self.timeout,
+                    ) as resp:
+                        resp.raise_for_status()
+                        data = await resp.json()
+                        content = data["choices"][0]["message"]["content"]
+                        return LLMResponse(content=content, raw=data)
+                except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+                    last_exc = exc
+                    if attempt >= self.retries:
+                        break
+                    backoff = 2**attempt
+                    logger.warning("LLM call failed (attempt {}): {}; retrying in {}s", attempt + 1, exc, backoff)
+                    await asyncio.sleep(backoff)
         raise RuntimeError(f"LLM call failed after {self.retries + 1} attempts: {last_exc}")
 
     @staticmethod

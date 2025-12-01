@@ -31,6 +31,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Run Simple GraphRAG baseline on MIRAGE dataset.json")
     parser.add_argument("--dataset-path", default="data/mirage_sample/dataset.json")
     parser.add_argument("--result-root", default="result")
+    parser.add_argument("--index-dir", default=None, help="Directory containing graph index files")
     parser.add_argument("--work-dir", default=None, help="Where to write outputs. Default: auto under result_root")
     parser.add_argument("--new", action="store_true", help="Force creating a new workspace")
     parser.add_argument("--limit", type=int, default=0, help="Limit number of questions (0=all)")
@@ -40,9 +41,10 @@ def main() -> None:
 
     # 1. Setup config for the baseline (it uses global config)
     from config.config_loader import config as global_config
-    global_config.setdefault("lmstudio", {})
-    global_config["lmstudio"]["endpoint"] = args.lmstudio_endpoint
-    global_config["lmstudio"]["model"] = args.lmstudio_model
+    # global_config is a ConfigLoader instance, not a dict.
+    # It has a .set(key, value) method.
+    global_config.set("lmstudio.endpoint", args.lmstudio_endpoint)
+    global_config.set("lmstudio.model", args.lmstudio_model)
     
     dataset_path = Path(args.dataset_path)
     if not dataset_path.exists():
@@ -57,6 +59,69 @@ def main() -> None:
         work_dir = _select_workspace(Path(args.result_root), "mirage_simple_graphrag", args.new)
     logger.info("Writing Simple GraphRAG outputs to {}", work_dir)
 
+    # Determine index directory: if not provided, default to work_dir
+    index_dir = args.index_dir if args.index_dir else str(work_dir)
+    logger.info(f"Using graph index from: {index_dir}")
+
+    # Check if index exists, if not, build it
+    graph_pkl = Path(index_dir) / "simple_graphrag_graph.pkl"
+    chunk_store_pkl = Path(index_dir) / "simple_graphrag_chunk_store.pkl"
+    
+    if not graph_pkl.exists() or not chunk_store_pkl.exists():
+        logger.info(f"Graph index not found in {index_dir}. Building graph...")
+        
+        # Collect documents from dataset
+        docs = {}
+        
+        # First check if there is a separate doc_pool.json
+        doc_pool_path = dataset_path.parent / "doc_pool.json"
+        if doc_pool_path.exists():
+            logger.info(f"Loading documents from {doc_pool_path}")
+            with doc_pool_path.open("r", encoding="utf-8") as handle:
+                doc_pool = json.load(handle)
+                for item in doc_pool:
+                    # In doc_pool, documents are associated with queries via mapped_id
+                    # But we want to build a graph of knowledge. 
+                    # doc_pool items have "doc_chunk" or "text"
+                    # We can use a combination of doc_name and index as ID, or just iterate
+                    
+                    # Ideally we want unique documents. 
+                    # Let's use a hash of content or just sequential ID if no stable ID
+                    text = item.get("doc_chunk") or item.get("text") or item.get("content") or ""
+                    doc_name = item.get("doc_name") or "unknown"
+                    
+                    if text:
+                        # Create a deterministic ID based on content hash to avoid duplicates
+                        import hashlib
+                        doc_hash = hashlib.md5(text.encode("utf-8")).hexdigest()
+                        doc_id = f"{doc_name}_{doc_hash[:8]}"
+                        docs[doc_id] = text
+        else:
+            # Fallback to dataset items
+            for item in dataset:
+                doc_id = item.get("doc_id") or item.get("id")
+                text = item.get("text") or item.get("content") or ""
+                if doc_id and text:
+                    docs[str(doc_id)] = text
+        
+        logger.info(f"Collected {len(docs)} documents for graph construction")
+        
+        # Build graph
+        import asyncio
+        from baselines.simple_graphrag.build_graph import GraphBuilder
+        from structrag.llm_client import LLMChatClient
+        
+        llm_client = LLMChatClient(
+            endpoint=args.lmstudio_endpoint,
+            model=args.lmstudio_model,
+            temperature=0.0
+        )
+        
+        builder = GraphBuilder(llm_client)
+        asyncio.run(builder.build(docs))
+        builder.save(str(graph_pkl), str(chunk_store_pkl))
+        logger.info(f"Graph built and saved to {index_dir}")
+
     # 2. Run inference
     if args.limit > 0:
         dataset = dataset[:args.limit]
@@ -64,21 +129,26 @@ def main() -> None:
     results = []
     qa_lines = []
     
+    from baselines.simple_graphrag.runner import _strip_reasoning, _enforce_short_answer
+    
     for i, item in enumerate(dataset):
         question = item.get("query") or item.get("question")
         qid = item.get("query_id") or str(i)
         
         try:
             logger.info(f"Processing Q{i}: {question}")
-            ans = simple_graphrag_answer(question)
+            ans = simple_graphrag_answer(question, index_dir=index_dir)
+            cleaned_ans = _strip_reasoning(ans)
+            final_ans = _enforce_short_answer(cleaned_ans)
             
             results.append({
                 "query_id": qid,
                 "question": question,
-                "answer": ans
+                "answer": final_ans,
+                "raw_answer": ans
             })
             
-            clean_ans = " ".join(ans.split())
+            clean_ans = " ".join(final_ans.split())
             qa_lines.append(f"{question}\t{clean_ans}")
             
         except Exception as e:

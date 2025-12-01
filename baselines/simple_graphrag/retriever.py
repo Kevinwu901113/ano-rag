@@ -45,27 +45,57 @@ class GraphRetriever:
         """
         messages = [{"role": "user", "content": prompt}]
         try:
-            response = self.llm_client.chat(messages, max_tokens=128, temperature=0.0)
+            response = self.llm_client.chat(messages, max_tokens=8192, temperature=0.0)
             content = response.content
-            match = re.search(r'\[.*\]', content, re.DOTALL)
+            logger.debug(f"Entity extraction response: {content}")
+            # Try matching markdown code block first
+            match = re.search(r'```json\s*(\[.*?\])\s*```', content, re.DOTALL)
+            if match:
+                return json.loads(match.group(1))
+            
+            # Fallback to finding first list-like structure
+            match = re.search(r'\[.*?\]', content, re.DOTALL)
             if match:
                 return json.loads(match.group(0))
+            
+            # Fallback 2: If no JSON found, split by comma if it looks like a list
+            if "," in content and "[" not in content:
+                 parts = [p.strip() for p in content.split(",") if p.strip()]
+                 if parts:
+                     return parts
+
         except Exception as e:
             logger.warning(f"Failed to extract query entities: {e}")
         return []
 
     def _match_nodes(self, entities: List[str], top_k: int = 3) -> List[str]:
         matched_ids = set()
+        # Normalize graph keys for faster matching
+        graph_keys_lower = {k: k.lower() for k in self.graph.nodes.keys()}
+        
         for entity in entities:
             entity_norm = entity.lower().strip()
+            if not entity_norm:
+                continue
+                
             # Exact/substring match
             candidates = []
-            for node_id, node in self.graph.nodes.items():
-                if entity_norm in node_id or node_id in entity_norm:
-                    candidates.append(node_id)
+            
+            # 1. Try direct lookup first (fast)
+            for original_key, lower_key in graph_keys_lower.items():
+                if entity_norm == lower_key:
+                    candidates.append(original_key)
+                    
+            # 2. If no exact match, try substring (slower)
+            if not candidates:
+                 for original_key, lower_key in graph_keys_lower.items():
+                    if entity_norm in lower_key or lower_key in entity_norm:
+                        candidates.append(original_key)
             
             # Simple heuristic: prioritize exact matches or shorter matches
-            candidates.sort(key=lambda x: len(x))
+            # Sort by length difference to prioritize closer matches
+            candidates.sort(key=lambda x: abs(len(x) - len(entity)))
+            
             matched_ids.update(candidates[:top_k])
             
         return list(matched_ids)
@@ -90,6 +120,9 @@ class GraphRetriever:
                     relevant_chunks.add(edge.chunk_id)
                     
                     neighbor_id = edge.target_id
+                    # Also consider undirected/bidirectional graph traversal if needed?
+                    # For now assume directed based on Edge definition.
+                    
                     if neighbor_id not in visited_nodes:
                         visited_nodes.add(neighbor_id)
                         next_frontier.add(neighbor_id)
@@ -115,7 +148,7 @@ class GraphRetriever:
         """
         messages = [{"role": "user", "content": prompt}]
         try:
-            response = self.llm_client.chat(messages, max_tokens=512, temperature=0.0)
+            response = self.llm_client.chat(messages, max_tokens=8192, temperature=0.0)
             return response.content
         except Exception as e:
             logger.error(f"Failed to generate answer: {e}")

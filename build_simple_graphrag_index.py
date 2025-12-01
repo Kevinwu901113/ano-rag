@@ -1,17 +1,18 @@
 import argparse
 import json
+import asyncio
 from typing import Dict
 from loguru import logger
 from structrag.llm_client import LLMChatClient
 from config.config_loader import config as global_config
 from baselines.simple_graphrag.build_graph import GraphBuilder
 
-def main():
+async def main():
     parser = argparse.ArgumentParser(description="Build Simple GraphRAG Index")
     parser.add_argument("--doc_pool", type=str, required=True, help="Path to doc_pool.json or similar")
-    parser.add_argument("--output_graph", type=str, default="simple_graphrag_graph.pkl", help="Output path for graph pickle")
-    parser.add_argument("--output_chunks", type=str, default="simple_graphrag_chunk_store.pkl", help="Output path for chunk store pickle")
+    parser.add_argument("--output_dir", type=str, default=".", help="Directory to save graph and chunk store")
     parser.add_argument("--limit", type=int, default=0, help="Limit number of docs to process (0 for all)")
+    parser.add_argument("--concurrency", type=int, default=50, help="Number of concurrent LLM requests")
     args = parser.parse_args()
 
     # 1. Initialize LLM Client
@@ -45,7 +46,18 @@ def main():
             elif isinstance(raw_data, list):
                 # Assume list of doc objects
                 for item in raw_data:
-                    if "doc_id" in item and "text" in item:
+                    if "mapped_id" in item and "doc_chunk" in item:
+                        # MIRAGE format: use mapped_id or combine with doc_name if needed
+                        # To ensure uniqueness if mapped_id is repeated for chunks, we might need a composite key
+                        # But mapped_id seems to be the document ID.
+                        # However, looking at the data, multiple entries have the same mapped_id but different chunks.
+                        # It seems the input JSON is already chunked or has multiple parts.
+                        # Let's use a unique key for each entry to avoid overwriting.
+                        # We can use mapped_id + index
+                        key = f"{item['mapped_id']}_{len(docs)}"
+                        text = item.get("doc_name", "") + "\n" + item["doc_chunk"]
+                        docs[key] = text
+                    elif "doc_id" in item and "text" in item:
                         docs[item["doc_id"]] = item["text"]
                     elif "id" in item and "content" in item:
                         docs[item["id"]] = item["content"]
@@ -60,11 +72,16 @@ def main():
 
     # 3. Build Graph
     builder = GraphBuilder(llm_client)
-    builder.build(docs)
+    await builder.build(docs, concurrency=args.concurrency)
 
     # 4. Save
-    builder.save(args.output_graph, args.output_chunks)
-    logger.info("Done.")
+    import os
+    os.makedirs(args.output_dir, exist_ok=True)
+    output_graph = os.path.join(args.output_dir, "simple_graphrag_graph.pkl")
+    output_chunks = os.path.join(args.output_dir, "simple_graphrag_chunk_store.pkl")
+    
+    builder.save(output_graph, output_chunks)
+    logger.info(f"Saved graph to {output_graph} and chunks to {output_chunks}")
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())

@@ -77,7 +77,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "router": "llm",
         "supported_types": ["chunk", "graph"],
         "top_k": 10,
-        "llm_model": "gpt-oss-20b",
+        "llm_model": "openai/gpt-oss-20b",
     },
     "routing": {
         "token_budget_hint": 320000,
