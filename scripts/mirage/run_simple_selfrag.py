@@ -40,9 +40,9 @@ def main():
 
     # Override config if provided
     if args.lmstudio_endpoint:
-        global_config.setdefault("lmstudio", {})["endpoint"] = args.lmstudio_endpoint
+        global_config.set("lmstudio.endpoint", args.lmstudio_endpoint)
     if args.lmstudio_model:
-        global_config.setdefault("lmstudio", {})["model"] = args.lmstudio_model
+        global_config.set("lmstudio.model", args.lmstudio_model)
 
     # Setup workspace
     if args.work_dir:
@@ -83,7 +83,8 @@ def main():
         docs = {}
         if isinstance(raw_data, list):
             for i, item in enumerate(raw_data):
-                 doc_id = item.get("doc_id") or item.get("mapped_id") or str(i)
+                 base_id = item.get("doc_id") or item.get("mapped_id") or str(i)
+                 doc_id = f"{base_id}::{i}"
                  text = item.get("doc_chunk") or item.get("text") or item.get("content") or ""
                  
                  # Prepend title if available (consistent with Vanilla RAG)

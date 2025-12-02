@@ -45,6 +45,13 @@ def main() -> None:
     parser.add_argument("--no-debug", action="store_true", help="Skip writing retrieval debug JSONL")
     args = parser.parse_args()
 
+    # 1. Setup config for the baseline (it uses global config)
+    from config.config_loader import config as global_config
+    if args.lmstudio_endpoint:
+        global_config.set("lmstudio.endpoint", args.lmstudio_endpoint)
+    if args.lmstudio_model:
+        global_config.set("lmstudio.model", args.lmstudio_model)
+
     dataset_path = Path(args.dataset_path)
     if not dataset_path.exists():
         raise FileNotFoundError(f"Dataset not found: {dataset_path}")

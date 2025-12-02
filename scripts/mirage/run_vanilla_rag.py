@@ -51,9 +51,9 @@ def main():
 
     # 0. Setup Config Overrides
     if args.lmstudio_endpoint:
-        global_config.setdefault("lmstudio", {})["endpoint"] = args.lmstudio_endpoint
+        global_config.set("lmstudio.endpoint", args.lmstudio_endpoint)
     if args.lmstudio_model:
-        global_config.setdefault("lmstudio", {})["model"] = args.lmstudio_model
+        global_config.set("lmstudio.model", args.lmstudio_model)
 
     # 1. Setup Workspace
     if args.work_dir:
@@ -92,7 +92,8 @@ def main():
                 if isinstance(raw_data, list):
                     for i, item in enumerate(raw_data):
                          # MIRAGE doc pool format
-                         doc_id = item.get("doc_id") or item.get("mapped_id") or str(i)
+                         base_id = item.get("doc_id") or item.get("mapped_id") or str(i)
+                         doc_id = f"{base_id}::{i}"
                          text = item.get("doc_chunk") or item.get("text") or item.get("content") or ""
                          title = item.get("doc_name", "")
                          if title:

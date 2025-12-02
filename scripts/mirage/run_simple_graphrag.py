@@ -46,6 +46,10 @@ def main() -> None:
     global_config.set("lmstudio.endpoint", args.lmstudio_endpoint)
     global_config.set("lmstudio.model", args.lmstudio_model)
     
+    # Ensure string types for kwargs passed later
+    lm_endpoint_str = str(args.lmstudio_endpoint)
+    lm_model_str = str(args.lmstudio_model)
+    
     dataset_path = Path(args.dataset_path)
     if not dataset_path.exists():
         raise FileNotFoundError(f"Dataset not found: {dataset_path}")
@@ -92,14 +96,18 @@ def main() -> None:
                     # Ideally we want unique documents. 
                     # Let's use a hash of content or just sequential ID if no stable ID
                     text = item.get("doc_chunk") or item.get("text") or item.get("content") or ""
-                    doc_name = item.get("doc_name") or "unknown"
-                    
-                    if text:
-                        # Create a deterministic ID based on content hash to avoid duplicates
-                        import hashlib
-                        doc_hash = hashlib.md5(text.encode("utf-8")).hexdigest()
-                        doc_id = f"{doc_name}_{doc_hash[:8]}"
-                        docs[doc_id] = text
+            doc_name = item.get("doc_name") or "unknown"
+            
+            if text:
+                # Create a deterministic ID based on content hash to avoid duplicates
+                import hashlib
+                doc_hash = hashlib.md5(text.encode("utf-8")).hexdigest()
+                # Include index to ensure absolute uniqueness if needed, but hash should be enough for identical content
+                # To be safe against hash collisions (unlikely) or identical content from different sources, let's append index
+                # Wait, enumerate index is not available in this loop context directly (it's 'item' in 'doc_pool').
+                # Let's just use hash. If content is identical, it's fine to treat as same node.
+                doc_id = f"{doc_name}_{doc_hash[:8]}"
+                docs[doc_id] = text
         else:
             # Fallback to dataset items
             for item in dataset:
@@ -116,8 +124,8 @@ def main() -> None:
         from structrag.llm_client import LLMChatClient
         
         llm_client = LLMChatClient(
-            endpoint=args.lmstudio_endpoint,
-            model=args.lmstudio_model,
+            endpoint=lm_endpoint_str,
+            model=lm_model_str,
             temperature=0.0
         )
         

@@ -47,6 +47,13 @@ class GraphRetriever:
         try:
             response = self.llm_client.chat(messages, max_tokens=8192, temperature=0.0)
             content = response.content
+            
+            # Handle <think> blocks
+            import re
+            content = re.sub(r"<think>.*?</think>", "", content, flags=re.DOTALL).strip()
+            if content.startswith("<think>"):
+                content = re.sub(r"^<think>.*", "", content, flags=re.DOTALL).strip()
+                
             logger.debug(f"Entity extraction response: {content}")
             # Try matching markdown code block first
             match = re.search(r'```json\s*(\[.*?\])\s*```', content, re.DOTALL)
@@ -144,12 +151,22 @@ class GraphRetriever:
         Relevant Information:
         {context}
         
-        Answer:
+        Answer the question based on the relevant information provided.
+        If the answer is not in the context, say "Insufficient evidence".
         """
         messages = [{"role": "user", "content": prompt}]
         try:
             response = self.llm_client.chat(messages, max_tokens=8192, temperature=0.0)
-            return response.content
+            content = response.content
+            
+            # Handle <think> blocks
+            import re
+            content = re.sub(r"<think>.*?</think>", "", content, flags=re.DOTALL).strip()
+            if content.startswith("<think>"):
+                content = re.sub(r"^<think>.*", "", content, flags=re.DOTALL).strip()
+                
+            from utils.rag_normalization import normalize_model_answer
+            return normalize_model_answer(content)
         except Exception as e:
             logger.error(f"Failed to generate answer: {e}")
-            return "Sorry, I encountered an error while generating the answer."
+            return "Insufficient evidence"

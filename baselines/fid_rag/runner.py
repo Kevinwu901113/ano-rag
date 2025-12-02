@@ -69,6 +69,13 @@ class LLMClient:
                 resp.raise_for_status()
                 data = resp.json()
                 content = data["choices"][0]["message"]["content"]
+                
+                # Handle <think> blocks
+                import re
+                content = re.sub(r"<think>.*?</think>", "", content, flags=re.DOTALL).strip()
+                if content.startswith("<think>"):
+                    content = re.sub(r"^<think>.*", "", content, flags=re.DOTALL).strip()
+                    
                 cleaned = _strip_reasoning(content)
                 return cleaned or "Insufficient evidence"
             except requests.RequestException as exc:  # noqa: PERF203
@@ -102,6 +109,11 @@ class FiDRAGRunner:
         lm_cfg = self.cfg.get("lmstudio", {}) or {}
         endpoint = lm_endpoint or lm_cfg.get("endpoint")
         model = lm_model or lm_cfg.get("model")
+        
+        # Ensure endpoint and model are strings
+        endpoint = str(endpoint) if endpoint else None
+        model = str(model) if model else None
+        
         temp = temperature if temperature is not None else lm_cfg.get("temperature", 0.0)
         max_new_tokens = max_tokens if max_tokens is not None else lm_cfg.get("max_tokens", 128)
         self.retriever = NaiveIndex(index_path, chunks_path, config=self.cfg)

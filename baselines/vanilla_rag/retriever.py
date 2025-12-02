@@ -139,7 +139,16 @@ Answer:"""
         messages = [{"role": "user", "content": prompt}]
         try:
             response = self.llm_client.chat(messages, max_tokens=2048, temperature=0.0)
-            return response.content.strip()
+            content = response.content
+            
+            # Handle <think> blocks locally
+            if isinstance(content, str):
+                 import re
+                 content = re.sub(r"<think>.*?</think>", "", content, flags=re.DOTALL).strip()
+                 if content.startswith("<think>"):
+                     content = re.sub(r"^<think>.*", "", content, flags=re.DOTALL).strip()
+            
+            return content.strip()
         except Exception as e:
             logger.error(f"Error generating answer: {e}")
             return "Error generating answer"

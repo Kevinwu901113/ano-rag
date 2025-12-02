@@ -184,6 +184,13 @@ class LLMClient:
                 resp.raise_for_status()
                 data = resp.json()
                 content = data["choices"][0]["message"]["content"]
+                
+                # Handle <think> blocks
+                import re
+                content = re.sub(r"<think>.*?</think>", "", content, flags=re.DOTALL).strip()
+                if content.startswith("<think>"):
+                    content = re.sub(r"^<think>.*", "", content, flags=re.DOTALL).strip()
+                    
                 cleaned = _strip_reasoning(content)
                 return _enforce_short_answer(cleaned)
             except requests.RequestException as exc:  # noqa: PERF203
@@ -217,6 +224,11 @@ class NaiveRAGRunner:
         lm_cfg = self.cfg.get("lmstudio", {}) or {}
         endpoint = lm_endpoint or lm_cfg.get("endpoint")
         model = lm_model or lm_cfg.get("model")
+        
+        # Ensure strings
+        endpoint = str(endpoint) if endpoint else None
+        model = str(model) if model else None
+        
         if model and "qwen" in model.lower() and "instruct" in model.lower():
              # Fix potential model name mismatch if user config has lowercase but server has MixedCase
              # This is a heuristic; ideally we list models from server

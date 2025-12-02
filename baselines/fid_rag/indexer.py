@@ -1,3 +1,4 @@
+
 from __future__ import annotations
 
 import json
@@ -116,8 +117,8 @@ class NaiveChunker:
         return chunks
 
 
-class MirageNaiveIndexer:
-    """Offline builder for naive RAG index over MIRAGE doc_pool."""
+class FiDNaiveIndexer:
+    """Offline builder for FiD RAG index over MIRAGE doc_pool."""
 
     def __init__(
         self,
@@ -148,13 +149,10 @@ class MirageNaiveIndexer:
         encoder = self._init_encoder()
         texts = [c.text for c in chunk_records]
         
-        # Ensure index is built on CPU to guarantee consistency
-        # We've seen evidence of CUDA OOM fallbacks causing index mismatch
-        # when mixed with different environments or fallback behaviors.
-        # Forcing CPU here is safer for reproducibility and avoids OOM during build.
-        logger.info("Forcing CPU for index building to ensure consistency...")
-        encoder._device_pref = "cpu" 
-        encoder._resolved_device = "cpu"
+        # Removed CPU forcing to allow GPU acceleration
+        # logger.info("Forcing CPU for index building to ensure consistency...")
+        # encoder._device_pref = "cpu" 
+        # encoder._resolved_device = "cpu"
         
         vectors = encoder.encode(texts)
         if vectors.size == 0:
@@ -251,8 +249,7 @@ def _iter_docs(doc_pool_path: str) -> Iterable[Dict[str, Any]]:
             or ""
         ).strip()
         
-        # Ensure uniqueness by appending index if needed, similar to other baselines
-        # Since doc_pool can have duplicate mapped_id/doc_name for different chunks
+        # Ensure uniqueness by appending index if needed
         raw_id = f"{raw_id}::{i}"
         
         if not raw_id:

@@ -81,6 +81,14 @@ class DirectLLMClient:
                 resp.raise_for_status()
                 data = resp.json()
                 content = data["choices"][0]["message"]["content"]
+                
+                # Handle <think> blocks
+                import re
+                content = re.sub(r"<think>.*?</think>", "", content, flags=re.DOTALL).strip()
+                if content.startswith("<think>"):
+                    content = re.sub(r"^<think>.*", "", content, flags=re.DOTALL).strip()
+                
+                from baselines.direct_llm.utils import _strip_reasoning
                 return _strip_reasoning(content)
             except requests.RequestException as exc:  # noqa: PERF203
                 if attempt >= self.retries:
@@ -110,6 +118,11 @@ class DirectLLMRunner:
         lm_cfg = self.cfg.get("lmstudio", {}) or {}
         endpoint = lm_endpoint or lm_cfg.get("endpoint")
         model = lm_model or lm_cfg.get("model")
+        
+        # Ensure endpoint and model are strings
+        endpoint = str(endpoint) if endpoint else None
+        model = str(model) if model else None
+        
         temp = temperature if temperature is not None else 0.0
         max_new_tokens = max_tokens if max_tokens is not None else 32
         self.client = DirectLLMClient(
