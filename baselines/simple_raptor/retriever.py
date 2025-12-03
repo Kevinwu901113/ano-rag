@@ -5,8 +5,8 @@ from typing import List, Tuple, Optional, Dict
 from loguru import logger
 
 from config.config_loader import config as global_config
-from utils.embedding_utils import EmbeddingEncoder
-from baselines.naive_rag.runner import LLMClient
+from rag_core.embedding_client import EmbeddingEncoder
+from rag_core.llm_client import LLMChatClient
 from baselines.simple_raptor.tree import TreeNode
 
 def _strip_reasoning(answer: str) -> str:
@@ -39,9 +39,10 @@ class SimpleRaptorRetriever:
         chunk_store_path: str,
         config: Optional[Dict] = None,
         embedding_client: Optional[EmbeddingEncoder] = None,
-        llm_client: Optional[LLMClient] = None
+        llm_client: Optional[LLMChatClient] = None,
+        top_k: Optional[int] = None
     ):
-        self.config = config or global_config
+        self.config = config or global_config.load_config()
         self.raptor_config = self.config.get("retriever", {}).get("simple_raptor", {})
         
         # Load Index
@@ -69,8 +70,7 @@ class SimpleRaptorRetriever:
         if embedding_client:
             self.encoder = embedding_client
         else:
-            # Reuse EmbeddingClient to support overrides and consistent loading
-            from retriever.embedding_client import EmbeddingClient
+            # Use rag_core.embedding_client.EmbeddingEncoder
             
             # Base config from retriever section
             base_emb_cfg = self.config.get("retriever", {}).get("embedding") or {}
@@ -81,12 +81,19 @@ class SimpleRaptorRetriever:
             final_cfg = base_emb_cfg.copy()
             final_cfg.update(raptor_emb_cfg)
             
-            # Instantiate EmbeddingClient with merged config
-            # We don't set 'enabled'=True because we don't want it to load the main FAISS index
-            # We only want the encoder.
-            client = EmbeddingClient(final_cfg)
-            client.load_encoder()
-            self.encoder = client._encoder
+            provider = final_cfg.get("provider", "huggingface")
+            model = final_cfg.get("model", "sentence-transformers/all-MiniLM-L6-v2")
+            device = final_cfg.get("device", "cpu")
+            
+            # Additional args
+            extra_kwargs = {k: v for k, v in final_cfg.items() if k not in ["provider", "model", "device"]}
+
+            self.encoder = EmbeddingEncoder(
+                provider=provider,
+                model=model,
+                device=device,
+                **extra_kwargs
+            )
             
         # Initialize LLM Client
         if llm_client:
@@ -98,7 +105,7 @@ class SimpleRaptorRetriever:
             temp = lm_cfg.get("temperature", 0.0)
             # Raptor uses summarization and answering, which might need longer context
             # But we should respect global config if set
-            max_tokens = lm_cfg.get("max_tokens", 8192)
+            self.max_tokens = int(lm_cfg.get("max_tokens", 8192))
             stop = lm_cfg.get("stop", [])
             
             if not endpoint or not model:
@@ -110,25 +117,37 @@ class SimpleRaptorRetriever:
                  endpoint = endpoint or full_lm.get("endpoint", "http://127.0.0.1:1234/v1")
                  model = model or full_lm.get("model", "qwen2.5-7b-instruct")
             
-            self.llm = LLMClient(
+            self.llm = LLMChatClient(
                 endpoint=endpoint,
                 model=model,
                 temperature=float(temp),
-                max_tokens=int(max_tokens),
                 stop=stop
             )
             
-        self.top_k_nodes = self.raptor_config.get("top_k_nodes", 10)
+        self.top_k_nodes = top_k or self.raptor_config.get("top_k_nodes", 10)
         self.max_answer_chunks = self.raptor_config.get("max_answer_chunks", 5)
 
-    def retrieve_nodes(self, question: str, top_k: int) -> List[TreeNode]:
+    def retrieve_nodes(self, question: str, top_k: Optional[int] = None) -> List[TreeNode]:
         """
         Retrieve relevant nodes from the tree.
         """
+        search_k = top_k or self.top_k_nodes
+        
         q_vec = self.encoder.encode([question])
         if len(q_vec) > 0:
+             # Fix dimension mismatch for mock embeddings or different model
+             if q_vec.shape[1] != self.index.d:
+                 logger.warning(f"Dimension mismatch: query {q_vec.shape[1]} vs index {self.index.d}. Resizing query vector.")
+                 if q_vec.shape[1] < self.index.d:
+                     # Pad with zeros
+                     padding = np.zeros((q_vec.shape[0], self.index.d - q_vec.shape[1]), dtype=q_vec.dtype)
+                     q_vec = np.hstack([q_vec, padding])
+                 else:
+                     # Truncate
+                     q_vec = q_vec[:, :self.index.d]
+             
              faiss.normalize_L2(q_vec)
-        scores, indices = self.index.search(q_vec, top_k)
+        scores, indices = self.index.search(q_vec, search_k)
         
         results = []
         for score, idx in zip(scores[0], indices[0]):
@@ -148,7 +167,7 @@ class SimpleRaptorRetriever:
         """
         # 1. Retrieve Nodes
         logger.info(f"Retrieving nodes for: {question}")
-        retrieved_nodes = self.retrieve_nodes(question, self.top_k_nodes)
+        retrieved_nodes = self.retrieve_nodes(question)
         
         # 2. Collect Leaf Chunks
         # We prioritize chunks from higher-ranked nodes
@@ -178,7 +197,13 @@ class SimpleRaptorRetriever:
         if len(context_block) > 20000:
              context_block = context_block[:20000] + "..."
         
-        raw_answer = self.llm.answer(question, context_block)
+        # Construct messages for LLMChatClient
+        messages = [
+            {"role": "system", "content": "You are a helpful assistant. Answer the question based on the provided context."},
+            {"role": "user", "content": f"Context:\n{context_block}\n\nQuestion: {question}\n\nAnswer:"}
+        ]
+        
+        raw_answer = self.llm.chat(messages, max_tokens=getattr(self, 'max_tokens', 1024))
         
         # 4. Normalize/Clean Answer
         final_answer = _strip_reasoning(raw_answer)

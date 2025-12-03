@@ -14,7 +14,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from baselines.simple_raptor.retriever import SimpleRaptorRetriever
-from baselines.naive_rag.runner import LLMClient
+from rag_core.llm_client import LLMChatClient
 
 def _select_workspace(root: Path, dataset: str, new: bool) -> Path:
     if not root.exists():
@@ -100,11 +100,10 @@ def main() -> None:
         temp = args.temperature if args.temperature is not None else lm_cfg.get("temperature", 0.0)
         max_tokens = args.max_new_tokens if args.max_new_tokens is not None else lm_cfg.get("max_tokens", 8192)
         
-        llm_client = LLMClient(
+        llm_client = LLMChatClient(
             endpoint=endpoint,
             model=model,
-            temperature=float(temp),
-            max_tokens=int(max_tokens)
+            temperature=float(temp)
         )
 
     # Initialize Retriever
@@ -112,7 +111,8 @@ def main() -> None:
         str(index_path),
         str(nodes_path),
         str(chunk_store_path),
-        llm_client=llm_client
+        llm_client=llm_client,
+        top_k=args.topk
     )
     
     # Run Dataset
