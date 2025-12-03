@@ -41,6 +41,10 @@ class EmbeddingClient:
         self._index = faiss.read_index(str(index_path))
         self._meta_df = pd.read_parquet(meta_path).sort_values("vector_id")
         self._meta_by_id = {int(row["vector_id"]): row.to_dict() for _, row in self._meta_df.iterrows()}
+        self.load_encoder()
+
+    def load_encoder(self) -> None:
+        """Explicitly load the embedding encoder based on config."""
         provider = self.cfg.get("provider", "qwen3")
         model = self._resolve_model_name()
         max_len = int(self.cfg.get("max_len_note", 256))

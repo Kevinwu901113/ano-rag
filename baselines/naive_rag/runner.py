@@ -147,6 +147,13 @@ class LLMClient:
         if not endpoint or not model:
             raise ValueError("Both endpoint and model are required for LLM calls")
         self.endpoint = endpoint.rstrip("/")
+        if self.endpoint.endswith("/v1"):
+            self.endpoint = self.endpoint[:-3]
+        
+        # Fix: Ensure endpoint has scheme
+        if not self.endpoint.startswith("http://") and not self.endpoint.startswith("https://"):
+            self.endpoint = "http://" + self.endpoint
+            
         self.model = model
         self.temperature = temperature
         self.max_tokens = max_tokens
@@ -156,16 +163,34 @@ class LLMClient:
         self.retries = max(0, retries)
 
     def answer(self, question: str, context: str) -> str:
-        if not context.strip():
-            return "Insufficient evidence"
-        prompt = _build_prompt(question, context)
+        # Allow empty context if needed (e.g. summarization where prompt contains text)
+        # But typically Naive RAG uses context.
+        # Raptor baseline sometimes passes empty context string if it's doing pure summarization 
+        # (where question is the prompt and context is empty string).
+        # So we should relax the check:
+        if not context.strip() and not question.strip():
+             return "Insufficient evidence"
+
+        # Truncate context if it's too long to avoid 400 Bad Request
+        # Qwen context window is large, but let's be safe around 30k chars ~ 8k tokens
+        if len(context) > 20000:
+             logger.warning(f"Context too long ({len(context)} chars), truncating to 20000 chars")
+             context = context[:20000] + "..."
+             
+        # If context is empty, prompt is just the question (summarization use case)
+        # If context is present, we build the RAG prompt.
+        if context.strip():
+            prompt = _build_prompt(question, context)
+        else:
+            prompt = question
+
         payload = {
             "model": self.model,
             "temperature": self.temperature,
             "max_tokens": self.max_tokens,
             "messages": [{"role": "user", "content": prompt}],
         }
-        if self.stop:
+        if self.stop and len(self.stop) > 0:
             payload["stop"] = self.stop
 
         headers = {
@@ -175,14 +200,26 @@ class LLMClient:
 
         for attempt in range(self.retries + 1):
             try:
+                url = f"{self.endpoint}/v1/chat/completions"
+                # Ensure we don't double-slash if endpoint already had trailing slash (we rstrip it above but just in case)
+                if self.endpoint.endswith("/"):
+                    url = f"{self.endpoint}v1/chat/completions"
+                
+                # DEBUG: Log payload on first attempt
+                if attempt == 0:
+                    logger.debug(f"LLM Payload: {json.dumps(payload, ensure_ascii=False)}")
+
                 resp = requests.post(
-                    f"{self.endpoint}/chat/completions",
+                    url,
                     headers=headers,
                     json=payload,
                     timeout=60,
                 )
                 resp.raise_for_status()
                 data = resp.json()
+                if "choices" not in data:
+                    logger.error(f"Invalid LLM response: {data}")
+                    return "Insufficient evidence"
                 content = data["choices"][0]["message"]["content"]
                 
                 # Handle <think> blocks
@@ -310,19 +347,6 @@ class NaiveRAGRunner:
 
 
 PROMPT_TEMPLATE = """Answer the question based on the context below. Keep the answer short and concise. Do not output reasoning.
-
-Context:
-[1] Paris is the capital and most populous city of France.
-[2] The city is a major railway, highway, and air-transport hub.
-
-Question: What is the capital of France?
-Answer: Paris
-
-Context:
-[1] Elon Reeve Musk FRS is a business magnate and investor. He is the founder, CEO, and Chief Engineer at SpaceX.
-
-Question: Who is the CEO of SpaceX?
-Answer: Elon Musk
 
 Context:
 {context}

@@ -69,7 +69,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     },
     "lmstudio": {
         "endpoint": "http://127.0.0.1:1234/v1",
-        "model": "openai/gpt-oss-20b",
+        "model": "qwen2.5-7b-instruct",
         "temperature": 0.2,
         "max_tokens": 64,
     },
@@ -77,7 +77,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "router": "llm",
         "supported_types": ["chunk", "graph"],
         "top_k": 10,
-        "llm_model": "openai/gpt-oss-20b",
+        "llm_model": "qwen2.5-7b-instruct",
     },
     "routing": {
         "token_budget_hint": 320000,

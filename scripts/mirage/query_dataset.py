@@ -69,6 +69,7 @@ def main() -> None:
     parser.add_argument("--new", action="store_true", help="Force create a new workspace copy")
     parser.add_argument("--direct-llm", action="store_true", help="Skip retrieval and answer directly with LLM")
     parser.add_argument("--vanilla-rag", action="store_true", help="Use Vanilla RAG baseline")
+    parser.add_argument("--simple-raptor", action="store_true", help="Use Simple Raptor baseline")
     parser.add_argument("--temperature", type=float, default=None, help="Override LLM temperature")
     parser.add_argument("--max-new-tokens", type=int, default=None, help="Override LLM max new tokens")
     args = parser.parse_args()
@@ -173,6 +174,86 @@ def main() -> None:
             qa_log_path.write_text("\n".join(qa_lines), encoding="utf-8")
             
         logger.info("Vanilla RAG baseline complete.")
+        return
+
+    if args.simple_raptor:
+        from baselines.simple_raptor import answer as raptor_answer
+        from baselines.simple_raptor import get_retriever
+
+        # For Raptor, we might need to init the retriever explicitly if we want to pass LLM config
+        # But the simple_raptor.answer() wrapper uses a global singleton that loads global config.
+        # To support CLI overrides (endpoint/model), we should instantiate it manually here.
+        from baselines.simple_raptor.retriever import SimpleRaptorRetriever
+        from baselines.naive_rag.runner import LLMClient
+        from config.config_loader import config as global_config_loader
+
+        # Default paths or from indexes-dir
+        index_path = "indexes/simple_raptor_index.faiss"
+        nodes_path = "indexes/simple_raptor_nodes.pkl"
+        chunk_path = "indexes/simple_raptor_chunk_store.pkl"
+
+        if args.indexes_dir:
+             idx_root = Path(args.indexes_dir)
+             if (idx_root / "simple_raptor_index.faiss").exists():
+                 index_path = str(idx_root / "simple_raptor_index.faiss")
+                 nodes_path = str(idx_root / "simple_raptor_nodes.pkl")
+                 chunk_path = str(idx_root / "simple_raptor_chunk_store.pkl")
+
+        logger.info(f"Running Simple Raptor with index={index_path}")
+
+        # Create custom LLM Client if args provided
+        llm_client = None
+        if args.lmstudio_endpoint and args.lmstudio_model:
+            llm_client = LLMClient(
+                endpoint=args.lmstudio_endpoint,
+                model=args.lmstudio_model,
+                temperature=args.temperature if args.temperature is not None else 0.0,
+                max_tokens=args.max_new_tokens or 2048
+            )
+
+        # Init retriever
+        retriever = SimpleRaptorRetriever(
+            index_path=index_path,
+            nodes_path=nodes_path,
+            chunk_store_path=chunk_path,
+            config=global_config_loader.load_config(),
+            llm_client=llm_client
+        )
+
+        results = []
+        qa_lines = []
+
+        for i, item in enumerate(dataset):
+            question = item.get("query") or item.get("question")
+            qid = item.get("query_id") or str(i)
+            
+            try:
+                ans = retriever.answer(question)
+                # Simple cleaning
+                if ans.lower().startswith("answer:"):
+                    ans = ans[7:].strip()
+                clean_ans = _strip_reasoning(ans)
+                clean_ans_line = " ".join(clean_ans.split())
+                
+                results.append({
+                    "query_id": qid,
+                    "question": question,
+                    "answer": clean_ans,
+                    "raw_answer": ans
+                })
+                qa_lines.append(f"{question}\t{clean_ans_line}")
+            except Exception as e:
+                logger.error(f"Error Q{i}: {e}")
+
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(output_path, "w", encoding="utf-8") as handle:
+            json.dump(results, handle, ensure_ascii=False, indent=2)
+        
+        if qa_log_path:
+            qa_log_path.parent.mkdir(parents=True, exist_ok=True)
+            qa_log_path.write_text("\n".join(qa_lines), encoding="utf-8")
+            
+        logger.info("Simple Raptor baseline complete.")
         return
 
     indexes_dir = Path(args.indexes_dir) if args.indexes_dir else work_dir / "indexes"
