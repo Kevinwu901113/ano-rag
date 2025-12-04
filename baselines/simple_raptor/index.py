@@ -9,7 +9,7 @@ from tqdm import tqdm
 from sklearn.cluster import KMeans
 
 from utils.embedding_utils import EmbeddingEncoder
-from baselines.naive_rag.runner import LLMClient
+from rag_core.llm_client import LLMChatClient
 from baselines.simple_raptor.tree import TreeNode
 
 class SimpleRaptorChunker:
@@ -87,10 +87,11 @@ class SimpleRaptorIndexer:
         
         # Initialize LLM client for summarization
         if llm_config:
-            self.llm = LLMClient(
+            self.llm = LLMChatClient(
                 endpoint=llm_config.get("endpoint"),
                 model=llm_config.get("model"),
-                temperature=llm_config.get("temperature", 0.0)
+                temperature=llm_config.get("temperature", 0.0),
+                stop=llm_config.get("stop")
             )
         else:
             # Load from global config
@@ -103,11 +104,13 @@ class SimpleRaptorIndexer:
             endpoint = lm_cfg.get("endpoint", "http://127.0.0.1:1234/v1")
             model = lm_cfg.get("model", "qwen2.5-7b-instruct")
             temperature = float(lm_cfg.get("temperature", 0.0))
+            stop = lm_cfg.get("stop")
             
-            self.llm = LLMClient(
+            self.llm = LLMChatClient(
                 endpoint=endpoint,
                 model=model,
-                temperature=temperature
+                temperature=temperature,
+                stop=stop
             )
 
         self.nodes: List[TreeNode] = []
@@ -200,7 +203,13 @@ Summary:"""
                 # Truncate text to avoid context window issues, now that we fixed 400s
                 safe_text = combined_text[:15000] # 15k chars ~ 4k tokens, safe for Qwen
                 prompt = self.summary_prompt_template.format(text=safe_text) 
-                summary = self.llm.answer(prompt, "")
+                
+                messages = [
+                    {"role": "system", "content": "You are a helpful assistant."},
+                    {"role": "user", "content": prompt}
+                ]
+                # LLMChatClient.chat returns string content directly
+                summary = self.llm.chat(messages, max_tokens=512)
                 
                 # Aggregate descendants
                 descendants = []

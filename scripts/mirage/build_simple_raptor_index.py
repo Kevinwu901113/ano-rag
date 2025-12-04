@@ -14,7 +14,6 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from baselines.simple_raptor.index import SimpleRaptorIndexer
-from baselines.naive_rag.runner import LLMClient
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Build Simple Raptor index for MIRAGE dataset")
