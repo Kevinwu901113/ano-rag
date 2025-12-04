@@ -10,6 +10,7 @@ from sklearn.cluster import KMeans
 
 from utils.embedding_utils import EmbeddingEncoder
 from rag_core.llm_client import LLMChatClient
+from baselines.common.model_clients import get_default_embedding_client, get_default_llm_client
 from baselines.simple_raptor.tree import TreeNode
 
 class SimpleRaptorChunker:
@@ -54,64 +55,24 @@ class SimpleRaptorChunker:
         return chunks
 
 class SimpleRaptorIndexer:
-    def __init__(self, embedding_config: Optional[Dict] = None, llm_config: Optional[Dict] = None):
+    def __init__(
+        self, 
+        config: Optional[Dict[str, Any]] = None, 
+        embedding_client: Optional[EmbeddingEncoder] = None, 
+        llm_client: Optional[LLMChatClient] = None
+    ):
         self.chunker = SimpleRaptorChunker()
         
-        # Initialize embedding encoder
-        if embedding_config:
-            # Use 'qwen3' as default provider for local models
-            # Reuse EmbeddingClient to resolve model path and device correctly
-            from retriever.embedding_client import EmbeddingClient
-            
-            # Merge basic settings
-            cfg = embedding_config.copy()
-            
-            # EmbeddingClient expects 'enabled' to be True to do anything usually,
-            # but we just want the encoder. We'll use our newly exposed load_encoder method.
-            # We don't need to set 'enabled' or load FAISS indices.
-            
-            # Instantiate client with config
-            client = EmbeddingClient(cfg)
-            
-            # Force load ONLY the encoder part
-            client.load_encoder()
-            self.encoder = client._encoder
+        # Initialize clients
+        if embedding_client is None:
+            self.embedding = get_default_embedding_client(config)
         else:
-            # Fallback to default config via EmbeddingClient
-            # IMPORTANT: Do NOT default to Qwen/Qwen2.5-7B-Instruct as it is a large LLM, not an embedding model.
-            # Use 'qwen3' provider default or let EmbeddingClient resolve it.
-            from retriever.embedding_client import EmbeddingClient
-            client = EmbeddingClient({}) # Empty config allows it to pick up defaults (e.g. Qwen/Qwen3-Embedding-8B)
-            client.load_encoder()
-            self.encoder = client._encoder
-        
-        # Initialize LLM client for summarization
-        if llm_config:
-            self.llm = LLMChatClient(
-                endpoint=llm_config.get("endpoint"),
-                model=llm_config.get("model"),
-                temperature=llm_config.get("temperature", 0.0),
-                stop=llm_config.get("stop")
-            )
+            self.embedding = embedding_client
+            
+        if llm_client is None:
+            self.llm = get_default_llm_client(config)
         else:
-            # Load from global config
-            from config.config_loader import config as global_config
-            cfg = global_config.load_config()
-            
-            # Try to find LM Studio config
-            lm_cfg = cfg.get("lmstudio", {})
-            
-            endpoint = lm_cfg.get("endpoint", "http://127.0.0.1:1234/v1")
-            model = lm_cfg.get("model", "qwen2.5-7b-instruct")
-            temperature = float(lm_cfg.get("temperature", 0.0))
-            stop = lm_cfg.get("stop")
-            
-            self.llm = LLMChatClient(
-                endpoint=endpoint,
-                model=model,
-                temperature=temperature,
-                stop=stop
-            )
+            self.llm = llm_client
 
         self.nodes: List[TreeNode] = []
         self.chunk_store: Dict[str, str] = {}
@@ -147,7 +108,7 @@ Summary:"""
         
         # Batch encode leaf nodes
         logger.info("Encoding leaf nodes...")
-        embeddings = self.encoder.encode(chunk_texts)
+        embeddings = self.embedding.encode(chunk_texts)
         if len(embeddings) > 0:
              faiss.normalize_L2(embeddings)
         
@@ -237,7 +198,7 @@ Summary:"""
                 
             # Encode new level
             logger.info(f"Encoding {len(new_level_texts)} summary nodes...")
-            current_embeddings = self.encoder.encode(new_level_texts)
+            current_embeddings = self.embedding.encode(new_level_texts)
             if len(current_embeddings) > 0:
                 faiss.normalize_L2(current_embeddings)
             current_level_nodes = new_level_nodes
@@ -251,7 +212,7 @@ Summary:"""
              logger.warning("No nodes to index! Creating an empty index with default dimension.")
              # Use encoder's default dimension if available, or a fallback
              # We can try to encode a dummy text to get dimension
-             dummy_emb = self.encoder.encode(["test"])
+             dummy_emb = self.embedding.encode(["test"])
              d = dummy_emb.shape[1]
              self.index = faiss.IndexFlatIP(d)
              return {
@@ -265,7 +226,7 @@ Summary:"""
         # Let's batch encode all nodes at once to form the final index.
         # Note: This might be redundant but ensures a single consistent index matrix.
         
-        final_embeddings = self.encoder.encode(all_texts)
+        final_embeddings = self.embedding.encode(all_texts)
         if len(final_embeddings) > 0:
              faiss.normalize_L2(final_embeddings)
         
