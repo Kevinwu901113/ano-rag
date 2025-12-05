@@ -12,12 +12,26 @@ from baselines.common.model_clients import get_default_embedding_client, get_def
 from baselines.simple_raptor.tree import TreeNode
 from utils.answer_cleaner import clean_model_answer
 
+DEFAULT_SYSTEM_PROMPT = (
+    "You are a helpful assistant for multi-hop question answering.\n"
+    "You are given several pieces of context that may come from different Wikipedia articles.\n"
+    "You may need to combine information from multiple pieces to answer the question.\n"
+    "Answer the question with a short phrase. If the answer is not contained in the context, say \"unknown\"."
+)
+
+PROMPT_TEMPLATE = """Context:
+{context}
+
+Question: {question}
+
+Answer the question with a short phrase. If the answer is not contained in the context, say "unknown"."""
+
 class SimpleRaptorRetriever:
     def __init__(
         self, 
         index_path: str, 
-        nodes_path: str,
-        chunk_store_path: str,
+        nodes_path: str, 
+        chunk_store_path: str, 
         config: Optional[Dict] = None,
         embedding_client: Optional[EmbeddingEncoder] = None,
         llm_client: Optional[LLMChatClient] = None,
@@ -175,19 +189,12 @@ class SimpleRaptorRetriever:
              context_block = context_block[:12000] + "..."
         
         # Construct messages for LLMChatClient
-        # Similar to simple_selfrag or naive_rag answer generation
-        prompt = f"""You are a helpful assistant. Use the following context to answer the question.
-If the answer is not contained in the context, say you are not sure.
-
-Question:
-{question}
-
-Context:
-{context_block}
-
-Answer:"""
+        prompt = PROMPT_TEMPLATE.format(context=context_block, question=question)
         
-        messages = [{"role": "user", "content": prompt}]
+        messages = [
+            {"role": "system", "content": DEFAULT_SYSTEM_PROMPT},
+            {"role": "user", "content": prompt}
+        ]
         
         try:
             # Using chat interface
@@ -229,7 +236,8 @@ Answer:"""
             "context does not contain",
             "context does not provide",
             "you are not sure",  # Handle LLM echo of instructions
-            "not sure"
+            "not sure",
+            "unknown"
         ]
         
         cleaned_lower = cleaned.lower()
@@ -237,6 +245,9 @@ Answer:"""
         # Remove bold markers if present
         cleaned = cleaned.replace("**", "").strip()
         
+        if cleaned_lower in ["unknown", "unknown.", "unknown!"]:
+             return "Insufficient evidence"
+
         for phrase in blacklist:
             if phrase in cleaned_lower:
                 return "Insufficient evidence"
@@ -254,4 +265,3 @@ Answer:"""
              return "Insufficient evidence"
              
         return cleaned
-

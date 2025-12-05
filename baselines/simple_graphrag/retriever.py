@@ -6,6 +6,20 @@ from baselines.simple_graphrag.graph import SimpleGraph
 from structrag.llm_client import LLMChatClient
 from loguru import logger
 
+DEFAULT_SYSTEM_PROMPT = (
+    "You are a helpful assistant for multi-hop question answering.\n"
+    "You are given several pieces of context that may come from different Wikipedia articles.\n"
+    "You may need to combine information from multiple pieces to answer the question.\n"
+    "Answer the question with a short phrase. If the answer is not contained in the context, say \"unknown\"."
+)
+
+PROMPT_TEMPLATE = """Context:
+{context}
+
+Question: {question}
+
+Answer the question with a short phrase. If the answer is not contained in the context, say "unknown"."""
+
 class GraphRetriever:
     def __init__(self, graph_path: str, chunk_store_path: str, llm_client: LLMChatClient):
         self.graph = SimpleGraph.load(graph_path)
@@ -46,7 +60,9 @@ class GraphRetriever:
         messages = [{"role": "user", "content": prompt}]
         try:
             response = self.llm_client.chat(messages, max_tokens=8192, temperature=0.0)
-            content = response.content
+            # response might be object or string depending on client implementation
+            # LLMChatClient.chat returns string if configured properly, but let's handle both
+            content = response if isinstance(response, str) else response.content
             
             # Handle <think> blocks
             import re
@@ -144,20 +160,21 @@ class GraphRetriever:
         return relevant_chunks
 
     def _generate_answer(self, question: str, chunks: List[str]) -> str:
-        context = "\n\n".join(chunks)
-        prompt = f"""
-        Question: {question}
+        context_blocks = []
+        for i, chunk in enumerate(chunks):
+            context_blocks.append(f"[{i+1}] {chunk}")
+        context_str = "\n\n".join(context_blocks)
+
+        prompt = PROMPT_TEMPLATE.format(context=context_str, question=question)
+
+        messages = [
+            {"role": "system", "content": DEFAULT_SYSTEM_PROMPT},
+            {"role": "user", "content": prompt}
+        ]
         
-        Relevant Information:
-        {context}
-        
-        Answer the question based on the relevant information provided.
-        If the answer is not in the context, say "Insufficient evidence".
-        """
-        messages = [{"role": "user", "content": prompt}]
         try:
             response = self.llm_client.chat(messages, max_tokens=8192, temperature=0.0)
-            content = response.content
+            content = response if isinstance(response, str) else response.content
             
             # Handle <think> blocks
             import re
@@ -165,8 +182,12 @@ class GraphRetriever:
             if content.startswith("<think>"):
                 content = re.sub(r"^<think>.*", "", content, flags=re.DOTALL).strip()
                 
-            from utils.rag_normalization import normalize_model_answer
-            return normalize_model_answer(content)
+            try:
+                from utils.rag_normalization import normalize_model_answer
+                return normalize_model_answer(content)
+            except ImportError:
+                return content
+                
         except Exception as e:
             logger.error(f"Failed to generate answer: {e}")
             return "Insufficient evidence"

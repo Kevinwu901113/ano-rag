@@ -12,6 +12,20 @@ from config.config_loader import config as global_config
 from rag_core.embedding_client import EmbeddingEncoder
 from rag_core.llm_client import LLMChatClient
 
+DEFAULT_SYSTEM_PROMPT = (
+    "You are a helpful assistant for multi-hop question answering.\n"
+    "You are given several pieces of context that may come from different Wikipedia articles.\n"
+    "You may need to combine information from multiple pieces to answer the question.\n"
+    "Answer the question with a short phrase. If the answer is not contained in the context, say \"unknown\"."
+)
+
+PROMPT_TEMPLATE = """Context:
+{context}
+
+Question: {question}
+
+Answer the question with a short phrase. If the answer is not contained in the context, say "unknown"."""
+
 class SimpleSelfRAGRetriever:
     def __init__(
         self, 
@@ -98,18 +112,14 @@ class SimpleSelfRAGRetriever:
         contexts_1 = self.retrieve(question, self.top_k_first)
         context_block_1 = "\n\n".join([f"[{i+1}] {c[0]}" for i, c in enumerate(contexts_1)])
         
-        prompt_1 = f"""You are a helpful assistant. Use the following context to answer the question.
-If the answer is not contained in the context, say you are not sure.
-
-Question:
-{question}
-
-Context:
-{context_block_1}
-
-Answer:"""
+        prompt_1 = PROMPT_TEMPLATE.format(context=context_block_1, question=question)
         
-        answer_0 = self.llm.chat([{"role": "user", "content": prompt_1}])
+        messages_1 = [
+            {"role": "system", "content": DEFAULT_SYSTEM_PROMPT},
+            {"role": "user", "content": prompt_1}
+        ]
+        
+        answer_0 = self.llm.chat(messages_1)
         logger.info(f"Initial answer: {answer_0[:100]}...")
         
         # Step 2: Critique
@@ -157,9 +167,14 @@ Question:
 New context:
 {context_block_2}
 
-Improved answer:"""
+Improved answer (short phrase):"""
 
-        answer_1 = self.llm.chat([{"role": "user", "content": prompt_2}])
+        messages_2 = [
+             {"role": "system", "content": DEFAULT_SYSTEM_PROMPT},
+             {"role": "user", "content": prompt_2}
+        ]
+
+        answer_1 = self.llm.chat(messages_2)
         logger.info(f"Improved answer: {answer_1[:100]}...")
         
         return answer_1

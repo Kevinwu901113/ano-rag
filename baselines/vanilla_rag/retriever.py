@@ -1,3 +1,6 @@
+"""
+Vanilla RAG baseline (Index/Retriever/Runner).
+"""
 from __future__ import annotations
 
 import json
@@ -13,6 +16,19 @@ from config import config as config_loader
 from structrag.llm_client import LLMChatClient
 from utils.embedding_utils import EmbeddingEncoder
 
+DEFAULT_SYSTEM_PROMPT = (
+    "You are a helpful assistant for multi-hop question answering.\n"
+    "You are given several pieces of context that may come from different Wikipedia articles.\n"
+    "You may need to combine information from multiple pieces to answer the question.\n"
+    "Answer the question with a short phrase. If the answer is not contained in the context, say \"unknown\"."
+)
+
+PROMPT_TEMPLATE = """Context:
+{context}
+
+Question: {question}
+
+Answer the question with a short phrase. If the answer is not contained in the context, say "unknown"."""
 
 class VanillaRAGRetriever:
     def __init__(
@@ -37,7 +53,6 @@ class VanillaRAGRetriever:
         if not meta_path.exists():
              # Fallback: try legacy or assume implicit ordering? 
              # For now, raise error as we expect meta file.
-             # Actually, let's just warn and assume we can't map back if missing, but that makes it useless.
              raise FileNotFoundError(f"Index metadata file not found: {meta_path}")
              
         with open(meta_path, "rb") as f:
@@ -82,73 +97,68 @@ class VanillaRAGRetriever:
             
         return LLMChatClient(endpoint=endpoint, model=model, temperature=0.0)
 
-    def _clean_path(self, value: Any) -> Optional[str]:
-        if not value:
-            return None
-        return str(Path(str(value)).expanduser())
-
     def _resolve_device(self) -> Optional[str]:
-        retriever_cfg = self.cfg.get("retriever", {}) or {}
-        embed_cfg = retriever_cfg.get("embedding", {}) or {}
-        device = embed_cfg.get("device")
+        device = (self.cfg.get("retriever", {}) or {}).get("embedding", {}).get("device")
         if device:
             return str(device)
         system_cfg = self.cfg.get("system") or {}
         return system_cfg.get("device")
 
-    def retrieve(self, question: str, top_k: int = 5) -> List[Tuple[str, float]]:
-        """Retrieve top-k chunks for the question."""
-        # Encode query
-        q_vec = self.embedding_client.encode([question])
-        if bool(self.cfg.get("retriever", {}).get("embedding", {}).get("normalize", True)):
-            faiss.normalize_L2(q_vec)
+    def _clean_path(self, value: Any) -> Optional[str]:
+        if not value:
+            return None
+        return str(Path(str(value)).expanduser())
+
+    def retrieve(self, query: str, top_k: int = 5) -> List[Tuple[str, float]]:
+        """Retrieve chunks for a query. Returns list of (chunk_text, score)."""
+        emb = self.embedding_client.encode([query])
+        if emb is None or len(emb) == 0:
+            return []
             
-        # Search
-        scores, indices = self.index.search(q_vec.astype("float32"), top_k)
+        # Fix dimension mismatch
+        if emb.shape[1] != self.index.d:
+             if emb.shape[1] < self.index.d:
+                 padding = np.zeros((emb.shape[0], self.index.d - emb.shape[1]), dtype=emb.dtype)
+                 emb = np.hstack([emb, padding])
+             else:
+                 emb = emb[:, :self.index.d]
+
+        scores, indices = self.index.search(emb, top_k)
         
         results = []
         for score, idx in zip(scores[0], indices[0]):
-            if idx == -1:
+            if idx < 0 or idx >= len(self.chunk_ids):
                 continue
-            if idx < len(self.chunk_ids):
-                chunk_id = self.chunk_ids[idx]
-                text = self.chunk_store.get(chunk_id, "")
-                if text:
-                    results.append((text, float(score)))
-        
+            chunk_id = self.chunk_ids[idx]
+            if chunk_id in self.chunk_store:
+                results.append((self.chunk_store[chunk_id], float(score)))
+                
         return results
 
     def answer(self, question: str, top_k: int = 5) -> str:
-        chunks = self.retrieve(question, top_k=top_k)
-        if not chunks:
-            return "Insufficient evidence"
+        """End-to-end retrieve and answer."""
+        docs = self.retrieve(question, top_k=top_k)
         
-        context_texts = [text for text, _ in chunks]
-        context_block = "\n\n".join(context_texts)
+        context_blocks = []
+        for i, (text, score) in enumerate(docs):
+            context_blocks.append(f"[{i+1}] {text}")
+        context_str = "\n\n".join(context_blocks)
         
-        prompt = f"""Answer the question based solely on the provided context.
-If the answer is not in the context, say "Insufficient evidence".
+        prompt = PROMPT_TEMPLATE.format(context=context_str, question=question)
+        
+        messages = [
+            {"role": "system", "content": DEFAULT_SYSTEM_PROMPT},
+            {"role": "user", "content": prompt}
+        ]
+        
+        return self.llm_client.chat(messages)
 
-Context:
-{context_block}
 
-Question: {question}
-
-Answer:"""
-
-        messages = [{"role": "user", "content": prompt}]
-        try:
-            response = self.llm_client.chat(messages, max_tokens=2048, temperature=0.0)
-            content = response.content
-            
-            # Handle <think> blocks locally
-            if isinstance(content, str):
-                 import re
-                 content = re.sub(r"<think>.*?</think>", "", content, flags=re.DOTALL).strip()
-                 if content.startswith("<think>"):
-                     content = re.sub(r"^<think>.*", "", content, flags=re.DOTALL).strip()
-            
-            return content.strip()
-        except Exception as e:
-            logger.error(f"Error generating answer: {e}")
-            return "Error generating answer"
+def answer(
+    question: str, 
+    index_path: str, 
+    chunk_store_path: str,
+    llm_client: Optional[LLMChatClient] = None
+) -> str:
+    retriever = VanillaRAGRetriever(index_path, chunk_store_path, llm_client=llm_client)
+    return retriever.answer(question)

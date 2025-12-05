@@ -1,0 +1,41 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+from pathlib import Path
+
+from loguru import logger
+
+ROOT = Path(__file__).resolve().parents[2]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from baselines.naive_rag import MirageNaiveIndexer, NaiveChunker
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Build naive HotpotQA RAG index from doc_pool.json")
+    parser.add_argument("--doc-pool", default="data/hotpotqa/doc_pool.json", help="Path to HotpotQA doc_pool.json")
+    parser.add_argument("--out-dir", default="result/hotpot_naive", help="Output directory for FAISS + chunks.jsonl")
+    # Adjusted default params for HotpotQA as per instructions
+    parser.add_argument("--target-tokens", type=int, default=512, help="Target tokens per chunk")
+    parser.add_argument("--max-tokens", type=int, default=512, help="Hard cap tokens per chunk")
+    parser.add_argument("--overlap-tokens", type=int, default=256, help="Token overlap between chunks")
+    parser.add_argument("--no-title", action="store_true", help="Do not prepend doc title to chunk text")
+    args = parser.parse_args()
+
+    chunker = NaiveChunker(
+        target_tokens=args.target_tokens,
+        max_tokens=args.max_tokens,
+        overlap_tokens=args.overlap_tokens,
+        append_title=not args.no_title,
+    )
+    builder = MirageNaiveIndexer(chunker=chunker)
+    stats = builder.build(args.doc_pool, args.out_dir)
+
+    logger.info("Naive HotpotQA index built. Stats:\n{}", json.dumps(stats, ensure_ascii=False, indent=2))
+
+
+if __name__ == "__main__":
+    main()
