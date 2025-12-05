@@ -1,34 +1,45 @@
+import time
 import requests
-import json
 from typing import List, Dict, Optional, Any
 from loguru import logger
 
 class LLMChatClient:
-    def __init__(self, endpoint: str, model: str, temperature: float = 0.0, **kwargs):
-        """
-        Initialize LLM Chat Client.
-        endpoint: URL to the OpenAI-compatible API (e.g., http://localhost:1234/v1)
-        model: Model identifier string
-        """
-        self.endpoint = endpoint.rstrip('/')
-        if not self.endpoint.endswith("/v1"):
-             # Some endpoints might be passed without /v1, but let's assume standard OpenAI format
-             # If the user passed "http://localhost:1234", we append "/v1"
-             # If they passed "http://localhost:1234/v1", we keep it.
-             # But safer to just rely on what's passed or append if it looks like base URL.
-             # Let's assume endpoint should be the full base URL for the client, usually ending in /v1
-             pass
-             
+    """
+    A unified client for chatting with LLM via OpenAI-compatible API.
+    Support for LM Studio, vLLM, etc.
+    """
+    def __init__(
+        self, 
+        endpoint: str, 
+        model: str, 
+        temperature: float = 0.0, 
+        api_key: str = "sk-no-key-required",
+        stop: Optional[List[str]] = None,
+        retries: int = 3
+    ):
+        self.endpoint = endpoint.rstrip("/")
+        # Auto-correct endpoint format if needed
+        # Most OpenAI clients expect base_url to be just the host, but requests needs full path
+        # If user passes http://localhost:1234/v1, we keep it.
+        # If user passes http://localhost:1234, we might append /v1 or not depending on usage.
+        # Here we assume the user provides the base API URL (e.g. .../v1).
+        
         self.model = model
         self.temperature = temperature
-        self.api_key = kwargs.get("api_key", "lm-studio") # Default dummy key for local
-        
+        self.api_key = api_key
+        self.stop = stop
+        self.retries = retries
+
     def chat(self, messages: List[Dict[str, str]], max_tokens: int = 1024, temperature: Optional[float] = None, **kwargs) -> str:
         """
-        Send chat completion request.
+        Send chat completion request with retries.
         messages: List of {"role": "...", "content": "..."}
         """
         url = f"{self.endpoint}/chat/completions"
+        # Ensure we don't double-slash if endpoint already had trailing slash (handled by rstrip above)
+        # But if endpoint is http://localhost:8000 and we want http://localhost:8000/v1/chat/completions
+        # Check if /v1 is missing?
+        # Standard practice: assume endpoint is base URL like http://localhost:8000/v1
         
         payload = {
             "model": self.model,
@@ -38,6 +49,9 @@ class LLMChatClient:
             "stream": False
         }
         
+        if self.stop:
+            payload["stop"] = self.stop
+            
         # Merge extra kwargs
         payload.update(kwargs)
         
@@ -46,18 +60,35 @@ class LLMChatClient:
             "Authorization": f"Bearer {self.api_key}"
         }
         
-        try:
-            response = requests.post(url, json=payload, headers=headers, timeout=60)
-            response.raise_for_status()
-            data = response.json()
-            
-            # Parse response
-            # OpenAI format: choices[0].message.content
-            content = data["choices"][0]["message"]["content"]
-            return content
-            
-        except Exception as e:
-            logger.error(f"LLM request failed: {e}")
-            # Fallback for robustness? Or re-raise?
-            # For baseline, maybe return empty or error message
-            return f"[Error: {str(e)}]"
+        for attempt in range(self.retries + 1):
+            try:
+                response = requests.post(url, json=payload, headers=headers, timeout=60)
+                response.raise_for_status()
+                data = response.json()
+                
+                # Parse response
+                if "choices" not in data or not data["choices"]:
+                     logger.error(f"Invalid LLM response: {data}")
+                     # If response is malformed, retry?
+                     if attempt < self.retries:
+                         continue
+                     return "[Error: Invalid response format]"
+                     
+                content = data["choices"][0]["message"]["content"]
+                return content
+                
+            except requests.RequestException as e:
+                if attempt < self.retries:
+                    wait_time = 2 ** attempt # Exponential backoff: 1s, 2s, 4s...
+                    logger.warning(f"LLM request failed (attempt {attempt+1}/{self.retries+1}): {e}. Retrying in {wait_time}s...")
+                    time.sleep(wait_time)
+                else:
+                    logger.error(f"LLM request failed after {self.retries+1} attempts: {e}")
+                    # Fallback or re-raise? 
+                    # For baselines, returning an error string is safer than crashing the whole run.
+                    return f"[Error: {str(e)}]"
+            except Exception as e:
+                 logger.error(f"Unexpected error during LLM call: {e}")
+                 return f"[Error: {str(e)}]"
+                 
+        return "[Error: Max retries exceeded]"

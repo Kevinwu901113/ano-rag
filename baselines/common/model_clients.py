@@ -36,22 +36,22 @@ def get_default_embedding_client(config: Optional[Dict[str, Any]] = None) -> Emb
 def get_default_llm_client(config: Optional[Dict[str, Any]] = None) -> LLMChatClient:
     """
     Constructs and returns an LLMChatClient instance based on the provided configuration or defaults.
-    Prioritizes 'vllm' configuration, falls back to 'lmstudio'.
+    Prioritizes 'lmstudio' configuration, falls back to 'vllm'.
     """
     if config is None:
         config = global_config.load_config()
         
-    # Try vLLM config first
-    llm_cfg = config.get("vllm", {})
+    # Try LM Studio config first (Preferred for current environment)
+    llm_cfg = config.get("lmstudio", {})
     if not llm_cfg:
-        # Fallback to LM Studio
-        llm_cfg = config.get("lmstudio", {})
+        # Fallback to vLLM
+        llm_cfg = config.get("vllm", {})
         if llm_cfg:
-            logger.info("Using LM Studio configuration for LLM Client")
+            logger.info("Using vLLM configuration for LLM Client")
         else:
-            logger.warning("No LLM configuration found (checked 'vllm' and 'lmstudio'). Using defaults.")
+            logger.warning("No LLM configuration found (checked 'lmstudio' and 'vllm'). Using defaults.")
     else:
-        logger.info("Using vLLM configuration for LLM Client")
+        logger.info("Using LM Studio configuration for LLM Client")
 
     endpoint = llm_cfg.get("endpoint")
     model = llm_cfg.get("model")

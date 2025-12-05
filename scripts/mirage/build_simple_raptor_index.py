@@ -71,16 +71,25 @@ def main() -> None:
     # We rely on global config for embedding client (via EmbeddingClient inside Indexer)
     # And we pass explicit LLM config if needed, or let it load from global
     
-    llm_config = None
+    from baselines.common.model_clients import get_default_llm_client
+    
+    llm_client = None
     if args.lmstudio_endpoint or args.lmstudio_model:
         lm_cfg = global_config.load_config().get("lmstudio", {})
-        llm_config = {
-            "endpoint": args.lmstudio_endpoint or lm_cfg.get("endpoint"),
-            "model": args.lmstudio_model or lm_cfg.get("model"),
-            "temperature": args.temperature if args.temperature is not None else lm_cfg.get("temperature", 0.0)
-        }
+        # Create a temporary config dict to pass to get_default_llm_client or manually construct
+        # Actually, we can just manually construct the client here since we have the values
+        from rag_core.llm_client import LLMChatClient
+        endpoint = args.lmstudio_endpoint or lm_cfg.get("endpoint")
+        model = args.lmstudio_model or lm_cfg.get("model")
+        temperature = args.temperature if args.temperature is not None else lm_cfg.get("temperature", 0.0)
         
-    indexer = SimpleRaptorIndexer(llm_config=llm_config)
+        llm_client = LLMChatClient(
+            endpoint=endpoint,
+            model=model,
+            temperature=float(temperature)
+        )
+        
+    indexer = SimpleRaptorIndexer(llm_client=llm_client)
     
     # 3. Build Index
     logger.info(f"Building Raptor index for {len(docs)} documents...")
