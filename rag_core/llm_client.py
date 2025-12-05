@@ -36,6 +36,7 @@ class LLMChatClient:
         messages: List of {"role": "...", "content": "..."}
         """
         url = f"{self.endpoint}/chat/completions"
+        logger.info(f"[RAPTOR-LLM] POST {url} model={self.model}")
         # Ensure we don't double-slash if endpoint already had trailing slash (handled by rstrip above)
         # But if endpoint is http://localhost:8000 and we want http://localhost:8000/v1/chat/completions
         # Check if /v1 is missing?
@@ -61,6 +62,8 @@ class LLMChatClient:
         }
         
         for attempt in range(self.retries + 1):
+            if attempt == 0:
+                logger.info(f"[RAPTOR-LLM] payload_preview={str(payload)[:300]}")
             try:
                 response = requests.post(url, json=payload, headers=headers, timeout=60)
                 response.raise_for_status()

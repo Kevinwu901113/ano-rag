@@ -1,6 +1,7 @@
 import numpy as np
 from typing import List, Optional
 from loguru import logger
+from utils.embedding_utils import EmbeddingEncoder as QwenEmbeddingEncoder
 
 class EmbeddingEncoder:
     def __init__(self, provider: str = "huggingface", model: str = "sentence-transformers/all-MiniLM-L6-v2", device: str = "cpu", **kwargs):
@@ -8,10 +9,20 @@ class EmbeddingEncoder:
         self.model_name = model
         self.device = device
         self._model_instance = None
+        self._qwen_impl = None
         
         logger.info(f"Initializing EmbeddingEncoder: {provider} / {model} on {device}")
         
-        if provider == "huggingface":
+        if provider == "qwen3":
+            logger.info("Using utils.embedding_utils.EmbeddingEncoder for qwen3")
+            self._qwen_impl = QwenEmbeddingEncoder(
+                provider="qwen3",
+                model_name=model,
+                cache_dir=kwargs.get("cache_dir"),
+                device=kwargs.get("device", device),
+                dtype=kwargs.get("dtype"),
+            )
+        elif provider == "huggingface":
             try:
                 from sentence_transformers import SentenceTransformer
                 try:
@@ -43,8 +54,23 @@ class EmbeddingEncoder:
         Encode a list of texts into embeddings.
         Returns a numpy array of shape (len(texts), dimension).
         """
+        if texts and len(texts) > 0:
+            first_text_preview = texts[0][:50]
+            logger.info(f"[EMB] encoding {len(texts)} texts, first={first_text_preview}...")
+        
         if not texts:
             return np.array([])
+
+        if self._qwen_impl is not None:
+            # qwen3 implementation from utils.embedding_utils
+            # It returns unnormalized embeddings by default usually, but let's check implementation
+            # The util returns np.vstack(vectors).astype("float32")
+            emb_array = self._qwen_impl.encode(texts)
+            if normalize_embeddings:
+                norm = np.linalg.norm(emb_array, axis=1, keepdims=True)
+                norm[norm == 0] = 1e-12
+                emb_array = emb_array / norm
+            return emb_array
             
         if self.provider == "huggingface" and self._model_instance:
             return self._model_instance.encode(texts, normalize_embeddings=normalize_embeddings)

@@ -9,28 +9,7 @@ from rag_core.embedding_client import EmbeddingEncoder
 from rag_core.llm_client import LLMChatClient
 from baselines.common.model_clients import get_default_embedding_client, get_default_llm_client
 from baselines.simple_raptor.tree import TreeNode
-
-def _strip_reasoning(answer: str) -> str:
-    """
-    Standard answer cleaning logic reused from other baselines.
-    """
-    text = answer
-    while True:
-        start = text.find("<think>")
-        if start == -1:
-            break
-        end = text.find("</think>", start + 7)
-        if end == -1:
-            text = text[:start] + text[start + 7 :]
-            break
-        text = text[:start] + text[end + len("</think>") :]
-    
-    # Additional common cleaning
-    text = text.strip()
-    # Remove common prefixes
-    if text.lower().startswith("answer:"):
-        text = text[7:].strip()
-    return text
+from utils.answer_cleaner import clean_model_answer
 
 class SimpleRaptorRetriever:
     def __init__(
@@ -170,6 +149,7 @@ Answer:"""
             # Using chat interface
             # Max tokens can be passed if needed, but client handles defaults
             # We use self.llm.chat directly
+            logger.info(f"[RAPTOR] answering qid={question[:50]}..., ctx_len={len(context_block)}")
             answer = self.llm.chat(messages)
             
             # Clean reasoning if present (using local helper which reuses logic)
@@ -185,7 +165,7 @@ Answer:"""
             # For normalization, simple_selfrag just returns the raw answer from LLM usually, 
             # but let's keep _strip_reasoning as it's robust for reasoning models which might be used.
             
-            return _strip_reasoning(answer)
+            return clean_model_answer(answer)
             
         except Exception as e:
             logger.error(f"Raptor answer generation failed: {e}")
