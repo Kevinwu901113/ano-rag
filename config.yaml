@@ -60,6 +60,18 @@ retriever:
     entity_match_threshold: 0.5
     path_consistency_threshold: 0.9
     vector_fallback_enabled: false
+  simple_raptor:
+    # 每个 summary node 最多挂多少叶子 chunk（默认20太小）
+    max_descendants: 128
+
+    # 检索阶段，召回多少个树节点
+    top_k_nodes: 20
+
+    # 最终给 LLM 的 chunk 数量（默认5太少）
+    max_answer_chunks: 16
+
+    # 是否开启“名字感知”rerank
+    enable_name_rerank: true
   embedding:
     enabled: true
     provider: "qwen3"

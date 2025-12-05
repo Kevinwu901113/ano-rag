@@ -1,3 +1,4 @@
+import re
 import pickle
 import faiss
 import numpy as np
@@ -57,8 +58,28 @@ class SimpleRaptorRetriever:
         else:
             self.llm = get_default_llm_client(self.config)
             
-        self.top_k_nodes = top_k or self.raptor_config.get("top_k_nodes", 10)
-        self.max_answer_chunks = self.raptor_config.get("max_answer_chunks", 5)
+        self.top_k_nodes = top_k or int(self.raptor_config.get("top_k_nodes", 10))
+        self.max_answer_chunks = int(self.raptor_config.get("max_answer_chunks", 5))
+        self.enable_name_rerank = bool(self.raptor_config.get("enable_name_rerank", True))
+
+    def _extract_name_from_question(self, question: str) -> Optional[str]:
+        """
+        针对 MIRAGE 这种 "What is X's occupation?" 问法，
+        简单抽出 X 当成实体名；不匹配就返回 None。
+        """
+        q = question.strip()
+        lower = q.lower()
+        # 只处理典型 "What is X's occupation" 格式
+        if not lower.startswith("what is "):
+            return None
+        # 找到 "'s occupation"
+        m = re.search(r"'s occupation", lower)
+        if not m:
+            return None
+        # 截取 "What is " 和 "'s occupation" 之间的部分
+        name = q[len("What is "): m.start()].strip()
+        # 极端情况过滤一下空串
+        return name or None
 
     def retrieve_nodes(self, question: str, top_k: Optional[int] = None) -> List[TreeNode]:
         """
@@ -104,18 +125,39 @@ class SimpleRaptorRetriever:
         
         # 2. Collect Leaf Chunks
         # We prioritize chunks from higher-ranked nodes
-        chunk_ids = []
+        candidate_chunk_ids = []
         seen_chunks = set()
         
         for node in retrieved_nodes:
             for cid in node.descendant_chunk_ids:
-                if cid not in seen_chunks:
-                    chunk_ids.append(cid)
+                if cid not in seen_chunks and cid in self.chunk_store:
+                    candidate_chunk_ids.append(cid)
                     seen_chunks.add(cid)
-                    if len(chunk_ids) >= self.max_answer_chunks:
-                        break
-            if len(chunk_ids) >= self.max_answer_chunks:
-                break
+        
+        if not candidate_chunk_ids:
+            logger.warning("No candidate chunks found for question: {}", question)
+            return "Insufficient evidence"
+        
+        # 3. Name-aware rerank
+        name = self._extract_name_from_question(question) if self.enable_name_rerank else None
+        
+        if name:
+            name_lower = name.lower()
+            
+            def has_name(cid: int) -> bool:
+                text = self.chunk_store.get(cid, "")
+                return name_lower in text.lower()
+                
+            # True 排前面，False 排后面；保持原有顺序的稳定性
+            candidate_chunk_ids.sort(key=lambda cid: (not has_name(cid)))
+            logger.debug(
+                "Name-aware rerank enabled for name='{}'. First candidate snippet: {}",
+                name,
+                self.chunk_store[candidate_chunk_ids[0]][:80].replace("\n", " "),
+            )
+            
+        # 4. Truncate to max_answer_chunks
+        chunk_ids = candidate_chunk_ids[:self.max_answer_chunks]
                 
         # Retrieve chunk text
         context_texts = []
@@ -127,8 +169,10 @@ class SimpleRaptorRetriever:
         context_block = "\n\n".join([f"[{i+1}] {c}" for i, c in enumerate(context_texts)])
         
         # Truncate to avoid 400 error (similar to index.py fix)
-        if len(context_block) > 20000:
-             context_block = context_block[:20000] + "..."
+        # The model has 4096 limit, so we should be conservative.
+        # 12000 chars approx 3000 tokens
+        if len(context_block) > 12000:
+             context_block = context_block[:12000] + "..."
         
         # Construct messages for LLMChatClient
         # Similar to simple_selfrag or naive_rag answer generation

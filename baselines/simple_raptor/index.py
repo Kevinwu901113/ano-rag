@@ -80,9 +80,10 @@ class SimpleRaptorIndexer:
         self.node_ids_map: Dict[int, int] = {} # map faiss index to node_id
         
         # Raptor config
-        self.cluster_size = 16
+        self.raptor_config = config.get("simple_raptor", {}) if config else {}
+        self.cluster_size = self.raptor_config.get("cluster_size", 16)
         self.max_root_nodes = 10
-        self.max_descendants = 20
+        self.max_descendants = int(self.raptor_config.get("max_descendants", 20))
         self.summary_prompt_template = """You are a helpful assistant. Please summarize the following text.
 The summary should be concise and capture the main points. Do not add any explanation or extra words.
 

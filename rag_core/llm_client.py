@@ -66,6 +66,11 @@ class LLMChatClient:
                 logger.info(f"[RAPTOR-LLM] payload_preview={str(payload)[:300]}")
             try:
                 response = requests.post(url, json=payload, headers=headers, timeout=60)
+                if response.status_code == 400:
+                    logger.error(f"400 Bad Request: {response.text}")
+                    # 400 usually means bad payload (too long context?), retrying won't help usually.
+                    # But for now let's just log it and break to avoid wasting time.
+                    return f"[Error: 400 Client Error: {response.text}]"
                 response.raise_for_status()
                 data = response.json()
                 
