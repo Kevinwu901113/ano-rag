@@ -79,7 +79,7 @@ retriever:
     model_path_override: "/home/wjk/models/qwen3-emb"
     cache_dir: "/home/wjk/models/hf-cache"
     download_dir: null
-    device: null
+    device: "cuda"
     dtype: "bfloat16"
     auto_build: true
     offline_index_path: "indexes/faiss/notes.faiss"

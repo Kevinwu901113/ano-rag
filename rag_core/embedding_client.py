@@ -46,8 +46,7 @@ class EmbeddingEncoder:
         elif provider == "mock":
             self._model_instance = None
         else:
-            logger.warning(f"Unknown provider {provider}, falling back to mock or implementation needed.")
-            self._model_instance = None
+            raise ValueError(f"Unknown embedding provider: {provider}")
 
     def encode(self, texts: List[str], normalize_embeddings: bool = True) -> np.ndarray:
         """

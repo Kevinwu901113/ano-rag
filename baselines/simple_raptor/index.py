@@ -69,6 +69,14 @@ class SimpleRaptorIndexer:
         else:
             self.embedding = embedding_client
             
+        logger.info(
+            "[RAPTOR] Embedding client: type=%s, provider=%s, model=%s, device=%s",
+            type(self.embedding),
+            getattr(self.embedding, "provider", None),
+            getattr(self.embedding, "model_name", None),
+            getattr(self.embedding, "device", None),
+        )
+
         if llm_client is None:
             self.llm = get_default_llm_client(config)
         else:

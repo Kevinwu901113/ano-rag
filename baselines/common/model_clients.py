@@ -32,6 +32,9 @@ def get_default_embedding_client(config: Optional[Dict[str, Any]] = None):
         model_name = str(override or base).strip()
         if override:
             logger.info("Embedding model override detected for qwen3: {}", model_name)
+        
+        if device is None:
+             raise ValueError("Device must be explicitly specified ('cuda' or 'cpu') for qwen3 provider.")
 
         dtype = emb_cfg.get("dtype")
         max_len = int(emb_cfg.get("max_len_note", 512))
@@ -49,6 +52,9 @@ def get_default_embedding_client(config: Optional[Dict[str, Any]] = None):
             device=device,
             dtype=dtype,
         )
+
+    if provider not in ("huggingface", "vllm", "mock"):
+        raise ValueError(f"Unsupported embedding provider: {provider}")
 
     # --- Other cases: still use the general implementation from rag_core.embedding_client ---
     known_keys = {"provider", "model", "device"}

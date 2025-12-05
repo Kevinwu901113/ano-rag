@@ -138,7 +138,7 @@ class SimpleRaptorRetriever:
             logger.warning("No candidate chunks found for question: {}", question)
             return "Insufficient evidence"
         
-        # 3. Name-aware rerank
+        # 2) 如果开启 name_rerank，优先把“包含名字字符串”的 chunk 排到前面
         name = self._extract_name_from_question(question) if self.enable_name_rerank else None
         
         if name:
@@ -196,21 +196,62 @@ Answer:"""
             logger.info(f"[RAPTOR] answering qid={question[:50]}..., ctx_len={len(context_block)}")
             answer = self.llm.chat(messages)
             
-            # Clean reasoning if present (using local helper which reuses logic)
-            # But wait, simple_selfrag logic is requested: "prompt 构造和答案归一化方式需与 simple_selfrag 保持一致"
-            # simple_selfrag uses:
-            # prompt_1 = f"""You are a helpful assistant. Use the following context to answer the question.
-            # If the answer is not contained in the context, say you are not sure.
-            # ..."""
-            # And it doesn't seem to use explicit normalization like _strip_reasoning inside the answer method, 
-            # but existing naive baselines often do.
-            # However, to be safe and "consistent", I should follow the exact string if possible.
-            # The requested prompt above matches simple_selfrag.
-            # For normalization, simple_selfrag just returns the raw answer from LLM usually, 
-            # but let's keep _strip_reasoning as it's robust for reasoning models which might be used.
-            
-            return clean_model_answer(answer)
+            # Apply strict filtering rules as requested
+            final_answer = self._filter_answer(answer)
+            return final_answer
             
         except Exception as e:
             logger.error(f"Raptor answer generation failed: {e}")
             return "Insufficient evidence"
+
+    def _filter_answer(self, raw_answer: str) -> str:
+        """
+        Strictly filter the answer to match baseline standards.
+        1. Remove reasoning/thinking process
+        2. Apply keyword blacklist
+        3. Enforce length limits
+        """
+        # 1. Clean reasoning and basic formatting
+        cleaned = clean_model_answer(raw_answer)
+        
+        # 2. Keyword Blacklist (Case-insensitive)
+        # Standard blacklist for "I don't know" responses
+        blacklist = [
+            "i am not sure",
+            "i'm not sure", 
+            "i do not know",
+            "i don't know",
+            "insufficient evidence",
+            "not mentioned",
+            "no information",
+            "cannot answer",
+            "cannot be answered",
+            "context does not contain",
+            "context does not provide",
+            "you are not sure",  # Handle LLM echo of instructions
+            "not sure"
+        ]
+        
+        cleaned_lower = cleaned.lower()
+        
+        # Remove bold markers if present
+        cleaned = cleaned.replace("**", "").strip()
+        
+        for phrase in blacklist:
+            if phrase in cleaned_lower:
+                return "Insufficient evidence"
+
+                
+        # 3. Length Limit
+        # Standard short answer limit (e.g. < 100 chars or < 20 words)
+        # If it's too long, it might be hallucinations or non-compliant
+        if len(cleaned) > 200:
+             logger.warning(f"Answer too long ({len(cleaned)} chars), truncating or rejecting. Answer: {cleaned[:50]}...")
+             # Option A: Reject
+             # return "Insufficient evidence"
+             # Option B: Truncate (risky for correctness)
+             # Let's reject for now to be safe and high-precision
+             return "Insufficient evidence"
+             
+        return cleaned
+
