@@ -38,7 +38,13 @@ class SimpleRaptorRetriever:
         top_k: Optional[int] = None
     ):
         self.config = config or global_config.load_config()
-        self.raptor_config = self.config.get("retriever", {}).get("simple_raptor", {})
+        
+        # Try new nested key first, then legacy key, then empty dict
+        self.raptor_config = (
+            self.config.get("retriever", {}).get("simple_raptor") or 
+            self.config.get("simple_raptor") or 
+            {}
+        )
         
         # Load Index
         logger.info(f"Loading index from {index_path}")

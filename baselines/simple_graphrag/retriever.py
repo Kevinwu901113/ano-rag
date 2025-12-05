@@ -5,6 +5,7 @@ from typing import List, Set, Dict
 from baselines.simple_graphrag.graph import SimpleGraph
 from structrag.llm_client import LLMChatClient
 from loguru import logger
+from utils.answer_cleaner import _strip_reasoning
 
 DEFAULT_SYSTEM_PROMPT = (
     "You are a helpful assistant for multi-hop question answering.\n"
@@ -65,10 +66,7 @@ class GraphRetriever:
             content = response if isinstance(response, str) else response.content
             
             # Handle <think> blocks
-            import re
-            content = re.sub(r"<think>.*?</think>", "", content, flags=re.DOTALL).strip()
-            if content.startswith("<think>"):
-                content = re.sub(r"^<think>.*", "", content, flags=re.DOTALL).strip()
+            content = _strip_reasoning(content)
                 
             logger.debug(f"Entity extraction response: {content}")
             # Try matching markdown code block first
@@ -177,10 +175,7 @@ class GraphRetriever:
             content = response if isinstance(response, str) else response.content
             
             # Handle <think> blocks
-            import re
-            content = re.sub(r"<think>.*?</think>", "", content, flags=re.DOTALL).strip()
-            if content.startswith("<think>"):
-                content = re.sub(r"^<think>.*", "", content, flags=re.DOTALL).strip()
+            content = _strip_reasoning(content)
                 
             try:
                 from utils.rag_normalization import normalize_model_answer

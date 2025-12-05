@@ -11,6 +11,7 @@ from loguru import logger
 
 from config import config as config_loader
 from utils.embedding_utils import EmbeddingEncoder
+from utils.answer_cleaner import _strip_reasoning
 
 try:
     import faiss  # type: ignore
@@ -311,7 +312,8 @@ class NaiveRAGRunner:
         ]
         
         # 4. Generate
-        return self.lm.chat(messages)
+        ans = self.lm.chat(messages)
+        return _strip_reasoning(ans)
 
 def answer(
     question: str, 

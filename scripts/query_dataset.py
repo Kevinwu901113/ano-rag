@@ -19,6 +19,7 @@ if str(ROOT) not in sys.path:
 from baselines.direct_llm import DirectLLMRunner
 from baselines.naive_rag.runner import LLMClient
 from config.config_loader import config as global_config_loader
+from utils.answer_cleaner import _strip_reasoning
 
 
 def _list_workspaces(root: Path, dataset: str) -> List[Path]:
@@ -48,18 +49,7 @@ def _select_workspace(root: Path, dataset: str, new: bool) -> Path:
     return workspaces[-1]
 
 
-def _strip_reasoning(answer: str) -> str:
-    text = answer
-    while True:
-        start = text.find("<think>")
-        if start == -1:
-            break
-        end = text.find("</think>", start + 7)
-        if end == -1:
-            text = text[:start] + text[start + 7 :]
-            break
-        text = text[:start] + text[end + len("</think>") :]
-    return text.strip()
+
 
 
 def load_dataset_file(dataset_name: str, dataset_path: Optional[str]) -> List[dict]:
@@ -171,18 +161,18 @@ def main() -> None:
         return
 
     elif args.baseline == "naive":
-        from baselines.naive_rag import answer as naive_rag_answer
+        from baselines.naive_rag.runner import answer as naive_rag_answer
         
         # Infer index path
-        index_dir = Path(args.indexes_dir) if args.indexes_dir else Path(f"result/{dataset_name}_naive/index")
+        index_dir = Path(args.indexes_dir) if args.indexes_dir else Path(f"result/{dataset_name}_naive")
         if not index_dir.exists():
              # Fallback to standard location inside work_dir if created there, or assume relative
              index_dir = Path(f"result/{dataset_name}_naive")
         
         # Actually naive_rag_answer expects a path to FAISS index usually, let's check signature
         # It usually takes index_path and chunk_store_path
-        index_path = str(index_dir / "naive_rag_index.faiss")
-        chunk_path = str(index_dir / "naive_rag_chunk_store.pkl")
+        index_path = str(index_dir / "index.faiss")
+        chunk_path = str(index_dir / "chunks.jsonl")
         
         logger.info(f"Running Naive RAG with index={index_path}")
 
@@ -290,16 +280,30 @@ def main() -> None:
     elif args.baseline == "graphrag":
         from baselines.simple_graphrag import answer as graphrag_answer
         
-        # GraphRAG might expect different index structure
         index_dir = Path(args.indexes_dir) if args.indexes_dir else Path(f"result/{dataset_name}_graphrag")
-        # Assuming graphrag uses some specific files, but the simple implementation might just load a graph pickle
-        # Let's assume standard params for now or check implementation
-        # simple_graphrag.answer(question, graph_path=..., ...)
-        graph_path = str(index_dir / "graph.pkl") # Hypothetical
+        graph_path = str(index_dir / "graph.pkl")
+        chunk_store_path = str(index_dir / "chunk_store.pkl")
         
-        logger.info(f"Running GraphRAG (Not fully implemented path resolution)")
-        # Placeholder logic
-        pass
+        # Set global config for LLM
+        global_config_loader.set("lmstudio.endpoint", args.lmstudio_endpoint)
+        global_config_loader.set("lmstudio.model", args.lmstudio_model)
+        
+        logger.info(f"Running GraphRAG with graph={graph_path}")
+        
+        for i, item in enumerate(dataset):
+            question = item.get("query") or item.get("question")
+            qid = item.get("query_id") or str(i)
+            try:
+                ans = graphrag_answer(
+                    question, 
+                    graph_path=graph_path, 
+                    chunk_store_path=chunk_store_path
+                )
+                clean_ans = _strip_reasoning(ans)
+                results.append({"query_id": qid, "question": question, "answer": clean_ans, "raw_answer": ans})
+                qa_lines.append(f"{question}\t{' '.join(clean_ans.split())}")
+            except Exception as e:
+                logger.error(f"Error Q{i}: {e}")
 
     elif args.baseline == "mirage":
         # Original MIRAGE logic

@@ -88,7 +88,13 @@ class SimpleRaptorIndexer:
         self.node_ids_map: Dict[int, int] = {} # map faiss index to node_id
         
         # Raptor config
-        self.raptor_config = config.get("simple_raptor", {}) if config else {}
+        # Try new nested key first, then legacy key, then empty dict
+        self.raptor_config = (
+            config.get("retriever", {}).get("simple_raptor") or 
+            config.get("simple_raptor") or 
+            {}
+        ) if config else {}
+        
         self.cluster_size = self.raptor_config.get("cluster_size", 16)
         self.max_root_nodes = 10
         self.max_descendants = int(self.raptor_config.get("max_descendants", 20))

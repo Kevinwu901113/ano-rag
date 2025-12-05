@@ -10,25 +10,7 @@ from loguru import logger
 
 from baselines.naive_rag import NaiveIndex
 from config import config as config_loader
-
-def _enforce_short_answer(text: str) -> str:
-    """Helper to truncate or normalize short answer."""
-    # Implement simple logic or import from somewhere else if needed
-    # For now, just basic cleanup
-    return text.strip()
-
-def _strip_reasoning(text: str) -> str:
-    output = text or ""
-    while True:
-        start = output.find("<think>")
-        if start == -1:
-            break
-        end = output.find("</think>", start + len("<think>"))
-        if end == -1:
-            output = output[:start] + output[start + len("<think>") :]
-            break
-        output = output[:start] + output[end + len("</think>") :]
-    return output.strip()
+from utils.answer_cleaner import _enforce_short_answer, _strip_reasoning
 
 
 FID_PROMPT_TEMPLATE = """You are a question answering system.

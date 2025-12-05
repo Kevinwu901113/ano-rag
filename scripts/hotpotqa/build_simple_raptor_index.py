@@ -39,11 +39,24 @@ def main() -> None:
         global_config.set("lmstudio.model", args.lmstudio_model)
         
     # Update raptor specific config
-    raptor_cfg = global_config.get("baselines.simple_raptor", {}) or {}
+    # Ensure we update the config key that both Indexer and Retriever will actually read.
+    # SimpleRaptorRetriever reads: config.get("retriever", {}).get("simple_raptor", {})
+    # SimpleRaptorIndexer reads: config.get("simple_raptor", {})  <-- We should align this one too if possible, or set both.
+    
+    # Let's set "retriever.simple_raptor" as the source of truth for these params
+    retriever_cfg = global_config.get("retriever", {}) or {}
+    raptor_cfg = retriever_cfg.get("simple_raptor", {}) or {}
+    
     raptor_cfg["max_descendants"] = args.max_descendants
     raptor_cfg["top_k_nodes"] = args.top_k_nodes
     raptor_cfg["max_answer_chunks"] = args.max_answer_chunks
-    global_config.set("baselines.simple_raptor", raptor_cfg)
+    
+    # Write back to retriever.simple_raptor
+    retriever_cfg["simple_raptor"] = raptor_cfg
+    global_config.set("retriever", retriever_cfg)
+    
+    # Also set the top-level key if Indexer uses it directly (legacy check)
+    global_config.set("simple_raptor", raptor_cfg)
 
     # Initialize Indexer
     # We can just manually construct the client here since we have the values
