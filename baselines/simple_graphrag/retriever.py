@@ -17,9 +17,12 @@ DEFAULT_SYSTEM_PROMPT = (
 PROMPT_TEMPLATE = """Context:
 {context}
 
-Question: {question}
+Question:
+{question}
 
-Answer the question with a short phrase. If the answer is not contained in the context, say "unknown"."""
+Answer the question with a short phrase.
+If the answer is not contained in the context, say "unknown".
+"""
 
 class GraphRetriever:
     def __init__(self, graph_path: str, chunk_store_path: str, llm_client: LLMChatClient):

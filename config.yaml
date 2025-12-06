@@ -53,6 +53,11 @@ structrag:
   top_k: 10
   llm_model: "openai/gpt-oss-20b"
 
+relrag:
+  dataset: "hotpotqa"
+  top_k: 20
+  max_context_tokens: 4096
+
 retriever:
   structured:
     enabled: true

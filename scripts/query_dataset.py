@@ -161,27 +161,41 @@ def main() -> None:
         return
 
     elif args.baseline == "naive":
-        from baselines.naive_rag.runner import answer as naive_rag_answer
-        
+        from baselines.naive_rag.runner import NaiveRAGRunner
         # Infer index path
         index_dir = Path(args.indexes_dir) if args.indexes_dir else Path(f"result/{dataset_name}_naive")
-        if not index_dir.exists():
-             # Fallback to standard location inside work_dir if created there, or assume relative
-             index_dir = Path(f"result/{dataset_name}_naive")
-        
-        # Actually naive_rag_answer expects a path to FAISS index usually, let's check signature
-        # It usually takes index_path and chunk_store_path
         index_path = str(index_dir / "index.faiss")
         chunk_path = str(index_dir / "chunks.jsonl")
+
+        runner = NaiveRAGRunner(
+            index_path=index_path,
+            chunks_path=chunk_path,
+            lm_endpoint=args.lmstudio_endpoint,
+            lm_model=args.lmstudio_model,
+        )
+        answer_func = runner.answer
         
-        logger.info(f"Running Naive RAG with index={index_path}")
+        for i, item in enumerate(dataset):
+            question = item.get("query") or item.get("question")
+            qid = item.get("query_id") or str(i)
+            try:
+                ans = answer_func(question)
+                clean_ans = _strip_reasoning(ans)
+                results.append({"query_id": qid, "question": question, "answer": clean_ans, "raw_answer": ans})
+                qa_lines.append(f"{question}\t{' '.join(clean_ans.split())}")
+            except Exception as e:
+                logger.error(f"Error Q{i}: {e}")
+
+    elif args.baseline == "relrag":
+        from baselines.simple_graphrag.runner import answer as relrag_answer
+        index_dir = Path(args.indexes_dir) if args.indexes_dir else Path(f"result/{dataset_name}_relrag")
+        logger.info(f"Running RelRAG with index_dir={index_dir}")
 
         for i, item in enumerate(dataset):
             question = item.get("query") or item.get("question")
             qid = item.get("query_id") or str(i)
             try:
-                # Note: naive_rag_answer signature might vary, assuming similar to vanilla
-                ans = naive_rag_answer(question, index_path=index_path, chunk_store_path=chunk_path, llm_client=llm_client)
+                ans = relrag_answer(question, index_dir=str(index_dir))
                 clean_ans = _strip_reasoning(ans)
                 results.append({"query_id": qid, "question": question, "answer": clean_ans, "raw_answer": ans})
                 qa_lines.append(f"{question}\t{' '.join(clean_ans.split())}")
