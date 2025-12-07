@@ -70,9 +70,19 @@ def load_dataset_file(dataset_name: str, dataset_path: Optional[str]) -> List[di
     with open(path, "r", encoding="utf-8") as handle:
         dataset = json.load(handle)
         
-    # Normalize dataset to list of dicts with id, question, answer
-    # HotpotQA/Mirage format expected
     return dataset
+
+def load_hotpotqa_distractor(path: Path) -> List[dict]:
+    """
+    Load HotpotQA distractor dataset which includes full context.
+    Structure: id, question, answer, context, supporting_facts
+    """
+    if not path.exists():
+        raise FileNotFoundError(f"HotpotQA dataset not found at {path}")
+        
+    with open(path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    return data
 
 
 def main() -> None:
@@ -106,8 +116,11 @@ def main() -> None:
     if args.vanilla_rag: args.baseline = "vanilla"
     if args.simple_raptor: args.baseline = "raptor"
 
-    dataset_name = args.dataset
-    dataset = load_dataset_file(dataset_name, args.dataset_path)
+    if args.dataset == "hotpotqa":
+        dataset_path = args.dataset_path if args.dataset_path else "data/hotpotqa/dataset_distractor.json"
+        dataset = load_hotpotqa_distractor(Path(dataset_path))
+    else:
+        dataset = load_dataset_file(dataset_name, args.dataset_path)
 
     result_root = Path(args.result_root)
     if args.work_dir:
@@ -143,48 +156,123 @@ def main() -> None:
     # --- BASELINE RUNNERS ---
 
     if args.baseline == "direct":
-        runner = DirectLLMRunner(
-            lm_endpoint=args.lmstudio_endpoint,
-            lm_model=args.lmstudio_model,
-            temperature=args.temperature,
-            max_tokens=args.max_new_tokens,
-        )
-        artifacts = runner.run_dataset(dataset, work_dir=str(work_dir))
-        logger.info("Direct LLM baseline complete: {}", artifacts.get("qa"))
-        # DirectLLMRunner saves its own files, we just copy/reference them
-        if output_path and Path(artifacts["answers_json"]) != output_path:
-            output_path.parent.mkdir(parents=True, exist_ok=True)
-            output_path.write_text(Path(artifacts["answers_json"]).read_text(encoding="utf-8"), encoding="utf-8")
-        if qa_log_path and Path(artifacts["qa"]) != qa_log_path:
-            qa_log_path.parent.mkdir(parents=True, exist_ok=True)
-            qa_log_path.write_text(Path(artifacts["qa"]).read_text(encoding="utf-8"), encoding="utf-8")
-        return
+        # Handle HotpotQA distractor setting for direct/naive baseline by constructing context from paragraphs
+        if args.dataset == "hotpotqa":
+             # For HotpotQA, we construct context from the 10 distractor paragraphs
+            for i, item in enumerate(dataset):
+                question = item.get("question")
+                qid = item.get("id") or str(i)
+                
+                # Construct context from title + sentences
+                ctx_titles = item["context"]["title"]
+                ctx_sents = item["context"]["sentences"]
+                
+                paragraphs = []
+                for title, sents in zip(ctx_titles, ctx_sents):
+                    para_text = f"Title: {title}\n" + " ".join(sents)
+                    paragraphs.append(para_text)
+                
+                context_block = "\n\n".join(paragraphs)
+                
+                prompt = f"""You are answering a multi-hop question based on the provided documents.
+    
+Question:
+{question}
+
+Context:
+{context_block}
+
+Answer with a short phrase. If the answer is not in the context, say "unknown"."""
+                
+                try:
+                    ans = llm_client.generate(prompt)
+                    clean_ans = _strip_reasoning(ans)
+                    results.append({"query_id": qid, "question": question, "answer": clean_ans, "raw_answer": ans})
+                    qa_lines.append(f"{question}\t{' '.join(clean_ans.split())}")
+                except Exception as e:
+                    logger.error(f"Error Q{i}: {e}")
+
+        else:
+            runner = DirectLLMRunner(
+                lm_endpoint=args.lmstudio_endpoint,
+                lm_model=args.lmstudio_model,
+                temperature=args.temperature,
+                max_tokens=args.max_new_tokens,
+            )
+            artifacts = runner.run_dataset(dataset, work_dir=str(work_dir))
+            logger.info("Direct LLM baseline complete: {}", artifacts.get("qa"))
+            # DirectLLMRunner saves its own files, we just copy/reference them
+            if output_path and Path(artifacts["answers_json"]) != output_path:
+                output_path.parent.mkdir(parents=True, exist_ok=True)
+                output_path.write_text(Path(artifacts["answers_json"]).read_text(encoding="utf-8"), encoding="utf-8")
+            if qa_log_path and Path(artifacts["qa"]) != qa_log_path:
+                qa_log_path.parent.mkdir(parents=True, exist_ok=True)
+                qa_log_path.write_text(Path(artifacts["qa"]).read_text(encoding="utf-8"), encoding="utf-8")
+            return
 
     elif args.baseline == "naive":
-        from baselines.naive_rag.runner import NaiveRAGRunner
-        # Infer index path
-        index_dir = Path(args.indexes_dir) if args.indexes_dir else Path(f"result/{dataset_name}_naive")
-        index_path = str(index_dir / "index.faiss")
-        chunk_path = str(index_dir / "chunks.jsonl")
+        if args.dataset == "hotpotqa":
+             # Re-use the same logic as direct for HotpotQA distractor (as per instructions: "10 paragraphs all fed in")
+             # Essentially treating naive/vanilla/etc as "RAG over 10 docs" or just "Long Context"
+             # Since the instruction says: "All baselines use '10 paragraphs fed in + different prompt/structure'"
+             # But simplest start is just feed them all.
+             
+            for i, item in enumerate(dataset):
+                question = item.get("question")
+                qid = item.get("id") or str(i)
+                
+                ctx_titles = item["context"]["title"]
+                ctx_sents = item["context"]["sentences"]
+                
+                paragraphs = []
+                for title, sents in zip(ctx_titles, ctx_sents):
+                    para_text = f"Title: {title}\n" + " ".join(sents)
+                    paragraphs.append(para_text)
+                
+                context_block = "\n\n".join(paragraphs)
+                
+                prompt = f"""You are answering a multi-hop question.
+    
+Question:
+{question}
 
-        runner = NaiveRAGRunner(
-            index_path=index_path,
-            chunks_path=chunk_path,
-            lm_endpoint=args.lmstudio_endpoint,
-            lm_model=args.lmstudio_model,
-        )
-        answer_func = runner.answer
-        
-        for i, item in enumerate(dataset):
-            question = item.get("query") or item.get("question")
-            qid = item.get("query_id") or str(i)
-            try:
-                ans = answer_func(question)
-                clean_ans = _strip_reasoning(ans)
-                results.append({"query_id": qid, "question": question, "answer": clean_ans, "raw_answer": ans})
-                qa_lines.append(f"{question}\t{' '.join(clean_ans.split())}")
-            except Exception as e:
-                logger.error(f"Error Q{i}: {e}")
+Context:
+{context_block}
+
+Answer with a short phrase. If the answer is not in the context, say "unknown"."""
+
+                try:
+                    ans = llm_client.generate(prompt)
+                    clean_ans = _strip_reasoning(ans)
+                    results.append({"query_id": qid, "question": question, "answer": clean_ans, "raw_answer": ans})
+                    qa_lines.append(f"{question}\t{' '.join(clean_ans.split())}")
+                except Exception as e:
+                    logger.error(f"Error Q{i}: {e}")
+        else:
+            from baselines.naive_rag.runner import NaiveRAGRunner
+            # Infer index path
+            index_dir = Path(args.indexes_dir) if args.indexes_dir else Path(f"result/{dataset_name}_naive")
+            index_path = str(index_dir / "index.faiss")
+            chunk_path = str(index_dir / "chunks.jsonl")
+
+            runner = NaiveRAGRunner(
+                index_path=index_path,
+                chunks_path=chunk_path,
+                lm_endpoint=args.lmstudio_endpoint,
+                lm_model=args.lmstudio_model,
+            )
+            answer_func = runner.answer
+            
+            for i, item in enumerate(dataset):
+                question = item.get("query") or item.get("question")
+                qid = item.get("query_id") or str(i)
+                try:
+                    ans = answer_func(question)
+                    clean_ans = _strip_reasoning(ans)
+                    results.append({"query_id": qid, "question": question, "answer": clean_ans, "raw_answer": ans})
+                    qa_lines.append(f"{question}\t{' '.join(clean_ans.split())}")
+                except Exception as e:
+                    logger.error(f"Error Q{i}: {e}")
 
     elif args.baseline == "relrag":
         from baselines.simple_graphrag.runner import answer as relrag_answer
