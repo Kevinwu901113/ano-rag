@@ -106,6 +106,7 @@ def main() -> None:
     parser.add_argument("--limit", type=int, default=5)
     parser.add_argument("--out", default=None, help="Output JSON path")
     parser.add_argument("--qa-log", default=None, help="Optional plain text QA log path (question \t answer)")
+    parser.add_argument("--hotpot-eval-output", default=None, help="Path to output official HotpotQA prediction JSON")
     parser.add_argument("--new", action="store_true", help="Force create a new workspace copy")
     parser.add_argument("--temperature", type=float, default=None, help="Override LLM temperature")
     parser.add_argument("--max-new-tokens", type=int, default=None, help="Override LLM max new tokens")
@@ -208,6 +209,29 @@ Answer with a short phrase. If the answer is not in the context, say "unknown"."
             if qa_log_path and Path(artifacts["qa"]) != qa_log_path:
                 qa_log_path.parent.mkdir(parents=True, exist_ok=True)
                 qa_log_path.write_text(Path(artifacts["qa"]).read_text(encoding="utf-8"), encoding="utf-8")
+            
+            # DirectLLMRunner produces "answers_jsonl" which has raw records. We need to convert to Hotpot eval format if requested
+            if args.hotpot_eval_output:
+                from collections import OrderedDict
+                pred_answers = OrderedDict()
+                # Load results
+                with open(artifacts["answers_json"], "r", encoding="utf-8") as f:
+                    final_res = json.load(f)
+                for item in final_res:
+                    qid = item.get("query_id") or item.get("id")
+                    ans = item.get("answer") or ""
+                    pred_answers[qid] = ans
+                
+                eval_out = {
+                    "answer": pred_answers,
+                    "sp": {qid: [] for qid in pred_answers.keys()}
+                }
+                out_p = Path(args.hotpot_eval_output)
+                out_p.parent.mkdir(parents=True, exist_ok=True)
+                with open(out_p, "w", encoding="utf-8") as f:
+                    json.dump(eval_out, f, ensure_ascii=False)
+                logger.info("Saved HotpotQA evaluation prediction to {}", out_p)
+                
             return
 
     elif args.baseline == "naive":
@@ -445,16 +469,40 @@ Answer with a short phrase. If the answer is not in the context, say "unknown"."
             })
             qa_lines.append(f"{question}\t{clean_ans}")
 
-    # Save results
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(output_path, "w", encoding="utf-8") as handle:
-        json.dump(results, handle, ensure_ascii=False, indent=2)
-    logger.info("Wrote {} answers to {}", len(results), output_path)
+    # --- Save results ---
+    if results:
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(output_path, "w", encoding="utf-8") as f:
+            json.dump(results, f, ensure_ascii=False, indent=2)
+        logger.info("Saved JSON results to {}", output_path)
 
-    if qa_log_path:
         qa_log_path.parent.mkdir(parents=True, exist_ok=True)
-        qa_log_path.write_text("\n".join(qa_lines), encoding="utf-8")
-        logger.info("Wrote QA log to {}", qa_log_path)
+        with open(qa_log_path, "w", encoding="utf-8") as f:
+            f.write("\n".join(qa_lines))
+        logger.info("Saved QA log to {}", qa_log_path)
+        
+        # Save official HotpotQA prediction format if requested
+        if args.hotpot_eval_output:
+            from collections import OrderedDict
+            pred_answers = OrderedDict()
+            for item in results:
+                qid = item.get("query_id") or item.get("id")
+                # Ensure qid is string as per HotpotQA specs
+                qid = str(qid)
+                ans = item.get("answer") or ""
+                pred_answers[qid] = ans
+            
+            eval_out = {
+                "answer": pred_answers,
+                "sp": {qid: [] for qid in pred_answers.keys()}
+            }
+            out_p = Path(args.hotpot_eval_output)
+            out_p.parent.mkdir(parents=True, exist_ok=True)
+            with open(out_p, "w", encoding="utf-8") as f:
+                json.dump(eval_out, f, ensure_ascii=False)
+            logger.info("Saved HotpotQA evaluation prediction to {}", out_p)
+
+    logger.info("Done.")
 
 
 if __name__ == "__main__":

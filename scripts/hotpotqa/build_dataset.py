@@ -26,6 +26,7 @@ def main():
     for item in dataset:
         record = {
             "id": item["id"],
+            "_id": item["id"],  # Add _id for official evaluation script compatibility
             "question": item["question"],
             "answer": item["answer"],
             "context": {
