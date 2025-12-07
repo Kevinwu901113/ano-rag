@@ -80,7 +80,7 @@ def main() -> None:
                      # Reconstruct from sentences
                      sentences = item["sentences"]
                      if isinstance(sentences, list):
-                         text = "".join(sentences)
+                         text = " ".join(sentences)
                 
                 if not text:
                      continue

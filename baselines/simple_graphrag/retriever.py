@@ -24,12 +24,22 @@ Answer the question with a short phrase.
 If the answer is not contained in the context, say "unknown".
 """
 
+from config.config_loader import config as global_config
+
 class GraphRetriever:
     def __init__(self, graph_path: str, chunk_store_path: str, llm_client: LLMChatClient):
         self.graph = SimpleGraph.load(graph_path)
         with open(chunk_store_path, 'rb') as f:
             self.chunk_store = pickle.load(f)
         self.llm_client = llm_client
+        
+        # Load config for relrag parameters
+        cfg = global_config.load_config()
+        self.relrag_cfg = cfg.get("relrag", {})
+        self.top_k = int(self.relrag_cfg.get("top_k", 15))
+        # max_context_tokens usage is implicit via chunk limit, 
+        # but we can use it to limit chunk count dynamically if we had a tokenizer.
+        # For now, we'll just use top_k as chunk limit.
 
     def answer(self, question: str) -> str:
         # 1. Extract entities from query
@@ -47,7 +57,7 @@ class GraphRetriever:
         # 4. Retrieve chunks
         chunks = [self.chunk_store[cid] for cid in relevant_chunk_ids if cid in self.chunk_store]
         # Limit chunks to avoid context overflow
-        chunks = chunks[:15]
+        chunks = chunks[:self.top_k]
         
         # 5. Generate answer
         return self._generate_answer(question, chunks)
