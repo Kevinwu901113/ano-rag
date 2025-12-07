@@ -107,6 +107,7 @@ def main() -> None:
     parser.add_argument("--out", default=None, help="Output JSON path")
     parser.add_argument("--qa-log", default=None, help="Optional plain text QA log path (question \t answer)")
     parser.add_argument("--hotpot-eval-output", default=None, help="Path to output official HotpotQA prediction JSON")
+    parser.add_argument("--include-gold-sp", action="store_true", help="Include gold supporting facts in prediction file (upper bound for SP)")
     parser.add_argument("--new", action="store_true", help="Force create a new workspace copy")
     parser.add_argument("--temperature", type=float, default=None, help="Override LLM temperature")
     parser.add_argument("--max-new-tokens", type=int, default=None, help="Override LLM max new tokens")
@@ -120,6 +121,10 @@ def main() -> None:
     if args.dataset == "hotpotqa":
         dataset_path = args.dataset_path if args.dataset_path else "data/hotpotqa/dataset_distractor.json"
         dataset = load_hotpotqa_distractor(Path(dataset_path))
+        # Ensure consistency by preferring _id if available (official format)
+        for item in dataset:
+            if "_id" not in item and "id" in item:
+                item["_id"] = item["id"]
     else:
         dataset = load_dataset_file(dataset_name, args.dataset_path)
 
@@ -188,7 +193,9 @@ Answer with a short phrase. If the answer is not in the context, say "unknown"."
                 try:
                     ans = llm_client.generate(prompt)
                     clean_ans = _strip_reasoning(ans)
-                    results.append({"query_id": qid, "question": question, "answer": clean_ans, "raw_answer": ans})
+                    # Prefer _id for HotpotQA
+                    res_id = item.get("_id") or item.get("id") or str(i)
+                    results.append({"query_id": res_id, "question": question, "answer": clean_ans, "raw_answer": ans})
                     qa_lines.append(f"{question}\t{' '.join(clean_ans.split())}")
                 except Exception as e:
                     logger.error(f"Error Q{i}: {e}")
@@ -212,6 +219,9 @@ Answer with a short phrase. If the answer is not in the context, say "unknown"."
             
             # DirectLLMRunner produces "answers_jsonl" which has raw records. We need to convert to Hotpot eval format if requested
             if args.hotpot_eval_output:
+                if args.dataset != "hotpotqa":
+                    logger.warning("Using --hotpot-eval-output with a non-HotpotQA dataset. Ensure this is intended.")
+
                 from collections import OrderedDict
                 pred_answers = OrderedDict()
                 # Load results
@@ -243,7 +253,8 @@ Answer with a short phrase. If the answer is not in the context, say "unknown"."
              
             for i, item in enumerate(dataset):
                 question = item.get("question")
-                qid = item.get("id") or str(i)
+                # Prefer _id for HotpotQA
+                qid = item.get("_id") or item.get("id") or str(i)
                 
                 ctx_titles = item["context"]["title"]
                 ctx_sents = item["context"]["sentences"]
@@ -268,7 +279,9 @@ Answer with a short phrase. If the answer is not in the context, say "unknown"."
                 try:
                     ans = llm_client.generate(prompt)
                     clean_ans = _strip_reasoning(ans)
-                    results.append({"query_id": qid, "question": question, "answer": clean_ans, "raw_answer": ans})
+                    # Prefer _id for HotpotQA
+                    res_id = item.get("_id") or item.get("id") or str(i)
+                    results.append({"query_id": res_id, "question": question, "answer": clean_ans, "raw_answer": ans})
                     qa_lines.append(f"{question}\t{' '.join(clean_ans.split())}")
                 except Exception as e:
                     logger.error(f"Error Q{i}: {e}")
@@ -481,26 +494,54 @@ Answer with a short phrase. If the answer is not in the context, say "unknown"."
             f.write("\n".join(qa_lines))
         logger.info("Saved QA log to {}", qa_log_path)
         
-        # Save official HotpotQA prediction format if requested
-        if args.hotpot_eval_output:
-            from collections import OrderedDict
-            pred_answers = OrderedDict()
-            for item in results:
-                qid = item.get("query_id") or item.get("id")
-                # Ensure qid is string as per HotpotQA specs
+    if args.hotpot_eval_output:
+        if args.dataset != "hotpotqa":
+            logger.warning("Using --hotpot-eval-output with a non-HotpotQA dataset. Ensure this is intended.")
+        
+        from collections import OrderedDict
+        pred_answers = OrderedDict()
+        pred_sp = OrderedDict()
+        
+        # Build a lookup for gold SP if requested
+        gold_sp_map = {}
+        if args.include_gold_sp:
+            for item in dataset:
+                qid = item.get("_id") or item.get("id")
                 qid = str(qid)
-                ans = item.get("answer") or ""
-                pred_answers[qid] = ans
-            
-            eval_out = {
-                "answer": pred_answers,
-                "sp": {qid: [] for qid in pred_answers.keys()}
-            }
-            out_p = Path(args.hotpot_eval_output)
-            out_p.parent.mkdir(parents=True, exist_ok=True)
-            with open(out_p, "w", encoding="utf-8") as f:
-                json.dump(eval_out, f, ensure_ascii=False)
-            logger.info("Saved HotpotQA evaluation prediction to {}", out_p)
+                # Format: [ [title, sent_id], ... ]
+                # In HF dataset, it is {"title": [...], "sent_id": [...]}
+                # In official json, it is [ [title, sent_id], ... ]
+                # We need to adapt based on source format
+                sp_raw = item.get("supporting_facts")
+                sp_list = []
+                if isinstance(sp_raw, dict): # HF format
+                     titles = sp_raw.get("title", [])
+                     sent_ids = sp_raw.get("sent_id", [])
+                     for t, s in zip(titles, sent_ids):
+                         sp_list.append([t, s])
+                elif isinstance(sp_raw, list): # Official format
+                     sp_list = sp_raw
+                gold_sp_map[qid] = sp_list
+
+        for item in results:
+            # For HotpotQA, qid is now unified to _id (which is same as id)
+            # For other datasets, it might be query_id or id.
+            # We trust 'query_id' field in results list which we populated above.
+            qid = item.get("query_id") or item.get("id")
+            qid = str(qid)
+            ans = item.get("answer") or ""
+            pred_answers[qid] = ans
+            pred_sp[qid] = gold_sp_map.get(qid, []) if args.include_gold_sp else []
+        
+        eval_out = {
+            "answer": pred_answers,
+            "sp": pred_sp
+        }
+        out_p = Path(args.hotpot_eval_output)
+        out_p.parent.mkdir(parents=True, exist_ok=True)
+        with open(out_p, "w", encoding="utf-8") as f:
+            json.dump(eval_out, f, ensure_ascii=False)
+        logger.info("Saved HotpotQA evaluation prediction to {}", out_p)
 
     logger.info("Done.")
 
