@@ -2,7 +2,66 @@
 
 本文档整理了 `baselines` 目录下各个 RAG 基线模型的调用方法，包括索引构建（Index Building）和推理（Inference）两个阶段。
 
-所有命令均假设在项目根目录下执行，且已正确配置 `config.yaml`（特别是 LLM 和 Embedding 模型路径/端口）。
+## HotpotQA Distractor Setting
+
+HotpotQA Distractor setting has been unified to strictly use only the provided 10 paragraphs per question. The following scripts implement this restricted setting:
+
+### 1. Direct / Naive
+Concatenates 10 paragraphs and prompts LLM directly.
+```bash
+python scripts/hotpotqa/baselines/run_direct.py \
+  --dataset path/to/hotpot_dev_distractor_v1.json \
+  --output path/to/pred.json \
+  --lm-endpoint http://localhost:1234/v1 \
+  --lm-model model-id
+```
+
+### 2. Vanilla RAG (Distractor)
+Builds an in-memory index for the 10 paragraphs and retrieves top-k before prompting.
+```bash
+python scripts/hotpotqa/baselines/run_vanilla_rag.py \
+  --dataset path/to/hotpot_dev_distractor_v1.json \
+  --output path/to/pred.json \
+  --topk 3
+```
+
+### 3. Self-RAG (Distractor)
+Retrieves from 10 paragraphs, then uses LLM reflection to select best paragraphs.
+```bash
+python scripts/hotpotqa/baselines/run_selfrag.py \
+  --dataset path/to/hotpot_dev_distractor_v1.json \
+  --output path/to/pred.json
+```
+
+### 4. Raptor (Distractor)
+Clusters the 10 paragraphs into a mini-tree (Leaves -> Summaries) and retrieves.
+```bash
+python scripts/hotpotqa/baselines/run_raptor.py \
+  --dataset path/to/hotpot_dev_distractor_v1.json \
+  --output path/to/pred.json
+```
+
+### 5. GraphRAG (Distractor)
+Extracts triples from 10 paragraphs to build a mini-graph, then answers.
+```bash
+python scripts/hotpotqa/baselines/run_graphrag.py \
+  --dataset path/to/hotpot_dev_distractor_v1.json \
+  --output path/to/pred.json
+```
+
+### 6. RelRAG (Distractor)
+Builds a relation graph between paragraphs (similarity-based) and uses centrality to re-rank.
+```bash
+python scripts/hotpotqa/baselines/run_relrag.py \
+  --dataset path/to/hotpot_dev_distractor_v1.json \
+  --output path/to/pred.json
+```
+
+---
+
+## MIRAGE / Full-Wiki Baselines
+
+(Below are existing instructions for full-retrieval settings)
 
 ## 1. Direct LLM (No Retrieval)
 
@@ -198,38 +257,4 @@ retriever = GraphRetriever(
     chunk_store_path="path/to/chunk_store.pkl",
     llm_client=llm_client
 )
-
-answer = retriever.answer("Question")
-```
-
-## 7. Vanilla RAG
-
-标准的 RAG 实现。
-
-**构建索引 (Indexing):**
-
-```python
-from baselines.vanilla_rag.index import VanillaRAGIndexer
-
-indexer = VanillaRAGIndexer()
-# docs: dict {doc_id: text}
-# build 方法参数明确为 output_index_path 和 output_chunks_path
-indexer.build(
-    docs, 
-    output_index_path="data/indices/vanilla/index.faiss",
-    output_chunks_path="data/indices/vanilla/chunk_store.pkl"
-)
-```
-
-**推理 (Inference):**
-
-```python
-from baselines.vanilla_rag.retriever import VanillaRAGRetriever
-
-retriever = VanillaRAGRetriever(
-    index_path="data/indices/vanilla/index.faiss",
-    chunk_store_path="data/indices/vanilla/chunk_store.pkl"
-)
-
-hits = retriever.retrieve("Question", top_k=5)
 ```

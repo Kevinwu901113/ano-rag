@@ -126,7 +126,7 @@ def main() -> None:
             if "_id" not in item and "id" in item:
                 item["_id"] = item["id"]
     else:
-        dataset = load_dataset_file(dataset_name, args.dataset_path)
+        dataset = load_dataset_file(args.dataset, args.dataset_path)
 
     result_root = Path(args.result_root)
     if args.work_dir:
@@ -134,9 +134,9 @@ def main() -> None:
         work_dir.mkdir(parents=True, exist_ok=True)
     else:
         # Include baseline in workspace name if not default
-        ws_name = dataset_name
+        ws_name = args.dataset
         if args.baseline != "mirage":
-             ws_name = f"{dataset_name}_{args.baseline}"
+             ws_name = f"{args.dataset}_{args.baseline}"
         
         result_root.mkdir(parents=True, exist_ok=True)
         work_dir = _select_workspace(result_root, ws_name, args.new)
@@ -191,7 +191,9 @@ Context:
 Answer with a short phrase. If the answer is not in the context, say "unknown"."""
                 
                 try:
-                    ans = llm_client.generate(prompt)
+                    ans = llm_client.chat([
+                        {"role": "user", "content": prompt}
+                    ])
                     clean_ans = _strip_reasoning(ans)
                     # Prefer _id for HotpotQA
                     res_id = item.get("_id") or item.get("id") or str(i)
@@ -277,7 +279,9 @@ Context:
 Answer with a short phrase. If the answer is not in the context, say "unknown"."""
 
                 try:
-                    ans = llm_client.generate(prompt)
+                    ans = llm_client.chat([
+                        {"role": "user", "content": prompt}
+                    ])
                     clean_ans = _strip_reasoning(ans)
                     # Prefer _id for HotpotQA
                     res_id = item.get("_id") or item.get("id") or str(i)
@@ -313,7 +317,7 @@ Answer with a short phrase. If the answer is not in the context, say "unknown"."
 
     elif args.baseline == "relrag":
         from baselines.simple_graphrag.runner import answer as relrag_answer
-        index_dir = Path(args.indexes_dir) if args.indexes_dir else Path(f"result/{dataset_name}_relrag")
+        index_dir = Path(args.indexes_dir) if args.indexes_dir else Path(f"result/{args.dataset}_relrag")
         logger.info(f"Running RelRAG with index_dir={index_dir}")
 
         for i, item in enumerate(dataset):
@@ -330,7 +334,7 @@ Answer with a short phrase. If the answer is not in the context, say "unknown"."
     elif args.baseline == "vanilla":
         from baselines.vanilla_rag import answer as vanilla_rag_answer
         
-        index_dir = Path(args.indexes_dir) if args.indexes_dir else Path(f"result/{dataset_name}_vanilla")
+        index_dir = Path(args.indexes_dir) if args.indexes_dir else Path(f"result/{args.dataset}_vanilla")
         index_path = str(index_dir / "vanilla_rag_index.faiss")
         chunk_path = str(index_dir / "vanilla_rag_chunk_store.pkl")
 
@@ -364,7 +368,7 @@ Answer with a short phrase. If the answer is not in the context, say "unknown"."
     elif args.baseline == "selfrag":
         from baselines.simple_selfrag import answer as selfrag_answer
         
-        index_dir = Path(args.indexes_dir) if args.indexes_dir else Path(f"result/{dataset_name}_selfrag")
+        index_dir = Path(args.indexes_dir) if args.indexes_dir else Path(f"result/{args.dataset}_selfrag")
         index_path = str(index_dir / "selfrag_index.faiss")
         chunk_path = str(index_dir / "selfrag_chunk_store.pkl")
         
@@ -388,7 +392,7 @@ Answer with a short phrase. If the answer is not in the context, say "unknown"."
     elif args.baseline == "raptor":
         from baselines.simple_raptor.retriever import SimpleRaptorRetriever
         
-        index_dir = Path(args.indexes_dir) if args.indexes_dir else Path(f"result/{dataset_name}_raptor")
+        index_dir = Path(args.indexes_dir) if args.indexes_dir else Path(f"result/{args.dataset}_raptor")
         index_path = str(index_dir / "simple_raptor_index.faiss")
         nodes_path = str(index_dir / "simple_raptor_nodes.pkl")
         chunk_path = str(index_dir / "simple_raptor_chunk_store.pkl")
