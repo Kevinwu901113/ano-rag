@@ -15,7 +15,8 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from structrag.llm_client import LLMChatClient
-from utils.embedding_utils import EmbeddingEncoder
+from scripts.hotpotqa.baselines.baseline_utils import get_embedding_model
+from typing import Callable
 
 def load_dataset(path: str) -> List[Dict[str, Any]]:
     with open(path, "r", encoding="utf-8") as f:
@@ -49,7 +50,7 @@ class RelRAG:
     Builds a relation graph between paragraphs (based on entity overlap or similarity)
     and re-ranks them using PageRank or similar centrality on top of vector scores.
     """
-    def __init__(self, encoder: EmbeddingEncoder, llm: LLMChatClient):
+    def __init__(self, encoder: Callable[[List[str]], np.ndarray], llm: LLMChatClient):
         self.encoder = encoder
         self.llm = llm
         
@@ -59,7 +60,7 @@ class RelRAG:
         if not texts:
             return "Insufficient evidence"
             
-        vecs = self.encoder.encode(texts)
+        vecs = self.encoder(texts)
         norm = np.linalg.norm(vecs, axis=1, keepdims=True)
         vecs = vecs / (norm + 1e-10)
         
@@ -69,7 +70,7 @@ class RelRAG:
         adj = (sim_matrix > threshold).astype(float)
         
         # 3. Vector Search for Question
-        q_vec = self.encoder.encode([question])
+        q_vec = self.encoder([question])
         q_norm = np.linalg.norm(q_vec, axis=1, keepdims=True)
         q_vec = q_vec / (q_norm + 1e-10)
         
@@ -101,7 +102,7 @@ Answer:"""
 
 def process_example(item: Dict[str, Any], 
                     llm: LLMChatClient, 
-                    encoder: EmbeddingEncoder,
+                    encoder: Callable[[List[str]], np.ndarray],
                     args) -> Tuple[str, str, List[List[Any]]]:
     """
     Process a single HotpotQA example using RelRAG.
@@ -142,7 +143,8 @@ def main():
     logger.info(f"Loaded {len(data)} examples from {args.dataset}")
 
     llm = LLMChatClient(endpoint=args.lm_endpoint, model=args.lm_model, temperature=0.0)
-    encoder = EmbeddingEncoder(provider="qwen3", model_name=args.emb_model, device="cuda" if os.environ.get("CUDA_VISIBLE_DEVICES") else "cpu")
+    device = "cuda" if os.environ.get("CUDA_VISIBLE_DEVICES") else "cpu"
+    encoder = get_embedding_model(args.emb_model, device)
     
     predictions = {"answer": {}, "sp": {}}
     

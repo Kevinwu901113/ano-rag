@@ -16,7 +16,8 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from structrag.llm_client import LLMChatClient
-from utils.embedding_utils import EmbeddingEncoder
+from scripts.hotpotqa.baselines.baseline_utils import get_embedding_model
+from typing import Callable
 
 def load_dataset(path: str) -> List[Dict[str, Any]]:
     with open(path, "r", encoding="utf-8") as f:
@@ -45,7 +46,7 @@ def build_passages_from_context(context: Any) -> List[str]:
     return passages
 
 class MiniRaptor:
-    def __init__(self, encoder: EmbeddingEncoder, llm: LLMChatClient):
+    def __init__(self, encoder: Callable[[List[str]], np.ndarray], llm: LLMChatClient):
         self.encoder = encoder
         self.llm = llm
         self.tree_nodes = [] # List of text
@@ -68,7 +69,7 @@ class MiniRaptor:
             return
             
         # Level 1: Cluster leaves
-        vecs = self.encoder.encode(leaf_texts)
+        vecs = self.encoder(leaf_texts)
         # Dynamic cluster count
         n_clusters = max(1, len(leaf_texts) // 3)
         kmeans = KMeans(n_clusters=n_clusters, n_init=5, random_state=42)
@@ -97,8 +98,8 @@ class MiniRaptor:
         if not self.tree_nodes:
             return []
             
-        vecs = self.encoder.encode(self.tree_nodes)
-        q_vec = self.encoder.encode([query])
+        vecs = self.encoder(self.tree_nodes)
+        q_vec = self.encoder([query])
         
         scores = np.dot(vecs, q_vec.T).flatten()
         indices = np.argsort(scores)[::-1][:k]
@@ -107,7 +108,7 @@ class MiniRaptor:
 
 def process_example(item: Dict[str, Any], 
                     llm: LLMChatClient, 
-                    encoder: EmbeddingEncoder,
+                    encoder: Callable[[List[str]], np.ndarray],
                     args) -> Tuple[str, str, List[List[Any]]]:
     """
     Process a single HotpotQA example using RAPTOR.
@@ -161,7 +162,8 @@ def main():
     logger.info(f"Loaded {len(data)} examples from {args.dataset}")
 
     llm = LLMChatClient(endpoint=args.lm_endpoint, model=args.lm_model, temperature=0.0)
-    encoder = EmbeddingEncoder(provider="qwen3", model_name=args.emb_model, device="cuda" if os.environ.get("CUDA_VISIBLE_DEVICES") else "cpu")
+    device = "cuda" if os.environ.get("CUDA_VISIBLE_DEVICES") else "cpu"
+    encoder = get_embedding_model(args.emb_model, device)
     
     predictions = {"answer": {}, "sp": {}}
     

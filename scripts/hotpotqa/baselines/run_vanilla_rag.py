@@ -15,7 +15,8 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from structrag.llm_client import LLMChatClient
-from utils.embedding_utils import EmbeddingEncoder
+from scripts.hotpotqa.baselines.baseline_utils import get_embedding_model
+from typing import Callable
 
 def load_dataset(path: str) -> List[Dict[str, Any]]:
     with open(path, "r", encoding="utf-8") as f:
@@ -44,7 +45,7 @@ def build_passages_from_context(context: Any) -> List[str]:
     return passages
 
 class InMemoryVanillaRetriever:
-    def __init__(self, encoder: EmbeddingEncoder):
+    def __init__(self, encoder: Callable[[List[str]], np.ndarray]):
         self.encoder = encoder
         self.passages = []
         self.vectors = None
@@ -58,7 +59,7 @@ class InMemoryVanillaRetriever:
             self.vectors = None
             return
 
-        self.vectors = self.encoder.encode(self.passages)
+        self.vectors = self.encoder(self.passages)
         # Normalize for cosine similarity
         norm = np.linalg.norm(self.vectors, axis=1, keepdims=True)
         self.vectors = self.vectors / (norm + 1e-10)
@@ -67,7 +68,7 @@ class InMemoryVanillaRetriever:
         if self.vectors is None or len(self.passages) == 0:
             return []
             
-        query_vec = self.encoder.encode([query])
+        query_vec = self.encoder([query])
         norm = np.linalg.norm(query_vec, axis=1, keepdims=True)
         query_vec = query_vec / (norm + 1e-10)
         
@@ -83,7 +84,7 @@ class InMemoryVanillaRetriever:
 
 def process_example(item: Dict[str, Any], 
                     llm: LLMChatClient, 
-                    encoder: EmbeddingEncoder,
+                    encoder: Callable[[List[str]], np.ndarray],
                     args) -> Tuple[str, str, List[List[Any]]]:
     """
     Process a single HotpotQA example.
@@ -154,12 +155,10 @@ def main():
         temperature=0.0
     )
     
-    logger.info("Loading embedding model...")
-    encoder = EmbeddingEncoder(
-        provider="qwen3",
-        model_name=args.emb_model,
-        device="cuda" if os.environ.get("CUDA_VISIBLE_DEVICES") else "cpu"
-    )
+    logger.info("Loading embedding model configuration...")
+    # No explicit encoder object needed, just config
+    device = "cuda" if os.environ.get("CUDA_VISIBLE_DEVICES") else "cpu"
+    encoder = get_embedding_model(args.emb_model, device)
     
     predictions = {"answer": {}, "sp": {}}
     
