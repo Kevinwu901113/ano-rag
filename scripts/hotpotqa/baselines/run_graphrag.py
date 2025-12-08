@@ -1,13 +1,14 @@
+from pathlib import Path
+from typing import Any, Dict, List, Tuple
+from loguru import logger
 import argparse
 import json
-import os
 import sys
-from pathlib import Path
-from typing import List, Dict, Any
-from loguru import logger
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from tqdm import tqdm
 import re
 
+# Add project root to sys.path
 ROOT = Path(__file__).resolve().parents[3]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
@@ -18,31 +19,45 @@ def load_dataset(path: str) -> List[Dict[str, Any]]:
     with open(path, "r", encoding="utf-8") as f:
         return json.load(f)
 
+def build_passages_from_context(context: Any) -> List[str]:
+    """
+    支持两种格式的 context：
+    1) dict: {"title": [...], "sentences": [...]}
+    2) list: [[title, [sent1, ...]], ...]  (兼容官方原始格式)
+    返回：每段 "Title: xxx\nContent: yyy" 的列表
+    """
+    passages: List[str] = []
+
+    if isinstance(context, dict):
+        titles = context.get("title", [])
+        sentences_list = context.get("sentences", [])
+        for title, sentences in zip(titles, sentences_list):
+            text = " ".join(sentences)
+            passages.append(f"Title: {title}\nContent: {text}")
+    else:
+        for title, sentences in context:
+            text = " ".join(sentences)
+            passages.append(f"Title: {title}\nContent: {text}")
+
+    return passages
+
 class MiniGraphRAG:
     def __init__(self, llm: LLMChatClient):
         self.llm = llm
         
-    def build_and_query(self, context_data: List[List[Any]], question: str) -> str:
+    def build_and_query(self, passages: List[str], question: str) -> str:
         """
-        1. Extract entities/relations from 10 paragraphs.
+        1. Extract entities/relations from paragraphs.
         2. Build a mini text-based graph.
         3. Answer.
         """
-        if len(context_data) > 10:
-             context_data = context_data[:10]
-             
-        # Just concat for extraction to save calls? Or extract per paragraph.
-        # To be safe and high quality, extract per paragraph but batching is hard here.
-        # Let's do a single extraction pass if text fits, or per-paragraph.
-        # Hotpot paragraphs are short.
         
         triples = []
         
         # Simplified: Concat all text, then extract graph (might be too long for extraction prompt output)
         # Better: Extract from each paragraph
         
-        for title, sentences in context_data:
-            text = "".join(sentences)
+        for text in passages:
             # Extract
             prompt = f"""Extract knowledge triples (Subject, Relation, Object) from the text. Return as JSON list.
 Text: {text}
@@ -52,7 +67,7 @@ JSON:"""
                 # Heuristic parsing
                 try:
                     # Try to find JSON list
-                    match = re.search(r'\[.*\]', resp, re.DOTALL)
+                    match = re.search(r'\[.*\]', resp.content, re.DOTALL)
                     if match:
                         extracted = json.loads(match.group(0))
                         if isinstance(extracted, list):
@@ -69,7 +84,7 @@ JSON:"""
         # Here we just use the graph + original text as fallback or combined.
         # Strict GraphRAG relies on the graph.
         
-        full_text = "\n\n".join([f"{t}\n{''.join(s)}" for t, s in context_data])
+        full_text = "\n\n".join(passages)
         
         prompt = f"""Answer the question using the knowledge graph and text below.
         
@@ -82,7 +97,31 @@ Original Text:
 Question: {question}
 Answer:"""
 
-        return self.llm.chat([{"role": "user", "content": prompt}])
+        resp = self.llm.chat([{"role": "user", "content": prompt}])
+        return resp.content
+
+def process_example(item: Dict[str, Any], 
+                    llm: LLMChatClient, 
+                    args) -> Tuple[str, str, List[List[Any]]]:
+    """
+    Process a single HotpotQA example using GraphRAG.
+    """
+    qid = item.get("_id") or item.get("id")
+    question = item["question"]
+    context = item["context"]
+    passages = build_passages_from_context(context)
+    
+    # New graph_rag instance per thread
+    graph_rag = MiniGraphRAG(llm)
+    
+    try:
+        ans = graph_rag.build_and_query(passages, question)
+        ans = ans.strip().replace("Answer:", "").strip()
+        sp = []
+        return qid, ans, sp
+    except Exception as e:
+        logger.error(f"Error Q {qid}: {e}")
+        return qid, "error", []
 
 def main():
     parser = argparse.ArgumentParser(description="Run Mini GraphRAG on HotpotQA Distractor")
@@ -91,34 +130,46 @@ def main():
     parser.add_argument("--lm-endpoint", default="http://localhost:1234/v1")
     parser.add_argument("--lm-model", default="model-identifier")
     parser.add_argument("--limit", type=int, default=0)
+    parser.add_argument("--num-workers", type=int, default=1, help="Number of parallel workers")
     
     args = parser.parse_args()
 
-    llm = LLMChatClient(endpoint=args.lm_endpoint, model=args.lm_model, temperature=0.0)
-    graph_rag = MiniGraphRAG(llm)
-    
     data = load_dataset(args.dataset)
-    if args.limit > 0:
-        data = data[:args.limit]
-        
+    if args.limit and args.limit > 0:
+        data = data[: args.limit]
+
+    logger.info(f"Loaded {len(data)} examples from {args.dataset}")
+
+    llm = LLMChatClient(endpoint=args.lm_endpoint, model=args.lm_model, temperature=0.0)
+    
     predictions = {"answer": {}, "sp": {}}
     
-    for item in tqdm(data):
-        qid = item["_id"]
-        question = item["question"]
-        
-        try:
-            ans = graph_rag.build_and_query(item["context"], question)
-            ans = ans.strip().replace("Answer:", "").strip()
-            predictions["answer"][qid] = ans
-            predictions["sp"][qid] = [] 
-        except Exception as e:
-            logger.error(f"Error Q {qid}: {e}")
-            predictions["answer"][qid] = "error"
+    num_workers = max(1, args.num_workers)
+    logger.info(f"Running GraphRAG on {len(data)} examples with {num_workers} workers...")
+    
+    with ThreadPoolExecutor(max_workers=num_workers) as ex:
+        futures = [
+            ex.submit(process_example, item, llm, args)
+            for item in data
+        ]
+
+        for fut in tqdm(as_completed(futures), total=len(futures)):
+            try:
+                qid, ans, sp = fut.result()
+                if not qid:
+                    continue
+                predictions["answer"][qid] = ans
+                predictions["sp"][qid] = sp
+            except Exception as e:
+                logger.error(f"Error in worker: {e}")
             
-    Path(args.output).parent.mkdir(parents=True, exist_ok=True)
-    with open(args.output, "w") as f:
-        json.dump(predictions, f, indent=2)
+    logger.info(f"Predictions generated for {len(predictions['answer'])} examples")
+
+    out_path = Path(args.output)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    with out_path.open("w", encoding="utf-8") as f:
+        json.dump(predictions, f, indent=2, ensure_ascii=False)
+    logger.info(f"Saved predictions to {out_path}")
 
 if __name__ == "__main__":
     main()

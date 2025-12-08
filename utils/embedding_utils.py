@@ -40,6 +40,16 @@ class EmbeddingEncoder:
             return self._encode_sentence_transformers(texts)
         raise ValueError(f"Unsupported embedding provider: {self.provider}")
 
+    def _resolve_device(self, torch) -> str:
+        """Resolve the best available device."""
+        if self._device_pref:
+            return self._device_pref
+        if torch.cuda.is_available():
+            return "cuda"
+        if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+            return "mps"
+        return "cpu"
+
     def _encode_transformers(self, texts: Sequence[str]) -> np.ndarray:
         try:
             import torch  # type: ignore
@@ -50,8 +60,12 @@ class EmbeddingEncoder:
             logger.info("Loading transformer embedding model: {}", self.model_name)
             tokenizer_kwargs = {"trust_remote_code": True}
             model_kwargs = {"trust_remote_code": True, "low_cpu_mem_usage": True}
+            
+            # Resolve device: Priority GPU
             target_device_str = self._resolve_device(torch)
+            logger.info(f"Target device resolved to: {target_device_str}")
             target_device = torch.device(target_device_str)
+            self._resolved_device = target_device_str
 
             if self.cache_dir:
                 tokenizer_kwargs["cache_dir"] = self.cache_dir
@@ -61,33 +75,15 @@ class EmbeddingEncoder:
             if torch_dtype is not None:
                 model_kwargs["dtype"] = torch_dtype
 
-            # Let device selection prefer GPU and fall back to CPU on failure
-            model_kwargs["device_map"] = None
+            # Load model
             try:
                 self._model = AutoModel.from_pretrained(self.model_name, **model_kwargs)
-                self._model_uses_device_map = False
-                if target_device.type == "cuda":
-                    try:
-                        self._model.to(target_device)
-                    except RuntimeError as exc:  # noqa: PERF203
-                        logger.warning(
-                            "Moving embedding model to {} failed ({}); falling back to CPU",
-                            target_device,
-                            exc,
-                        )
-                        target_device = torch.device("cpu")
-                        self._resolved_device = "cpu"
-                        self._model.to(target_device)
-                else:
-                    self._model.to(target_device)
-            except (ValueError, ImportError) as exc:
-                if model_kwargs.get("device_map") is None:
-                    raise
-                logger.warning("device_map loading failed ({}); retrying without device map", exc)
-                model_kwargs.pop("device_map", None)
-                self._model = AutoModel.from_pretrained(self.model_name, **model_kwargs)
-                self._model_uses_device_map = False
                 self._model.to(target_device)
+            except Exception as e:
+                logger.error(f"Failed to load model on {target_device}: {e}. Falling back to CPU.")
+                self._model = AutoModel.from_pretrained(self.model_name, **model_kwargs)
+                self._model.to("cpu")
+                self._resolved_device = "cpu"
 
             self._model.eval()
 

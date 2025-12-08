@@ -1,10 +1,10 @@
+from pathlib import Path
+from typing import Any, Dict, List, Tuple
+from loguru import logger
 import argparse
 import json
-import os
 import sys
-from pathlib import Path
-from typing import List, Dict, Any
-from loguru import logger
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from tqdm import tqdm
 
 # Add project root to sys.path
@@ -18,9 +18,69 @@ def load_dataset(path: str) -> List[Dict[str, Any]]:
     with open(path, "r", encoding="utf-8") as f:
         return json.load(f)
 
-def format_context(paragraphs: List[str]) -> str:
-    # Join paragraphs with clear delimiters
-    return "\n\n".join([f"Paragraph {i+1}: {p}" for i, p in enumerate(paragraphs)])
+def build_passages_from_context(context: Any) -> List[str]:
+    """
+    支持两种格式的 context：
+    1) dict: {"title": [...], "sentences": [...]}
+    2) list: [[title, [sent1, ...]], ...]  (兼容官方原始格式)
+    返回：每段 "Title: xxx\nContent: yyy" 的列表
+    """
+    passages: List[str] = []
+
+    if isinstance(context, dict):
+        titles = context.get("title", [])
+        sentences_list = context.get("sentences", [])
+        for title, sentences in zip(titles, sentences_list):
+            text = " ".join(sentences)
+            passages.append(f"Title: {title}\nContent: {text}")
+    else:
+        for title, sentences in context:
+            text = " ".join(sentences)
+            passages.append(f"Title: {title}\nContent: {text}")
+
+    return passages
+
+def process_example(
+    item: Dict[str, Any],
+    llm: LLMChatClient,
+    args,
+) -> Tuple[str, str, List[List[Any]]]:
+    """
+    返回 (qid, answer, sp)
+    """
+    qid = item.get("_id") or item.get("id")
+    question = item["question"]
+    context = item["context"]
+    passages = build_passages_from_context(context)
+    
+    # 1. Format context
+    context_text = "\n\n".join(passages)
+    
+    # 2. Prompt
+    prompt = f"""Answer the question based on the following paragraphs. 
+Keep the answer concise.
+
+{context_text}
+
+Question: {question}
+Answer:"""
+
+    messages = [{"role": "user", "content": prompt}]
+    
+    # 3. Generate
+    try:
+        resp = llm.chat(messages)
+        ans = resp.content
+        # Cleanup answer
+        ans = ans.strip()
+        if ans.lower().startswith("answer:"):
+            ans = ans[7:].strip()
+    except Exception as e:
+        logger.error(f"Error processing {qid}: {e}")
+        ans = "error"
+
+    sp: List[List[Any]] = []  # Direct baseline doesn't predict supporting facts
+    return qid, ans, sp
 
 def main():
     parser = argparse.ArgumentParser(description="Run Direct/Naive Baseline on HotpotQA Distractor Setting")
@@ -31,8 +91,20 @@ def main():
     parser.add_argument("--temperature", type=float, default=0.0)
     parser.add_argument("--max-tokens", type=int, default=128)
     parser.add_argument("--limit", type=int, default=0, help="Test on N examples")
+    parser.add_argument(
+        "--num-workers",
+        type=int,
+        default=1,
+        help="并发 worker 数，使用线程并发调用 LM，默认 1（串行）",
+    )
     
     args = parser.parse_args()
+
+    data = load_dataset(args.dataset)
+    if args.limit and args.limit > 0:
+        data = data[: args.limit]
+
+    logger.info(f"Loaded {len(data)} examples from {args.dataset}")
 
     # Initialize LLM Client
     llm = LLMChatClient(
@@ -42,64 +114,33 @@ def main():
         max_tokens=args.max_tokens
     )
 
-    data = load_dataset(args.dataset)
-    if args.limit > 0:
-        data = data[:args.limit]
-
     predictions = {"answer": {}, "sp": {}}
     
-    logger.info(f"Running Direct/Naive Baseline on {len(data)} examples...")
+    num_workers = max(1, args.num_workers)
+    logger.info(f"Running with {num_workers} workers...")
 
-    for item in tqdm(data):
-        qid = item["_id"]
-        question = item["question"]
-        context_data = item["context"]  # List of [title, sentences]
-        
-        # 1. Flatten context to 10 paragraphs max (HotpotQA distractor usually has 10)
-        # Verify limit
-        if len(context_data) > 10:
-             logger.warning(f"QID {qid} has {len(context_data)} paragraphs. Truncating to 10.")
-             context_data = context_data[:10]
-             
-        # Flatten sentences to paragraphs
-        paragraphs = []
-        for title, sentences in context_data:
-            text = "".join(sentences)
-            paragraphs.append(f"Title: {title}\nContent: {text}")
-            
-        context_text = format_context(paragraphs)
-        
-        # 2. Prompt
-        prompt = f"""Answer the question based on the following paragraphs. 
-Keep the answer concise.
+    with ThreadPoolExecutor(max_workers=num_workers) as ex:
+        futures = [
+            ex.submit(process_example, item, llm, args)
+            for item in data
+        ]
 
-{context_text}
+        for fut in tqdm(as_completed(futures), total=len(futures)):
+            try:
+                qid, ans, sp = fut.result()
+                if not qid:
+                    continue
+                predictions["answer"][qid] = ans
+                predictions["sp"][qid] = sp
+            except Exception as e:
+                logger.error(f"Error in worker: {e}")
 
-Question: {question}
-Answer:"""
+    logger.info(f"Predictions generated for {len(predictions['answer'])} examples")
 
-        messages = [{"role": "user", "content": prompt}]
-        
-        # 3. Generate
-        try:
-            ans = llm.chat(messages)
-            # Cleanup answer
-            ans = ans.strip()
-            if ans.lower().startswith("answer:"):
-                ans = ans[7:].strip()
-            predictions["answer"][qid] = ans
-            # Direct baseline doesn't predict supporting facts usually, or we can just leave empty
-            predictions["sp"][qid] = [] 
-        except Exception as e:
-            logger.error(f"Error processing {qid}: {e}")
-            predictions["answer"][qid] = "error"
-            predictions["sp"][qid] = []
-
-    # Save
     out_path = Path(args.output)
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(out_path, "w", encoding="utf-8") as f:
-        json.dump(predictions, f, indent=2)
+    with out_path.open("w", encoding="utf-8") as f:
+        json.dump(predictions, f, ensure_ascii=False, indent=2)
     logger.info(f"Saved predictions to {out_path}")
 
 if __name__ == "__main__":
