@@ -199,3 +199,5 @@ vector_db/
 *.swo
 *~
 MIRAGE
+data/
+ans/
