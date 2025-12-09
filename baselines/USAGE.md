@@ -6,12 +6,13 @@
 
 HotpotQA Distractor setting has been unified to strictly use only the provided 10 paragraphs per question. The following scripts implement this restricted setting:
 
+> 说明：所有 HotpotQA 基线会自动在 `result/hotpotqa` 下创建一个工作目录（例如 `hotpot_direct_000`），默认写入 `pred.json`（官方评测格式）和 `qa.tsv`（仅问题和清洗后的答案）。可以通过 `--output` / `--qa-path` 覆盖输出路径，或用 `--work-dir` / `--result-root` 自定义工作目录。
+
 ### 1. Direct / Naive
 Concatenates 10 paragraphs and prompts LLM directly.
 ```bash
 python scripts/hotpotqa/baselines/run_direct.py \
   --dataset path/to/hotpot_dev_distractor_v1.json \
-  --output path/to/pred.json \
   --lm-endpoint http://localhost:1234/v1 \
   --lm-model model-id
 ```
@@ -21,7 +22,6 @@ Builds an in-memory index for the 10 paragraphs and retrieves top-k before promp
 ```bash
 python scripts/hotpotqa/baselines/run_vanilla_rag.py \
   --dataset path/to/hotpot_dev_distractor_v1.json \
-  --output path/to/pred.json \
   --topk 3
 ```
 
@@ -29,32 +29,28 @@ python scripts/hotpotqa/baselines/run_vanilla_rag.py \
 Retrieves from 10 paragraphs, then uses LLM reflection to select best paragraphs.
 ```bash
 python scripts/hotpotqa/baselines/run_selfrag.py \
-  --dataset path/to/hotpot_dev_distractor_v1.json \
-  --output path/to/pred.json
+  --dataset path/to/hotpot_dev_distractor_v1.json
 ```
 
 ### 4. Raptor (Distractor)
 Clusters the 10 paragraphs into a mini-tree (Leaves -> Summaries) and retrieves.
 ```bash
 python scripts/hotpotqa/baselines/run_raptor.py \
-  --dataset path/to/hotpot_dev_distractor_v1.json \
-  --output path/to/pred.json
+  --dataset path/to/hotpot_dev_distractor_v1.json
 ```
 
 ### 5. GraphRAG (Distractor)
 Extracts triples from 10 paragraphs to build a mini-graph, then answers.
 ```bash
 python scripts/hotpotqa/baselines/run_graphrag.py \
-  --dataset path/to/hotpot_dev_distractor_v1.json \
-  --output path/to/pred.json
+  --dataset path/to/hotpot_dev_distractor_v1.json
 ```
 
 ### 6. RelRAG (Distractor)
 Builds a relation graph between paragraphs (similarity-based) and uses centrality to re-rank.
 ```bash
 python scripts/hotpotqa/baselines/run_relrag.py \
-  --dataset path/to/hotpot_dev_distractor_v1.json \
-  --output path/to/pred.json
+  --dataset path/to/hotpot_dev_distractor_v1.json
 ```
 
 ---

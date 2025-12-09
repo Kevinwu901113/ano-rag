@@ -26,7 +26,7 @@ class LLMChatClient:
         model: str,
         *,
         temperature: float = 0.0,
-        max_tokens: int = 256,
+        max_tokens: int = 8192,
         timeout: int = 60,
         retries: int = 2,
         stop: Optional[List[str]] = None,
