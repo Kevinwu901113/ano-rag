@@ -1,16 +1,16 @@
 import argparse
 import json
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from pathlib import Path
-from typing import Any, Callable, Dict, List, Tuple
-
-import numpy as np
 import os
 import re
 import sys
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import numpy as np
+from pathlib import Path
+from typing import Any, Callable, Dict, List, Tuple
 
 from loguru import logger
 from tqdm import tqdm
+
 # Add project root to sys.path
 ROOT = Path(__file__).resolve().parents[3]
 if str(ROOT) not in sys.path:
@@ -20,6 +20,7 @@ from structrag.llm_client import LLMChatClient
 from scripts.hotpotqa.baselines.baseline_utils import (
     build_passages_from_context,
     clean_hotpot_answer,
+    detect_device,
     format_context,
     get_embedding_model,
     save_predictions_and_qa,
@@ -140,6 +141,8 @@ def main():
     parser.add_argument("--lm-endpoint", default="http://localhost:1234/v1")
     parser.add_argument("--lm-model", default="model-identifier")
     parser.add_argument("--emb-model", default="Qwen/Qwen3-Embedding-8B")
+    parser.add_argument("--emb-device", default=None, help="Force embedding device (e.g., cpu, cuda)")
+    parser.add_argument("--emb-dtype", default=None, help="Embedding torch dtype (e.g., float16, bfloat16)")
     parser.add_argument("--limit", type=int, default=0)
     parser.add_argument("--max-context", type=int, default=10, help="Max number of paragraphs from context to keep")
     parser.add_argument("--num-workers", type=int, default=1, help="Number of parallel workers")
@@ -163,8 +166,9 @@ def main():
     logger.info(f"Writing outputs to workspace {work_dir}")
 
     llm = LLMChatClient(endpoint=args.lm_endpoint, model=args.lm_model, temperature=0.0)
-    device = "cuda" if os.environ.get("CUDA_VISIBLE_DEVICES") else "cpu"
-    encoder = get_embedding_model(args.emb_model, device)
+    device = args.emb_device or detect_device()
+    encoder = get_embedding_model(args.emb_model, device, torch_dtype=args.emb_dtype)
+    logger.info(f"Embedding model {args.emb_model} on {device} (dtype={args.emb_dtype or 'auto'})")
     
     predictions = {"answer": {}, "sp": {}}
     qa_rows: List[Tuple[str, str]] = []

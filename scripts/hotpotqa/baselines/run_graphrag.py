@@ -1,12 +1,13 @@
-from pathlib import Path
-from typing import Any, Dict, List, Tuple
-from loguru import logger
 import argparse
 import json
 import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from tqdm import tqdm
 import re
+from pathlib import Path
+from typing import Any, Dict, List, Tuple
+
+from loguru import logger
+from tqdm import tqdm
 
 # Add project root to sys.path
 ROOT = Path(__file__).resolve().parents[3]
@@ -14,37 +15,22 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from structrag.llm_client import LLMChatClient
-from scripts.hotpotqa.baselines.baseline_utils import encode_passages
+from scripts.hotpotqa.baselines.baseline_utils import (
+    build_passages_from_context,
+    clean_hotpot_answer,
+    format_context,
+    save_predictions_and_qa,
+    select_workspace,
+)
 
 def load_dataset(path: str) -> List[Dict[str, Any]]:
     with open(path, "r", encoding="utf-8") as f:
         return json.load(f)
 
-def build_passages_from_context(context: Any) -> List[str]:
-    """
-    支持两种格式的 context：
-    1) dict: {"title": [...], "sentences": [...]}
-    2) list: [[title, [sent1, ...]], ...]  (兼容官方原始格式)
-    返回：每段 "Title: xxx\nContent: yyy" 的列表
-    """
-    passages: List[str] = []
-
-    if isinstance(context, dict):
-        titles = context.get("title", [])
-        sentences_list = context.get("sentences", [])
-        for title, sentences in zip(titles, sentences_list):
-            text = " ".join(sentences)
-            passages.append(f"Title: {title}\nContent: {text}")
-    else:
-        for title, sentences in context:
-            text = " ".join(sentences)
-            passages.append(f"Title: {title}\nContent: {text}")
-
-    return passages
-
 class MiniGraphRAG:
-    def __init__(self, llm: LLMChatClient):
-        self.llm = llm
+    def __init__(self, llm_extract: LLMChatClient, llm_answer: LLMChatClient):
+        self.llm_extract = llm_extract
+        self.llm_answer = llm_answer
         
     def build_and_query(self, passages: List[str], question: str) -> str:
         """
@@ -64,7 +50,7 @@ class MiniGraphRAG:
 Text: {text}
 JSON:"""
             try:
-                resp = self.llm.chat([{"role": "user", "content": prompt}])
+                resp = self.llm_extract.chat([{"role": "user", "content": prompt}])
                 # Heuristic parsing
                 try:
                     # Try to find JSON list
@@ -85,7 +71,7 @@ JSON:"""
         # Here we just use the graph + original text as fallback or combined.
         # Strict GraphRAG relies on the graph.
         
-        full_text = "\n\n".join(passages)
+        full_text = format_context(passages)
         
         prompt = f"""Answer the question using the knowledge graph and text below.
         
@@ -98,40 +84,52 @@ Original Text:
 Question: {question}
 Answer:"""
 
-        resp = self.llm.chat([{"role": "user", "content": prompt}])
+        resp = self.llm_answer.chat([{"role": "user", "content": prompt}])
         return resp.content
 
 def process_example(item: Dict[str, Any], 
-                    llm: LLMChatClient, 
-                    args) -> Tuple[str, str, List[List[Any]]]:
+                    llm_extract: LLMChatClient, 
+                    llm_answer: LLMChatClient,
+                    args) -> Tuple[str, str, str, List[List[Any]]]:
     """
     Process a single HotpotQA example using GraphRAG.
     """
     qid = item.get("_id") or item.get("id")
     question = item["question"]
     context = item["context"]
-    passages = build_passages_from_context(context)
+    passages = build_passages_from_context(context, max_passages=args.max_context)
     
     # New graph_rag instance per thread
-    graph_rag = MiniGraphRAG(llm)
+    graph_rag = MiniGraphRAG(llm_extract, llm_answer)
     
     try:
         ans = graph_rag.build_and_query(passages, question)
-        ans = ans.strip().replace("Answer:", "").strip()
+        ans = clean_hotpot_answer(ans)
         sp = []
-        return qid, ans, sp
+        return qid, question, ans, sp
     except Exception as e:
         logger.error(f"Error Q {qid}: {e}")
-        return qid, "error", []
+        return qid, question, "error", []
 
 def main():
     parser = argparse.ArgumentParser(description="Run Mini GraphRAG on HotpotQA Distractor")
     parser.add_argument("--dataset", required=True)
-    parser.add_argument("--output", required=True)
+    parser.add_argument("--output", default=None, help="Output path for prediction json (default: work_dir/pred.json)")
+    parser.add_argument("--qa-path", default=None, help="Optional QA log path (default: work_dir/qa.tsv)")
+    parser.add_argument("--result-root", default="result/hotpotqa", help="Root directory for auto workspace creation")
+    parser.add_argument("--work-dir", default=None, help="Workspace directory (default: auto under result-root)")
+    parser.add_argument("--new", action="store_true", help="Force creating a new workspace")
     parser.add_argument("--lm-endpoint", default="http://localhost:1234/v1")
     parser.add_argument("--lm-model", default="model-identifier")
+    parser.add_argument("--lm-timeout", type=int, default=120, help="LLM HTTP timeout in seconds")
+    parser.add_argument("--lm-max-tokens", type=int, default=512, help="Max new tokens per LLM call")
+    parser.add_argument("--extract-endpoint", default=None, help="LLM endpoint for triple extraction (defaults to lm-endpoint)")
+    parser.add_argument("--extract-model", default=None, help="LLM model for triple extraction (defaults to lm-model)")
+    parser.add_argument("--answer-endpoint", default=None, help="LLM endpoint for answering (defaults to lm-endpoint)")
+    parser.add_argument("--answer-model", default=None, help="LLM model for answering (defaults to lm-model)")
     parser.add_argument("--limit", type=int, default=0)
-    parser.add_argument("--num-workers", type=int, default=1, help="Number of parallel workers")
+    parser.add_argument("--max-context", type=int, default=10, help="Max number of paragraphs from context to keep")
+    parser.add_argument("--num-workers", type=int, default=4, help="Number of parallel workers")
     
     args = parser.parse_args()
 
@@ -141,36 +139,70 @@ def main():
 
     logger.info(f"Loaded {len(data)} examples from {args.dataset}")
 
-    llm = LLMChatClient(endpoint=args.lm_endpoint, model=args.lm_model, temperature=0.0)
+    # Workspace setup
+    if args.work_dir:
+        work_dir = Path(args.work_dir)
+        work_dir.mkdir(parents=True, exist_ok=True)
+    else:
+        work_dir = select_workspace(Path(args.result_root), "hotpot_graphrag", args.new)
+    output_path = Path(args.output) if args.output else work_dir / "pred.json"
+    qa_path = Path(args.qa_path) if args.qa_path else work_dir / "qa.tsv"
+    logger.info(f"Writing outputs to workspace {work_dir}")
+
+    extract_endpoint = args.extract_endpoint or args.lm_endpoint
+    extract_model = args.extract_model or args.lm_model
+    answer_endpoint = args.answer_endpoint or args.lm_endpoint
+    answer_model = args.answer_model or args.lm_model
+
+    llm_extract = LLMChatClient(
+        endpoint=extract_endpoint,
+        model=extract_model,
+        temperature=0.0,
+        timeout=args.lm_timeout,
+        max_tokens=args.lm_max_tokens,
+    )
+    llm_answer = LLMChatClient(
+        endpoint=answer_endpoint,
+        model=answer_model,
+        temperature=0.0,
+        timeout=args.lm_timeout,
+        max_tokens=args.lm_max_tokens,
+    )
     
     predictions = {"answer": {}, "sp": {}}
+    qa_rows: List[Tuple[str, str]] = []
     
     num_workers = max(1, args.num_workers)
     logger.info(f"Running GraphRAG on {len(data)} examples with {num_workers} workers...")
     
     with ThreadPoolExecutor(max_workers=num_workers) as ex:
         futures = [
-            ex.submit(process_example, item, llm, args)
+            ex.submit(process_example, item, llm_extract, llm_answer, args)
             for item in data
         ]
 
         for fut in tqdm(as_completed(futures), total=len(futures)):
             try:
-                qid, ans, sp = fut.result()
+                qid, question, ans, sp = fut.result()
                 if not qid:
                     continue
                 predictions["answer"][qid] = ans
                 predictions["sp"][qid] = sp
+                qa_rows.append((question, ans))
             except Exception as e:
                 logger.error(f"Error in worker: {e}")
             
     logger.info(f"Predictions generated for {len(predictions['answer'])} examples")
 
-    out_path = Path(args.output)
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    with out_path.open("w", encoding="utf-8") as f:
-        json.dump(predictions, f, indent=2, ensure_ascii=False)
+    out_path, qa_file = save_predictions_and_qa(
+        work_dir,
+        predictions,
+        qa_rows,
+        output_path=output_path,
+        qa_path=qa_path,
+    )
     logger.info(f"Saved predictions to {out_path}")
+    logger.info(f"Saved QA log to {qa_file}")
 
 if __name__ == "__main__":
     main()

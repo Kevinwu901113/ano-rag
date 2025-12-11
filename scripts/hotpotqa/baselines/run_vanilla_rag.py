@@ -1,12 +1,11 @@
 import argparse
 import json
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from pathlib import Path
-from typing import Any, Callable, Dict, List, Tuple
-
-import numpy as np
 import os
 import sys
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import numpy as np
+from pathlib import Path
+from typing import Any, Callable, Dict, List, Tuple
 
 from loguru import logger
 from tqdm import tqdm
@@ -20,6 +19,7 @@ from structrag.llm_client import LLMChatClient
 from scripts.hotpotqa.baselines.baseline_utils import (
     build_passages_from_context,
     clean_hotpot_answer,
+    detect_device,
     format_context,
     get_embedding_model,
     save_predictions_and_qa,
@@ -45,7 +45,7 @@ class InMemoryVanillaRetriever:
             self.vectors = None
             return
 
-        self.vectors = self.encoder(self.passages)
+        self.vectors = self.encoder(self.passages, torch_dtype=args.emb_dtype if hasattr(args, "emb_dtype") else None)
         # Normalize for cosine similarity
         norm = np.linalg.norm(self.vectors, axis=1, keepdims=True)
         self.vectors = self.vectors / (norm + 1e-10)
@@ -123,6 +123,8 @@ def main():
     parser.add_argument("--lm-endpoint", default="http://localhost:1234/v1", help="LLM API endpoint")
     parser.add_argument("--lm-model", default="model-identifier", help="LLM model name")
     parser.add_argument("--emb-model", default="Qwen/Qwen3-Embedding-8B", help="Embedding model name or path")
+    parser.add_argument("--emb-device", default=None, help="Force embedding device (e.g., cpu, cuda)")
+    parser.add_argument("--emb-dtype", default=None, help="Embedding torch dtype (e.g., float16, bfloat16)")
     parser.add_argument("--topk", type=int, default=3, help="Number of paragraphs to retrieve from the 10 distractors")
     parser.add_argument("--limit", type=int, default=0, help="Test on N examples")
     parser.add_argument("--max-context", type=int, default=10, help="Max number of paragraphs from context to keep")
@@ -155,8 +157,10 @@ def main():
     
     logger.info("Loading embedding model configuration...")
     # No explicit encoder object needed, just config
-    device = "cuda" if os.environ.get("CUDA_VISIBLE_DEVICES") else "cpu"
-    encoder = get_embedding_model(args.emb_model, device)
+    device = args.emb_device or detect_device()
+    encoder = get_embedding_model(args.emb_model, device, torch_dtype=args.emb_dtype)
+    encoder_dtype = args.emb_dtype
+    logger.info(f"Embedding model {args.emb_model} on {device} (dtype={encoder_dtype or 'auto'})")
     
     predictions = {"answer": {}, "sp": {}}
     qa_rows: List[Tuple[str, str]] = []
