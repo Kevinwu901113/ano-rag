@@ -16,12 +16,13 @@ if str(ROOT) not in sys.path:
 
 from structrag.llm_client import LLMChatClient
 from scripts.hotpotqa.baselines.baseline_utils import (
-    build_passages_from_context,
+    build_passage_entries,
     clean_hotpot_answer,
     format_context,
     save_predictions_and_qa,
     select_workspace,
 )
+from utils.retrieval_logger import log_retrieval
 
 def load_dataset(path: str) -> List[Dict[str, Any]]:
     with open(path, "r", encoding="utf-8") as f:
@@ -90,21 +91,54 @@ Answer:"""
 def process_example(item: Dict[str, Any], 
                     llm_extract: LLMChatClient, 
                     llm_answer: LLMChatClient,
-                    args) -> Tuple[str, str, str, List[List[Any]]]:
+                    args,
+                    *,
+                    run_name: str,
+                    dataset_name: str,
+                    log_dir: Path) -> Tuple[str, str, str, List[List[Any]]]:
     """
     Process a single HotpotQA example using GraphRAG.
     """
     qid = item.get("_id") or item.get("id")
     question = item["question"]
     context = item["context"]
-    passages = build_passages_from_context(context, max_passages=args.max_context)
+    passages = build_passage_entries(context, max_passages=args.max_context)
     
     # New graph_rag instance per thread
     graph_rag = MiniGraphRAG(llm_extract, llm_answer)
     
     try:
-        ans = graph_rag.build_and_query(passages, question)
+        ans = graph_rag.build_and_query([p["text"] for p in passages], question)
         ans = clean_hotpot_answer(ans)
+        try:
+            log_retrieval(
+                sample_id=qid,
+                dataset=dataset_name,
+                run_name=run_name,
+                retrieved=[
+                    {
+                        "rank": idx + 1,
+                        "score": None,
+                        "doc_id": entry.get("doc_id"),
+                        "sent_ids": entry.get("sent_ids"),
+                        "passage_id": entry.get("passage_id"),
+                    }
+                    for idx, entry in enumerate(passages)
+                ],
+                topk=len(passages),
+                final_context=[
+                    {
+                        "doc_id": entry.get("doc_id"),
+                        "sent_ids": entry.get("sent_ids"),
+                        "passage_id": entry.get("passage_id"),
+                        "text": entry.get("text"),
+                    }
+                    for entry in passages
+                ],
+                log_dir=log_dir,
+            )
+        except Exception as log_exc:
+            logger.error(f"retrieval logging failed for {qid}: {log_exc}")
         sp = []
         return qid, question, ans, sp
     except Exception as e:
@@ -145,6 +179,8 @@ def main():
         work_dir.mkdir(parents=True, exist_ok=True)
     else:
         work_dir = select_workspace(Path(args.result_root), "hotpot_graphrag", args.new)
+    run_name = work_dir.name
+    dataset_name = "hotpotqa"
     output_path = Path(args.output) if args.output else work_dir / "pred.json"
     qa_path = Path(args.qa_path) if args.qa_path else work_dir / "qa.tsv"
     logger.info(f"Writing outputs to workspace {work_dir}")
@@ -177,7 +213,16 @@ def main():
     
     with ThreadPoolExecutor(max_workers=num_workers) as ex:
         futures = [
-            ex.submit(process_example, item, llm_extract, llm_answer, args)
+            ex.submit(
+                process_example,
+                item,
+                llm_extract,
+                llm_answer,
+                args,
+                run_name=run_name,
+                dataset_name=dataset_name,
+                log_dir=work_dir,
+            )
             for item in data
         ]
 

@@ -81,6 +81,7 @@ class SimpleRaptorRetriever:
         self.top_k_nodes = top_k or int(self.raptor_config.get("top_k_nodes", 10))
         self.max_answer_chunks = int(self.raptor_config.get("max_answer_chunks", 5))
         self.enable_name_rerank = bool(self.raptor_config.get("enable_name_rerank", True))
+        self.last_hits: List[Dict[str, Any]] = []
 
     def _extract_name_from_question(self, question: str) -> Optional[str]:
         """
@@ -193,6 +194,23 @@ class SimpleRaptorRetriever:
         # 12000 chars approx 3000 tokens
         if len(context_block) > 12000:
              context_block = context_block[:12000] + "..."
+
+        # Record retrieval for logging
+        self.last_hits = []
+        for rank, cid in enumerate(chunk_ids):
+            doc_id = None
+            if isinstance(cid, str) and "::" in cid:
+                doc_id = cid.split("::", 1)[0]
+            self.last_hits.append(
+                {
+                    "rank": rank + 1,
+                    "score": None,
+                    "doc_id": doc_id,
+                    "sent_ids": None,
+                    "passage_id": str(cid),
+                    "text": self.chunk_store.get(cid),
+                }
+            )
         
         # Construct messages for LLMChatClient
         prompt = PROMPT_TEMPLATE.format(context=context_block, question=question)

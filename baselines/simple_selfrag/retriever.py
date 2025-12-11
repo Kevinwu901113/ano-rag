@@ -2,7 +2,7 @@ import os
 import pickle
 import faiss
 import numpy as np
-from typing import List, Tuple, Optional, Dict
+from typing import Any, Dict, List, Optional
 from pathlib import Path
 from loguru import logger
 
@@ -77,11 +77,12 @@ class SimpleSelfRAGRetriever:
             
         self.top_k_first = self.selfrag_config.get("top_k_first", 5)
         self.top_k_second = self.selfrag_config.get("top_k_second", 10)
+        self.last_hits: List[Dict[str, Any]] = []
 
-    def retrieve(self, question: str, top_k: int) -> List[Tuple[str, float]]:
+    def retrieve(self, question: str, top_k: int) -> List[Dict[str, Any]]:
         """
         Retrieve chunks for a question.
-        Returns list of (chunk_text, score).
+        Returns list of dicts with text and scores.
         """
         # Encode question
         q_vec = self.encoder.encode([question], normalize_embeddings=True)
@@ -89,14 +90,26 @@ class SimpleSelfRAGRetriever:
         # Search
         scores, indices = self.index.search(q_vec, top_k)
         
-        results = []
+        results: List[Dict[str, Any]] = []
         for score, idx in zip(scores[0], indices[0]):
             if idx < 0 or idx >= len(self.chunk_ids):
                 continue
             chunk_id = self.chunk_ids[idx]
             text = self.chunk_store.get(chunk_id, "")
             if text:
-                results.append((text, float(score)))
+                doc_id = None
+                if "::" in str(chunk_id):
+                    doc_id = str(chunk_id).split("::", 1)[0]
+                results.append(
+                    {
+                        "text": text,
+                        "score": float(score),
+                        "doc_id": doc_id,
+                        "sent_ids": None,
+                        "passage_id": str(chunk_id),
+                    }
+                )
+        self.last_hits = results
                 
         return results
 
@@ -110,7 +123,7 @@ class SimpleSelfRAGRetriever:
         # Step 1: First Retrieval
         logger.info(f"First retrieval for: {question}")
         contexts_1 = self.retrieve(question, self.top_k_first)
-        context_block_1 = "\n\n".join([f"[{i+1}] {c[0]}" for i, c in enumerate(contexts_1)])
+        context_block_1 = "\n\n".join([f"[{i+1}] {c['text']}" for i, c in enumerate(contexts_1)])
         
         prompt_1 = PROMPT_TEMPLATE.format(context=context_block_1, question=question)
         
@@ -146,6 +159,7 @@ Verdict (sufficient / insufficient):"""
         logger.info(f"Critique verdict: {verdict}")
         
         if "sufficient" in verdict and "insufficient" not in verdict:
+            self.last_hits = contexts_1
             return answer_0
             
         # Step 3: Second Retrieval (if needed)
@@ -156,7 +170,7 @@ Verdict (sufficient / insufficient):"""
         
         # Merge contexts (simple concatenation here, could be deduplicated)
         # We use the new contexts primarily
-        context_block_2 = "\n\n".join([f"[{i+1}] {c[0]}" for i, c in enumerate(contexts_2)])
+        context_block_2 = "\n\n".join([f"[{i+1}] {c['text']}" for i, c in enumerate(contexts_2)])
         
         prompt_2 = f"""The previous answer was judged insufficient.
 Use the following context to give a more complete and well-supported answer.
@@ -177,4 +191,6 @@ Improved answer (short phrase):"""
         answer_1 = self.llm.chat(messages_2)
         logger.info(f"Improved answer: {answer_1[:100]}...")
         
+        # Keep the contexts used in the final round for logging
+        self.last_hits = contexts_2
         return answer_1

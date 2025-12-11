@@ -18,7 +18,7 @@ if str(ROOT) not in sys.path:
 
 from structrag.llm_client import LLMChatClient
 from scripts.hotpotqa.baselines.baseline_utils import (
-    build_passages_from_context,
+    build_passage_entries,
     clean_hotpot_answer,
     detect_device,
     format_context,
@@ -26,6 +26,7 @@ from scripts.hotpotqa.baselines.baseline_utils import (
     save_predictions_and_qa,
     select_workspace,
 )
+from utils.retrieval_logger import log_retrieval
 
 def load_dataset(path: str) -> List[Dict[str, Any]]:
     with open(path, "r", encoding="utf-8") as f:
@@ -35,11 +36,14 @@ class SelfReflectiveRetriever:
     def __init__(self, encoder: Callable[[List[str]], np.ndarray], llm: LLMChatClient):
         self.encoder = encoder
         self.llm = llm
-        self.passages = []
+        self.passages: List[str] = []
+        self.entries: List[Dict[str, Any]] = []
         self.vectors = None
+        self.last_hits: List[Dict[str, Any]] = []
         
-    def build_index(self, passages: List[str]):
-        self.passages = passages
+    def build_index(self, passages: List[Dict[str, Any]]):
+        self.entries = passages
+        self.passages = [p["text"] for p in passages]
         if not self.passages:
             self.vectors = None
             return
@@ -48,7 +52,7 @@ class SelfReflectiveRetriever:
         norm = np.linalg.norm(self.vectors, axis=1, keepdims=True)
         self.vectors = self.vectors / (norm + 1e-10)
 
-    def retrieve_and_reflect(self, query: str, topk: int = 3) -> List[str]:
+    def retrieve_and_reflect(self, query: str, topk: int = 3) -> List[Dict[str, Any]]:
         if self.vectors is None:
             return []
             
@@ -60,11 +64,22 @@ class SelfReflectiveRetriever:
         
         # Get top K candidates
         indices = np.argsort(scores)[::-1][:min(topk * 2, len(self.passages))]
-        candidates = [self.passages[i] for i in indices]
+        candidates = [self.entries[i] for i in indices]
+        self.last_hits = [
+            {
+                "text": self.passages[i],
+                "score": float(scores[i]),
+                "doc_id": self.entries[i].get("doc_id"),
+                "sent_ids": self.entries[i].get("sent_ids"),
+                "passage_id": self.entries[i].get("passage_id"),
+                "rank": rank + 1,
+            }
+            for rank, i in enumerate(indices)
+        ]
         
         # 2. Reflection / Re-ranking using LLM
         # Simple implementation: ask LLM to select relevant paragraphs from candidates
-        cand_str = "\n\n".join([f"[{i}] {c}" for i, c in enumerate(candidates)])
+        cand_str = "\n\n".join([f"[{i}] {c['text']}" for i, c in enumerate(candidates)])
         
         prompt = f"""Identify the paragraphs that are most relevant to answering the question: "{query}"
 Return only the indices (e.g., 0, 2) of the relevant paragraphs. If none are relevant, return nothing.
@@ -96,14 +111,18 @@ Relevant Indices:"""
 def process_example(item: Dict[str, Any], 
                     llm: LLMChatClient, 
                     encoder: Callable[[List[str]], np.ndarray],
-                    args) -> Tuple[str, str, str, List[List[Any]]]:
+                    args,
+                    *,
+                    run_name: str,
+                    dataset_name: str,
+                    log_dir: Path) -> Tuple[str, str, str, List[List[Any]]]:
     """
     Process a single HotpotQA example.
     """
     qid = item.get("_id") or item.get("id")
     question = item["question"]
     context = item["context"]
-    passages = build_passages_from_context(context, max_passages=args.max_context)
+    passages = build_passage_entries(context, max_passages=args.max_context)
     
     # Use a new retriever instance to avoid state conflicts, 
     # but share the encoder and llm client.
@@ -112,7 +131,7 @@ def process_example(item: Dict[str, Any],
     retriever.build_index(passages)
     hits = retriever.retrieve_and_reflect(question)
     
-    context_str = format_context(hits)
+    context_str = format_context([hit["text"] for hit in hits])
     
     prompt = f"""Answer the question using the provided context.
     
@@ -124,6 +143,26 @@ Answer:"""
     try:
         resp = llm.chat([{"role": "user", "content": prompt}])
         ans = clean_hotpot_answer(resp.content)
+        try:
+            log_retrieval(
+                sample_id=qid,
+                dataset=dataset_name,
+                run_name=run_name,
+                retrieved=hits,
+                topk=len(hits),
+                final_context=[
+                    {
+                        "doc_id": hit.get("doc_id"),
+                        "sent_ids": hit.get("sent_ids"),
+                        "passage_id": hit.get("passage_id"),
+                        "text": hit.get("text"),
+                    }
+                    for hit in hits
+                ],
+                log_dir=log_dir,
+            )
+        except Exception as log_exc:
+            logger.error(f"retrieval logging failed for {qid}: {log_exc}")
         sp = [] # Not predicting supporting facts for now
         return qid, question, ans, sp
     except Exception as e:
@@ -161,6 +200,8 @@ def main():
         work_dir.mkdir(parents=True, exist_ok=True)
     else:
         work_dir = select_workspace(Path(args.result_root), "hotpot_selfrag", args.new)
+    run_name = work_dir.name
+    dataset_name = "hotpotqa"
     output_path = Path(args.output) if args.output else work_dir / "pred.json"
     qa_path = Path(args.qa_path) if args.qa_path else work_dir / "qa.tsv"
     logger.info(f"Writing outputs to workspace {work_dir}")
@@ -178,7 +219,16 @@ def main():
     
     with ThreadPoolExecutor(max_workers=num_workers) as ex:
         futures = [
-            ex.submit(process_example, item, llm, encoder, args)
+            ex.submit(
+                process_example,
+                item,
+                llm,
+                encoder,
+                args,
+                run_name=run_name,
+                dataset_name=dataset_name,
+                log_dir=work_dir,
+            )
             for item in data
         ]
 

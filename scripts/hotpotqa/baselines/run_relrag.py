@@ -17,7 +17,7 @@ if str(ROOT) not in sys.path:
 
 from structrag.llm_client import LLMChatClient
 from scripts.hotpotqa.baselines.baseline_utils import (
-    build_passages_from_context,
+    build_passage_entries,
     clean_hotpot_answer,
     detect_device,
     format_context,
@@ -25,6 +25,7 @@ from scripts.hotpotqa.baselines.baseline_utils import (
     save_predictions_and_qa,
     select_workspace,
 )
+from utils.retrieval_logger import log_retrieval
 
 def load_dataset(path: str) -> List[Dict[str, Any]]:
     with open(path, "r", encoding="utf-8") as f:
@@ -39,14 +40,15 @@ class RelRAG:
     def __init__(self, encoder: Callable[[List[str]], np.ndarray], llm: LLMChatClient):
         self.encoder = encoder
         self.llm = llm
+        self.last_hits: List[Dict[str, Any]] = []
         
-    def solve(self, passages: List[str], question: str) -> str:
+    def solve(self, passages: List[Dict[str, Any]], question: str) -> str:
         texts = passages
         
         if not texts:
             return "Insufficient evidence"
             
-        vecs = self.encoder(texts)
+        vecs = self.encoder([p["text"] for p in passages])
         norm = np.linalg.norm(vecs, axis=1, keepdims=True)
         vecs = vecs / (norm + 1e-10)
         
@@ -72,7 +74,19 @@ class RelRAG:
         k = 3
         indices = np.argsort(final_scores)[::-1][:k]
         
-        selected_texts = [texts[i] for i in indices]
+        selected = [passages[i] for i in indices]
+        self.last_hits = [
+            {
+                "text": passages[i]["text"],
+                "score": float(final_scores[i]),
+                "doc_id": passages[i].get("doc_id"),
+                "sent_ids": passages[i].get("sent_ids"),
+                "passage_id": passages[i].get("passage_id"),
+                "rank": rank + 1,
+            }
+            for rank, i in enumerate(indices)
+        ]
+        selected_texts = [item["text"] for item in selected]
         
         # 5. Answer
         context_str = format_context(selected_texts)
@@ -89,14 +103,18 @@ Answer:"""
 def process_example(item: Dict[str, Any], 
                     llm: LLMChatClient, 
                     encoder: Callable[[List[str]], np.ndarray],
-                    args) -> Tuple[str, str, str, List[List[Any]]]:
+                    args,
+                    *,
+                    run_name: str,
+                    dataset_name: str,
+                    log_dir: Path) -> Tuple[str, str, str, List[List[Any]]]:
     """
     Process a single HotpotQA example using RelRAG.
     """
     qid = item.get("_id") or item.get("id")
     question = item["question"]
     context = item["context"]
-    passages = build_passages_from_context(context, max_passages=args.max_context)
+    passages = build_passage_entries(context, max_passages=args.max_context)
     
     # New relrag instance per thread
     relrag = RelRAG(encoder, llm)
@@ -104,6 +122,26 @@ def process_example(item: Dict[str, Any],
     try:
         ans = relrag.solve(passages, question)
         ans = clean_hotpot_answer(ans)
+        try:
+            log_retrieval(
+                sample_id=qid,
+                dataset=dataset_name,
+                run_name=run_name,
+                retrieved=relrag.last_hits,
+                topk=len(relrag.last_hits),
+                final_context=[
+                    {
+                        "doc_id": hit.get("doc_id"),
+                        "sent_ids": hit.get("sent_ids"),
+                        "passage_id": hit.get("passage_id"),
+                        "text": hit.get("text"),
+                    }
+                    for hit in relrag.last_hits
+                ],
+                log_dir=log_dir,
+            )
+        except Exception as log_exc:
+            logger.error(f"retrieval logging failed for {qid}: {log_exc}")
         sp = []
         return qid, question, ans, sp
     except Exception as e:
@@ -141,6 +179,8 @@ def main():
         work_dir.mkdir(parents=True, exist_ok=True)
     else:
         work_dir = select_workspace(Path(args.result_root), "hotpot_relrag", args.new)
+    run_name = work_dir.name
+    dataset_name = "hotpotqa"
     output_path = Path(args.output) if args.output else work_dir / "pred.json"
     qa_path = Path(args.qa_path) if args.qa_path else work_dir / "qa.tsv"
     logger.info(f"Writing outputs to workspace {work_dir}")
@@ -158,7 +198,16 @@ def main():
     
     with ThreadPoolExecutor(max_workers=num_workers) as ex:
         futures = [
-            ex.submit(process_example, item, llm, encoder, args)
+            ex.submit(
+                process_example,
+                item,
+                llm,
+                encoder,
+                args,
+                run_name=run_name,
+                dataset_name=dataset_name,
+                log_dir=work_dir,
+            )
             for item in data
         ]
 

@@ -11,6 +11,7 @@ from loguru import logger
 from baselines.naive_rag import NaiveIndex
 from config import config as config_loader
 from utils.answer_cleaner import _enforce_short_answer, _strip_reasoning
+from utils.retrieval_logger import log_retrieval
 
 
 FID_PROMPT_TEMPLATE = """You are a question answering system.
@@ -132,10 +133,14 @@ class FiDRAGRunner:
         work_dir: str,
         limit: Optional[int] = None,
         debug: bool = True,
+        dataset_name: str = "mirage",
+        run_name: Optional[str] = None,
     ) -> Dict[str, Any]:
         items = list(dataset)
         if limit:
             items = items[:limit]
+        log_dir = Path(work_dir)
+        resolved_run_name = run_name or log_dir.name
         answers: List[Dict[str, Any]] = []
         qa_rows: List[str] = []
         qa_rows_no_header: List[str] = []
@@ -166,6 +171,28 @@ class FiDRAGRunner:
             qa_rows.append(f"{question}\t{answer_text}")
             qa_rows_no_header.append(f"{question}\t{answer_text}")
             qa_with_q.append(f"{question}\t{answer_text}")
+            try:
+                log_retrieval(
+                    sample_id=qid,
+                    dataset=dataset_name,
+                    run_name=resolved_run_name,
+                    retrieved=[
+                        {**hit, "rank": idx + 1} for idx, hit in enumerate(hits)
+                    ],
+                    topk=len(hits),
+                    final_context=[
+                        {
+                            "doc_id": hit.get("doc_id"),
+                            "sent_ids": hit.get("sent_ids"),
+                            "passage_id": hit.get("passage_id"),
+                            "text": hit.get("text"),
+                        }
+                        for hit in hits
+                    ],
+                    log_dir=log_dir,
+                )
+            except Exception as log_exc:
+                logger.error("retrieval logging failed for {}: {}", qid, log_exc)
             if debug:
                 debug_records.append(
                     json.dumps(

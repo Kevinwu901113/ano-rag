@@ -1,0 +1,8 @@
+Total cases: 20
+Completed (with metrics): 20
+Errors: 0
+EM: 0.2500
+F1: 0.4390
+Precision: 0.3978
+Recall: 0.6650
+Support coverage (titles) - full: 7, partial: 11, zero: 2

@@ -12,6 +12,7 @@ from loguru import logger
 from config import config as config_loader
 from utils.embedding_utils import EmbeddingEncoder
 from utils.answer_cleaner import _strip_reasoning
+from utils.retrieval_logger import log_retrieval
 
 try:
     import faiss  # type: ignore
@@ -134,6 +135,7 @@ class NaiveIndex:
             for line in f:
                 if line.strip():
                     self.chunks.append(json.loads(line))
+        self.last_hits: List[Dict[str, Any]] = []
         
         # Initialize encoder for query embedding
         self.encoder = self._init_encoder()
@@ -189,12 +191,31 @@ class NaiveIndex:
             if idx < 0 or idx >= len(self.chunks):
                 continue
             chunk = self.chunks[idx]
-            results.append({
-                "text": chunk.get("text", ""),
-                "score": float(score),
-                "metadata": chunk
-            })
+            chunk_id = chunk.get("chunk_id") or chunk.get("id")
+            doc_id = chunk.get("doc_id")
+            if not doc_id and chunk_id and "::" in str(chunk_id):
+                doc_id = str(chunk_id).split("::", 1)[0]
+            passage_id = None
+            if chunk_id:
+                if "::" in str(chunk_id):
+                    passage_id = str(chunk_id).split("::", 1)[1]
+                else:
+                    passage_id = str(chunk_id)
+            results.append(
+                {
+                    "text": chunk.get("text", ""),
+                    "score": float(score),
+                    "metadata": chunk,
+                    "doc_id": doc_id,
+                    "sent_ids": None,
+                    "passage_id": passage_id,
+                }
+            )
+        self.last_hits = results
         return results
+
+    def search(self, query: str, k: int = 5) -> List[Dict[str, Any]]:
+        return self.retrieve(query, k)
 
 
 class LLMClient:
@@ -292,6 +313,89 @@ class NaiveRAGRunner:
             self.lm = LLMClient(endpoint, model, temperature=float(temp or 0.0), max_tokens=int(max_new_tokens or 8192), stop=stop)
         else:
             raise ValueError("LLM Client configuration missing")
+
+    def run_dataset(
+        self,
+        dataset: Iterable[Dict[str, Any]],
+        *,
+        work_dir: str,
+        limit: Optional[int] = None,
+        debug: bool = True,
+        dataset_name: str = "mirage",
+        run_name: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        items = list(dataset)
+        if limit:
+            items = items[:limit]
+        work_path = Path(work_dir)
+        work_path.mkdir(parents=True, exist_ok=True)
+        resolved_run_name = run_name or work_path.name
+        answers: List[Dict[str, Any]] = []
+        qa_rows: List[str] = []
+        debug_records: List[str] = []
+        for idx, item in enumerate(items):
+            question = item.get("query") or item.get("question") or ""
+            qid = item.get("query_id") or str(idx)
+            hits = self.retriever.retrieve(question, k=self.topk)
+
+            context_blocks = []
+            for i, doc in enumerate(hits):
+                context_blocks.append(f"[{i+1}] {doc['text']}")
+            context_str = "\n\n".join(context_blocks)
+
+            prompt = PROMPT_TEMPLATE.format(context=context_str, question=question)
+            messages = [
+                {"role": "system", "content": DEFAULT_SYSTEM_PROMPT},
+                {"role": "user", "content": prompt},
+            ]
+            try:
+                raw_answer = self.lm.chat(messages)
+                ans_text = _strip_reasoning(raw_answer)
+            except Exception as exc:
+                logger.error("LLM call failed for {}: {}", qid, exc)
+                ans_text = "Insufficient evidence"
+
+            answers.append(
+                {"query_id": qid, "question": question, "answer": ans_text, "hits": hits}
+            )
+            qa_rows.append(f"{question}\t{ans_text}")
+            if debug:
+                debug_records.append(
+                    json.dumps(
+                        {"query_id": qid, "question": question, "answer": ans_text, "hits": hits},
+                        ensure_ascii=False,
+                    )
+                )
+            try:
+                log_retrieval(
+                    sample_id=qid,
+                    dataset=dataset_name,
+                    run_name=resolved_run_name,
+                    retrieved=[{**hit, "rank": i + 1} for i, hit in enumerate(hits)],
+                    topk=len(hits),
+                    final_context=[
+                        {
+                            "doc_id": hit.get("doc_id"),
+                            "sent_ids": hit.get("sent_ids"),
+                            "passage_id": hit.get("passage_id"),
+                            "text": hit.get("text"),
+                        }
+                        for hit in hits
+                    ],
+                    log_dir=work_path,
+                )
+            except Exception as log_exc:
+                logger.error("retrieval logging failed for {}: {}", qid, log_exc)
+
+        answers_path = work_path / "answers.json"
+        qa_path = work_path / "qa.tsv"
+        answers_path.write_text(json.dumps(answers, ensure_ascii=False, indent=2), encoding="utf-8")
+        qa_path.write_text("\n".join(qa_rows), encoding="utf-8")
+        if debug:
+            debug_dir = work_path / "debug"
+            debug_dir.mkdir(parents=True, exist_ok=True)
+            (debug_dir / "retrieval_raw.jsonl").write_text("\n".join(debug_records), encoding="utf-8")
+        return {"answers": str(answers_path), "qa": str(qa_path)}
 
     def answer(self, question: str) -> str:
         # 1. Retrieve

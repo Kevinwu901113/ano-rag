@@ -22,8 +22,9 @@ except ImportError:
     logger.warning("Could not import config.config_loader or utils.answer_cleaner, ensuring PYTHONPATH is set correctly.")
     pass
 
-from baselines.vanilla_rag import answer as vanilla_rag_answer
+from baselines.vanilla_rag import get_retriever
 from baselines.vanilla_rag.index import VanillaRAGIndexer
+from utils.retrieval_logger import log_retrieval
 
 def _select_workspace(root: Path, prefix: str, force_new: bool) -> Path:
     root.mkdir(parents=True, exist_ok=True)
@@ -61,6 +62,9 @@ def main():
         work_dir.mkdir(parents=True, exist_ok=True)
     else:
         work_dir = _select_workspace(Path(args.result_root), "mirage_vanilla_rag", args.new)
+    
+    run_name = work_dir.name
+    dataset_name = "mirage"
     
     logger.add(work_dir / "vanilla_rag.log")
     logger.info(f"Starting Vanilla RAG run in {work_dir}")
@@ -117,6 +121,7 @@ def main():
         indexer = VanillaRAGIndexer()
         indexer.build(docs, str(index_path), str(chunk_store_path))
         logger.info("Index built successfully.")
+    retriever = get_retriever(index_path=str(index_path), chunk_store_path=str(chunk_store_path))
 
     # 4. Load Dataset
     try:
@@ -138,11 +143,7 @@ def main():
         
         try:
             logger.info(f"Processing Q{i}: {question}")
-            ans = vanilla_rag_answer(
-                question, 
-                index_path=str(index_path), 
-                chunk_store_path=str(chunk_store_path)
-            )
+            ans = retriever.answer(question)
             final_ans = clean_model_answer(ans)
             
             results.append({
@@ -151,6 +152,29 @@ def main():
                 "answer": final_ans,
                 "raw_answer": ans
             })
+            try:
+                hits = getattr(retriever, "last_hits", [])
+                log_retrieval(
+                    sample_id=qid,
+                    dataset=dataset_name,
+                    run_name=run_name,
+                    retrieved=[
+                        {**hit, "rank": idx + 1} for idx, hit in enumerate(hits)
+                    ],
+                    topk=len(hits),
+                    final_context=[
+                        {
+                            "doc_id": hit.get("doc_id"),
+                            "sent_ids": hit.get("sent_ids"),
+                            "passage_id": hit.get("passage_id"),
+                            "text": hit.get("text"),
+                        }
+                        for hit in hits
+                    ],
+                    log_dir=work_dir,
+                )
+            except Exception as log_exc:
+                logger.error(f"retrieval logging failed for {qid}: {log_exc}")
             
         except Exception as e:
             logger.error(f"Error processing Q{i}: {e}")

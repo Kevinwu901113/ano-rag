@@ -71,6 +71,7 @@ def main() -> None:
         work_dir.mkdir(parents=True, exist_ok=True)
     else:
         work_dir = _select_workspace(Path(args.result_root), "mirage_naive", args.new)
+    run_name = work_dir.name
     logger.info("Writing outputs to {}", work_dir)
 
     runner = NaiveRAGRunner(
@@ -83,7 +84,14 @@ def main() -> None:
         max_tokens=args.max_new_tokens,
     )
     limit = args.limit if args.limit and args.limit > 0 else None
-    artifacts = runner.run_dataset(dataset, work_dir=str(work_dir), limit=limit, debug=not args.no_debug)
+    artifacts = runner.run_dataset(
+        dataset,
+        work_dir=str(work_dir),
+        limit=limit,
+        debug=not args.no_debug,
+        dataset_name="mirage",
+        run_name=run_name,
+    )
     logger.info("Naive RAG finished. qa.tsv: {}", artifacts.get("qa"))
 
 

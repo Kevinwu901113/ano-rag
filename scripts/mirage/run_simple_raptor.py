@@ -15,6 +15,7 @@ if str(ROOT) not in sys.path:
 
 from baselines.simple_raptor.retriever import SimpleRaptorRetriever
 from rag_core.llm_client import LLMChatClient
+from utils.retrieval_logger import log_retrieval
 
 def _select_workspace(root: Path, dataset: str, new: bool) -> Path:
     if not root.exists():
@@ -88,6 +89,8 @@ def main() -> None:
         work_dir.mkdir(parents=True, exist_ok=True)
     else:
         work_dir = _select_workspace(Path(args.result_root), "mirage_raptor", args.new)
+    run_name = work_dir.name
+    dataset_name = "mirage"
     logger.info("Writing outputs to {}", work_dir)
     
     # Configure LLM Client explicit overrides if provided
@@ -136,6 +139,27 @@ def main() -> None:
                 "answer": ans,
             })
             qa_lines.append(f"{question}\t{ans.replace(chr(10), ' ')}")
+            try:
+                hits = getattr(retriever, "last_hits", [])
+                log_retrieval(
+                    sample_id=qid,
+                    dataset=dataset_name,
+                    run_name=run_name,
+                    retrieved=hits,
+                    topk=len(hits),
+                    final_context=[
+                        {
+                            "doc_id": hit.get("doc_id"),
+                            "sent_ids": hit.get("sent_ids"),
+                            "passage_id": hit.get("passage_id"),
+                            "text": hit.get("text"),
+                        }
+                        for hit in hits
+                    ],
+                    log_dir=work_dir,
+                )
+            except Exception as log_exc:
+                logger.error(f"retrieval logging failed for {qid}: {log_exc}")
         except Exception as e:
             logger.exception(f"Error Q{i}: {e}")
             

@@ -32,6 +32,7 @@ class GraphRetriever:
         with open(chunk_store_path, 'rb') as f:
             self.chunk_store = pickle.load(f)
         self.llm_client = llm_client
+        self.last_hits: List[Dict[str, Any]] = []
         
         # Load config for relrag parameters
         cfg = global_config.load_config()
@@ -55,9 +56,28 @@ class GraphRetriever:
         logger.info(f"Collected {len(relevant_chunk_ids)} relevant chunks")
         
         # 4. Retrieve chunks
-        chunks = [self.chunk_store[cid] for cid in relevant_chunk_ids if cid in self.chunk_store]
+        hits: List[Dict[str, Any]] = []
+        for cid in relevant_chunk_ids:
+            if cid not in self.chunk_store:
+                continue
+            doc_id = None
+            if isinstance(cid, str) and "::" in cid:
+                doc_id = cid.split("::", 1)[0]
+            hits.append(
+                {
+                    "doc_id": doc_id,
+                    "sent_ids": None,
+                    "passage_id": str(cid),
+                    "score": None,
+                    "text": self.chunk_store[cid],
+                }
+            )
         # Limit chunks to avoid context overflow
-        chunks = chunks[:self.top_k]
+        hits = hits[: self.top_k]
+        self.last_hits = [
+            {**hit, "rank": idx + 1} for idx, hit in enumerate(hits)
+        ]
+        chunks = [hit["text"] for hit in hits]
         
         # 5. Generate answer
         return self._generate_answer(question, chunks)

@@ -13,8 +13,8 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from baselines.simple_selfrag import answer as simple_selfrag_answer
 from config.config_loader import config as global_config
+from utils.retrieval_logger import log_retrieval
 
 def _select_workspace(root: Path, prefix: str, force_new: bool) -> Path:
     root.mkdir(parents=True, exist_ok=True)
@@ -50,6 +50,8 @@ def main():
         work_dir.mkdir(parents=True, exist_ok=True)
     else:
         work_dir = _select_workspace(Path(args.result_root), "mirage_simple_selfrag", args.new)
+    run_name = work_dir.name
+    dataset_name = "mirage"
         
     logger.add(work_dir / "simple_selfrag.log")
     logger.info(f"Writing Simple Self-RAG outputs to {work_dir}")
@@ -168,6 +170,27 @@ def main():
                 "raw_answer": ans_text,
                 "gold_answer": item.get("answer") # Preserve gold if available
             })
+            try:
+                hits = getattr(retriever, "last_hits", [])
+                log_retrieval(
+                    sample_id=qid,
+                    dataset=dataset_name,
+                    run_name=run_name,
+                    retrieved=[{**hit, "rank": i + 1} for i, hit in enumerate(hits)],
+                    topk=len(hits),
+                    final_context=[
+                        {
+                            "doc_id": hit.get("doc_id"),
+                            "sent_ids": hit.get("sent_ids"),
+                            "passage_id": hit.get("passage_id"),
+                            "text": hit.get("text"),
+                        }
+                        for hit in hits
+                    ],
+                    log_dir=work_dir,
+                )
+            except Exception as log_exc:
+                logger.error(f"retrieval logging failed for {qid}: {log_exc}")
             
         except Exception as e:
             logger.exception(f"Error processing question {qid}: {e}")

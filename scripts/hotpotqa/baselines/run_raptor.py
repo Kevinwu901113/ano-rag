@@ -18,7 +18,7 @@ if str(ROOT) not in sys.path:
 
 from structrag.llm_client import LLMChatClient
 from scripts.hotpotqa.baselines.baseline_utils import (
-    build_passages_from_context,
+    build_passage_entries,
     clean_hotpot_answer,
     detect_device,
     format_context,
@@ -27,6 +27,7 @@ from scripts.hotpotqa.baselines.baseline_utils import (
     select_workspace,
     truncate_text,
 )
+from utils.retrieval_logger import log_retrieval
 
 def load_dataset(path: str) -> List[Dict[str, Any]]:
     with open(path, "r", encoding="utf-8") as f:
@@ -36,15 +37,18 @@ class MiniRaptor:
     def __init__(self, encoder: Callable[[List[str]], np.ndarray], llm: LLMChatClient):
         self.encoder = encoder
         self.llm = llm
-        self.tree_nodes = [] # List of text
+        self.tree_nodes: List[Dict[str, Any]] = []  # Nodes with text + metadata
+        self.leaf_entries: List[Dict[str, Any]] = []
+        self.last_hits: List[Dict[str, Any]] = []
         
-    def build_tree(self, passages: List[str]):
+    def build_tree(self, passages: List[Dict[str, Any]]):
         """
         Build a small RAPTOR tree from the paragraphs.
         1. Leaf layer: paragraphs
         2. Cluster and summarize -> Higher level
         """
-        leaf_texts = passages
+        self.leaf_entries = passages
+        leaf_texts = [p["text"] for p in passages]
             
         if not leaf_texts:
             self.tree_nodes = []
@@ -52,7 +56,15 @@ class MiniRaptor:
             
         # If too few nodes, just use leaves
         if len(leaf_texts) < 3:
-            self.tree_nodes = leaf_texts
+            self.tree_nodes = [
+                {
+                    "text": text,
+                    "doc_id": entry.get("doc_id"),
+                    "sent_ids": entry.get("sent_ids"),
+                    "passage_id": entry.get("passage_id"),
+                }
+                for text, entry in zip(leaf_texts, self.leaf_entries)
+            ]
             return
             
         # Level 1: Cluster leaves
@@ -79,31 +91,65 @@ class MiniRaptor:
                 pass
                 
         # Tree = Leaves + Summaries
-        self.tree_nodes = leaf_texts + summaries
+        leaf_nodes = [
+            {
+                "text": text,
+                "doc_id": entry.get("doc_id"),
+                "sent_ids": entry.get("sent_ids"),
+                "passage_id": entry.get("passage_id"),
+            }
+            for text, entry in zip(leaf_texts, self.leaf_entries)
+        ]
+        summary_nodes = [
+            {
+                "text": summary,
+                "doc_id": None,
+                "sent_ids": None,
+                "passage_id": f"summary_{idx}",
+            }
+            for idx, summary in enumerate(summaries)
+        ]
+        self.tree_nodes = leaf_nodes + summary_nodes
         
     def retrieve(self, query: str, k: int = 5):
         if not self.tree_nodes:
             return []
             
-        vecs = self.encoder(self.tree_nodes)
+        texts = [node["text"] for node in self.tree_nodes]
+        vecs = self.encoder(texts)
         q_vec = self.encoder([query])
         
         scores = np.dot(vecs, q_vec.T).flatten()
         indices = np.argsort(scores)[::-1][:k]
         
-        return [self.tree_nodes[i] for i in indices]
+        hits: List[Dict[str, Any]] = []
+        for rank, idx in enumerate(indices):
+            node = self.tree_nodes[idx]
+            hits.append(
+                {
+                    **node,
+                    "score": float(scores[idx]),
+                    "rank": rank + 1,
+                }
+            )
+        self.last_hits = hits
+        return hits
 
 def process_example(item: Dict[str, Any], 
                     llm: LLMChatClient, 
                     encoder: Callable[[List[str]], np.ndarray],
-                    args) -> Tuple[str, str, str, List[List[Any]]]:
+                    args,
+                    *,
+                    run_name: str,
+                    dataset_name: str,
+                    log_dir: Path) -> Tuple[str, str, str, List[List[Any]]]:
     """
     Process a single HotpotQA example using RAPTOR.
     """
     qid = item.get("_id") or item.get("id")
     question = item["question"]
     context = item["context"]
-    passages = build_passages_from_context(context, max_passages=args.max_context)
+    passages = build_passage_entries(context, max_passages=args.max_context)
     
     try:
         # New raptor instance per thread
@@ -112,7 +158,7 @@ def process_example(item: Dict[str, Any],
         raptor.build_tree(passages)
         context_nodes = raptor.retrieve(question)
         
-        context_str = format_context(context_nodes)
+        context_str = format_context([node["text"] for node in context_nodes])
         # Clip context to avoid exceeding small ctx-length models (approx 4 chars per token)
         max_chars = args.max_prompt_tokens * 4 if args.max_prompt_tokens and args.max_prompt_tokens > 0 else None
         context_str = truncate_text(context_str, max_chars)
@@ -126,6 +172,27 @@ Answer:"""
     
         ans = llm.chat([{"role": "user", "content": prompt}])
         ans = clean_hotpot_answer(ans.content)
+        try:
+            hits = raptor.last_hits or context_nodes
+            log_retrieval(
+                sample_id=qid,
+                dataset=dataset_name,
+                run_name=run_name,
+                retrieved=hits,
+                topk=len(hits),
+                final_context=[
+                    {
+                        "doc_id": hit.get("doc_id"),
+                        "sent_ids": hit.get("sent_ids"),
+                        "passage_id": hit.get("passage_id"),
+                        "text": hit.get("text"),
+                    }
+                    for hit in hits
+                ],
+                log_dir=log_dir,
+            )
+        except Exception as log_exc:
+            logger.error(f"retrieval logging failed for {qid}: {log_exc}")
         # Hard to map back to original paragraphs from summaries
         sp = []
         return qid, question, ans, sp
@@ -170,6 +237,8 @@ def main():
         work_dir.mkdir(parents=True, exist_ok=True)
     else:
         work_dir = select_workspace(Path(args.result_root), "hotpot_raptor", args.new)
+    run_name = work_dir.name
+    dataset_name = "hotpotqa"
     output_path = Path(args.output) if args.output else work_dir / "pred.json"
     qa_path = Path(args.qa_path) if args.qa_path else work_dir / "qa.tsv"
     logger.info(f"Writing outputs to workspace {work_dir}")
@@ -187,7 +256,16 @@ def main():
     
     with ThreadPoolExecutor(max_workers=num_workers) as ex:
         futures = [
-            ex.submit(process_example, item, llm, encoder, args)
+            ex.submit(
+                process_example,
+                item,
+                llm,
+                encoder,
+                args,
+                run_name=run_name,
+                dataset_name=dataset_name,
+                log_dir=work_dir,
+            )
             for item in data
         ]
 

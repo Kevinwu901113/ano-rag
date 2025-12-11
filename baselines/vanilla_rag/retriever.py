@@ -42,6 +42,7 @@ class VanillaRAGRetriever:
         self.cfg = config or config_loader.load_config()
         self.index_path = Path(index_path)
         self.chunk_store_path = Path(chunk_store_path)
+        self.last_hits: List[Dict[str, Any]] = []
         
         # Load Index
         if not self.index_path.exists():
@@ -109,8 +110,8 @@ class VanillaRAGRetriever:
             return None
         return str(Path(str(value)).expanduser())
 
-    def retrieve(self, query: str, top_k: int = 5) -> List[Tuple[str, float]]:
-        """Retrieve chunks for a query. Returns list of (chunk_text, score)."""
+    def retrieve(self, query: str, top_k: int = 5) -> List[Dict[str, Any]]:
+        """Retrieve chunks for a query. Returns list of dict with text/score/meta."""
         emb = self.embedding_client.encode([query])
         if emb is None or len(emb) == 0:
             return []
@@ -125,14 +126,25 @@ class VanillaRAGRetriever:
 
         scores, indices = self.index.search(emb, top_k)
         
-        results = []
+        results: List[Dict[str, Any]] = []
         for score, idx in zip(scores[0], indices[0]):
             if idx < 0 or idx >= len(self.chunk_ids):
                 continue
             chunk_id = self.chunk_ids[idx]
             if chunk_id in self.chunk_store:
-                results.append((self.chunk_store[chunk_id], float(score)))
-                
+                doc_id = None
+                if "::" in str(chunk_id):
+                    doc_id = str(chunk_id).split("::", 1)[0]
+                results.append(
+                    {
+                        "text": self.chunk_store[chunk_id],
+                        "score": float(score),
+                        "doc_id": doc_id,
+                        "sent_ids": None,
+                        "passage_id": str(chunk_id),
+                    }
+                )
+        self.last_hits = results
         return results
 
     def answer(self, question: str, top_k: int = 5) -> str:
@@ -140,8 +152,8 @@ class VanillaRAGRetriever:
         docs = self.retrieve(question, top_k=top_k)
         
         context_blocks = []
-        for i, (text, score) in enumerate(docs):
-            context_blocks.append(f"[{i+1}] {text}")
+        for i, hit in enumerate(docs):
+            context_blocks.append(f"[{i+1}] {hit.get('text', '')}")
         context_str = "\n\n".join(context_blocks)
         
         prompt = PROMPT_TEMPLATE.format(context=context_str, question=question)

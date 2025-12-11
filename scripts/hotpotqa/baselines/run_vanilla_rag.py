@@ -5,7 +5,7 @@ import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import numpy as np
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from loguru import logger
 from tqdm import tqdm
@@ -17,7 +17,7 @@ if str(ROOT) not in sys.path:
 
 from structrag.llm_client import LLMChatClient
 from scripts.hotpotqa.baselines.baseline_utils import (
-    build_passages_from_context,
+    build_passage_entries,
     clean_hotpot_answer,
     detect_device,
     format_context,
@@ -25,32 +25,37 @@ from scripts.hotpotqa.baselines.baseline_utils import (
     save_predictions_and_qa,
     select_workspace,
 )
+from utils.retrieval_logger import log_retrieval
 
 def load_dataset(path: str) -> List[Dict[str, Any]]:
     with open(path, "r", encoding="utf-8") as f:
         return json.load(f)
 
 class InMemoryVanillaRetriever:
-    def __init__(self, encoder: Callable[[List[str]], np.ndarray]):
+    def __init__(self, encoder: Callable[[List[str]], np.ndarray], emb_dtype: Optional[str] = None):
         self.encoder = encoder
-        self.passages = []
+        self.passages: List[str] = []
+        self.entries: List[Dict[str, Any]] = []
         self.vectors = None
+        self.last_hits: List[Dict[str, Any]] = []
+        self.emb_dtype = emb_dtype
         
-    def build_index_for_question(self, passages: List[str]):
+    def build_index_for_question(self, entries: List[Dict[str, Any]]):
         """
         Build a temporary index for the paragraphs provided in the distractor setting.
         """
-        self.passages = passages
+        self.entries = entries
+        self.passages = [entry["text"] for entry in entries]
         if not self.passages:
             self.vectors = None
             return
 
-        self.vectors = self.encoder(self.passages, torch_dtype=args.emb_dtype if hasattr(args, "emb_dtype") else None)
+        self.vectors = self.encoder(self.passages, torch_dtype=self.emb_dtype)
         # Normalize for cosine similarity
         norm = np.linalg.norm(self.vectors, axis=1, keepdims=True)
         self.vectors = self.vectors / (norm + 1e-10)
 
-    def retrieve(self, query: str, k: int = 3) -> List[Tuple[str, float]]:
+    def retrieve(self, query: str, k: int = 3) -> List[Dict[str, Any]]:
         if self.vectors is None or len(self.passages) == 0:
             return []
             
@@ -63,33 +68,47 @@ class InMemoryVanillaRetriever:
         # Get top k
         indices = np.argsort(scores)[::-1][:k]
         
-        results = []
+        results: List[Dict[str, Any]] = []
         for idx in indices:
-            results.append((self.passages[idx], float(scores[idx])))
+            entry = self.entries[idx]
+            results.append(
+                {
+                    "text": self.passages[idx],
+                    "score": float(scores[idx]),
+                    "doc_id": entry.get("doc_id"),
+                    "sent_ids": entry.get("sent_ids"),
+                    "passage_id": entry.get("passage_id"),
+                }
+            )
+        self.last_hits = results
         return results
 
 def process_example(item: Dict[str, Any], 
                     llm: LLMChatClient, 
                     encoder: Callable[[List[str]], np.ndarray],
-                    args) -> Tuple[str, str, str, List[List[Any]]]:
+                    args,
+                    *,
+                    run_name: str,
+                    dataset_name: str,
+                    log_dir: Path) -> Tuple[str, str, str, List[List[Any]]]:
     """
     Process a single HotpotQA example.
     """
     qid = item.get("_id") or item.get("id")
     question = item["question"]
     context = item["context"]
-    passages = build_passages_from_context(context, max_passages=args.max_context)
+    passage_entries = build_passage_entries(context, max_passages=args.max_context)
     
-    retriever = InMemoryVanillaRetriever(encoder)
+    retriever = InMemoryVanillaRetriever(encoder, emb_dtype=getattr(args, "emb_dtype", None))
     
     # 1. Build small index for this question
-    retriever.build_index_for_question(passages)
+    retriever.build_index_for_question(passage_entries)
     
     # 2. Retrieve
     hits = retriever.retrieve(question, k=args.topk)
     
     # 3. Format Context
-    context_str = format_context([text for text, score in hits])
+    context_str = format_context([hit["text"] for hit in hits])
     
     # 4. Prompt
     prompt = f"""Answer the question based on the selected paragraphs.
@@ -104,6 +123,28 @@ Answer:"""
     try:
         resp = llm.chat([{"role": "user", "content": prompt}])
         ans = clean_hotpot_answer(resp.content)
+        try:
+            log_retrieval(
+                sample_id=qid,
+                dataset=dataset_name,
+                run_name=run_name,
+                retrieved=[
+                    {**hit, "rank": idx + 1} for idx, hit in enumerate(hits)
+                ],
+                topk=len(hits),
+                final_context=[
+                    {
+                        "doc_id": hit.get("doc_id"),
+                        "sent_ids": hit.get("sent_ids"),
+                        "passage_id": hit.get("passage_id"),
+                        "text": hit.get("text"),
+                    }
+                    for hit in hits
+                ],
+                log_dir=log_dir,
+            )
+        except Exception as log_exc:
+            logger.error(f"retrieval logging failed for {qid}: {log_exc}")
         
         sp = [] # Not predicting supporting facts for now
         return qid, question, ans, sp
@@ -144,6 +185,8 @@ def main():
         work_dir.mkdir(parents=True, exist_ok=True)
     else:
         work_dir = select_workspace(Path(args.result_root), "hotpot_vanilla_rag", args.new)
+    run_name = work_dir.name
+    dataset_name = "hotpotqa"
     output_path = Path(args.output) if args.output else work_dir / "pred.json"
     qa_path = Path(args.qa_path) if args.qa_path else work_dir / "qa.tsv"
     logger.info(f"Writing outputs to workspace {work_dir}")
@@ -170,7 +213,16 @@ def main():
     
     with ThreadPoolExecutor(max_workers=num_workers) as ex:
         futures = [
-            ex.submit(process_example, item, llm, encoder, args)
+            ex.submit(
+                process_example,
+                item,
+                llm,
+                encoder,
+                args,
+                run_name=run_name,
+                dataset_name=dataset_name,
+                log_dir=work_dir,
+            )
             for item in data
         ]
 

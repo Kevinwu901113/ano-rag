@@ -174,20 +174,42 @@ def build_passages_from_context(context: Any, max_passages: int = 10) -> List[st
     Supports both dict format {"title": [...], "sentences": [...]} and
     list format [[title, [sent1, ...]], ...].
     """
-    passages: List[str] = []
+    return [entry["text"] for entry in build_passage_entries(context, max_passages=max_passages)]
+
+
+def build_passage_entries(context: Any, max_passages: int = 10) -> List[Dict[str, Any]]:
+    """
+    Normalize HotpotQA context and keep metadata for retrieval logging.
+    Each entry has: text, doc_id (title), sent_ids (indices of included sentences).
+    """
+    entries: List[Dict[str, Any]] = []
 
     if isinstance(context, dict):
         titles = list(context.get("title", []))[:max_passages]
         sentences_list = list(context.get("sentences", []))[:max_passages]
         for title, sentences in zip(titles, sentences_list):
             text = " ".join(sentences)
-            passages.append(f"Title: {title}\nContent: {text}")
+            entries.append(
+                {
+                    "text": f"Title: {title}\nContent: {text}",
+                    "doc_id": title,
+                    "sent_ids": list(range(len(sentences))),
+                    "passage_id": None,
+                }
+            )
     else:
         for title, sentences in list(context)[:max_passages]:
             text = " ".join(sentences)
-            passages.append(f"Title: {title}\nContent: {text}")
+            entries.append(
+                {
+                    "text": f"Title: {title}\nContent: {text}",
+                    "doc_id": title,
+                    "sent_ids": list(range(len(sentences))),
+                    "passage_id": None,
+                }
+            )
 
-    return passages
+    return entries
 
 
 def format_context(passages: List[str]) -> str:

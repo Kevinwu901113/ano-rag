@@ -13,7 +13,8 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from baselines.simple_graphrag import answer as simple_graphrag_answer
+from baselines.simple_graphrag import get_retriever
+from utils.retrieval_logger import log_retrieval
 
 
 def _select_workspace(root: Path, prefix: str, force_new: bool) -> Path:
@@ -61,6 +62,8 @@ def main() -> None:
         work_dir.mkdir(parents=True, exist_ok=True)
     else:
         work_dir = _select_workspace(Path(args.result_root), "mirage_simple_graphrag", args.new)
+    run_name = work_dir.name
+    dataset_name = "mirage"
     
     # Add logger sink to work_dir
     logger.add(work_dir / "simple_graphrag.log")
@@ -142,6 +145,7 @@ def main() -> None:
     qa_lines = []
     
     from baselines.simple_graphrag.runner import _strip_reasoning, _enforce_short_answer
+    retriever = get_retriever(index_dir=index_dir)
     
     for i, item in enumerate(dataset):
         question = item.get("query") or item.get("question")
@@ -149,7 +153,7 @@ def main() -> None:
         
         try:
             logger.info(f"Processing Q{i}: {question}")
-            ans = simple_graphrag_answer(question, index_dir=index_dir)
+            ans = retriever.answer(question)
             cleaned_ans = _strip_reasoning(ans)
             final_ans = _enforce_short_answer(cleaned_ans)
             
@@ -162,6 +166,27 @@ def main() -> None:
             
             clean_ans = " ".join(final_ans.split())
             qa_lines.append(f"{question}\t{clean_ans}")
+            try:
+                hits = getattr(retriever, "last_hits", [])
+                log_retrieval(
+                    sample_id=qid,
+                    dataset=dataset_name,
+                    run_name=run_name,
+                    retrieved=hits,
+                    topk=len(hits),
+                    final_context=[
+                        {
+                            "doc_id": hit.get("doc_id"),
+                            "sent_ids": hit.get("sent_ids"),
+                            "passage_id": hit.get("passage_id"),
+                            "text": hit.get("text"),
+                        }
+                        for hit in hits
+                    ],
+                    log_dir=work_dir,
+                )
+            except Exception as log_exc:
+                logger.error(f"retrieval logging failed for {qid}: {log_exc}")
             
         except Exception as e:
             logger.error(f"Error processing Q{i}: {e}")
