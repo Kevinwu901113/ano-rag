@@ -1,15 +1,19 @@
-# 项目清理记录
+# 项目清理记录 / 当前现状
 
-本次已移除全部旧的向量 / 混合检索相关模块和脚本，保留的代码只围绕结构化三元组管线（`doc/chunker.py` → `generator/` → `indexer/` → `retriever/` → `main.py`）运行。
+仓库已完成一次大整理：主结构化三元组笔记管线集中在  
+`doc/chunker.py` → `generator/` → `indexer/` → `retriever/` → `query/` → `main.py`，  
+并在 `scripts/` 中提供 MIRAGE / HotpotQA / MuSiQue 的一键运行与基线评测。
 
-## 已删除的目录/脚本
-- 目录：`adapters/`, `answer/`, `chunker/`, `configs/`, `context/`, `eval/`, `graph/`, `llm/`, `parallel/`, `reasoning/`, `retrieval/`, `scripts/`, `support/`, `training/`, `vector_store/`, `test_notes/`, `MIRAGE/`
-- 旧入口及工具脚本：`answer_selector.py`, `convert_to_official_format.py`, `enhanced_evaluator.py`, `extract_dev200.py`, `install_requirements.py`, `main_build_notes.py`, `main_mirage.py`, `main_musique.py`, `main_query.py`, `run_evaluation.py`, `test_mirage_small.py`
-- 旧测试与迁移文档：`tests/`、`README_EFSA.md`、`VLLM_MIGRATION_NOTES.md`
+## 已完成的清理
 
-## 当前仍保留但待评估的资源
-- `docs/`：多为旧架构示意图/说明，如需继续沿用需更新内容。
-- `data/`、`logs/`, `indexes/`, `notes/`：示例数据与运行产物，可视需求归档或清空。
-- `validator/`（与 `validators/` 并存的旧目录）：若确认无引用，可在下一轮移除。
+- 旧的向量检索/混合检索栈已从主链路剥离（详见 Git 历史）。
+- 配置入口统一为 `config.yaml` + `config/config_loader.py`。
+- 对比基线集中在 `baselines/` 与 `scripts/*/baselines/`。
 
-> 如需回溯旧实现，建议在清理前参考 Git 历史或创建专门的 `legacy` 分支。
+## 仍保留的实验/Legacy 组件
+
+- `main_build_notes.py` 与 `adapters/`：目前主要被 `scripts/mirage/build_notes.sh` 使用，属于旧入口；如需完全统一到 `main.py process`，可在后续迭代中合并/替换。
+- `retriever/retrieve.py`、`rag_core/`、`analysis/` 等：不走主链路或仅用于实验，可视需求归档/删减。
+- 运行产物目录（建议保持在 `.gitignore` 中）：`notes/`、`indexes/`、`result/`、`logs/`、`ans/` 等。
+
+> 需要回溯旧实现或清理背景，请参考 Git 历史或建立 `legacy` 分支。  

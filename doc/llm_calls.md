@@ -103,9 +103,8 @@
 - 配置：沿用 `config.retriever.embedding.*`。
 
 #### 嵌入配置 / 预下载
-- 关键键：`retriever.embedding.cache_dir`（Hugging Face 缓存位置）、`download_dir`（`huggingface-cli --local-dir` 默认目录）、`model_path_override`（本地模型文件夹）、`device`（默认继承 `system.device`）、`auto_build`（`scripts/mirage/build_notes.sh` 结束后自动执行 `scripts/build_indexes.sh`）。
- - 关键键：`retriever.embedding.cache_dir`（Hugging Face 缓存位置）、`download_dir`（`huggingface-cli --local-dir` 默认目录）、`model_path_override`（本地模型文件夹）、`device`（默认继承 `system.device`）、`dtype`（如 `bfloat16`/`float16` 限制显存）、`auto_build`（`scripts/mirage/build_notes.sh` 结束后自动执行 `scripts/build_indexes.sh`）。
-- 自动覆盖：环境变量 `EMB_CACHE_DIR`、`EMB_MODEL_PATH`、`EMB_DOWNLOAD_DIR` 会在 `config_loader` 读取时覆盖对应配置，与 `VLLM_DOWNLOAD_DIR` 行为一致。
+- 关键键：`retriever.embedding.cache_dir`（Hugging Face 缓存位置）、`download_dir`（`huggingface-cli --local-dir` 默认目录）、`model_path_override`（本地模型文件夹）、`device`（默认继承 `system.device`）、`dtype`（如 `bfloat16`/`float16` 限制显存）、`auto_build`（`scripts/mirage/build_notes.sh` 结束后自动执行 `scripts/build_indexes.sh`）。
+- 自动覆盖：环境变量 `EMB_CACHE_DIR`、`EMB_MODEL_PATH`、`EMB_DOWNLOAD_DIR`、`EMB_DEVICE`、`EMB_DTYPE` 会在 `config_loader` 读取时覆盖对应配置，与 `VLLM_DOWNLOAD_DIR` 行为一致。
 - 预下载脚本：`scripts/download_embedding_model.sh` 读取上述配置并封装 `huggingface-cli download`，可通过 `--model` / `--cache-dir` / `--local-dir` 指定 repo 与目标目录，适合在构建索引前预拉 `Qwen/Qwen3-Embedding-8B` 等大模型。
 - 多源检索开关：`retriever.structured.enabled` / `retriever.embedding.enabled` / `retriever.bm25.enabled` 控制三路召回；混合检索由 `retriever/pipeline.py::_maybe_run_hybrid` 根据配置自动融合。
 
@@ -116,7 +115,6 @@
   - 使用本地 `SentenceTransformer`（默认 `all-MiniLM-L6-v2`）编码问题与笔记文本，进行余弦相似度检索，仅用于预筛或兜底，不参与最终融合排序。
 
 ## 配置总表与来源
--
 - 文件：`config/config_loader.py`（默认值）与项目根 `config.yaml`（可覆盖）。
 - 关键键：
   - `vllm.*`：`endpoint`、`model`、`temperature`、`max_tokens`、`concurrency.*`（`max_workers`、`endpoints`、`connect_timeout_sec`、`read_timeout_sec`、`retry_*`、`blacklist_duration_sec`、`endpoint_log_every`）、`adaptive.*`。
@@ -124,7 +122,7 @@
   - `reranker.llm.*`：`endpoint`、`model`、`batch`、`timeout_s`。
   - `retriever.embedding.*`：`enabled`、`provider`、`model`、`model_path_override`、`cache_dir`、`download_dir`、`device`、`dtype`、`offline_index_path`、`meta_path`、`max_len_note`、`faiss.*`、`normalize`、`topn`、`auto_build`。
   - `notes.*`、`chunk.*`、`parsing.*`：与生成/解析相关的辅助配置。
-  - 环境变量：`VLLM_ENDPOINT{N}`（如 `VLLM_ENDPOINT0`, `VLLM_ENDPOINT1`）优先于配置实现多端点轮询；`EMB_CACHE_DIR` / `EMB_MODEL_PATH` / `EMB_DOWNLOAD_DIR` 覆盖嵌入缓存/本地模型目录；`ANO_RAG_CONFIG` 可指向任意配置文件，方便 per-run 覆盖。
+  - 环境变量：`VLLM_ENDPOINT{N}`（如 `VLLM_ENDPOINT0`, `VLLM_ENDPOINT1`）优先于配置实现多端点轮询；`EMB_CACHE_DIR` / `EMB_MODEL_PATH` / `EMB_DOWNLOAD_DIR` / `EMB_DEVICE` / `EMB_DTYPE` 覆盖嵌入相关配置；`ANO_RAG_CONFIG` 可指向任意配置文件，方便 per-run 覆盖。
 
 ## 端到端调用链
 - 构建阶段：`main.py process` → `pipeline/structured_builder.py` → `NoteGenerator`（vLLM → JSON 解析 → 校验）→ 索引构建（倒排/图/嵌入/BM25）。

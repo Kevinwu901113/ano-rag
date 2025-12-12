@@ -1,17 +1,20 @@
-# ANO-RAG：结构化 RAG 最小实现
+# ANO-RAG：结构化三元组笔记 RAG
 
-以三元组“原子笔记”为核心的两阶段 RAG：构建阶段将文档抽取为规范化事实笔记并写出多类索引；检索阶段在结构空间内执行别名绑定与图遍历，融合弱信号兜底，最终将证据交给 LM 接口生成答案。
+Ano‑RAG 是一个以“原子笔记（subj–pred–obj）”为中间表示的两阶段 RAG 最小实现：
+
+1. **构建阶段**：对文档做句级滑窗分块，调用 vLLM 抽取严格 JSON 的事实笔记，完成校验/归一后写出轻量结构索引（倒排、类型边、图边、属性值倒排、别名与提及/共指等）。
+2. **查询阶段**：把自然语言问题解析为结构化 IR，在索引中执行别名绑定与图扩展并做路径打分；当结构信号不足时，可在候选范围内用向量/BM25 兜底；最终把证据交给 LM Studio（或任意 OpenAI 兼容端）生成答案。
 
 ## 为什么选择结构化
 
-- 可解释性强：检索路径由显式边与类型约束组成，可回溯至 `note_id` 与证据文本。
-- 精准受控：类型边与谓词归一限制不合理跳转，职业等属性统一归一提升一致性。
-- 别名稳健：实体别名索引与查询端归一协同，跨语体/噪声条件下仍保持稳定召回。
-- 易于扩展：索引是轻量 JSON/JSONL；可增量构建嵌入与 BM25 以增强弱信号。
+- **可解释**：检索路径由显式图边与类型约束组成，可回溯到 `note_id` 与证据文本。
+- **可控**：谓词/类型归一限制不合理跳转；occupation 等字段值统一归一提升一致性。
+- **稳健**：实体别名索引 + 查询端归一协同，噪声/跨语体条件下仍保持稳定召回。
+- **易扩展**：索引全为 JSON/JSONL；可增量补齐嵌入与 BM25 作为弱信号。
 
-## 架构图
+## 架构概览
 
-端到端流程示意：
+端到端流程：
 
 ```mermaid
 flowchart LR
@@ -61,15 +64,24 @@ flowchart TB
   AttrValue --> FI
 ```
 
-更多详图可在 `doc/architecture.mmd` 中查看与维护。
+更细的图示维护在 `doc/architecture.mmd`。
 
 ## 快速开始
 
-- 依赖安装：`pip install -r requirements.txt`（可选安装嵌入/FAISS/BM25 相关包）
-- 服务准备：确保有 vLLM 与 LM Studio 的 OpenAI 风格 HTTP 接口。
-- 可选配置：在 `config.yaml` 修改 `vllm.*`、`lmstudio.*`、`notes.*`、`chunk.*`。
+### 1) 安装依赖
 
-构建笔记与基础索引：
+```bash
+pip install -r requirements.txt
+```
+
+如需启用向量/FAISS 或 BM25，可按 `requirements.txt` 里的可选依赖安装对应包。
+
+### 2) 准备服务
+
+- vLLM（用于笔记抽取），需提供 OpenAI 风格 `chat/completions` 端点。
+- LM Studio/兼容端（用于最终回答，可选）。
+
+### 3) 构建笔记与结构索引
 
 ```bash
 python main.py process \
@@ -80,10 +92,10 @@ python main.py process \
   --max-tokens 8000
 ```
 
-- 默认输出：`notes/notes.jsonl`、`notes/chunks.jsonl`、`indexes/`（见“索引说明”）。
-- 可通过 `--notes-out` 与 `--indexes-dir` 覆盖输出路径。
+- 默认输出：`notes/notes.jsonl`、`notes/chunks.jsonl`、`indexes/`。
+- 可通过 `--notes-out`、`--indexes-dir` 覆盖输出路径。
 
-查询并生成答案：
+### 4) 查询并生成答案
 
 ```bash
 python main.py query \
@@ -94,7 +106,7 @@ python main.py query \
   --lmstudio-model openai/gpt-oss-20b
 ```
 
-输出为 JSON，包含结构化检索结果与答案文本（若配置了 LM 接口）。
+输出为 JSON，包含结构化检索结果、证据与答案文本。
 
 ## 索引说明
 
@@ -104,88 +116,47 @@ python main.py query \
 - `graph_edges.jsonl` / `inverse_edges.jsonl`：有向/反向图边（含 `note_id`）。
 - `field_index.json`：属性值归一倒排（如 occupation）。
 - `entity_alias_index.json`：别名到实体集合。
-- `mentions_edges.jsonl`：从证据文本抽取的实体提及。
+- `mentions_edges.jsonl`：从证据文本抽取的实体提及边。
 - `corefers_edges.jsonl`：笔记到主体实体的共指边。
-- `anchor_index.json`：每条笔记的锚点实体（若唯一可判定）。
+- `anchor_index.json`：笔记锚点实体（若唯一可判定）。
 - `manifest.json`：索引清单与计数信息。
 
-## 架构与代码位置
+可选弱信号索引：
 
-- `pipeline/structured_builder.py`：统一构建器，遍历数据源、分块、抽取、写出索引。
-- `doc/chunker.py`：句级滑窗分块，参数来自 `config.chunk`（`n_sent`、`overlap`）。
-- `generator/note_generator.py`：调用 vLLM 抽取严格 JSON；`generator/note_parsing.py` 负责容错解析；`validators/note_validator.py` 执行校验与归一。
-- `indexer/index_builder.py`：从 `notes.jsonl` 构建上述各类索引。
-- `retriever/`：结构化检索（别名绑定、图扩展、打分与兜底），总控在 `retriever/pipeline.py`。
-- `generator/answerer.py`：将结构化证据传给 LM Studio 生成自然语言答案。
-- `main.py`：CLI 入口（`process` / `query`）。
-- `baselines/`：对比实验或外部基线（含 MIRAGE 用的 `naive_rag` 与直接无检索的 `direct_llm`，后续可放 LightRAG/GraphRAG 等）。
+- `indexes/faiss/*`：嵌入索引（FAISS）。
+- `indexes/bm25/*`：BM25 语料与倒排。
+
+## 代码位置
+
+- 构建：`pipeline/structured_builder.py`（总控） → `doc/chunker.py`（分块） → `generator/`（笔记抽取/解析/校验） → `indexer/index_builder.py`（写索引）。
+- 查询：`query/query_processor.py`（入口） → `retriever/`（IR 解析、BIND/EXPAND、打分/兜底） → `generator/answerer.py`（最终回答）。
+- CLI：`main.py`（`process` / `query`）。
+- 对比基线：`baselines/` 与 `scripts/*/baselines/`（详见 `baselines/USAGE.md`、`doc/*_baseline_commands.md`）。
 
 ## 配置与并发
 
-- 通过 `config.yaml` 或默认配置（`config/config_loader.py`）管理：
-  - `vllm.endpoint`, `vllm.model`, `vllm.temperature`, `vllm.max_tokens`
-  - `vllm.concurrency.max_workers`：并发线程数（默认 `8`），线程池保持满载提交。
-  - `vllm.concurrency.endpoints`：可选多端点列表，启用轮询均衡。
-  - `vllm.concurrency.timeout_sec` 与 `retry_backoff`：HTTP 超时与重试退避。
-  - `lmstudio.endpoint`, `lmstudio.model`
-  - `notes.out_path`, `notes.indexes_dir`
-  - `chunk.n_sent`, `chunk.overlap`, `chunk.max_tokens`
-  - `parsing.*`, `schema_guard.*`：解析与类型守卫。
-- 环境变量：支持 `VLLM_ENDPOINT{N}`（如 `VLLM_ENDPOINT0`, `VLLM_ENDPOINT1`）覆盖端点列表以进行轮询。
+配置可在根目录 `config.yaml` 覆盖默认值（`config/config_loader.py`）：
 
-## 进阶：向量与 BM25
+- vLLM：
+  - `vllm.endpoint` / `vllm.model` / `vllm.temperature` / `vllm.max_tokens`
+  - `vllm.concurrency.max_workers`：并发线程数（默认 `16`）。
+  - `vllm.concurrency.endpoints`：多端点轮询池（不填则用单端点）。
+  - `vllm.concurrency.connect_timeout_sec` / `read_timeout_sec` / `retry_*`：超时与重试退避。
+  - `vllm.adaptive.*`：可选自适应并发（见下方示例）。
+- LM Studio：
+  - `lmstudio.endpoint` / `lmstudio.model` / `lmstudio.temperature` / `lmstudio.max_tokens`
+- 其他：
+  - `notes.out_path` / `notes.indexes_dir`
+  - `chunk.n_sent` / `chunk.overlap` / `chunk.max_tokens`
+  - `parsing.*` / `schema_guard.*`
 
-- 构建嵌入索引（FAISS，可选）：
+环境变量：
 
-```bash
-python -m indexer.embedding_index
-```
+- `ANO_RAG_CONFIG`：指向任意配置文件（per‑run 覆盖）。
+- `VLLM_ENDPOINT{N}`（如 `VLLM_ENDPOINT0`/`1`）：覆盖端点列表以进行轮询。
+- `EMB_CACHE_DIR` / `EMB_MODEL_PATH` / `EMB_DOWNLOAD_DIR` / `EMB_DEVICE` / `EMB_DTYPE`：覆盖嵌入模型缓存/本地路径/下载目录/设备/精度。
 
-- 构建 BM25 语料（可选，需在 `config.yaml` 开启 `retriever.bm25.enabled: true`）：
-
-```bash
-python -m indexer.bm25_index
-```
-
-- 或使用脚本一次生成两者：`scripts/build_indexes.sh`
-
-## 多源检索 & 嵌入模型预下载
-
-- 检索开关：在 `config.yaml` 或 `config/config_loader.py` 中管理 `retriever.structured.enabled`、`retriever.embedding.enabled`、`retriever.bm25.enabled` 即可按需融合结构 / 向量 / BM25 三路（查询阶段 `retriever/pipeline.py::_maybe_run_hybrid` 会按权重融合）。
-- 新的嵌入配置：`retriever.embedding.cache_dir`（Hugging Face 缓存目录）、`model_path_override`（本地模型文件夹）、`download_dir`（ huggingface-cli `--local-dir` 默认位置）、`device`（默认为 `system.device`）、`auto_build`（在 `scripts/mirage/build_notes.sh` 完成后自动调用 `scripts/build_indexes.sh`）。
-  另外新增 `dtype`（如 `bfloat16`/`float16`），可以在加载 embedding 模型时直接控制精度，降低显存占用。
-- 环境变量覆盖：`EMB_CACHE_DIR`、`EMB_MODEL_PATH`、`EMB_DOWNLOAD_DIR` 分别覆盖上述三个目录，类似 `VLLM_DOWNLOAD_DIR`。
-- 预下载脚本：`scripts/download_embedding_model.sh` 会读取配置中的模型与目录，封装 `huggingface-cli download`，将例如 `Qwen/Qwen3-Embedding-8B` 的权重预拉到本地缓存或 `--local-dir`；可用 `--model/--cache-dir/--local-dir` 快速覆盖。
-- 推荐脚本顺序：
-  1. `scripts/mirage/build_notes.sh`（生成 notes + 结构索引，若 `retriever.embedding.auto_build=true` 会自动补齐 FAISS/BM25）。
-  2. `scripts/download_embedding_model.sh`（可在首次部署或模型更新时运行）。
-  3. `scripts/build_indexes.sh`，或单独执行 `python -m indexer.embedding_index` / `python -m indexer.bm25_index` 以对齐向量/BM25 索引。
-- 索引构建完成后，将 `retriever.embedding.model_path_override` 指向本地目录（或仅设置 `cache_dir`），查询即会自动走结构 + BM25 + 嵌入的多源检索。
-- `scripts/mirage/build_notes.sh` 会在工作目录下生成 `config.override.yaml`，并通过环境变量 `ANO_RAG_CONFIG` 让后续 Python 命令（包括 `scripts/build_indexes.sh`）自动读取同一份配置，从而把 notes/FAISS/BM25 统一写进本次 run 的 `WORK_DIR`。
-
-## 常见问题
-
-- 报错缺少索引文件：先运行 `python main.py process` 以生成基础索引。
-- vLLM/LM Studio 未配置：CLI 支持通过 `--vllm-endpoint/--vllm-model` 与 `--lmstudio-endpoint/--lmstudio-model` 明确传参；也可在 `config.yaml` 中设置默认值。
-- 大文档构建吞吐：适当提高 `vllm.concurrency.max_workers` 并使用多端点轮询；根据服务参数（如 `--max-num-batched-tokens`）调优吞吐。
-
-——
-
-本仓库侧重“结构化检索可解释性”，在复杂问题上可进一步扩充谓词库与类型约束，并引入学习型重排与向量融合以提升表现。
-
-- 双卡脚本（自动拉起 vLLM 并并行分片）：`scripts/mirage/build_notes.sh`。
-  - 若启用多端点，可在 `config.yaml` 中添加 `vllm.concurrency.endpoints: [http://127.0.0.1:8001/v1, http://127.0.0.1:8002/v1]`，并相应提高 `max_workers` 以压满吞吐；同时建议设置 `retry_backoff`，在端点短时失败时快速切换与退避。
-
-### 并发调优建议
-
-- 连接池：每个线程拥有复用的 `requests.Session`，连接池大小按 `max_workers` 自动扩展，无需手动设置。
-- 饱和策略：我们在 `StructuredBuilder` 与 `main_build_notes` 中采用“完成即补位”的饱和提交策略，确保线程数始终保持在上限附近。
-- vLLM 参数配合：留意 `--max-num-batched-tokens`、`--gpu-memory-utilization` 等；当响应超时或队列过长时，适当降低 `max_workers` 或提高上述阈值。
-- 容错与回退：启用 `retry_backoff` 可降低短时错误的影响；在多端点场景下，轮询策略会在失败后切换端点。
-
-#### 自适应并发（可选）
-
-- 在 `config.yaml` 打开：
+### 自适应并发（可选）
 
 ```yaml
 vllm:
@@ -201,18 +172,47 @@ vllm:
     cool_down_sec: 5.0
 ```
 
-- 机制：生成器在每次 vLLM 调用后记录延迟，构建器每隔 `cool_down_sec` 读取建议并动态调整目标并发。线程池上限固定为 `adaptive.max_workers`，实际 `inflight` 会在建议值附近波动，趋近 GPU 的可承载吞吐。
-- 什么时候有用：
-  - 端点吞吐随时间波动（队列长度变化、临时降速）。
-  - 多端点轮询时，整体延迟特征变化明显。
-- 注意：如 vLLM 已通过 `--max-num-batched-tokens`/`--gpu-memory-utilization` 等充分调优，开启自适应并发通常仍能微调队列压力，但也可能引入轻微波动；保守做法是设置较小的 `step_up/step_down` 与适当的 `cool_down_sec`。
+机制：构建器采样 vLLM 调用延迟，并在 `cool_down_sec` 的周期内动态调整目标并发，使吞吐接近 GPU 可承载上限。
 
-## 依赖
+## 进阶：向量与 BM25
 
-- 见 `requirements.txt`。需准备可用的 vLLM 与 LM Studio 服务。
+构建嵌入索引（FAISS，可选）：
+
+```bash
+python -m indexer.embedding_index
+```
+
+构建 BM25 语料（可选，需在 `config.yaml` 开启 `retriever.bm25.enabled: true`）：
+
+```bash
+python -m indexer.bm25_index
+```
+
+或使用脚本一次生成两者：`scripts/build_indexes.sh`。
+
+## 多源检索 & 嵌入模型预下载
+
+- 检索开关：`retriever.structured.enabled`、`retriever.embedding.enabled`、`retriever.bm25.enabled` 控制三路召回与融合。
+- 嵌入配置：
+  - `retriever.embedding.cache_dir`：Hugging Face 缓存目录。
+  - `retriever.embedding.model_path_override`：本地模型文件夹（优先于远端下载）。
+  - `retriever.embedding.download_dir`：`huggingface-cli download --local-dir` 默认目录。
+  - `retriever.embedding.device` / `dtype`：加载设备与精度。
+  - `retriever.embedding.auto_build`：在 `scripts/mirage/build_notes.sh` 完成后自动调用 `scripts/build_indexes.sh`。
+- 预下载脚本：`scripts/download_embedding_model.sh` 读取上述配置封装 `huggingface-cli download`，可通过 `--model/--cache-dir/--local-dir` 临时覆盖。
+- 推荐脚本顺序：
+  1. `scripts/mirage/build_notes.sh`
+  2. `scripts/download_embedding_model.sh`
+  3. `scripts/build_indexes.sh`（或单独跑 `indexer.embedding_index` / `indexer.bm25_index`）
+
+## 常见问题
+
+- **缺索引文件**：先运行 `python main.py process`。
+- **端点/模型未配置**：用 CLI 传参或在 `config.yaml` 设默认值。
+- **构建吞吐不足**：提高 `vllm.concurrency.max_workers` 或配置多端点轮询，并结合 vLLM 的 `--max-num-batched-tokens`/`--gpu-memory-utilization` 调优。
 
 ## 开发建议
 
-- 为新领域扩充 `schema/aliases.json` 与 `schema/vocab.json`，提升规范化与别名召回。
-- 在 `retriever/operators.py` 中增加领域图算子与重排策略。
-- 结合 `meta.final_conf` 与 `quality_score` 设计可回答性策略与拒答。
+- 为新领域扩充 `schema/aliases.json` 与 `schema/vocab.json`。
+- 在 `retriever/operators.py` 增加领域图算子/重排策略。
+- 结合 `meta.final_conf` 与 `meta.quality_score` 设计可回答性与拒答策略。
