@@ -179,10 +179,50 @@ def build_passages_from_context(context: Any, max_passages: int = 10) -> List[st
 
 def build_passage_entries(context: Any, max_passages: int = 10) -> List[Dict[str, Any]]:
     """
-    Normalize HotpotQA context and keep metadata for retrieval logging.
-    Each entry has: text, doc_id (title), sent_ids (indices of included sentences).
+    Normalize HotpotQA/MuSiQue-style contexts into entries.
+
+    Supported schemas:
+    - HotpotQA dict format: {"title": [...], "sentences": [...]}.
+    - HotpotQA list format: [[title, [sent1, ...]], ...].
+    - MuSiQue list-of-dicts: [{"title": ..., "paragraph_text"/"text": ...}, ...].
+
+    Each entry has: text, doc_id, sent_ids, passage_id.
     """
     entries: List[Dict[str, Any]] = []
+
+    # MuSiQue-style paragraphs: list of dicts with title + paragraph_text/text
+    if isinstance(context, list) and context and isinstance(context[0], dict):
+        for idx, p in enumerate(context[:max_passages]):
+            if not isinstance(p, dict):
+                continue
+            title = str(p.get("title") or "").strip()
+            raw_text = (
+                p.get("paragraph_text")
+                or p.get("text")
+                or p.get("content")
+                or p.get("paragraph")
+                or p.get("para")
+                or ""
+            )
+            if not raw_text and isinstance(p.get("sentences"), list):
+                try:
+                    raw_text = " ".join([str(s) for s in p.get("sentences") if str(s)])
+                except Exception:
+                    raw_text = ""
+            text = str(raw_text or "").strip()
+            if not text:
+                continue
+            pid = str(p.get("pid") or p.get("para_id") or p.get("id") or f"p{idx:04d}")
+            full_text = f"Title: {title}\nContent: {text}" if title else text
+            entries.append(
+                {
+                    "text": full_text,
+                    "doc_id": title or pid,
+                    "sent_ids": [],
+                    "passage_id": pid,
+                }
+            )
+        return entries
 
     if isinstance(context, dict):
         titles = list(context.get("title", []))[:max_passages]

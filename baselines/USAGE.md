@@ -55,6 +55,71 @@ python scripts/hotpotqa/baselines/run_relrag.py \
 
 ---
 
+## MuSiQue (Provided Paragraphs Setting)
+
+MuSiQue 数据集为 `.jsonl`（每行一个样本），每个问题自带若干段落 `paragraphs`。本仓库的 MuSiQue 基线沿用 HotpotQA Distractor 的“提供段落”设定：**不依赖离线索引，按题内段落构建临时检索**。
+
+> 说明：所有 MuSiQue 基线会自动在 `result/musique` 下创建工作目录（例如 `musique_vanilla_rag_000`），默认写入 `musique_results.jsonl`（官方格式，含 `predicted_answer`/`predicted_evidence`）和 `qa.tsv`。可通过 `--output` / `--qa-path` 覆盖输出路径。
+
+### 1. Direct (No Retrieval)
+直接拼接所有段落提示 LLM。
+```bash
+python scripts/musique/baselines/run_direct.py \
+  --dataset data/musique/musique_full_v1.0_dev.jsonl \
+  --lm-endpoint http://localhost:1234/v1 \
+  --lm-model model-id
+```
+
+### 2. Vanilla RAG
+对题内段落做向量检索后回答。
+```bash
+python scripts/musique/baselines/run_vanilla_rag.py \
+  --dataset data/musique/musique_full_v1.0_dev.jsonl \
+  --topk 3 \
+  --emb-model Qwen/Qwen3-Embedding-8B
+```
+
+### 3. Self-RAG
+先检索候选段落，再用 LLM 反思重排。
+```bash
+python scripts/musique/baselines/run_selfrag.py \
+  --dataset data/musique/musique_full_v1.0_dev.jsonl \
+  --topk 3
+```
+
+### 4. Raptor
+对题内段落聚类生成摘要树后检索。
+```bash
+python scripts/musique/baselines/run_raptor.py \
+  --dataset data/musique/musique_full_v1.0_dev.jsonl
+```
+
+### 5. GraphRAG
+基于题内段落的简单图检索/重排。
+```bash
+python scripts/musique/baselines/run_graphrag.py \
+  --dataset data/musique/musique_full_v1.0_dev.jsonl
+```
+
+### 6. RelRAG
+段落相似度图 + 中心性重排。
+```bash
+python scripts/musique/baselines/run_relrag.py \
+  --dataset data/musique/musique_full_v1.0_dev.jsonl
+```
+
+### 可选：Full‑Wiki Baselines
+
+`baselines/` 下的 `naive_rag` / `fid_rag` / `simple_*` 等 Full‑Wiki 设定基线依赖全局 `doc_pool.json` 与离线索引。MuSiQue 原始数据无全局 doc_pool，可先用：
+
+```bash
+python scripts/musique/build_doc_pool.py \
+  --dataset data/musique/musique_full_v1.0_dev.jsonl \
+  --out data/musique/doc_pool.json
+```
+
+再复用 Mirage 的索引构建脚本（如 `python scripts/mirage/build_naive_index.py --doc-pool data/musique/doc_pool.json --out-dir result/musique_naive`）。推理脚本需自行加载 `.jsonl` 数据并调用对应 Runner。
+
 ## MIRAGE / Full-Wiki Baselines
 
 (Below are existing instructions for full-retrieval settings)
