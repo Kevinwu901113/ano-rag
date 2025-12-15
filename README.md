@@ -155,6 +155,7 @@ python main.py query \
 - `ANO_RAG_CONFIG`：指向任意配置文件（per‑run 覆盖）。
 - `VLLM_ENDPOINT{N}`（如 `VLLM_ENDPOINT0`/`1`）：覆盖端点列表以进行轮询。
 - `EMB_CACHE_DIR` / `EMB_MODEL_PATH` / `EMB_DOWNLOAD_DIR` / `EMB_DEVICE` / `EMB_DTYPE`：覆盖嵌入模型缓存/本地路径/下载目录/设备/精度。
+  - 检索/索引阶段若遇到 CUDA 显存不足（OOM），嵌入编码会自动回退到 CPU；也可直接设 `EMB_DEVICE=cpu` 强制走 CPU，便于在 GPU 被占用时跑检索/recall 评测。
 
 ### 自适应并发（可选）
 

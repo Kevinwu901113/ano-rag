@@ -293,8 +293,18 @@ Answer with a short phrase. If the answer is not in the context, say "unknown"."
             from baselines.naive_rag.runner import NaiveRAGRunner
             # Infer index path
             index_dir = Path(args.indexes_dir) if args.indexes_dir else Path(f"result/{dataset_name}_naive")
-            index_path = str(index_dir / "index.faiss")
-            chunk_path = str(index_dir / "chunks.jsonl")
+            meta_path = index_dir / "meta.json"
+            if meta_path.exists():
+                try:
+                    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+                    index_path = str(Path(str(meta.get("index") or "")).expanduser())
+                    chunk_path = str(Path(str(meta.get("chunks") or "")).expanduser())
+                except Exception:
+                    index_path = str(index_dir / "index.faiss")
+                    chunk_path = str(index_dir / "chunks.jsonl")
+            else:
+                index_path = str(index_dir / "index.faiss")
+                chunk_path = str(index_dir / "chunks.jsonl")
 
             runner = NaiveRAGRunner(
                 index_path=index_path,

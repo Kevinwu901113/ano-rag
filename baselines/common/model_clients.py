@@ -1,8 +1,9 @@
+from __future__ import annotations
+
 from typing import Optional, Dict, Any
 from loguru import logger
 from config.config_loader import config as global_config
 from rag_core.embedding_client import EmbeddingEncoder as RagEmbeddingEncoder
-from rag_core.llm_client import LLMChatClient
 from utils.embedding_utils import EmbeddingEncoder as QwenEmbeddingEncoder
 
 def get_default_embedding_client(config: Optional[Dict[str, Any]] = None):
@@ -69,7 +70,7 @@ def get_default_embedding_client(config: Optional[Dict[str, Any]] = None):
         **extra_kwargs,
     )
 
-def get_default_llm_client(config: Optional[Dict[str, Any]] = None) -> LLMChatClient:
+def get_default_llm_client(config: Optional[Dict[str, Any]] = None) -> "LLMChatClient":
     """
     Constructs and returns an LLMChatClient instance based on the provided configuration or defaults.
     Prioritizes 'lmstudio' configuration, falls back to 'vllm'.
@@ -101,6 +102,8 @@ def get_default_llm_client(config: Optional[Dict[str, Any]] = None) -> LLMChatCl
         model = "default-model"
         
     logger.info(f"Initializing LLM Client: endpoint={endpoint}, model={model}")
+
+    from rag_core.llm_client import LLMChatClient
 
     return LLMChatClient(
         endpoint=endpoint,

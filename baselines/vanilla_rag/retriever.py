@@ -13,7 +13,7 @@ import numpy as np
 from loguru import logger
 
 from config import config as config_loader
-from structrag.llm_client import LLMChatClient
+from utils.device import run_with_fallback
 from utils.embedding_utils import EmbeddingEncoder
 
 DEFAULT_SYSTEM_PROMPT = (
@@ -36,13 +36,26 @@ class VanillaRAGRetriever:
         index_path: str,
         chunk_store_path: str,
         embedding_client: Optional[EmbeddingEncoder] = None,
-        llm_client: Optional[LLMChatClient] = None,
+        llm_client: Optional["LLMChatClient"] = None,
         config: Optional[Dict[str, Any]] = None,
+        *,
+        embed_model: Optional[str] = None,
+        embed_device: str = "auto",
+        embed_batch_size: Optional[int] = None,
+        embed_max_length: Optional[int] = None,
+        embed_normalize: Optional[bool] = None,
     ) -> None:
         self.cfg = config or config_loader.load_config()
         self.index_path = Path(index_path)
         self.chunk_store_path = Path(chunk_store_path)
         self.last_hits: List[Dict[str, Any]] = []
+        self._embed_model_override = embed_model
+        self._embed_device_prefer = embed_device
+        self._embed_batch_size_override = embed_batch_size
+        self._embed_max_length_override = embed_max_length
+        self._embed_normalize_override = embed_normalize
+        self.embed_device_used: Optional[str] = None
+        self.fallback_reason: Optional[str] = None
         
         # Load Index
         if not self.index_path.exists():
@@ -79,13 +92,30 @@ class VanillaRAGRetriever:
         override = embed_cfg.get("model_path_override")
         base = embed_cfg.get("model", "Qwen/Qwen3-Embedding-8B")
         model = str(override or base).strip()
+        model = self._embed_model_override or model
         
         cache_dir = self._clean_path(embed_cfg.get("cache_dir"))
-        device = self._resolve_device()
+        device = self._embed_device_prefer
         dtype = embed_cfg.get("dtype")
-        max_len = int(embed_cfg.get("max_len_note", 512))
+        max_len = int(self._embed_max_length_override or embed_cfg.get("max_len_note", 512))
+        batch_size = int(self._embed_batch_size_override or embed_cfg.get("batch_size", 4))
+        normalize = bool(
+            embed_cfg.get("normalize", True)
+            if self._embed_normalize_override is None
+            else self._embed_normalize_override
+        )
         
-        return EmbeddingEncoder(provider, model, max_len, cache_dir=cache_dir, device=device, dtype=dtype)
+        return EmbeddingEncoder(
+            provider,
+            model,
+            max_len,
+            cache_dir=cache_dir,
+            device=device,
+            dtype=dtype,
+            fallback_to_cpu_on_oom=False,
+            batch_size=batch_size,
+            normalize=normalize,
+        )
 
     def _init_llm_client(self) -> LLMChatClient:
         # Use global config for LLM
@@ -96,6 +126,7 @@ class VanillaRAGRetriever:
         if not endpoint or not model:
             logger.warning("LLM endpoint/model not configured properly in config.yaml")
             
+        LLMChatClient = _lazy_import_llm_client()
         return LLMChatClient(endpoint=endpoint, model=model, temperature=0.0)
 
     def _resolve_device(self) -> Optional[str]:
@@ -112,9 +143,22 @@ class VanillaRAGRetriever:
 
     def retrieve(self, query: str, top_k: int = 5) -> List[Dict[str, Any]]:
         """Retrieve chunks for a query. Returns list of dict with text/score/meta."""
-        emb = self.embedding_client.encode([query])
+        normalize = bool(
+            (self.cfg.get("retriever", {}) or {}).get("embedding", {}).get("normalize", True)
+            if self._embed_normalize_override is None
+            else self._embed_normalize_override
+        )
+        emb, used_device, fallback_reason = run_with_fallback(
+            lambda device: self.embedding_client.encode([query], device=device),
+            prefer=self._embed_device_prefer,
+        )
+        self.embed_device_used = used_device
+        self.fallback_reason = fallback_reason
         if emb is None or len(emb) == 0:
             return []
+
+        if normalize:
+            faiss.normalize_L2(emb)
             
         # Fix dimension mismatch
         if emb.shape[1] != self.index.d:
@@ -164,6 +208,12 @@ class VanillaRAGRetriever:
         ]
         
         return self.llm_client.chat(messages)
+
+
+def _lazy_import_llm_client():  # pragma: no cover - optional dependency
+    from structrag.llm_client import LLMChatClient
+
+    return LLMChatClient
 
 
 def answer(

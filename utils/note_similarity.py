@@ -1,3 +1,4 @@
+import os
 from typing import List, Dict, Any, Optional, Tuple
 import numpy as np
 from sentence_transformers import SentenceTransformer
@@ -33,6 +34,12 @@ class NoteSimilarityCalculator:
         # 聚类过滤配置
         self.exclude_same_cluster = self.config.get('exclude_same_cluster', True)
         self.cluster_similarity_bonus = self.config.get('cluster_similarity_bonus', 0.1)
+
+        # Device / fallback (share the same env var name as retriever.embedding.* overrides)
+        env_device = os.environ.get("EMB_DEVICE")
+        chosen = str(self.config.get("device") or env_device or "").strip().lower()
+        self.device: Optional[str] = chosen or None
+        self.fallback_to_cpu_on_oom = bool(self.config.get("fallback_to_cpu_on_oom", True))
         
         # 初始化模型
         self.model = None
@@ -41,6 +48,32 @@ class NoteSimilarityCalculator:
         # 缓存
         self.embedding_cache = {}
         self.similarity_cache = {}
+
+    @staticmethod
+    def _is_cuda_oom(exc: BaseException) -> bool:
+        msg = str(exc).lower()
+        return (
+            "cuda out of memory" in msg
+            or "cublas_status_alloc_failed" in msg
+            or "cuda error: out of memory" in msg
+            or "out of memory" in msg and "cuda" in msg
+        )
+
+    def _switch_to_cpu(self) -> None:
+        self.device = "cpu"
+        if self.model is None:
+            return
+        try:
+            self.model.to("cpu")
+        except Exception:
+            self.model = None
+        try:
+            import torch  # type: ignore
+
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        except Exception:
+            return
     
     def _load_model(self):
         """延迟加载sentence transformer模型"""
@@ -49,15 +82,33 @@ class NoteSimilarityCalculator:
                 if self.model is None:
                     logger.info(f"Loading sentence transformer model: {self.model_name}")
                     try:
-                        self.model = SentenceTransformer(self.model_name)
+                        st_kwargs = {}
+                        if self.device:
+                            st_kwargs["device"] = self.device
+                        self.model = SentenceTransformer(self.model_name, **st_kwargs)
                         logger.info("Model loaded successfully")
                     except Exception as e:
+                        if self.fallback_to_cpu_on_oom and self._is_cuda_oom(e) and (self.device is None or (self.device or "").startswith("cuda")):
+                            logger.warning("CUDA OOM in SentenceTransformer init; retrying on CPU")
+                            self._switch_to_cpu()
+                            self.model = SentenceTransformer(self.model_name, device="cpu")
+                            logger.info("Model loaded successfully on CPU")
+                            return
                         logger.error(f"Failed to load model {self.model_name}: {e}")
                         # 回退到更简单的模型
                         try:
-                            self.model = SentenceTransformer('paraphrase-MiniLM-L3-v2')
+                            fb_kwargs = {}
+                            if self.device:
+                                fb_kwargs["device"] = self.device
+                            self.model = SentenceTransformer('paraphrase-MiniLM-L3-v2', **fb_kwargs)
                             logger.info("Loaded fallback model: paraphrase-MiniLM-L3-v2")
                         except Exception as e2:
+                            if self.fallback_to_cpu_on_oom and self._is_cuda_oom(e2) and (self.device is None or (self.device or "").startswith("cuda")):
+                                logger.warning("CUDA OOM in fallback SentenceTransformer init; retrying on CPU")
+                                self._switch_to_cpu()
+                                self.model = SentenceTransformer('paraphrase-MiniLM-L3-v2', device="cpu")
+                                logger.info("Loaded fallback model on CPU: paraphrase-MiniLM-L3-v2")
+                                return
                             logger.error(f"Failed to load fallback model: {e2}")
                             raise e2
     
@@ -106,8 +157,29 @@ class NoteSimilarityCalculator:
                     self.embedding_cache[cache_key] = embedding
                     
             except Exception as e:
-                logger.error(f"Failed to compute embeddings: {e}")
-                return {}
+                model_device = str(getattr(self.model, "device", self.device) or "")
+                if self.fallback_to_cpu_on_oom and self._is_cuda_oom(e) and model_device.startswith("cuda"):
+                    logger.warning("CUDA OOM during embeddings compute; switching to CPU and retrying")
+                    self._switch_to_cpu()
+                    self._load_model()
+                    try:
+                        batch_embeddings = self.model.encode(
+                            texts_to_encode,
+                            batch_size=max(1, int(self.batch_size)),
+                            show_progress_bar=True,
+                        )
+                    except Exception as retry_exc:
+                        logger.error(f"Failed to compute embeddings after CPU fallback: {retry_exc}")
+                        return {}
+                    for i, note_id in enumerate(note_ids):
+                        embedding = batch_embeddings[i]
+                        embeddings[note_id] = embedding
+                        note = next(n for n in notes if n.get('id', str(hash(n.get('content', '')))) == note_id)
+                        cache_key = self._get_cache_key(note)
+                        self.embedding_cache[cache_key] = embedding
+                else:
+                    logger.error(f"Failed to compute embeddings: {e}")
+                    return {}
         
         logger.info(f"Computed embeddings for {len(embeddings)} notes")
         return embeddings

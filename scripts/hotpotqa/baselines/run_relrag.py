@@ -1,11 +1,14 @@
+from __future__ import annotations
+
 import argparse
 import json
 import os
 import sys
+import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import numpy as np
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from loguru import logger
 from tqdm import tqdm
@@ -15,16 +18,15 @@ ROOT = Path(__file__).resolve().parents[3]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from structrag.llm_client import LLMChatClient
 from scripts.hotpotqa.baselines.baseline_utils import (
     build_passage_entries,
     clean_hotpot_answer,
-    detect_device,
     format_context,
-    get_embedding_model,
     save_predictions_and_qa,
     select_workspace,
+    TransformerEmbedder,
 )
+from utils.device import run_with_fallback
 from utils.retrieval_logger import log_retrieval
 
 def load_dataset(path: str) -> List[Dict[str, Any]]:
@@ -37,18 +39,41 @@ class RelRAG:
     Builds a relation graph between paragraphs (based on entity overlap or similarity)
     and re-ranks them using PageRank or similar centrality on top of vector scores.
     """
-    def __init__(self, encoder: Callable[[List[str]], np.ndarray], llm: LLMChatClient):
-        self.encoder = encoder
+    def __init__(self, embedder: TransformerEmbedder, llm: Optional[Any], *, embed_device: str):
+        self.embedder = embedder
+        self.embed_device = embed_device
         self.llm = llm
         self.last_hits: List[Dict[str, Any]] = []
+        self.embed_used_devices: Set[str] = set()
+        self.embed_fallback_reasons: List[str] = []
+        self.dim: Optional[int] = None
+
+    def _encode(self, texts: List[str]) -> np.ndarray:
+        vecs, used_device, fallback_reason = run_with_fallback(
+            lambda device: self.embedder.encode(texts, device=device),
+            prefer=self.embed_device,
+        )
+        self.embed_used_devices.add(str(used_device))
+        if fallback_reason:
+            self.embed_fallback_reasons.append(str(fallback_reason))
+        if getattr(vecs, "size", 0) > 0 and self.dim is None:
+            self.dim = int(vecs.shape[1])
+        return vecs
         
-    def solve(self, passages: List[Dict[str, Any]], question: str) -> str:
+    def solve(
+        self,
+        passages: List[Dict[str, Any]],
+        question: str,
+        *,
+        topk: int = 3,
+        retrieval_only: bool = False,
+    ) -> str:
         texts = passages
         
         if not texts:
             return "Insufficient evidence"
             
-        vecs = self.encoder([p["text"] for p in passages])
+        vecs = self._encode([p["text"] for p in passages])
         norm = np.linalg.norm(vecs, axis=1, keepdims=True)
         vecs = vecs / (norm + 1e-10)
         
@@ -58,7 +83,7 @@ class RelRAG:
         adj = (sim_matrix > threshold).astype(float)
         
         # 3. Vector Search for Question
-        q_vec = self.encoder([question])
+        q_vec = self._encode([question])
         q_norm = np.linalg.norm(q_vec, axis=1, keepdims=True)
         q_vec = q_vec / (q_norm + 1e-10)
         
@@ -71,8 +96,8 @@ class RelRAG:
         final_scores = alpha * initial_scores + (1 - alpha) * neighbor_scores
         
         # Select Top K
-        k = 3
-        indices = np.argsort(final_scores)[::-1][:k]
+        limit = max(1, int(topk))
+        indices = np.argsort(final_scores)[::-1][:limit]
         
         selected = [passages[i] for i in indices]
         self.last_hits = [
@@ -87,8 +112,13 @@ class RelRAG:
             for rank, i in enumerate(indices)
         ]
         selected_texts = [item["text"] for item in selected]
+
+        if retrieval_only:
+            return ""
         
         # 5. Answer
+        if self.llm is None:
+            raise RuntimeError("LLM client is required unless --retrieval-only is set")
         context_str = format_context(selected_texts)
         prompt = f"""Answer the question based on the context.
         
@@ -101,13 +131,15 @@ Answer:"""
         return resp.content
 
 def process_example(item: Dict[str, Any], 
-                    llm: LLMChatClient, 
-                    encoder: Callable[[List[str]], np.ndarray],
+                    llm: Optional[Any], 
+                    embedder: TransformerEmbedder,
                     args,
                     *,
                     run_name: str,
                     dataset_name: str,
-                    log_dir: Path) -> Tuple[str, str, str, List[List[Any]]]:
+                    log_dir: Path,
+                    embed_meta: Dict[str, Any],
+                    embed_meta_lock: threading.Lock) -> Tuple[str, str, str, List[List[Any]]]:
     """
     Process a single HotpotQA example using RelRAG.
     """
@@ -117,11 +149,15 @@ def process_example(item: Dict[str, Any],
     passages = build_passage_entries(context, max_passages=args.max_context)
     
     # New relrag instance per thread
-    relrag = RelRAG(encoder, llm)
+    relrag = RelRAG(embedder, llm, embed_device=args.embed_device)
     
     try:
-        ans = relrag.solve(passages, question)
-        ans = clean_hotpot_answer(ans)
+        retrieval_only = bool(getattr(args, "retrieval_only", False))
+        ans = relrag.solve(passages, question, topk=int(getattr(args, "topk", 3)), retrieval_only=retrieval_only)
+        if not retrieval_only:
+            ans = clean_hotpot_answer(ans)
+        else:
+            ans = ""
         try:
             log_retrieval(
                 sample_id=qid,
@@ -142,6 +178,13 @@ def process_example(item: Dict[str, Any],
             )
         except Exception as log_exc:
             logger.error(f"retrieval logging failed for {qid}: {log_exc}")
+        with embed_meta_lock:
+            for used in relrag.embed_used_devices:
+                embed_meta["used_devices"].add(str(used))
+            for reason in relrag.embed_fallback_reasons:
+                embed_meta["fallback_reasons"].append(str(reason))
+            if embed_meta.get("dim") is None and relrag.dim:
+                embed_meta["dim"] = int(relrag.dim)
         sp = []
         return qid, question, ans, sp
     except Exception as e:
@@ -158,9 +201,35 @@ def main():
     parser.add_argument("--new", action="store_true", help="Force creating a new workspace")
     parser.add_argument("--lm-endpoint", default="http://localhost:1234/v1")
     parser.add_argument("--lm-model", default="model-identifier")
-    parser.add_argument("--emb-model", default="Qwen/Qwen3-Embedding-8B")
-    parser.add_argument("--emb-device", default=None, help="Force embedding device (e.g., cpu, cuda)")
+    parser.add_argument(
+        "--embed-model",
+        "--emb-model",
+        dest="embed_model",
+        default="Qwen/Qwen3-Embedding-8B",
+        help="Embedding model name or path",
+    )
+    parser.add_argument(
+        "--embed-device",
+        "--emb-device",
+        dest="embed_device",
+        choices=["auto", "cuda", "cpu"],
+        default="auto",
+        help="Embedding device preference (auto prefers CUDA, falls back to CPU)",
+    )
+    parser.add_argument("--embed-batch-size", type=int, default=4, help="Embedding batch size")
+    parser.add_argument("--embed-max-length", type=int, default=512, help="Embedding max sequence length")
+    norm = parser.add_mutually_exclusive_group()
+    norm.add_argument("--embed-normalize", dest="embed_normalize", action="store_true", help="L2-normalize embeddings")
+    norm.add_argument(
+        "--no-embed-normalize",
+        dest="embed_normalize",
+        action="store_false",
+        help="Disable L2-normalization",
+    )
+    parser.set_defaults(embed_normalize=True)
     parser.add_argument("--emb-dtype", default=None, help="Embedding torch dtype (e.g., float16, bfloat16)")
+    parser.add_argument("--topk", type=int, default=3, help="Number of paragraphs to retrieve")
+    parser.add_argument("--retrieval-only", action="store_true", help="Skip LLM calls; only run retrieval and log retrieval.jsonl")
     parser.add_argument("--limit", type=int, default=0)
     parser.add_argument("--max-context", type=int, default=10, help="Max number of paragraphs from context to keep")
     parser.add_argument("--num-workers", type=int, default=1, help="Number of parallel workers")
@@ -185,10 +254,30 @@ def main():
     qa_path = Path(args.qa_path) if args.qa_path else work_dir / "qa.tsv"
     logger.info(f"Writing outputs to workspace {work_dir}")
 
-    llm = LLMChatClient(endpoint=args.lm_endpoint, model=args.lm_model, temperature=0.0)
-    device = args.emb_device or detect_device()
-    encoder = get_embedding_model(args.emb_model, device, torch_dtype=args.emb_dtype)
-    logger.info(f"Embedding model {args.emb_model} on {device} (dtype={args.emb_dtype or 'auto'})")
+    llm = None
+    if not args.retrieval_only:
+        from structrag.llm_client import LLMChatClient
+
+        llm = LLMChatClient(endpoint=args.lm_endpoint, model=args.lm_model, temperature=0.0)
+
+    embedder = TransformerEmbedder(
+        args.embed_model,
+        torch_dtype=args.emb_dtype,
+        batch_size=args.embed_batch_size,
+        max_length=args.embed_max_length,
+        normalize=args.embed_normalize,
+    )
+    logger.info(
+        "Embedding model {} (prefer={}, batch_size={}, max_length={}, normalize={}, dtype={})",
+        args.embed_model,
+        args.embed_device,
+        args.embed_batch_size,
+        args.embed_max_length,
+        args.embed_normalize,
+        args.emb_dtype or "auto",
+    )
+    embed_meta: Dict[str, Any] = {"used_devices": set(), "fallback_reasons": [], "dim": None}
+    embed_meta_lock = threading.Lock()
     
     predictions = {"answer": {}, "sp": {}}
     qa_rows: List[Tuple[str, str]] = []
@@ -202,11 +291,13 @@ def main():
                 process_example,
                 item,
                 llm,
-                encoder,
+                embedder,
                 args,
                 run_name=run_name,
                 dataset_name=dataset_name,
                 log_dir=work_dir,
+                embed_meta=embed_meta,
+                embed_meta_lock=embed_meta_lock,
             )
             for item in data
         ]
@@ -233,6 +324,17 @@ def main():
     )
     logger.info(f"Saved predictions to {out_path}")
     logger.info(f"Saved QA log to {qa_file}")
+    devices = sorted(str(d) for d in embed_meta["used_devices"])
+    used_device = "cpu" if "cpu" in devices else ("cuda" if "cuda" in devices else (devices[0] if devices else "cpu"))
+    fallback_reason = embed_meta["fallback_reasons"][0] if embed_meta["fallback_reasons"] else None
+    meta_payload = {
+        "embed_model": args.embed_model,
+        "embed_device_used": used_device,
+        "fallback_reason": fallback_reason,
+        "normalize": bool(args.embed_normalize),
+        "dim": int(embed_meta["dim"] or 0),
+    }
+    (work_dir / "meta.json").write_text(json.dumps(meta_payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
 if __name__ == "__main__":
     main()

@@ -27,6 +27,19 @@ def _select_workspace(root: Path, prefix: str, force_new: bool) -> Path:
     return existing[-1]
 
 
+def _resolve_index_artifacts(index_dir: Path) -> tuple[Path, Path]:
+    meta_path = index_dir / "meta.json"
+    if meta_path.exists():
+        try:
+            meta = json.loads(meta_path.read_text(encoding="utf-8"))
+            index_path = Path(str(meta.get("index") or "")).expanduser()
+            chunks_path = Path(str(meta.get("chunks") or "")).expanduser()
+            return index_path, chunks_path
+        except Exception:
+            pass
+    return index_dir / "index.faiss", index_dir / "chunks.jsonl"
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run naive RAG baseline on MIRAGE dataset.json")
     parser.add_argument("--dataset-path", default="data/mirage_sample/dataset.json")
@@ -59,8 +72,11 @@ def main() -> None:
         dataset = json.load(handle)
 
     index_dir = Path(args.index_dir)
-    index_path = Path(args.index_path) if args.index_path else index_dir / "index.faiss"
-    chunks_path = Path(args.chunks_path) if args.chunks_path else index_dir / "chunks.jsonl"
+    if args.index_path or args.chunks_path:
+        index_path = Path(args.index_path) if args.index_path else index_dir / "index.faiss"
+        chunks_path = Path(args.chunks_path) if args.chunks_path else index_dir / "chunks.jsonl"
+    else:
+        index_path, chunks_path = _resolve_index_artifacts(index_dir)
     if not index_path.exists():
         raise FileNotFoundError(f"index.faiss missing: {index_path}")
     if not chunks_path.exists():

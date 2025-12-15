@@ -10,6 +10,7 @@ import requests
 from loguru import logger
 
 from config import config as config_loader
+from utils.device import run_with_fallback
 from utils.embedding_utils import EmbeddingEncoder
 from utils.answer_cleaner import _strip_reasoning
 from utils.retrieval_logger import log_retrieval
@@ -115,11 +116,24 @@ class NaiveIndex:
         self, 
         index_path: str, 
         chunks_path: str,
-        config: Optional[Dict[str, Any]] = None
+        config: Optional[Dict[str, Any]] = None,
+        *,
+        embed_model: Optional[str] = None,
+        embed_device: str = "auto",
+        embed_batch_size: Optional[int] = None,
+        embed_max_length: Optional[int] = None,
+        embed_normalize: Optional[bool] = None,
     ) -> None:
         self.cfg = config or config_loader.load_config()
         self.index_path = Path(index_path)
         self.chunks_path = Path(chunks_path)
+        self._embed_model_override = embed_model
+        self._embed_device_prefer = embed_device
+        self._embed_batch_size_override = embed_batch_size
+        self._embed_max_length_override = embed_max_length
+        self._embed_normalize_override = embed_normalize
+        self.embed_device_used: Optional[str] = None
+        self.fallback_reason: Optional[str] = None
         
         if not self.index_path.exists():
             raise FileNotFoundError(f"Index not found: {index_path}")
@@ -142,12 +156,27 @@ class NaiveIndex:
         
     def _init_encoder(self) -> EmbeddingEncoder:
         provider = self.embed_cfg.get("provider", "qwen3")
-        model = self._resolve_model_name()
+        model = self._embed_model_override or self._resolve_model_name()
         cache_dir = self._clean_path(self.embed_cfg.get("cache_dir"))
-        device = self._resolve_device()
         dtype = self.embed_cfg.get("dtype")
-        max_len = int(self.embed_cfg.get("max_len_note", 384))
-        return EmbeddingEncoder(provider, model, max_len, cache_dir=cache_dir, device=device, dtype=dtype)
+        max_len = int(self._embed_max_length_override or self.embed_cfg.get("max_len_note", 384))
+        batch_size = int(self._embed_batch_size_override or self.embed_cfg.get("batch_size", 4))
+        normalize = bool(
+            self.embed_cfg.get("normalize", True)
+            if self._embed_normalize_override is None
+            else self._embed_normalize_override
+        )
+        return EmbeddingEncoder(
+            provider,
+            model,
+            max_len,
+            cache_dir=cache_dir,
+            device=self._embed_device_prefer,
+            dtype=dtype,
+            fallback_to_cpu_on_oom=False,
+            batch_size=batch_size,
+            normalize=normalize,
+        )
 
     @property
     def embed_cfg(self) -> Dict[str, Any]:
@@ -169,9 +198,22 @@ class NaiveIndex:
         return str(Path(str(value)).expanduser())
 
     def retrieve(self, query: str, k: int = 5) -> List[Dict[str, Any]]:
-        emb = self.encoder.encode([query])
+        normalize = bool(
+            self.embed_cfg.get("normalize", True)
+            if self._embed_normalize_override is None
+            else self._embed_normalize_override
+        )
+        emb, used_device, fallback_reason = run_with_fallback(
+            lambda device: self.encoder.encode([query], device=device),
+            prefer=self._embed_device_prefer,
+        )
+        self.embed_device_used = used_device
+        self.fallback_reason = fallback_reason
         if emb is None or len(emb) == 0:
             return []
+
+        if normalize:
+            faiss.normalize_L2(emb)
             
         # Ensure dimension match
         if emb.shape[1] != self.index.d:
@@ -206,6 +248,7 @@ class NaiveIndex:
                     "text": chunk.get("text", ""),
                     "score": float(score),
                     "metadata": chunk,
+                    "title": ((chunk.get("meta") or {}).get("doc_title")) if isinstance(chunk.get("meta"), dict) else None,
                     "doc_id": doc_id,
                     "sent_ids": None,
                     "passage_id": passage_id,

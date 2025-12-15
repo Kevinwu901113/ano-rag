@@ -7,6 +7,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import numpy as np
 import torch
+from loguru import logger
 from transformers import AutoModel, AutoTokenizer
 
 from utils.answer_cleaner import _strip_reasoning, clean_model_answer
@@ -19,6 +20,16 @@ _embedding_model_cache: Dict[Tuple[str, str, str], Callable[[List[str]], np.ndar
 _transformers_lock = threading.Lock()
 _transformers_cache: Dict[Tuple[str, str, str], Tuple[Any, Any]] = {}
 _transformers_inference_semaphores: Dict[Tuple[str, str, str], threading.Semaphore] = {}
+
+
+def _is_cuda_oom(exc: BaseException) -> bool:
+    msg = str(exc).lower()
+    return (
+        "cuda out of memory" in msg
+        or "cublas_status_alloc_failed" in msg
+        or "cuda error: out of memory" in msg
+        or "out of memory" in msg and "cuda" in msg
+    )
 
 
 def _get_inference_semaphore(key: Tuple[str, str, str]) -> threading.Semaphore:
@@ -46,6 +57,10 @@ def _resolve_torch_dtype(device: str, torch_dtype: Optional[str]) -> Optional[st
     Decide which dtype to use. Default to float16 on CUDA to save memory unless overridden.
     """
     if torch_dtype:
+        # CPU must stay float32 for compatibility (avoid fp16/bf16 on CPU).
+        if str(device) == "cpu" and str(torch_dtype).lower() not in {"float32", "fp32"}:
+            logger.warning("Requested torch dtype '{}' on CPU; forcing float32 instead", torch_dtype)
+            return None
         return torch_dtype
     if str(device).startswith("cuda"):
         return "float16"
@@ -121,8 +136,10 @@ def encode_passages(
     model_name: str = "bert-base-uncased",
     device: str = "cpu",
     batch_size: int = 32,
+    max_length: int = 512,
     normalize: bool = True,
     torch_dtype: Optional[str] = None,
+    fallback_to_cpu_on_oom: bool = True,
 ) -> np.ndarray:
     """
     Unified embedding interface using transformers.
@@ -131,41 +148,114 @@ def encode_passages(
     if not texts:
         return np.array([])
 
-    resolved_dtype = _resolve_torch_dtype(device, torch_dtype)
-    dtype_key = resolved_dtype or "auto"
+    try:
+        resolved_dtype = _resolve_torch_dtype(device, torch_dtype)
+        dtype_key = resolved_dtype or "auto"
 
-    key = (model_name, device, dtype_key)
-    tokenizer, model = _load_transformers_model(model_name, device, torch_dtype=resolved_dtype)
-    infer_gate = _get_inference_semaphore(key)
+        key = (model_name, device, dtype_key)
+        tokenizer, model = _load_transformers_model(model_name, device, torch_dtype=resolved_dtype)
+        infer_gate = _get_inference_semaphore(key)
 
-    all_embeddings = []
+        all_embeddings = []
 
-    # Batch processing (bounded concurrency per model/device)
-    with infer_gate:
-        for i in range(0, len(texts), batch_size):
-            batch_texts = texts[i : i + batch_size]
+        # Batch processing (bounded concurrency per model/device)
+        with infer_gate:
+            for i in range(0, len(texts), batch_size):
+                batch_texts = texts[i : i + batch_size]
+                try:
+                    inputs = tokenizer(
+                        batch_texts,
+                        padding=True,
+                        truncation=True,
+                        max_length=int(max_length) if max_length else 512,
+                        return_tensors="pt",
+                    ).to(device)
 
-            inputs = tokenizer(
-                batch_texts,
-                padding=True,
-                truncation=True,
-                max_length=512,  # Default max length
-                return_tensors="pt",
-            ).to(device)
+                    with torch.inference_mode():
+                        outputs = model(**inputs)
+                        # Mean pooling
+                        embeddings = outputs.last_hidden_state.mean(dim=1)
 
-            with torch.no_grad():
-                outputs = model(**inputs)
-                # Mean pooling
-                embeddings = outputs.last_hidden_state.mean(dim=1)
+                        if normalize:
+                            embeddings = torch.nn.functional.normalize(embeddings, p=2, dim=1)
 
-                if normalize:
-                    embeddings = torch.nn.functional.normalize(embeddings, p=2, dim=1)
-
-                all_embeddings.append(embeddings.cpu().numpy())
+                        all_embeddings.append(embeddings.cpu().numpy())
+                except Exception as exc:
+                    if fallback_to_cpu_on_oom and str(device).startswith("cuda") and _is_cuda_oom(exc):
+                        print("CUDA OOM during embedding encode; retrying on CPU")
+                        try:
+                            if torch.cuda.is_available():
+                                torch.cuda.empty_cache()
+                        except Exception:
+                            pass
+                        return encode_passages(
+                            texts,
+                            model_name=model_name,
+                            device="cpu",
+                            batch_size=batch_size,
+                            max_length=max_length,
+                            normalize=normalize,
+                            torch_dtype=None,
+                            fallback_to_cpu_on_oom=False,
+                        )
+                    raise
+    except Exception as exc:
+        if fallback_to_cpu_on_oom and str(device).startswith("cuda") and _is_cuda_oom(exc):
+            print("CUDA OOM while loading embedding model; retrying on CPU")
+            try:
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+            except Exception:
+                pass
+            return encode_passages(
+                texts,
+                model_name=model_name,
+                device="cpu",
+                batch_size=batch_size,
+                max_length=max_length,
+                normalize=normalize,
+                torch_dtype=None,
+                fallback_to_cpu_on_oom=False,
+            )
+        raise
 
     if all_embeddings:
         return np.concatenate(all_embeddings, axis=0)
     return np.array([])
+
+
+class TransformerEmbedder:
+    """
+    Lightweight embedding wrapper around `encode_passages` that matches the
+    `embedder.encode(texts, device=...)` call pattern used by baselines.
+    """
+
+    def __init__(
+        self,
+        model_name: str,
+        *,
+        torch_dtype: Optional[str] = None,
+        batch_size: int = 32,
+        max_length: int = 512,
+        normalize: bool = True,
+    ) -> None:
+        self.model_name = str(model_name)
+        self.torch_dtype = torch_dtype
+        self.batch_size = max(1, int(batch_size))
+        self.max_length = max(1, int(max_length))
+        self.normalize = bool(normalize)
+
+    def encode(self, texts: List[str], *, device: str) -> np.ndarray:
+        return encode_passages(
+            texts,
+            model_name=self.model_name,
+            device=str(device),
+            batch_size=self.batch_size,
+            max_length=self.max_length,
+            normalize=self.normalize,
+            torch_dtype=self.torch_dtype,
+            fallback_to_cpu_on_oom=False,
+        )
 
 
 def build_passages_from_context(context: Any, max_passages: int = 10) -> List[str]:

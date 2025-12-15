@@ -105,6 +105,7 @@
 #### 嵌入配置 / 预下载
 - 关键键：`retriever.embedding.cache_dir`（Hugging Face 缓存位置）、`download_dir`（`huggingface-cli --local-dir` 默认目录）、`model_path_override`（本地模型文件夹）、`device`（默认继承 `system.device`）、`dtype`（如 `bfloat16`/`float16` 限制显存）、`auto_build`（`scripts/mirage/build_notes.sh` 结束后自动执行 `scripts/build_indexes.sh`）。
 - 自动覆盖：环境变量 `EMB_CACHE_DIR`、`EMB_MODEL_PATH`、`EMB_DOWNLOAD_DIR`、`EMB_DEVICE`、`EMB_DTYPE` 会在 `config_loader` 读取时覆盖对应配置，与 `VLLM_DOWNLOAD_DIR` 行为一致。
+- 稳定性：检索/索引阶段如遇到 CUDA 显存不足（OOM），嵌入编码会自动回退到 CPU（便于在 GPU 被占用时跑检索/recall 评测）；也可通过 `EMB_DEVICE=cpu` 强制走 CPU。
 - 预下载脚本：`scripts/download_embedding_model.sh` 读取上述配置并封装 `huggingface-cli download`，可通过 `--model` / `--cache-dir` / `--local-dir` 指定 repo 与目标目录，适合在构建索引前预拉 `Qwen/Qwen3-Embedding-8B` 等大模型。
 - 多源检索开关：`retriever.structured.enabled` / `retriever.embedding.enabled` / `retriever.bm25.enabled` 控制三路召回；混合检索由 `retriever/pipeline.py::_maybe_run_hybrid` 根据配置自动融合。
 
@@ -113,6 +114,7 @@
 - 类/方法：`VectorSearcher.search_in_notes/search_note_ids`
 - 行为：
   - 使用本地 `SentenceTransformer`（默认 `all-MiniLM-L6-v2`）编码问题与笔记文本，进行余弦相似度检索，仅用于预筛或兜底，不参与最终融合排序。
+  - 支持 `EMB_DEVICE=cpu` 强制走 CPU；若遇到 CUDA OOM 也会自动回退到 CPU。
 
 ## 配置总表与来源
 - 文件：`config/config_loader.py`（默认值）与项目根 `config.yaml`（可覆盖）。

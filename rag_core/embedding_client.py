@@ -72,7 +72,30 @@ class EmbeddingEncoder:
             return emb_array
             
         if self.provider == "huggingface" and self._model_instance:
-            return self._model_instance.encode(texts, normalize_embeddings=normalize_embeddings)
+            try:
+                return self._model_instance.encode(texts, normalize_embeddings=normalize_embeddings)
+            except RuntimeError as e:
+                msg = str(e).lower()
+                if "cuda" in msg and "out of memory" in msg:
+                    logger.warning("CUDA OOM in SentenceTransformer encode, retrying on CPU")
+                    try:
+                        self._model_instance.to("cpu")
+                    except Exception:
+                        try:
+                            from sentence_transformers import SentenceTransformer
+
+                            self._model_instance = SentenceTransformer(self.model_name, device="cpu")
+                        except Exception:
+                            raise e
+                    try:
+                        import torch  # type: ignore
+
+                        if torch.cuda.is_available():
+                            torch.cuda.empty_cache()
+                    except Exception:
+                        pass
+                    return self._model_instance.encode(texts, normalize_embeddings=normalize_embeddings)
+                raise e
         elif self.provider == "vllm":
             import requests
             try:

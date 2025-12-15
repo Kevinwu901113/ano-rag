@@ -43,8 +43,21 @@ def main():
         indexer.build(args.doc_pool, args.out)
     
     elif args.cmd == "run":
-        index_path = Path(args.index_dir) / "index.faiss"
-        chunks_path = Path(args.index_dir) / "chunks.jsonl"
+        index_dir = Path(args.index_dir)
+        meta_path = index_dir / "meta.json"
+        if meta_path.exists():
+            try:
+                import json
+
+                meta = json.loads(meta_path.read_text(encoding="utf-8"))
+                index_path = Path(str(meta.get("index") or "")).expanduser()
+                chunks_path = Path(str(meta.get("chunks") or "")).expanduser()
+            except Exception:
+                index_path = index_dir / "index.faiss"
+                chunks_path = index_dir / "chunks.jsonl"
+        else:
+            index_path = index_dir / "index.faiss"
+            chunks_path = index_dir / "chunks.jsonl"
         
         if not index_path.exists() or not chunks_path.exists():
             logger.error(f"Index or chunks not found in {args.index_dir}")

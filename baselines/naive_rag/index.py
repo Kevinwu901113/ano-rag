@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import re
+import hashlib
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
@@ -10,6 +12,7 @@ from loguru import logger
 from adapters.mirage import _load_doc_pool, _paragraphs_from_record
 from config import config as config_loader
 from utils import TextUtils
+from utils.device import run_with_fallback
 from utils.embedding_utils import EmbeddingEncoder
 
 try:
@@ -129,13 +132,21 @@ class MirageNaiveIndexer:
         self.embed_cfg = retriever_cfg.get("embedding", {}) or {}
         self.chunker = chunker or NaiveChunker()
 
-    def build(self, doc_pool_path: str, out_dir: str) -> Dict[str, Any]:
+    def build(
+        self,
+        doc_pool_path: str,
+        out_dir: str,
+        *,
+        embed_model: Optional[str] = None,
+        embed_device: str = "auto",
+        embed_batch_size: Optional[int] = None,
+        embed_max_length: Optional[int] = None,
+        embed_normalize: Optional[bool] = None,
+    ) -> Dict[str, Any]:
         if faiss is None:
             raise RuntimeError("FAISS is required to build the naive index")
         out_root = Path(out_dir)
         out_root.mkdir(parents=True, exist_ok=True)
-        chunks_path = out_root / "chunks.jsonl"
-        index_path = out_root / "index.faiss"
         meta_path = out_root / "meta.json"
 
         chunk_records = self.chunker.build_chunks(doc_pool_path)
@@ -143,23 +154,45 @@ class MirageNaiveIndexer:
             raise RuntimeError("No chunks produced from doc_pool; aborting index build.")
 
         logger.info("Prepared {} chunks from doc_pool {}", len(chunk_records), doc_pool_path)
+        model_name = embed_model or self._resolve_model_name()
+        normalize = bool(self.embed_cfg.get("normalize", True) if embed_normalize is None else embed_normalize)
+        max_len = int(embed_max_length or self.embed_cfg.get("max_len_note", self.chunker.max_tokens))
+        batch_size = int(embed_batch_size or self.embed_cfg.get("batch_size", 4))
+
+        signature_src = f"{model_name}|norm={int(normalize)}|max_len={max_len}"
+        signature_hash = hashlib.sha1(signature_src.encode("utf-8")).hexdigest()[:10]
+        model_tag = re.sub(r"[^A-Za-z0-9._-]+", "_", Path(model_name).name)[:40].strip("_") or "model"
+        signature = f"{model_tag}-{signature_hash}_n{int(normalize)}_l{max_len}"
+
+        chunks_path = out_root / f"chunks_{signature}.jsonl"
+        index_path = out_root / f"index_{signature}.faiss"
+
         self._write_chunks(chunks_path, chunk_records)
 
-        encoder = self._init_encoder()
         texts = [c.text for c in chunk_records]
-        
-        # Ensure index is built on CPU to guarantee consistency
-        # We've seen evidence of CUDA OOM fallbacks causing index mismatch
-        # when mixed with different environments or fallback behaviors.
-        # Forcing CPU here is safer for reproducibility and avoids OOM during build.
-        logger.info("Forcing CPU for index building to ensure consistency...")
-        encoder._device_pref = "cpu" 
-        encoder._resolved_device = "cpu"
-        
-        vectors = encoder.encode(texts)
+
+        provider = self.embed_cfg.get("provider", "qwen3")
+        cache_dir = self._clean_path(self.embed_cfg.get("cache_dir"))
+        dtype = self.embed_cfg.get("dtype")
+        encoder = EmbeddingEncoder(
+            provider,
+            model_name,
+            max_len,
+            cache_dir=cache_dir,
+            device=embed_device,
+            dtype=dtype,
+            fallback_to_cpu_on_oom=False,
+            batch_size=batch_size,
+            normalize=normalize,
+        )
+
+        vectors, used_device, fallback_reason = run_with_fallback(
+            lambda device: encoder.encode(texts, device=device),
+            prefer=embed_device,
+        )
         if vectors.size == 0:
             raise RuntimeError("Embedding encoder produced empty vectors; cannot build index.")
-        if bool(self.embed_cfg.get("normalize", True)):
+        if normalize:
             faiss.normalize_L2(vectors)
 
         dim = vectors.shape[1]
@@ -175,11 +208,16 @@ class MirageNaiveIndexer:
         stats = {
             "doc_pool": str(Path(doc_pool_path).resolve()),
             "chunk_count": len(chunk_records),
-            "vector_dim": dim,
+            "dim": dim,
             "index": str(index_path),
             "chunks": str(chunks_path),
-            "normalize": bool(self.embed_cfg.get("normalize", True)),
-            "embedding_model": self._resolve_model_name(),
+            "artifact_id": signature,
+            "normalize": normalize,
+            "embed_model": model_name,
+            "embed_device_used": used_device,
+            "fallback_reason": fallback_reason,
+            "embed_batch_size": batch_size,
+            "embed_max_length": max_len,
             "target_tokens": self.chunker.target_tokens,
             "max_tokens": self.chunker.max_tokens,
             "overlap_tokens": self.chunker.overlap_tokens,

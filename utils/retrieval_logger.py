@@ -21,6 +21,8 @@ def _normalize_retrieved(items: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]
             {
                 "rank": item.get("rank", idx),
                 "score": item.get("score"),
+                # Compatibility: some evaluators use `title` (HotpotQA), while others use `doc_id`.
+                "title": item.get("title") or item.get("doc_id"),
                 "doc_id": item.get("doc_id"),
                 "sent_ids": item.get("sent_ids"),
                 "passage_id": item.get("passage_id"),
@@ -34,6 +36,7 @@ def _normalize_context(items: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
     for item in items:
         context.append(
             {
+                "title": item.get("title") or item.get("doc_id"),
                 "doc_id": item.get("doc_id"),
                 "sent_ids": item.get("sent_ids"),
                 "passage_id": item.get("passage_id"),

@@ -1,17 +1,57 @@
 import argparse
 import json
 import re
+import string
 from collections import Counter
 from pathlib import Path
 from typing import Dict, Iterable, List, Sequence, Set
 
 
+def clean_prediction(text: str) -> str:
+    """
+    Clean the prediction text by removing common prefixes/suffixes 
+    and extracting the actual answer from verbose outputs.
+    """
+    if not text:
+        return ""
+    text = str(text)
+    
+    # Handle "Answer: ..." (case insensitive)
+    # We take the last part after "Answer:" as the model might output "Question: ... Answer: ..."
+    if "answer:" in text.lower():
+        parts = re.split(r"answer\s*:", text, flags=re.IGNORECASE)
+        if len(parts) > 1:
+            candidate = parts[-1].strip()
+            if candidate:
+                text = candidate
+    
+    # Handle "The answer is ..."
+    if "the answer is" in text.lower():
+        parts = re.split(r"the answer is\s*", text, flags=re.IGNORECASE)
+        if len(parts) > 1:
+            candidate = parts[-1].strip()
+            if candidate:
+                text = candidate
+
+    return text.strip()
+
+
 def normalize(text: str) -> str:
-    """Lowercase, strip punctuation, collapse spaces."""
-    text = text.lower()
-    text = re.sub(r"[^a-z0-9\s]", " ", text)
-    text = re.sub(r"\s+", " ", text).strip()
-    return text
+    """Standard HotpotQA/SQuAD normalization."""
+    def remove_articles(t):
+        return re.sub(r'\b(a|an|the)\b', ' ', t)
+
+    def white_space_fix(t):
+        return ' '.join(t.split())
+
+    def remove_punc(t):
+        exclude = set(string.punctuation)
+        return ''.join(ch for ch in t if ch not in exclude)
+
+    def lower(t):
+        return t.lower()
+
+    return white_space_fix(remove_articles(remove_punc(lower(text))))
 
 
 def f1_prec_recall(pred: str, gold: str) -> Sequence[float]:
@@ -75,6 +115,10 @@ def evaluate_predictions(pred_path: Path, answers: Dict[str, str]) -> Dict[str, 
         if gold is None:
             continue
         n += 1
+        
+        # Clean prediction
+        pred = clean_prediction(pred)
+        
         if normalize(str(pred)) == normalize(str(gold)):
             em += 1
         p, r, f1 = f1_prec_recall(str(pred), str(gold))
@@ -182,9 +226,7 @@ def render_retrieval_table(metrics: Dict[str, Dict[str, float]]) -> str:
 
 
 def collect_runs(root: Path) -> List[Path]:
-    return sorted(
-        d for d in root.iterdir() if d.is_dir() and d.name.startswith("hotpot_") and d.name.endswith("_000")
-    )
+    return sorted(d for d in root.iterdir() if d.is_dir() and d.name.startswith("hotpot_"))
 
 
 def main():
@@ -197,7 +239,7 @@ def main():
     parser.add_argument(
         "--root",
         default="result/hotpotqa",
-        help="Root directory containing hotpot_*_000 subdirectories.",
+        help="Root directory containing hotpot_* subdirectories.",
     )
     parser.add_argument(
         "--output",

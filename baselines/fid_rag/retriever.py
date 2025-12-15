@@ -6,6 +6,7 @@ from typing import Any, Dict, List, Optional
 from loguru import logger
 
 from config import config as config_loader
+from utils.device import run_with_fallback
 from utils.embedding_utils import EmbeddingEncoder
 
 try:
@@ -23,6 +24,12 @@ class NaiveIndex:
         index_path: str,
         chunks_path: str,
         config: Optional[Dict[str, Any]] = None,
+        *,
+        embed_model: Optional[str] = None,
+        embed_device: str = "auto",
+        embed_batch_size: Optional[int] = None,
+        embed_max_length: Optional[int] = None,
+        embed_normalize: Optional[bool] = None,
     ) -> None:
         if faiss is None:
             raise RuntimeError("FAISS is required for naive retrieval")
@@ -41,16 +48,33 @@ class NaiveIndex:
             for idx, chunk in enumerate(self._chunks):
                 chunk["vector_id"] = idx
                 self._by_vec[idx] = chunk
+        self._embed_model_override = embed_model
+        self._embed_device_prefer = embed_device
+        self._embed_batch_size_override = embed_batch_size
+        self._embed_max_length_override = embed_max_length
+        self._embed_normalize_override = embed_normalize
+        self.embed_device_used: Optional[str] = None
+        self.fallback_reason: Optional[str] = None
         self._encoder = self._init_encoder()
 
     def search(self, question: str, topk: int) -> List[Dict[str, Any]]:
         q = (question or "").strip()
         if not q:
             return []
-        encoded = self._encoder.encode([q])
+        normalize = bool(
+            self.embed_cfg.get("normalize", True)
+            if self._embed_normalize_override is None
+            else self._embed_normalize_override
+        )
+        encoded, used_device, fallback_reason = run_with_fallback(
+            lambda device: self._encoder.encode([q], device=device),
+            prefer=self._embed_device_prefer,
+        )
+        self.embed_device_used = used_device
+        self.fallback_reason = fallback_reason
         if encoded.size == 0:
             return []
-        if bool(self.embed_cfg.get("normalize", True)):
+        if normalize:
             faiss.normalize_L2(encoded)
         limit = min(topk, self._index.ntotal)
         if limit <= 0:
@@ -98,12 +122,27 @@ class NaiveIndex:
 
     def _init_encoder(self) -> EmbeddingEncoder:
         provider = self.embed_cfg.get("provider", "qwen3")
-        model = self._resolve_model_name()
+        model = self._embed_model_override or self._resolve_model_name()
         cache_dir = self._clean_path(self.embed_cfg.get("cache_dir"))
-        device = self._resolve_device()
         dtype = self.embed_cfg.get("dtype")
-        max_len = int(self.embed_cfg.get("max_len_note", 384))
-        return EmbeddingEncoder(provider, model, max_len, cache_dir=cache_dir, device=device, dtype=dtype)
+        max_len = int(self._embed_max_length_override or self.embed_cfg.get("max_len_note", 384))
+        batch_size = int(self._embed_batch_size_override or self.embed_cfg.get("batch_size", 4))
+        normalize = bool(
+            self.embed_cfg.get("normalize", True)
+            if self._embed_normalize_override is None
+            else self._embed_normalize_override
+        )
+        return EmbeddingEncoder(
+            provider,
+            model,
+            max_len,
+            cache_dir=cache_dir,
+            device=self._embed_device_prefer,
+            dtype=dtype,
+            fallback_to_cpu_on_oom=False,
+            batch_size=batch_size,
+            normalize=normalize,
+        )
 
     def _resolve_model_name(self) -> str:
         override = self.embed_cfg.get("model_path_override")
