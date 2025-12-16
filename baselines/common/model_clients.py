@@ -54,7 +54,7 @@ def get_default_embedding_client(config: Optional[Dict[str, Any]] = None):
             dtype=dtype,
         )
 
-    if provider not in ("huggingface", "vllm", "mock"):
+    if provider not in ("huggingface", "vllm", "mock", "st"):
         raise ValueError(f"Unsupported embedding provider: {provider}")
 
     # --- Other cases: still use the general implementation from rag_core.embedding_client ---
@@ -69,6 +69,23 @@ def get_default_embedding_client(config: Optional[Dict[str, Any]] = None):
         device=device,
         **extra_kwargs,
     )
+
+class MockLLMChatClient:
+    """Mock LLM Client that returns dummy responses."""
+    def __init__(self, endpoint: str, model: str, temperature: float = 0.0, stop: Optional[List[str]] = None):
+        self.endpoint = endpoint
+        self.model = model
+        self.temperature = temperature
+        self.stop = stop
+        logger.warning(f"Initialized Mock LLM Client. Endpoint={endpoint}, Model={model}")
+
+    def chat(self, messages: List[Dict[str, str]], max_tokens: int = 1024, temperature: Optional[float] = None, **kwargs) -> str:
+        # Return a dummy response.
+        # Maybe check if last message asks for JSON to return valid JSON?
+        last_msg = messages[-1]["content"] if messages else ""
+        if "json" in last_msg.lower():
+            return '{"thought": "This is a mock thought", "answer": "Mock Answer", "relevance_score": 1.0}'
+        return "This is a mock response from the MockLLMChatClient."
 
 def get_default_llm_client(config: Optional[Dict[str, Any]] = None) -> "LLMChatClient":
     """
@@ -101,6 +118,9 @@ def get_default_llm_client(config: Optional[Dict[str, Any]] = None) -> "LLMChatC
     if not model:
         model = "default-model"
         
+    if endpoint == "mock":
+        return MockLLMChatClient(endpoint=endpoint, model=model, temperature=temperature, stop=stop)
+
     logger.info(f"Initializing LLM Client: endpoint={endpoint}, model={model}")
 
     from rag_core.llm_client import LLMChatClient

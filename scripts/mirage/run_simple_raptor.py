@@ -14,6 +14,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from baselines.simple_raptor.retriever import SimpleRaptorRetriever
+from baselines.common.model_clients import get_default_llm_client
 from rag_core.llm_client import LLMChatClient
 from utils.retrieval_logger import log_retrieval
 
@@ -94,20 +95,7 @@ def main() -> None:
     logger.info("Writing outputs to {}", work_dir)
     
     # Configure LLM Client explicit overrides if provided
-    llm_client = None
-    if args.lmstudio_endpoint or args.lmstudio_model:
-        # We need to fetch defaults first
-        lm_cfg = global_config.load_config().get("lmstudio", {})
-        endpoint = args.lmstudio_endpoint or lm_cfg.get("endpoint")
-        model = args.lmstudio_model or lm_cfg.get("model")
-        temp = args.temperature if args.temperature is not None else lm_cfg.get("temperature", 0.0)
-        max_tokens = args.max_new_tokens if args.max_new_tokens is not None else lm_cfg.get("max_tokens", 8192)
-        
-        llm_client = LLMChatClient(
-            endpoint=endpoint,
-            model=model,
-            temperature=float(temp)
-        )
+    llm_client = get_default_llm_client()
 
     # Initialize Retriever
     retriever = SimpleRaptorRetriever(

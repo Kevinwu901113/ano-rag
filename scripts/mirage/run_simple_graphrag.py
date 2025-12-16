@@ -99,18 +99,18 @@ def main() -> None:
                     # Ideally we want unique documents. 
                     # Let's use a hash of content or just sequential ID if no stable ID
                     text = item.get("doc_chunk") or item.get("text") or item.get("content") or ""
-            doc_name = item.get("doc_name") or "unknown"
+                    doc_name = item.get("doc_name") or "unknown"
             
-            if text:
-                # Create a deterministic ID based on content hash to avoid duplicates
-                import hashlib
-                doc_hash = hashlib.md5(text.encode("utf-8")).hexdigest()
-                # Include index to ensure absolute uniqueness if needed, but hash should be enough for identical content
-                # To be safe against hash collisions (unlikely) or identical content from different sources, let's append index
-                # Wait, enumerate index is not available in this loop context directly (it's 'item' in 'doc_pool').
-                # Let's just use hash. If content is identical, it's fine to treat as same node.
-                doc_id = f"{doc_name}_{doc_hash[:8]}"
-                docs[doc_id] = text
+                    if text:
+                        # Create a deterministic ID based on content hash to avoid duplicates
+                        import hashlib
+                        doc_hash = hashlib.md5(text.encode("utf-8")).hexdigest()
+                        # Include index to ensure absolute uniqueness if needed, but hash should be enough for identical content
+                        # To be safe against hash collisions (unlikely) or identical content from different sources, let's append index
+                        # Wait, enumerate index is not available in this loop context directly (it's 'item' in 'doc_pool').
+                        # Let's just use hash. If content is identical, it's fine to treat as same node.
+                        doc_id = f"{doc_name}_{doc_hash[:8]}"
+                        docs[doc_id] = text
         else:
             # Fallback to dataset items
             for item in dataset:
@@ -124,13 +124,9 @@ def main() -> None:
         # Build graph
         import asyncio
         from baselines.simple_graphrag.build_graph import GraphBuilder
-        from structrag.llm_client import LLMChatClient
+        from baselines.common.model_clients import get_default_llm_client
         
-        llm_client = LLMChatClient(
-            endpoint=lm_endpoint_str,
-            model=lm_model_str,
-            temperature=0.0
-        )
+        llm_client = get_default_llm_client(global_config.load_config())
         
         builder = GraphBuilder(llm_client)
         asyncio.run(builder.build(docs))

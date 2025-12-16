@@ -39,6 +39,9 @@ def main() -> None:
             for i, item in enumerate(raw_data):
                 # Unique ID construction
                 base_id = item.get("doc_id") or item.get("mapped_id") or str(i)
+                doc_id = f"{base_id}::{i}"
+                if i == 0:
+                     logger.info(f"DEBUG: doc_id format example: {doc_id}")
                 # Construct text from title + paragraphs
                 title = item.get("title") or item.get("doc_name") or ""
                 paragraphs = item.get("paragraphs")
@@ -50,7 +53,7 @@ def main() -> None:
                     text = title + "\n" + (item.get("doc_chunk") or "")
                 
                 # We use a compound key if needed, but doc_id usually suffices if unique
-                docs[base_id] = text.strip()
+                docs[doc_id] = text.strip()
         elif isinstance(raw_data, dict):
             # Handle simple dict format {id: text}
             docs = {k: str(v) for k, v in raw_data.items()}
@@ -75,19 +78,9 @@ def main() -> None:
     
     llm_client = None
     if args.lmstudio_endpoint or args.lmstudio_model:
-        lm_cfg = global_config.load_config().get("lmstudio", {})
-        # Create a temporary config dict to pass to get_default_llm_client or manually construct
-        # Actually, we can just manually construct the client here since we have the values
-        from rag_core.llm_client import LLMChatClient
-        endpoint = args.lmstudio_endpoint or lm_cfg.get("endpoint")
-        model = args.lmstudio_model or lm_cfg.get("model")
-        temperature = args.temperature if args.temperature is not None else lm_cfg.get("temperature", 0.0)
-        
-        llm_client = LLMChatClient(
-            endpoint=endpoint,
-            model=model,
-            temperature=float(temperature)
-        )
+        # Since we updated global_config above, we can just call get_default_llm_client
+        # which reads from global_config.
+        llm_client = get_default_llm_client()
         
     indexer = SimpleRaptorIndexer(llm_client=llm_client)
     

@@ -15,6 +15,7 @@ from loguru import logger
 from config import config as config_loader
 from utils.device import run_with_fallback
 from utils.embedding_utils import EmbeddingEncoder
+from baselines.common.model_clients import get_default_llm_client
 
 DEFAULT_SYSTEM_PROMPT = (
     "You are a helpful assistant for multi-hop question answering.\n"
@@ -51,6 +52,11 @@ class VanillaRAGRetriever:
         self.last_hits: List[Dict[str, Any]] = []
         self._embed_model_override = embed_model
         self._embed_device_prefer = embed_device
+        if self._embed_device_prefer == "auto":
+             retriever_cfg = self.cfg.get("retriever", {}) or {}
+             embed_cfg = retriever_cfg.get("embedding", {}) or {}
+             self._embed_device_prefer = embed_cfg.get("device", "auto")
+             
         self._embed_batch_size_override = embed_batch_size
         self._embed_max_length_override = embed_max_length
         self._embed_normalize_override = embed_normalize
@@ -96,6 +102,9 @@ class VanillaRAGRetriever:
         
         cache_dir = self._clean_path(embed_cfg.get("cache_dir"))
         device = self._embed_device_prefer
+        if device == "auto":
+            device = embed_cfg.get("device", "auto")
+        
         dtype = embed_cfg.get("dtype")
         max_len = int(self._embed_max_length_override or embed_cfg.get("max_len_note", 512))
         batch_size = int(self._embed_batch_size_override or embed_cfg.get("batch_size", 4))
@@ -118,16 +127,7 @@ class VanillaRAGRetriever:
         )
 
     def _init_llm_client(self) -> LLMChatClient:
-        # Use global config for LLM
-        lm_cfg = self.cfg.get("lmstudio", {})
-        endpoint = lm_cfg.get("endpoint")
-        model = lm_cfg.get("model")
-        
-        if not endpoint or not model:
-            logger.warning("LLM endpoint/model not configured properly in config.yaml")
-            
-        LLMChatClient = _lazy_import_llm_client()
-        return LLMChatClient(endpoint=endpoint, model=model, temperature=0.0)
+        return get_default_llm_client(self.cfg)
 
     def _resolve_device(self) -> Optional[str]:
         device = (self.cfg.get("retriever", {}) or {}).get("embedding", {}).get("device")

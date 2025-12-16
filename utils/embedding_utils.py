@@ -197,16 +197,15 @@ class EmbeddingEncoder:
                 self._resolved_device = "cpu"
                 self._resolved_torch_dtype = None
                 cpu_kwargs = dict(model_kwargs)
-                cpu_dtype = self._resolve_torch_dtype(torch, device="cpu")
-                if cpu_dtype is None:
-                    cpu_kwargs.pop("torch_dtype", None)
-                    cpu_kwargs.pop("dtype", None)
-                else:
-                    cpu_kwargs["torch_dtype"] = cpu_dtype
-                    cpu_kwargs["dtype"] = cpu_dtype
-
+                # Remove device specific args if any
                 self._model = _load_model_with_kwargs(cpu_kwargs)
-                self._model.to("cpu")
+        
+            # Ensure model is on the correct device
+            current_device = next(self._model.parameters()).device
+            target_device = torch.device(target_device_str)
+            if current_device.type != target_device.type:
+                logger.info(f"Moving model from {current_device} to {target_device}")
+                self._model.to(target_device)
 
             self._model.eval()
 

@@ -12,6 +12,7 @@ from baselines.naive_rag import NaiveIndex
 from config import config as config_loader
 from utils.answer_cleaner import _enforce_short_answer, _strip_reasoning
 from utils.retrieval_logger import log_retrieval
+from baselines.common.model_clients import get_default_llm_client
 
 
 FID_PROMPT_TEMPLATE = """You are a question answering system.
@@ -118,13 +119,24 @@ class FiDRAGRunner:
         temp = temperature if temperature is not None else lm_cfg.get("temperature", 0.0)
         max_new_tokens = max_tokens if max_tokens is not None else lm_cfg.get("max_tokens", 128)
         self.retriever = NaiveIndex(index_path, chunks_path, config=self.cfg)
-        self.lm = LLMClient(
-            endpoint,
-            model,
-            temperature=float(temp or 0.0),
-            max_tokens=int(max_new_tokens or 128),
-            stop=stop,
-        )
+        
+        # Override config if args provided
+        if endpoint or model:
+            # We need to ensure get_default_llm_client uses these overrides.
+            # But get_default_llm_client reads from config dict.
+            # So we create a temporary config dict with overrides.
+            # Or just update self.cfg['lmstudio']?
+            # Safer to just rely on global config updates if passed via CLI, 
+            # BUT arguments here are passed explicitly.
+            # Let's just update self.cfg['lmstudio'] locally.
+            if "lmstudio" not in self.cfg:
+                self.cfg["lmstudio"] = {}
+            if endpoint:
+                self.cfg["lmstudio"]["endpoint"] = endpoint
+            if model:
+                self.cfg["lmstudio"]["model"] = model
+
+        self.lm = get_default_llm_client(self.cfg)
 
     def run_dataset(
         self,
@@ -155,7 +167,7 @@ class FiDRAGRunner:
                 raw_output = "Insufficient evidence"
             else:
                 prompt = _build_fid_prompt(question, hits)
-                raw_output = self.lm.answer_raw_prompt(prompt)
+                raw_output = self.lm.chat([{"role": "user", "content": prompt}])
             answer_text, used_indices = _parse_fid_output(raw_output)
             used_indices = _filter_indices(used_indices, len(hits))
             answer_text = _enforce_short_answer(answer_text)

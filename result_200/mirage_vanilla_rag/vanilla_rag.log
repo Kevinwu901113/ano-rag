@@ -1,0 +1,220 @@
+2025-12-15 13:13:16.138 | INFO     | __main__:main:70 - Starting Vanilla RAG run in result_200/mirage_vanilla_rag
+2025-12-15 13:13:16.138 | INFO     | __main__:main:78 - Index not found at result_200/mirage_vanilla_rag/vanilla_rag_index.faiss. Attempting to build...
+2025-12-15 13:13:16.138 | INFO     | __main__:main:89 - Building index from data/mirage_sample_200/doc_pool.json...
+2025-12-15 13:13:16.216 | INFO     | baselines.vanilla_rag.index:build:132 - Generated 1002 chunks from 1000 documents.
+2025-12-15 13:13:16.216 | INFO     | baselines.vanilla_rag.index:_resolve_model_name:196 - Embedding model override detected: /home/wjk/models/qwen3-emb
+2025-12-15 13:13:16.216 | INFO     | baselines.vanilla_rag.index:build:138 - Encoding chunks...
+2025-12-15 13:13:20.211 | INFO     | utils.embedding_utils:_encode_transformers:147 - Loading transformer embedding model: /home/wjk/models/qwen3-emb
+2025-12-15 13:13:20.211 | INFO     | utils.embedding_utils:_encode_transformers:152 - Embedding target device resolved to: cpu
+2025-12-15 13:13:20.572 | WARNING  | utils.embedding_utils:_resolve_torch_dtype:376 - Non-float32 embeddings on CPU are not supported; using float32 instead
+2025-12-15 13:42:31.860 | INFO     | baselines.vanilla_rag.index:build:160 - Saved vector index to result_200/mirage_vanilla_rag/vanilla_rag_index.faiss
+2025-12-15 13:42:31.863 | INFO     | baselines.vanilla_rag.index:build:168 - Saved chunk store to result_200/mirage_vanilla_rag/vanilla_rag_chunk_store.pkl
+2025-12-15 13:42:31.863 | INFO     | baselines.vanilla_rag.index:build:176 - Saved index metadata to result_200/mirage_vanilla_rag/vanilla_rag_index.faiss.meta.pkl
+2025-12-15 13:42:34.319 | INFO     | __main__:main:123 - Index built successfully.
+2025-12-15 13:42:34.319 | INFO     | baselines.vanilla_rag:get_retriever:16 - Initializing VanillaRAGRetriever with index=result_200/mirage_vanilla_rag/vanilla_rag_index.faiss, chunks=result_200/mirage_vanilla_rag/vanilla_rag_chunk_store.pkl
+2025-12-15 13:42:34.326 | INFO     | baselines.common.model_clients:get_default_llm_client:108 - Using LM Studio configuration for LLM Client
+2025-12-15 13:42:34.326 | WARNING  | baselines.common.model_clients:__init__:80 - Initialized Mock LLM Client. Endpoint=mock, Model=mock-model
+2025-12-15 13:42:34.327 | INFO     | __main__:main:145 - Processing Q0: What is John Mayne's occupation?
+2025-12-15 13:42:34.327 | INFO     | utils.embedding_utils:_encode_transformers:147 - Loading transformer embedding model: /home/wjk/models/qwen3-emb
+2025-12-15 13:42:34.328 | INFO     | utils.embedding_utils:_encode_transformers:152 - Embedding target device resolved to: cpu
+2025-12-15 13:42:34.659 | WARNING  | utils.embedding_utils:_resolve_torch_dtype:376 - Non-float32 embeddings on CPU are not supported; using float32 instead
+2025-12-15 13:42:37.478 | INFO     | __main__:main:145 - Processing Q1: What is Kathy Saltzman's occupation?
+2025-12-15 13:42:38.322 | INFO     | __main__:main:145 - Processing Q2: What is Eleanor Davis's occupation?
+2025-12-15 13:42:39.398 | INFO     | __main__:main:145 - Processing Q3: What is William Murray, 1st Earl of Mansfield's occupation?
+2025-12-15 13:42:40.184 | INFO     | __main__:main:145 - Processing Q4: What is Þorsteinn Bachmann's occupation?
+2025-12-15 13:42:41.520 | INFO     | __main__:main:145 - Processing Q5: What is Jacob Kraemer's occupation?
+2025-12-15 13:42:42.392 | INFO     | __main__:main:145 - Processing Q6: What is Bae Geu-rin's occupation?
+2025-12-15 13:42:43.473 | INFO     | __main__:main:145 - Processing Q7: What is John Floyd's occupation?
+2025-12-15 13:42:44.336 | INFO     | __main__:main:145 - Processing Q8: What is Sachiko Kokubu's occupation?
+2025-12-15 13:42:45.509 | INFO     | __main__:main:145 - Processing Q9: What is Akari Hayami's occupation?
+2025-12-15 13:42:46.972 | INFO     | __main__:main:145 - Processing Q10: What is Paris's occupation?
+2025-12-15 13:42:47.946 | INFO     | __main__:main:145 - Processing Q11: What is Fairfax M. Cone's occupation?
+2025-12-15 13:42:49.056 | INFO     | __main__:main:145 - Processing Q12: What is Albert Bates's occupation?
+2025-12-15 13:42:50.051 | INFO     | __main__:main:145 - Processing Q13: What is Heath's occupation?
+2025-12-15 13:42:51.018 | INFO     | __main__:main:145 - Processing Q14: What is Yoshiki Tonogai's occupation?
+2025-12-15 13:42:52.176 | INFO     | __main__:main:145 - Processing Q15: What is Thomas R. Whitney's occupation?
+2025-12-15 13:42:53.260 | INFO     | __main__:main:145 - Processing Q16: What is Edwin Wallock's occupation?
+2025-12-15 13:42:54.326 | INFO     | __main__:main:145 - Processing Q17: What is Tsutomu Seki's occupation?
+2025-12-15 13:42:55.785 | INFO     | __main__:main:145 - Processing Q18: What is Matthew McKay's occupation?
+2025-12-15 13:42:56.752 | INFO     | __main__:main:145 - Processing Q19: What is Dominick Bellizzi's occupation?
+2025-12-15 13:42:57.902 | INFO     | __main__:main:145 - Processing Q20: What is Brendan Canty's occupation?
+2025-12-15 13:42:58.854 | INFO     | __main__:main:145 - Processing Q21: What is María Elena Marqués's occupation?
+2025-12-15 13:43:00.004 | INFO     | __main__:main:145 - Processing Q22: What is Patrick O'Brien Demsey's occupation?
+2025-12-15 13:43:01.170 | INFO     | __main__:main:145 - Processing Q23: What is Boutheina Jabnoun's occupation?
+2025-12-15 13:43:02.329 | INFO     | __main__:main:145 - Processing Q24: What is Modou Dia's occupation?
+2025-12-15 13:43:03.326 | INFO     | __main__:main:145 - Processing Q25: What is Glenn Albrecht's occupation?
+2025-12-15 13:43:04.523 | INFO     | __main__:main:145 - Processing Q26: What is Tobias Lindholm's occupation?
+2025-12-15 13:43:05.438 | INFO     | __main__:main:145 - Processing Q27: What is Ingrid Martinez's occupation?
+2025-12-15 13:43:06.418 | INFO     | __main__:main:145 - Processing Q28: What is Tolis Voskopoulos's occupation?
+2025-12-15 13:43:07.600 | INFO     | __main__:main:145 - Processing Q29: What is Marco Ameglio's occupation?
+2025-12-15 13:43:08.854 | INFO     | __main__:main:145 - Processing Q30: What is Mohd Sharkar Shamsudin's occupation?
+2025-12-15 13:43:10.254 | INFO     | __main__:main:145 - Processing Q31: What is Anthony Sharp's occupation?
+2025-12-15 13:43:11.175 | INFO     | __main__:main:145 - Processing Q32: What is Claire Berlinski's occupation?
+2025-12-15 13:43:12.389 | INFO     | __main__:main:145 - Processing Q33: What is Russell Stokes's occupation?
+2025-12-15 13:43:13.375 | INFO     | __main__:main:145 - Processing Q34: What is C. E. Webber's occupation?
+2025-12-15 13:43:14.555 | INFO     | __main__:main:145 - Processing Q35: What is Muhammad Ali Luqman's occupation?
+2025-12-15 13:43:15.643 | INFO     | __main__:main:145 - Processing Q36: What is Ivo Perilli's occupation?
+2025-12-15 13:43:16.772 | INFO     | __main__:main:145 - Processing Q37: What is Joseph Weydemeyer's occupation?
+2025-12-15 13:43:17.813 | INFO     | __main__:main:145 - Processing Q38: What is Ai's occupation?
+2025-12-15 13:43:18.814 | INFO     | __main__:main:145 - Processing Q39: What is Rinaldo del Mel's occupation?
+2025-12-15 13:43:19.992 | INFO     | __main__:main:145 - Processing Q40: What is Annie Beustes's occupation?
+2025-12-15 13:43:21.157 | INFO     | __main__:main:145 - Processing Q41: What is Elisa Bridges's occupation?
+2025-12-15 13:43:22.209 | INFO     | __main__:main:145 - Processing Q42: What is Domingo Eyzaguirre's occupation?
+2025-12-15 13:43:23.613 | INFO     | __main__:main:145 - Processing Q43: What is Suzanne Lilar's occupation?
+2025-12-15 13:43:24.525 | INFO     | __main__:main:145 - Processing Q44: What is Karen Redman's occupation?
+2025-12-15 13:43:25.369 | INFO     | __main__:main:145 - Processing Q45: What is Eduard Looijenga's occupation?
+2025-12-15 13:43:26.574 | INFO     | __main__:main:145 - Processing Q46: What is Petrus Camper's occupation?
+2025-12-15 13:43:27.792 | INFO     | __main__:main:145 - Processing Q47: What is Jacopo Melani's occupation?
+2025-12-15 13:43:29.119 | INFO     | __main__:main:145 - Processing Q48: What is Charlotte von Hagn's occupation?
+2025-12-15 13:43:30.388 | INFO     | __main__:main:145 - Processing Q49: What is Michael Hutchings's occupation?
+2025-12-15 13:43:31.411 | INFO     | __main__:main:145 - Processing Q50: What is James Alex Msekela's occupation?
+2025-12-15 13:43:32.645 | INFO     | __main__:main:145 - Processing Q51: What is Hiroyuki Arai's occupation?
+2025-12-15 13:43:33.912 | INFO     | __main__:main:145 - Processing Q52: What is Melinda Mullins's occupation?
+2025-12-15 13:43:35.048 | INFO     | __main__:main:145 - Processing Q53: What is Meyer Lutz's occupation?
+2025-12-15 13:43:35.928 | INFO     | __main__:main:145 - Processing Q54: What is Ludwig Lichtschein's occupation?
+2025-12-15 13:43:37.068 | INFO     | __main__:main:145 - Processing Q55: What is Władysław Sławny's occupation?
+2025-12-15 13:43:38.414 | INFO     | __main__:main:145 - Processing Q56: What is Johnson's occupation?
+2025-12-15 13:43:39.379 | INFO     | __main__:main:145 - Processing Q57: What is Walter Köbel's occupation?
+2025-12-15 13:43:40.274 | INFO     | __main__:main:145 - Processing Q58: What is Debbie Johnson's occupation?
+2025-12-15 13:43:41.126 | INFO     | __main__:main:145 - Processing Q59: What is Kekko Fornarelli's occupation?
+2025-12-15 13:43:42.363 | INFO     | __main__:main:145 - Processing Q60: What is Adil Shamoo's occupation?
+2025-12-15 13:43:43.632 | INFO     | __main__:main:145 - Processing Q61: What is Patrick Mulvany's occupation?
+2025-12-15 13:43:44.792 | INFO     | __main__:main:145 - Processing Q62: What is Gerard Kennedy's occupation?
+2025-12-15 13:43:45.758 | INFO     | __main__:main:145 - Processing Q63: What is Giora Godik's occupation?
+2025-12-15 13:43:46.957 | INFO     | __main__:main:145 - Processing Q64: What is Lillian Lawrence's occupation?
+2025-12-15 13:43:47.947 | INFO     | __main__:main:145 - Processing Q65: What is Philip Rosenberg's occupation?
+2025-12-15 13:43:48.836 | INFO     | __main__:main:145 - Processing Q66: What is Mariana Vicente's occupation?
+2025-12-15 13:43:49.939 | INFO     | __main__:main:145 - Processing Q67: What is Huntington Wilson's occupation?
+2025-12-15 13:43:50.821 | INFO     | __main__:main:145 - Processing Q68: What is Bala's occupation?
+2025-12-15 13:43:51.717 | INFO     | __main__:main:145 - Processing Q69: What is Steve Tom's occupation?
+2025-12-15 13:43:52.620 | INFO     | __main__:main:145 - Processing Q70: What is Ilja Rosendahl's occupation?
+2025-12-15 13:43:53.756 | INFO     | __main__:main:145 - Processing Q71: What is Thanasis Pafilis's occupation?
+2025-12-15 13:43:54.896 | INFO     | __main__:main:145 - Processing Q72: What is Christopher Butson's occupation?
+2025-12-15 13:43:55.853 | INFO     | __main__:main:145 - Processing Q73: What is Hate Man's occupation?
+2025-12-15 13:43:56.780 | INFO     | __main__:main:145 - Processing Q74: What is Rich Brightman's occupation?
+2025-12-15 13:43:57.696 | INFO     | __main__:main:145 - Processing Q75: What is Edward Norton's occupation?
+2025-12-15 13:43:58.601 | INFO     | __main__:main:145 - Processing Q76: What is Jonathan Le Billon's occupation?
+2025-12-15 13:43:59.756 | INFO     | __main__:main:145 - Processing Q77: What is Eliza Lawrence's occupation?
+2025-12-15 13:44:00.702 | INFO     | __main__:main:145 - Processing Q78: What is Charles Combe's occupation?
+2025-12-15 13:44:01.676 | INFO     | __main__:main:145 - Processing Q79: What is GQ's occupation?
+2025-12-15 13:44:02.640 | INFO     | __main__:main:145 - Processing Q80: What is John D. Maurice's occupation?
+2025-12-15 13:44:03.833 | INFO     | __main__:main:145 - Processing Q81: What is Harvey Benge's occupation?
+2025-12-15 13:44:04.801 | INFO     | __main__:main:145 - Processing Q82: What is Alan Huckle's occupation?
+2025-12-15 13:44:05.695 | INFO     | __main__:main:145 - Processing Q83: What is Sylwester Braun's occupation?
+2025-12-15 13:44:06.829 | INFO     | __main__:main:145 - Processing Q84: What is Jack Mackenzie's occupation?
+2025-12-15 13:44:07.692 | INFO     | __main__:main:145 - Processing Q85: What is Ernst Theodor Echtermeyer's occupation?
+2025-12-15 13:44:08.976 | INFO     | __main__:main:145 - Processing Q86: What is Felicia Chateloin's occupation?
+2025-12-15 13:44:10.076 | INFO     | __main__:main:145 - Processing Q87: What is Bedřich Feigl's occupation?
+2025-12-15 13:44:11.144 | INFO     | __main__:main:145 - Processing Q88: What is Björn Böhning's occupation?
+2025-12-15 13:44:12.378 | INFO     | __main__:main:145 - Processing Q89: What is Stanley Peiris's occupation?
+2025-12-15 13:44:13.460 | INFO     | __main__:main:145 - Processing Q90: What is J. Da Silva's occupation?
+2025-12-15 13:44:14.701 | INFO     | __main__:main:145 - Processing Q91: What is Carsten Carlsen's occupation?
+2025-12-15 13:44:15.920 | INFO     | __main__:main:145 - Processing Q92: What is Shiva Nageswara Rao's occupation?
+2025-12-15 13:44:17.476 | INFO     | __main__:main:145 - Processing Q93: What is Fritz Goos's occupation?
+2025-12-15 13:44:18.545 | INFO     | __main__:main:145 - Processing Q94: What is Alexander Gadolin's occupation?
+2025-12-15 13:44:19.547 | INFO     | __main__:main:145 - Processing Q95: What is Kamya Panjabi's occupation?
+2025-12-15 13:44:20.789 | INFO     | __main__:main:145 - Processing Q96: What is John Strange's occupation?
+2025-12-15 13:44:21.680 | INFO     | __main__:main:145 - Processing Q97: What is Everley Gregg's occupation?
+2025-12-15 13:44:22.554 | INFO     | __main__:main:145 - Processing Q98: What is Meg McCall's occupation?
+2025-12-15 13:44:23.484 | INFO     | __main__:main:145 - Processing Q99: What is Todd Verow's occupation?
+2025-12-15 13:44:24.400 | INFO     | __main__:main:145 - Processing Q100: What is Kyaw Swe's occupation?
+2025-12-15 13:44:25.468 | INFO     | __main__:main:145 - Processing Q101: What is Edwin H. Knopf's occupation?
+2025-12-15 13:44:26.646 | INFO     | __main__:main:145 - Processing Q102: What is Tatiana Doronina's occupation?
+2025-12-15 13:44:28.069 | INFO     | __main__:main:145 - Processing Q103: What is Marina Baker's occupation?
+2025-12-15 13:44:29.072 | INFO     | __main__:main:145 - Processing Q104: What is Giuseppe Demachi's occupation?
+2025-12-15 13:44:30.313 | INFO     | __main__:main:145 - Processing Q105: What is Atsushi Kaneko's occupation?
+2025-12-15 13:44:31.428 | INFO     | __main__:main:145 - Processing Q106: What is Richard Faith's occupation?
+2025-12-15 13:44:32.355 | INFO     | __main__:main:145 - Processing Q107: What is E. David Redwine's occupation?
+2025-12-15 13:44:33.534 | INFO     | __main__:main:145 - Processing Q108: What is Chiara Zanni's occupation?
+2025-12-15 13:44:34.583 | INFO     | __main__:main:145 - Processing Q109: What is P. J. Moloney's occupation?
+2025-12-15 13:44:35.835 | INFO     | __main__:main:145 - Processing Q110: What is Andreas Rüdiger's occupation?
+2025-12-15 13:44:37.037 | INFO     | __main__:main:145 - Processing Q111: What is Guillem Ramon de Gironella's occupation?
+2025-12-15 13:44:38.555 | INFO     | __main__:main:145 - Processing Q112: What is Dima Grigoriev's occupation?
+2025-12-15 13:44:39.735 | INFO     | __main__:main:145 - Processing Q113: What is Paddy Mullins's occupation?
+2025-12-15 13:44:40.929 | INFO     | __main__:main:145 - Processing Q114: What is Alan Mauritz Swanson's occupation?
+2025-12-15 13:44:42.127 | INFO     | __main__:main:145 - Processing Q115: What is Harvey William Burk's occupation?
+2025-12-15 13:44:43.116 | INFO     | __main__:main:145 - Processing Q116: What is Richard Sandrak's occupation?
+2025-12-15 13:44:44.303 | INFO     | __main__:main:145 - Processing Q117: What is Jim Boyd's occupation?
+2025-12-15 13:44:45.193 | INFO     | __main__:main:145 - Processing Q118: What is Nosrat Karimi's occupation?
+2025-12-15 13:44:46.261 | INFO     | __main__:main:145 - Processing Q119: What is Jörg A. Eggers's occupation?
+2025-12-15 13:44:47.619 | INFO     | __main__:main:145 - Processing Q120: What is Duilio Forte's occupation?
+2025-12-15 13:44:48.758 | INFO     | __main__:main:145 - Processing Q121: What is Giovanni Grasso's occupation?
+2025-12-15 13:44:49.625 | INFO     | __main__:main:145 - Processing Q122: What is Adam Darr's occupation?
+2025-12-15 13:44:50.516 | INFO     | __main__:main:145 - Processing Q123: What is Paul Lieber's occupation?
+2025-12-15 13:44:51.406 | INFO     | __main__:main:145 - Processing Q124: What is Keiko Aizawa's occupation?
+2025-12-15 13:44:52.538 | INFO     | __main__:main:145 - Processing Q125: What is Petros Efthymiou's occupation?
+2025-12-15 13:44:53.661 | INFO     | __main__:main:145 - Processing Q126: What is Isobel Pravda's occupation?
+2025-12-15 13:44:54.799 | INFO     | __main__:main:145 - Processing Q127: What is Seungri's occupation?
+2025-12-15 13:44:55.845 | INFO     | __main__:main:145 - Processing Q128: What is DM Sevilla's occupation?
+2025-12-15 13:44:56.750 | INFO     | __main__:main:145 - Processing Q129: What is Carlo Giustini's occupation?
+2025-12-15 13:44:57.902 | INFO     | __main__:main:145 - Processing Q130: What is Hugo Becker's occupation?
+2025-12-15 13:44:58.812 | INFO     | __main__:main:145 - Processing Q131: What is Per Risvik's occupation?
+2025-12-15 13:44:59.788 | INFO     | __main__:main:145 - Processing Q132: What is Eleanor Yule's occupation?
+2025-12-15 13:45:00.711 | INFO     | __main__:main:145 - Processing Q133: What is Claire Adams's occupation?
+2025-12-15 13:45:01.605 | INFO     | __main__:main:145 - Processing Q134: What is Lothrop Stoddard's occupation?
+2025-12-15 13:45:02.851 | INFO     | __main__:main:145 - Processing Q135: What is Chris Lang's occupation?
+2025-12-15 13:45:03.907 | INFO     | __main__:main:145 - Processing Q136: What is Pamela Winslow's occupation?
+2025-12-15 13:45:04.883 | INFO     | __main__:main:145 - Processing Q137: What is Zoran Rankić's occupation?
+2025-12-15 13:45:06.096 | INFO     | __main__:main:145 - Processing Q138: What is George Minor's occupation?
+2025-12-15 13:45:06.973 | INFO     | __main__:main:145 - Processing Q139: What is Anjali Sudhakar's occupation?
+2025-12-15 13:45:08.415 | INFO     | __main__:main:145 - Processing Q140: What is Jean Gabriel Marie's occupation?
+2025-12-15 13:45:09.449 | INFO     | __main__:main:145 - Processing Q141: What is George Birnie Esslemont's occupation?
+2025-12-15 13:45:10.605 | INFO     | __main__:main:145 - Processing Q142: What is Ajay Kumar Parida's occupation?
+2025-12-15 13:45:11.746 | INFO     | __main__:main:145 - Processing Q143: What is A. Lawrence Kocher's occupation?
+2025-12-15 13:45:13.038 | INFO     | __main__:main:145 - Processing Q144: What is John Andrew Martin's occupation?
+2025-12-15 13:45:13.964 | INFO     | __main__:main:145 - Processing Q145: What is Maurice Le Boucher's occupation?
+2025-12-15 13:45:15.124 | INFO     | __main__:main:145 - Processing Q146: What is Martin Shapiro's occupation?
+2025-12-15 13:45:16.050 | INFO     | __main__:main:145 - Processing Q147: What is Lewis J. Rachmil's occupation?
+2025-12-15 13:45:17.329 | INFO     | __main__:main:145 - Processing Q148: What is René Bégin's occupation?
+2025-12-15 13:45:18.481 | INFO     | __main__:main:145 - Processing Q149: What is Louis O'Dea's occupation?
+2025-12-15 13:45:19.582 | INFO     | __main__:main:145 - Processing Q150: What is Guo Gengmao's occupation?
+2025-12-15 13:45:20.718 | INFO     | __main__:main:145 - Processing Q151: What is Jacques Monasch's occupation?
+2025-12-15 13:45:21.901 | INFO     | __main__:main:145 - Processing Q152: What is Robert Antoine's occupation?
+2025-12-15 13:45:22.739 | INFO     | __main__:main:145 - Processing Q153: What is Howard Fowles's occupation?
+2025-12-15 13:45:23.863 | INFO     | __main__:main:145 - Processing Q154: What is Đurđa Ivezić's occupation?
+2025-12-15 13:45:25.298 | INFO     | __main__:main:145 - Processing Q155: What is Jeet Ganguly's occupation?
+2025-12-15 13:45:26.409 | INFO     | __main__:main:145 - Processing Q156: What is Akimasa Nakamura's occupation?
+2025-12-15 13:45:27.818 | INFO     | __main__:main:145 - Processing Q157: What is Jean-Marie-Victor Viel's occupation?
+2025-12-15 13:45:29.230 | INFO     | __main__:main:145 - Processing Q158: What is Eckart von Hirschhausen's occupation?
+2025-12-15 13:45:30.377 | INFO     | __main__:main:145 - Processing Q159: What is Val McLane's occupation?
+2025-12-15 13:45:31.304 | INFO     | __main__:main:145 - Processing Q160: What is Edwin N. Hubbell's occupation?
+2025-12-15 13:45:32.378 | INFO     | __main__:main:145 - Processing Q161: What is Mariví Bilbao's occupation?
+2025-12-15 13:45:33.504 | INFO     | __main__:main:145 - Processing Q162: What is Dick Rude's occupation?
+2025-12-15 13:45:34.518 | INFO     | __main__:main:145 - Processing Q163: What is Harding of Bristol's occupation?
+2025-12-15 13:45:35.386 | INFO     | __main__:main:145 - Processing Q164: What is Gina Krog's occupation?
+2025-12-15 13:45:36.263 | INFO     | __main__:main:145 - Processing Q165: What is Petr Mlsna's occupation?
+2025-12-15 13:45:37.424 | INFO     | __main__:main:145 - Processing Q166: What is Neville Ashenheim's occupation?
+2025-12-15 13:45:38.323 | INFO     | __main__:main:145 - Processing Q167: What is Lorena Corona Valdés's occupation?
+2025-12-15 13:45:39.415 | INFO     | __main__:main:145 - Processing Q168: What is Honor Harger's occupation?
+2025-12-15 13:45:40.299 | INFO     | __main__:main:145 - Processing Q169: What is Clement Baker's occupation?
+2025-12-15 13:45:41.240 | INFO     | __main__:main:145 - Processing Q170: What is Alleppey Vincent's occupation?
+2025-12-15 13:45:42.349 | INFO     | __main__:main:145 - Processing Q171: In what city was Belarmino Mario Chipongue born?
+2025-12-15 13:45:43.701 | INFO     | __main__:main:145 - Processing Q172: In what city was Raju Kaji Shakya born?
+2025-12-15 13:45:44.956 | INFO     | __main__:main:145 - Processing Q173: In what city was Alastair Heathcote born?
+2025-12-15 13:45:46.273 | INFO     | __main__:main:145 - Processing Q174: In what city was William Marshall Craig born?
+2025-12-15 13:45:47.472 | INFO     | __main__:main:145 - Processing Q175: In what city was Philipp Crone born?
+2025-12-15 13:45:48.592 | INFO     | __main__:main:145 - Processing Q176: In what city was Danie Mellor born?
+2025-12-15 13:45:49.805 | INFO     | __main__:main:145 - Processing Q177: In what city was Endre Bálint born?
+2025-12-15 13:45:51.027 | INFO     | __main__:main:145 - Processing Q178: In what city was Aleksandr Nekrasov born?
+2025-12-15 13:45:52.392 | INFO     | __main__:main:145 - Processing Q179: In what city was Charles Joseph Bonaparte born?
+2025-12-15 13:45:53.588 | INFO     | __main__:main:145 - Processing Q180: In what city was Louis François Antoine Arbogast born?
+2025-12-15 13:45:54.947 | INFO     | __main__:main:145 - Processing Q181: In what city was Austin Cuvillier born?
+2025-12-15 13:45:56.187 | INFO     | __main__:main:145 - Processing Q182: In what city was Bert Myers born?
+2025-12-15 13:45:57.278 | INFO     | __main__:main:145 - Processing Q183: In what city was Scott Fraser born?
+2025-12-15 13:45:58.280 | INFO     | __main__:main:145 - Processing Q184: In what city was Giuseppe Castelli born?
+2025-12-15 13:45:59.538 | INFO     | __main__:main:145 - Processing Q185: In what city was Jacob Duck born?
+2025-12-15 13:46:00.595 | INFO     | __main__:main:145 - Processing Q186: In what city was Parnelli Jones born?
+2025-12-15 13:46:01.747 | INFO     | __main__:main:145 - Processing Q187: In what city was Fernand Cornez born?
+2025-12-15 13:46:02.800 | INFO     | __main__:main:145 - Processing Q188: In what city was Yinka Ayenuwa born?
+2025-12-15 13:46:03.929 | INFO     | __main__:main:145 - Processing Q189: In what city was Phil Williams born?
+2025-12-15 13:46:04.808 | INFO     | __main__:main:145 - Processing Q190: In what city was James M. Bingham born?
+2025-12-15 13:46:05.938 | INFO     | __main__:main:145 - Processing Q191: In what city was Jack Kachkar born?
+2025-12-15 13:46:07.064 | INFO     | __main__:main:145 - Processing Q192: In what city was Gustavo Grondona born?
+2025-12-15 13:46:08.222 | INFO     | __main__:main:145 - Processing Q193: In what city was Bastien Lecouffe-Deharme born?
+2025-12-15 13:46:09.000 | INFO     | __main__:main:145 - Processing Q194: In what city was Betty Francisco born?
+2025-12-15 13:46:09.945 | INFO     | __main__:main:145 - Processing Q195: In what city was Hans-Jörg Voigt born?
+2025-12-15 13:46:11.362 | INFO     | __main__:main:145 - Processing Q196: In what city was Charlie Davis born?
+2025-12-15 13:46:12.254 | INFO     | __main__:main:145 - Processing Q197: In what city was Marnus Labuschagne born?
+2025-12-15 13:46:13.526 | INFO     | __main__:main:145 - Processing Q198: In what city was Leslie Douglas Jackson born?
+2025-12-15 13:46:14.783 | INFO     | __main__:main:145 - Processing Q199: In what city was Ricardo Maliandi born?
+2025-12-15 13:46:15.935 | INFO     | __main__:main:204 - Finished. Results saved to result_200/mirage_vanilla_rag

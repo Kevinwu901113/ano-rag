@@ -11,6 +11,7 @@ from config.config_loader import config as global_config
 # Reuse common components
 from rag_core.embedding_client import EmbeddingEncoder
 from rag_core.llm_client import LLMChatClient
+from baselines.common.model_clients import get_default_llm_client, get_default_embedding_client
 
 DEFAULT_SYSTEM_PROMPT = (
     "You are a helpful assistant for multi-hop question answering.\n"
@@ -57,23 +58,13 @@ class SimpleSelfRAGRetriever:
         if embedding_client:
             self.encoder = embedding_client
         else:
-            emb_cfg = self.selfrag_config.get("embedding") or self.config.get("retriever", {}).get("embedding")
-            self.encoder = EmbeddingEncoder(
-                provider=emb_cfg.get("provider", "huggingface"),
-                model=emb_cfg.get("model", "sentence-transformers/all-MiniLM-L6-v2"),
-                device=emb_cfg.get("device", "cpu")
-            )
+            self.encoder = get_default_embedding_client(self.config)
             
         # Initialize LLM Client
         if llm_client:
             self.llm = llm_client
         else:
-            lm_cfg = self.config.get("lmstudio", {})
-            self.llm = LLMChatClient(
-                endpoint=lm_cfg.get("endpoint"),
-                model=lm_cfg.get("model"),
-                temperature=0.0
-            )
+            self.llm = get_default_llm_client(self.config)
             
         self.top_k_first = self.selfrag_config.get("top_k_first", 5)
         self.top_k_second = self.selfrag_config.get("top_k_second", 10)

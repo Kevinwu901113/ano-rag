@@ -22,7 +22,7 @@ class EmbeddingEncoder:
                 device=kwargs.get("device", device),
                 dtype=kwargs.get("dtype"),
             )
-        elif provider == "huggingface":
+        elif provider in ("huggingface", "st"):
             try:
                 from sentence_transformers import SentenceTransformer
                 try:
@@ -71,7 +71,7 @@ class EmbeddingEncoder:
                 emb_array = emb_array / norm
             return emb_array
             
-        if self.provider == "huggingface" and self._model_instance:
+        if self.provider in ("huggingface", "st") and self._model_instance:
             try:
                 return self._model_instance.encode(texts, normalize_embeddings=normalize_embeddings)
             except RuntimeError as e:

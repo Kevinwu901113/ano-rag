@@ -5,6 +5,7 @@ from baselines.simple_graphrag.retriever import GraphRetriever
 from baselines.simple_graphrag.build_graph import GraphBuilder
 from baselines.simple_graphrag.runner import SimpleGraphRAGRunner
 from config.config_loader import config as global_config
+from baselines.common.model_clients import get_default_llm_client
 
 # Global retriever instance
 _retriever: Optional[GraphRetriever] = None
@@ -13,14 +14,7 @@ def get_retriever(index_dir: Optional[str] = None) -> GraphRetriever:
     global _retriever
     if _retriever is None:
         # Load config
-        lm_cfg = global_config.get("lmstudio", {})
-        endpoint = lm_cfg.get("endpoint")
-        model = lm_cfg.get("model")
-        
-        if not endpoint or not model:
-             raise ValueError("LM Studio endpoint/model must be configured")
-             
-        llm_client = LLMChatClient(endpoint=endpoint, model=model, temperature=0.0)
+        llm_client = get_default_llm_client(global_config.load_config())
         
         # Paths
         base_dir = index_dir if index_dir else "."
@@ -49,14 +43,7 @@ def answer(
     # If explicit paths are provided, bypass global singleton logic or re-init
     if graph_path and chunk_store_path:
         # Load config
-        lm_cfg = global_config.load_config().get("lmstudio", {})
-        endpoint = lm_cfg.get("endpoint")
-        model = lm_cfg.get("model")
-        
-        if not endpoint or not model:
-             raise ValueError("LM Studio endpoint/model must be configured")
-             
-        llm_client = LLMChatClient(endpoint=endpoint, model=model, temperature=0.0)
+        llm_client = get_default_llm_client(global_config.load_config())
         
         # Create ephemeral retriever
         temp_retriever = GraphRetriever(graph_path, chunk_store_path, llm_client)

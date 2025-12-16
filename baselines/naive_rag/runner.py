@@ -129,6 +129,9 @@ class NaiveIndex:
         self.chunks_path = Path(chunks_path)
         self._embed_model_override = embed_model
         self._embed_device_prefer = embed_device
+        if self._embed_device_prefer == "auto":
+             self._embed_device_prefer = self.embed_cfg.get("device", "auto")
+             
         self._embed_batch_size_override = embed_batch_size
         self._embed_max_length_override = embed_max_length
         self._embed_normalize_override = embed_normalize
