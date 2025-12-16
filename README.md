@@ -86,7 +86,7 @@ pip install -r requirements.txt
 ```bash
 python main.py process \
   --data-dir data/sample \
-  --vllm-endpoint http://127.0.0.1:8000/v1 \
+  --vllm-endpoint http://127.0.0.1:8001/v1 \
   --vllm-model qwen2.5-7b-instruct \
   --temperature 0.0 \
   --max-tokens 8000

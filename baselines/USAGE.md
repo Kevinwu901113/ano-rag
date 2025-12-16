@@ -215,7 +215,7 @@ indexer = SimpleRaptorIndexer(
         "device": "cuda:0"
     },
     llm_config={
-        "endpoint": "http://localhost:8000/v1", 
+        "endpoint": "http://localhost:8001/v1", 
         "model": "qwen2.5-7b-instruct"
     }
 )

@@ -52,7 +52,7 @@ flowchart LR
 ```bash
 python main.py process \
   --data-dir data/sample \
-  --vllm-endpoint http://127.0.0.1:8000/v1 \
+  --vllm-endpoint http://127.0.0.1:8001/v1 \
   --vllm-model qwen2.5-7b-instruct
 ```
 

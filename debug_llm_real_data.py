@@ -14,7 +14,7 @@ British lawyer (1828–1917) John Dawson Mayne (1828–1917) was a British lawye
         }
     ]
 
-    url = "http://127.0.0.1:8000/v1/chat/completions"
+    url = "http://127.0.0.1:8001/v1/chat/completions"
     headers = {
         "Content-Type": "application/json",
         "Authorization": "Bearer sk-no-key-required"

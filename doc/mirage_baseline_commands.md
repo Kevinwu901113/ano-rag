@@ -10,7 +10,7 @@
 - 嵌入模型：默认 `Qwen/Qwen3-Embedding-8B`，可在 `config.yaml` 或 CLI 覆盖。
 
 ### 结构化 RAG（项目主流程）
-- 构建笔记 + 结构索引（自动启动双 vLLM，输出 notes/indexes + `config.override.yaml`）：
+- 构建笔记 + 结构索引（自动启动单实例 vLLM（TP 多卡），输出 notes/indexes + `config.override.yaml`）：
 ```bash
 DATA_DIR=data/mirage_sample \
 VLLM_MODEL=qwen2.5-7b-instruct \

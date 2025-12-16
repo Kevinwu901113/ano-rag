@@ -8,12 +8,11 @@ DATASET="${DATASET:-mirage}"
 DATA_DIR="${DATA_DIR:-data/${DATASET}_sample}"
 VLLM_MODEL="${VLLM_MODEL:-qwen2.5-7b-instruct}"
 VLLM_HOST="${VLLM_HOST:-127.0.0.1}"
-VLLM_PORT0="${VLLM_PORT0:-8001}"
-VLLM_PORT1="${VLLM_PORT1:-8002}"
+VLLM_PORT="${VLLM_PORT:-8001}"
 GPU0="${GPU0:-0}"
 GPU1="${GPU1:-1}"
 DTYPE="${DTYPE:-float16}"
-MAX_MODEL_LEN="${MAX_MODEL_LEN:-8192}"
+MAX_MODEL_LEN="${MAX_MODEL_LEN:-10000}"
 RESULT_ROOT="${RESULT_ROOT:-result}"
 USE_GUIDED_JSON="${USE_GUIDED_JSON:-1}"
 JSON_SCHEMA_NAME="${JSON_SCHEMA_NAME:-ano-note}"
@@ -21,10 +20,21 @@ VLLM_GUIDED_BACKEND="${VLLM_GUIDED_BACKEND:-xgrammar}"
 # Single-process build by default
 SHARD_CNT=${SHARD_CNT:-1}
 VLLM_BIN="${VLLM_BIN:-python -m vllm.entrypoints.openai.api_server}"
-VLLM_DOWNLOAD_DIR="${VLLM_DOWNLOAD_DIR:-}"
+VLLM_DOWNLOAD_DIR="${VLLM_DOWNLOAD_DIR:-${HOME:-/root}/.cache/huggingface}"
 VLLM_GPU_MEMORY_UTIL="${VLLM_GPU_MEMORY_UTIL:-0.7}"
 VLLM_EXTRA_ARGS="${VLLM_EXTRA_ARGS:-}"
 STARTED_VLLM=0
+
+VLLM_CUDA_DEVICES="${VLLM_CUDA_DEVICES:-}"
+if [[ -z "${VLLM_CUDA_DEVICES}" ]]; then
+  if [[ -n "${CUDA_VISIBLE_DEVICES:-}" ]]; then
+    VLLM_CUDA_DEVICES="${CUDA_VISIBLE_DEVICES}"
+  elif [[ -n "${GPU1}" ]]; then
+    VLLM_CUDA_DEVICES="${GPU0},${GPU1}"
+  else
+    VLLM_CUDA_DEVICES="${GPU0}"
+  fi
+fi
 
 NEW_RUN=0
 WORK_DIR=""
@@ -32,10 +42,8 @@ LOG_DIR=""
 NOTES_DIR=""
 IDX_DIR=""
 OUT_MERGED=""
-VLLM_LOG0=""
-VLLM_LOG1=""
-VLLM_PID0=""
-VLLM_PID1=""
+VLLM_LOG=""
+VLLM_PID=""
 BUILD_LOG=""
 BUILD_PID=""
 PROG_SINGLE=""
@@ -210,10 +218,8 @@ ensure_workspace() {
 
   OUT_MERGED="$NOTES_DIR/notes.${DATASET}.jsonl"
 
-  VLLM_LOG0="$LOG_DIR/vllm_gpu0.log"
-  VLLM_LOG1="$LOG_DIR/vllm_gpu1.log"
-  VLLM_PID0="$WORK_DIR/vllm_gpu0.pid"
-  VLLM_PID1="$WORK_DIR/vllm_gpu1.pid"
+  VLLM_LOG="$LOG_DIR/vllm.log"
+  VLLM_PID="$WORK_DIR/vllm.pid"
   BUILD_LOG="$LOG_DIR/build_single.log"
   BUILD_PID="$WORK_DIR/build_single.pid"
   PROG_SINGLE="$WORK_DIR/progress.json"
@@ -224,8 +230,20 @@ ensure_workspace() {
   log "Indexes dir: $IDX_DIR"
 }
 
-start_vllm_dual() {
-  log "Starting vLLM on GPU${GPU0}:${VLLM_PORT0} and GPU${GPU1}:${VLLM_PORT1}"
+start_vllm_tp() {
+  local cuda_devices="${VLLM_CUDA_DEVICES//[[:space:]]/}"
+  if [[ -z "${cuda_devices}" ]]; then
+    cuda_devices="${GPU0},${GPU1}"
+  fi
+
+  local tp_size=0
+  IFS=',' read -r -a _devs <<< "${cuda_devices}"
+  for d in "${_devs[@]}"; do
+    [[ -n "${d}" ]] && tp_size=$((tp_size + 1))
+  done
+  (( tp_size < 1 )) && tp_size=1
+
+  log "Starting vLLM (TP=${tp_size}) on CUDA_VISIBLE_DEVICES=${cuda_devices} -> ${VLLM_HOST}:${VLLM_PORT}"
 
   VLLM_MODEL_RESOLVED=$(resolve_model_path "$VLLM_MODEL")
   if [[ "$VLLM_MODEL_RESOLVED" != "$VLLM_MODEL" ]]; then
@@ -233,7 +251,7 @@ start_vllm_dual() {
   fi
 
   extra_args=()
-  if [[ -n "$VLLM_DOWNLOAD_DIR" ]]; then
+  if [[ -n "${VLLM_DOWNLOAD_DIR}" ]]; then
     extra_args+=(--download-dir "$VLLM_DOWNLOAD_DIR")
   fi
   if [[ -n "$VLLM_GPU_MEMORY_UTIL" ]]; then
@@ -243,26 +261,24 @@ start_vllm_dual() {
     extra_args+=(--guided-decoding-backend "$VLLM_GUIDED_BACKEND")
   fi
 
-  CUDA_VISIBLE_DEVICES="${GPU0}" nohup ${VLLM_BIN} \
-    --model "${VLLM_MODEL_RESOLVED}" \
-    --host 0.0.0.0 --port "${VLLM_PORT0}" \
-    --dtype "${DTYPE}" \
-    --max-model-len "${MAX_MODEL_LEN}" \
-    ${extra_args[@]} ${VLLM_EXTRA_ARGS} \
-    > "$VLLM_LOG0" 2>&1 & echo $! > "$VLLM_PID0"
+  if nc -z "${VLLM_HOST}" "${VLLM_PORT}" 2>/dev/null; then
+    log "Port ${VLLM_PORT} already in use; aborting."
+    exit 1
+  fi
 
-  CUDA_VISIBLE_DEVICES="${GPU1}" nohup ${VLLM_BIN} \
+  CUDA_VISIBLE_DEVICES="${cuda_devices}" nohup ${VLLM_BIN} \
     --model "${VLLM_MODEL_RESOLVED}" \
-    --host 0.0.0.0 --port "${VLLM_PORT1}" \
+    --host 0.0.0.0 --port "${VLLM_PORT}" \
+    --tensor-parallel-size "${tp_size}" \
     --dtype "${DTYPE}" \
     --max-model-len "${MAX_MODEL_LEN}" \
-    ${extra_args[@]} ${VLLM_EXTRA_ARGS} \
-    > "$VLLM_LOG1" 2>&1 & echo $! > "$VLLM_PID1"
+    --uvicorn-log-level info \
+    "${extra_args[@]}" ${VLLM_EXTRA_ARGS} \
+    > "$VLLM_LOG" 2>&1 & echo $! > "$VLLM_PID"
 
   log "Waiting for vLLM endpoints ready ..."
-  wait_http_ok "http://${VLLM_HOST}:${VLLM_PORT0}/v1/models" 90 2 || { log "GPU0 endpoint not ready"; exit 1; }
-  wait_http_ok "http://${VLLM_HOST}:${VLLM_PORT1}/v1/models" 90 2 || { log "GPU1 endpoint not ready"; exit 1; }
-  log "vLLM endpoints are healthy."
+  wait_http_ok "http://${VLLM_HOST}:${VLLM_PORT}/v1/models" 90 2 || { log "vLLM endpoint not ready"; exit 1; }
+  log "vLLM endpoint is healthy."
   STARTED_VLLM=1
 }
 
@@ -272,17 +288,18 @@ build_notes_single() {
     exit 1
   fi
 
-  # Export two endpoints to be picked up by NoteGenerator (env priority)
-  export VLLM_ENDPOINT0="http://${VLLM_HOST}:${VLLM_PORT0}/v1"
-  export VLLM_ENDPOINT1="http://${VLLM_HOST}:${VLLM_PORT1}/v1"
+  # Ensure NoteGenerator uses the single endpoint passed via CLI (no multi-endpoint probing)
+  for var in ${!VLLM_ENDPOINT@}; do
+    unset "$var"
+  done
 
   log "Launching single builder -> ${OUT_MERGED}"
-  CUDA_VISIBLE_DEVICES="${GPU0},${GPU1}" python "$ROOT_DIR/main_build_notes.py" \
+  CUDA_VISIBLE_DEVICES="${VLLM_CUDA_DEVICES}" python "$ROOT_DIR/main_build_notes.py" \
     --dataset "${DATASET}" \
     --data_dir "${DATA_DIR}" \
     --out "${OUT_MERGED}" \
     --indexes_dir "${IDX_DIR}" \
-    --vllm_endpoint "http://${VLLM_HOST}:${VLLM_PORT0}/v1" \
+    --vllm_endpoint "http://${VLLM_HOST}:${VLLM_PORT}/v1" \
     --vllm_model "${VLLM_MODEL}" \
     --shard-cnt 1 \
     --progress-path "${PROG_SINGLE}" \
@@ -329,11 +346,9 @@ build_notes_single() {
 
 stop_vllm_and_wait() {
   log "Stopping vLLM instances ..."
-  kill_and_wait "$VLLM_PID0"
-  kill_and_wait "$VLLM_PID1"
-  wait_port_closed "${VLLM_HOST}" "${VLLM_PORT0}" 90 2 || { log "port ${VLLM_PORT0} still busy"; exit 1; }
-  wait_port_closed "${VLLM_HOST}" "${VLLM_PORT1}" 90 2 || { log "port ${VLLM_PORT1} still busy"; exit 1; }
-  log "vLLM ports closed."
+  kill_and_wait "$VLLM_PID"
+  wait_port_closed "${VLLM_HOST}" "${VLLM_PORT}" 90 2 || { log "port ${VLLM_PORT} still busy"; exit 1; }
+  log "vLLM port closed."
   STARTED_VLLM=0
 }
 
@@ -373,7 +388,7 @@ done
 
 ensure_workspace
 prepare_run_config
-start_vllm_dual
+start_vllm_tp
 build_notes_single
 stop_vllm_and_wait
 auto_build_indexes_if_needed

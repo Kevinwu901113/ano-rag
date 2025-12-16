@@ -2,7 +2,7 @@ import requests
 import json
 import time
 
-def test_llm(endpoint="http://127.0.0.1:8000/v1", model="Qwen/Qwen2.5-7B-Instruct"):
+def test_llm(endpoint="http://127.0.0.1:8001/v1", model="Qwen/Qwen2.5-7B-Instruct"):
     url = f"{endpoint}/chat/completions"
     headers = {"Content-Type": "application/json"}
     payload = {

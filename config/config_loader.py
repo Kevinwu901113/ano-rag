@@ -20,7 +20,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     },
     "chunk": {"n_sent": 3, "overlap": 1, "max_tokens": 768},
     "vllm": {
-        "endpoint": "http://127.0.0.1:8000/v1",
+        "endpoint": "http://127.0.0.1:8001/v1",
         "model": "qwen2.5-7b-instruct",
         "temperature": 0.0,
         "max_tokens": 256,
