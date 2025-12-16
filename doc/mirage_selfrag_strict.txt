@@ -1,0 +1,7 @@
+DEBUG hit keys: dict_keys(['text', 'score', 'doc_id', 'sent_ids', 'passage_id'])
+DEBUG meta keys: dict_keys([])
+DEBUG text preview: John Mayne Scottish printer, journalist and poet John Mayne (1759–1836) was a Scottish printer, journalist and poet born in Dumfries. In 1780, his poem "The Siller Gun" appeared in its original form i
+| Run | Metric | @1 | @3 | @5 | @10 |
+| --- | --- | --- | --- | --- | --- |
+| mirage_selfrag_strict | DocHit | 0.000 | 0.000 | 0.000 | 0.000 |
+| mirage_selfrag_strict | AnswerHit | 0.050 | 0.100 | 0.100 | 0.100 |

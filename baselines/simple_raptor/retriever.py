@@ -2,7 +2,7 @@ import re
 import pickle
 import faiss
 import numpy as np
-from typing import List, Tuple, Optional, Dict
+from typing import List, Tuple, Optional, Dict, Any
 from loguru import logger
 
 from config.config_loader import config as global_config
@@ -132,6 +132,53 @@ class SimpleRaptorRetriever:
             if node_id in self.nodes:
                 results.append(self.nodes[node_id])
         return results
+
+    def retrieve(self, question: str, k: int = 5) -> List[Dict[str, Any]]:
+        """
+        Public retrieval interface for evaluation.
+        Mimics the node retrieval + chunk expansion logic but returns standard hits.
+        """
+        # 1. Retrieve Nodes
+        retrieved_nodes = self.retrieve_nodes(question)
+        
+        # 2. Collect Leaf Chunks
+        candidate_chunk_ids = []
+        seen_chunks = set()
+        
+        for node in retrieved_nodes:
+            for cid in node.descendant_chunk_ids:
+                if cid not in seen_chunks and cid in self.chunk_store:
+                    candidate_chunk_ids.append(cid)
+                    seen_chunks.add(cid)
+        
+        # 3. Name-aware Rerank (optional)
+        if self.enable_name_rerank:
+            name = self._extract_name_from_question(question)
+            if name:
+                name_lower = name.lower()
+                def has_name(cid: int) -> bool:
+                    text = self.chunk_store.get(cid, "")
+                    return name_lower in text.lower()
+                candidate_chunk_ids.sort(key=lambda cid: (not has_name(cid)))
+
+        # 4. Format hits
+        hits = []
+        limit = k if k > 0 else len(candidate_chunk_ids)
+        for rank, cid in enumerate(candidate_chunk_ids[:limit]):
+            doc_id = None
+            if isinstance(cid, str) and "::" in cid:
+                doc_id = cid.split("::", 1)[0]
+            hits.append({
+                "rank": rank + 1,
+                "score": 1.0 / (rank + 1), # Dummy score
+                "doc_id": doc_id,
+                "sent_ids": None,
+                "passage_id": str(cid),
+                "text": self.chunk_store.get(cid),
+            })
+        
+        self.last_hits = hits
+        return hits
 
     def answer(self, question: str) -> str:
         """

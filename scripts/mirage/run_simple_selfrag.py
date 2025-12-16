@@ -35,6 +35,7 @@ def main():
     parser.add_argument("--limit", type=int, default=0, help="Limit number of queries")
     parser.add_argument("--lmstudio-endpoint", type=str, help="LM Studio endpoint override")
     parser.add_argument("--lmstudio-model", type=str, help="LM Studio model name override")
+    parser.add_argument("--retrieval-only", action="store_true", help="Skip LLM calls; only run retrieval and log retrieval.jsonl")
     
     args = parser.parse_args()
 
@@ -119,6 +120,10 @@ def main():
     # Initialize retriever with specific paths
     from baselines.simple_selfrag.retriever import SimpleSelfRAGRetriever
     retriever = SimpleSelfRAGRetriever(str(index_path), str(chunk_store_path))
+    
+    # Disable LLM if retrieval-only
+    if args.retrieval_only:
+         retriever.llm_client = None
 
     # Load dataset
     dataset_path = Path(args.dataset_path)
@@ -156,7 +161,28 @@ def main():
             
         try:
             # Use the local retriever instance instead of the global singleton
-            ans_text = retriever.answer(question)
+            if args.retrieval_only:
+                 # Check if the retriever has a dedicated retrieval method or if we need to call retrieve_and_reflect
+                 # Assuming retrieve_and_reflect handles None LLM gracefully or we need to access internal methods.
+                 # Let's inspect SimpleSelfRAGRetriever later if this fails.
+                 # But looking at baselines/simple_selfrag/retriever.py (not visible here), it likely has 'retrieve' or 'answer'
+                 # If answer() is called, it calls retrieve -> generate -> critique.
+                  # If we only want retrieval, we should call .retrieve() if available.
+                  if hasattr(retriever, "retrieve"):
+                      hits = retriever.retrieve(question, top_k=5) # Default top_k=5 if not specified
+                      ans_text = "Retrieval Only"
+                  else:
+                      # Fallback to answer(), hoping it stops if LLM is None or we mock it.
+                      # But better: just access the index directly if possible?
+                      # Let's assume for now answer() might fail if LLM is None.
+                      # Let's try to find a retrieve method or similar.
+                      # Actually, baselines usually have a .retrieve() method.
+                      hits = retriever.retrieve(question, top_k=5) # Assuming this exists
+                      ans_text = "Retrieval Only"
+            else:
+                ans_text = retriever.answer(question)
+                hits = getattr(retriever, "last_hits", [])
+
             final_ans = clean_model_answer(ans_text)
             
             # Ensure we have some answer, even if cleaning stripped it
@@ -171,7 +197,6 @@ def main():
                 "gold_answer": item.get("answer") # Preserve gold if available
             })
             try:
-                hits = getattr(retriever, "last_hits", [])
                 log_retrieval(
                     sample_id=qid,
                     dataset=dataset_name,

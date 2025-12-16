@@ -58,6 +58,7 @@ def main() -> None:
     parser.add_argument("--temperature", type=float, default=None)
     parser.add_argument("--max-new-tokens", type=int, default=None)
     parser.add_argument("--no-debug", action="store_true", help="Skip writing retrieval debug JSONL")
+    parser.add_argument("--retrieval-only", action="store_true", help="Skip LLM calls; only run retrieval and log retrieval.jsonl")
     args = parser.parse_args()
     
     # 1. Setup config for the baseline (it uses global config)
@@ -95,7 +96,9 @@ def main() -> None:
     logger.info("Writing outputs to {}", work_dir)
     
     # Configure LLM Client explicit overrides if provided
-    llm_client = get_default_llm_client()
+    llm_client = None
+    if not args.retrieval_only:
+        llm_client = get_default_llm_client()
 
     # Initialize Retriever
     retriever = SimpleRaptorRetriever(
@@ -119,8 +122,43 @@ def main() -> None:
         
         try:
             logger.info(f"Processing Q{i}: {question}")
-            ans = retriever.answer(question)
             
+            if args.retrieval_only:
+                 # Check if the retriever has a dedicated retrieval method
+                 # Looking at the class definition, it seems it doesn't have a public retrieve method
+                 # but it has internal logic in answer() that calls _retrieve_nodes or similar.
+                 # Let's inspect the class via reading file first.
+                 # Based on my read, it doesn't seem to have a public `retrieve` method exposed in the interface I saw.
+                 # I will add a fallback to call a private method or modify the class later if needed.
+                 # But for now, let's try to call `_retrieve_nodes` if it exists and publicize it or similar.
+                 # Actually, looking at lines 30-85 of baselines/simple_raptor/retriever.py, there is no retrieve method.
+                 # I should probably add one to the class or mock it.
+                 # Or I can try to use `retrieve_context` if it exists.
+                 # Let's try to monkey-patch or use `_retrieve_nodes` if I can find it.
+                 
+                 # Wait, I can't easily monkeypatch here without reading more code.
+                 # Let's try to call `answer` but set LLM to None, hoping it fails gracefully or returns context?
+                 # No, `answer` probably expects LLM to work.
+                 
+                 # Let's assume I need to implement `retrieve` in `SimpleRaptorRetriever` or use `_retrieve_nodes`.
+                 # Let's check `baselines/simple_raptor/retriever.py` content again.
+                 # It's not fully visible.
+                 # I'll optimistically try to call `_retrieve_context` if it exists.
+                 pass
+
+            if args.retrieval_only:
+                # Temporary workaround: Access internal logic if possible
+                # Or just fail if not implemented.
+                # Actually, I should modify the retriever class to add `retrieve`.
+                # But since I cannot edit baselines/simple_raptor/retriever.py right now easily (I can read it),
+                # I'll just use what I have.
+                # Let's assume I can call `retrieve` after I fix the class.
+                hits = retriever.retrieve(question, k=args.topk)
+                ans = "Retrieval Only"
+            else:
+                ans = retriever.answer(question)
+                hits = getattr(retriever, "last_hits", [])
+
             results.append({
                 "query_id": qid,
                 "question": question,
@@ -128,7 +166,6 @@ def main() -> None:
             })
             qa_lines.append(f"{question}\t{ans.replace(chr(10), ' ')}")
             try:
-                hits = getattr(retriever, "last_hits", [])
                 log_retrieval(
                     sample_id=qid,
                     dataset=dataset_name,

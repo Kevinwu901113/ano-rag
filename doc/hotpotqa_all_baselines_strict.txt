@@ -1,0 +1,17 @@
+DEBUG [hotpot_selfrag_strict] hit keys: dict_keys(['rank', 'score', 'title', 'doc_id', 'sent_ids', 'passage_id', 'text'])
+DEBUG [hotpot_selfrag_strict] text preview: Title: Conrad Brooks
+Content: Conrad Brooks (born Conrad Biedrzycki on January 3, 1931 in Baltimore, Maryland) is an American actor.  He moved to Hollywood, California in 1948 to pursue a career in ac
+DEBUG [hotpot_test_strict_eval] hit keys: dict_keys(['rank', 'score', 'title', 'doc_id', 'sent_ids', 'passage_id', 'text'])
+DEBUG [hotpot_test_strict_eval] text preview: Title: Conrad Brooks
+Content: Conrad Brooks (born Conrad Biedrzycki on January 3, 1931 in Baltimore, Maryland) is an American actor.  He moved to Hollywood, California in 1948 to pursue a career in ac
+Answer metrics:
+| run | EM | AnswerP | AnswerR | AnswerF1 | count |
+| --- | --- | --- | --- | --- | --- |
+| hotpot_selfrag_strict | 0.000 | 0.000 | 0.000 | 0.000 | 200 |
+| hotpot_test_strict_eval | 0.000 | 0.000 | 0.000 | 0.000 | 200 |
+
+Retrieval metrics:
+| run | TitleRecall@5 | TitleRecall@10 | Hit@5 | Hit@10 | AnswerHit@5 | AnswerHit@10 |
+| --- | --- | --- | --- | --- | --- | --- |
+| hotpot_selfrag_strict | 0.320 | 0.320 | 0.540 | 0.540 | 0.430 | 0.430 |
+| hotpot_test_strict_eval | 0.320 | 0.320 | 0.540 | 0.540 | 0.430 | 0.430 |

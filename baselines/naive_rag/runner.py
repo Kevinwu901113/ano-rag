@@ -148,10 +148,64 @@ class NaiveIndex:
         
         logger.info("Loading chunks from {}", chunks_path)
         self.chunks: List[Dict[str, Any]] = []
-        with open(chunks_path, "r", encoding="utf-8") as f:
-            for line in f:
-                if line.strip():
-                    self.chunks.append(json.loads(line))
+        with open(chunks_path, "rb") as f:
+            # Check if it's a pickle file first (magic bytes)
+            header = f.read(2)
+            f.seek(0)
+            if header == b'\x80\x04' or header == b'\x80\x03' or header == b'\x80\x02': # Pickle magic bytes
+                import pickle
+                try:
+                    data = pickle.load(f)
+                    if isinstance(data, dict):
+                        # SimpleSelfRAG stores chunk_store as dict {id: text}
+                        # We need to convert to list of dicts for NaiveIndex compatibility
+                        # But wait, NaiveIndex expects chunks to align with FAISS indices
+                        # If we are loading a SimpleSelfRAG chunk store, we need the meta file to map indices to IDs
+                        # This NaiveIndex class is for "naive_rag", not "simple_selfrag".
+                        # The evaluator is trying to use NaiveIndex to evaluate SimpleSelfRAG output?
+                        # No, the evaluator `evaluate_mirage_retrieval.py` uses `NaiveIndex` when mode is `naive`.
+                        # But I pointed it to `result/mirage_selfrag_strict` which has `simple_selfrag` artifacts (pickle).
+                        # NaiveIndex expects `chunks.jsonl`.
+                        # I symlinked `simple_selfrag_chunk_store.pkl` to `chunks.jsonl`.
+                        # So `chunks.jsonl` is actually a pickle file.
+                        
+                        # I should adapt NaiveIndex to handle pickle chunk stores if I want to use it for evaluation.
+                        # OR, I should use a different evaluator or different index class for SelfRAG.
+                        # But `evaluate_mirage_retrieval.py` is hardcoded to use `NaiveIndex` for `naive` mode.
+                        # So let's make `NaiveIndex` smarter.
+                        
+                        # Load meta if exists to map index -> chunk_id
+                        meta_path = str(index_path) + ".meta.pkl"
+                        chunk_ids = []
+                        if Path(meta_path).exists():
+                            with open(meta_path, "rb") as mf:
+                                chunk_ids = pickle.load(mf)
+                        
+                        # Convert dict store to list based on chunk_ids order (if available) or just values
+                        if chunk_ids:
+                            self.chunks = []
+                            for cid in chunk_ids:
+                                text = data.get(cid, "")
+                                self.chunks.append({"text": text, "id": cid})
+                        else:
+                            # Fallback: just list values? No, FAISS index alignment matters.
+                            # If no meta, we can't align.
+                            logger.error("Loaded pickle chunk store but missing .meta.pkl for alignment. Results will be wrong.")
+                            self.chunks = [{"text": v, "id": k} for k,v in data.items()] 
+                    elif isinstance(data, list):
+                        self.chunks = data
+                except Exception as e:
+                    logger.error(f"Failed to load pickle: {e}")
+            else:
+                # Assume JSONL (utf-8 text)
+                try:
+                    f_text = open(chunks_path, "r", encoding="utf-8")
+                    for line in f_text:
+                        if line.strip():
+                            self.chunks.append(json.loads(line))
+                    f_text.close()
+                except Exception as e:
+                     logger.error(f"Failed to load JSONL: {e}")
         self.last_hits: List[Dict[str, Any]] = []
         
         # Initialize encoder for query embedding

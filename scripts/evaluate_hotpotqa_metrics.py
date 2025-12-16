@@ -152,16 +152,66 @@ def topk_titles(retrieved: List[dict], k: int) -> Set[str]:
     return {t for t in titles if t}
 
 
+def _norm_for_hit(text: str) -> str:
+    if text is None:
+        return ""
+    text = str(text).lower()
+    # Punctuation to space
+    text = text.translate(str.maketrans({c: " " for c in string.punctuation}))
+    return " ".join(text.split())
+
+
+def _answer_pattern(ans_norm: str) -> re.Pattern:
+    # Word boundary strict match
+    return re.compile(rf"\b{re.escape(ans_norm)}\b", flags=re.IGNORECASE)
+
+
+def _extract_hit_text(hit: dict) -> str:
+    return str(hit.get("text") or hit.get("content") or hit.get("chunk") or "")
+
+
+def answer_hit_at_k(hits: list, gold_answer: str, k: int) -> int:
+    if not gold_answer:
+        return 0
+    
+    gold_norm = _norm_for_hit(gold_answer)
+    if len(gold_norm) < 4:  # Strict length check
+        return 0
+        
+    pattern = _answer_pattern(gold_norm)
+    
+    # Ensure hits are sorted (they are sorted in loop usually, but let's be safe or rely on caller)
+    # Actually evaluate_retrieval calls topk_titles which sorts. 
+    # Here we should assume hits passed to us might not be sorted if we pass raw list?
+    # Better to sort here or assume sorted. 
+    # In evaluate_retrieval loop, we should sort once.
+    
+    # For efficiency, let's assume the caller passes sorted hits or we sort.
+    # To be safe and match logic:
+    sorted_hits = sort_retrieved(hits)
+    
+    for hit in sorted_hits[:k]:
+        text = _norm_for_hit(_extract_hit_text(hit))
+        if pattern.search(text):
+            return 1
+    return 0
+
+
 def evaluate_retrieval(
-    retrieval_path: Path, gold_title_sets: Dict[str, Set[str]], ks: Iterable[int] = (5, 10)
+    retrieval_path: Path, 
+    gold_title_sets: Dict[str, Set[str]], 
+    gold_answers: Dict[str, str],
+    ks: Iterable[int] = (5, 10)
 ) -> Dict[str, float]:
     metrics = {f"TitleRecall@{k}": 0.0 for k in ks}
     metrics.update({f"TitlePrec@{k}": 0.0 for k in ks})
     metrics.update({f"Hit@{k}": 0.0 for k in ks})
+    metrics.update({f"AnswerHit@{k}": 0.0 for k in ks})
     n = 0
+    n_ans = 0 # Count queries with valid answers for AnswerHit
 
     with retrieval_path.open("r", encoding="utf-8") as f:
-        for line in f:
+        for idx, line in enumerate(f):
             line = line.strip()
             if not line:
                 continue
@@ -170,27 +220,73 @@ def evaluate_retrieval(
             gold_titles = gold_title_sets.get(pid)
             if gold_titles is None:
                 continue
+            
             retrieved = obj.get("retrieved") or []
+            final_context = obj.get("final_context") or []
+            
+            if final_context:
+                # Map text from final_context to retrieved items
+                text_map = {}
+                for fc in final_context:
+                    # Normalized logger puts title in 'title' or 'doc_id'
+                    t = str(fc.get("title") or fc.get("doc_id") or "").strip()
+                    if t:
+                        text_map[t] = fc.get("text", "")
+                
+                for hit in retrieved:
+                    t = str(hit.get("title") or hit.get("doc_id") or "").strip()
+                    if t and t in text_map:
+                        hit["text"] = text_map[t]
+
+            # Sort once for consistency
+            retrieved = sort_retrieved(retrieved)
+            
+            if idx == 0 and retrieved:
+                print(f"DEBUG [{retrieval_path.parent.name}] hit keys:", retrieved[0].keys())
+                print(f"DEBUG [{retrieval_path.parent.name}] text preview:", _extract_hit_text(retrieved[0])[:200])
+
             n += 1
+            
+            # Title Metrics
             for k in ks:
-                retrieved_set = topk_titles(retrieved, k)
-                inter = len(retrieved_set & gold_titles)
+                # Retrieved is already sorted
+                top_k_items = retrieved[:k]
+                retrieved_titles = {str(it.get("title", "")).strip() for it in top_k_items if it.get("title")}
+                
+                inter = len(retrieved_titles & gold_titles)
                 if gold_titles:
                     recall = inter / len(gold_titles)
                 else:
-                    recall = 1.0 if not retrieved_set else 0.0
-                if retrieved_set:
-                    prec = inter / len(retrieved_set)
+                    recall = 1.0 if not retrieved_titles else 0.0
+                if retrieved_titles:
+                    prec = inter / len(retrieved_titles)
                 else:
                     prec = 1.0 if not gold_titles else 0.0
-                hit = 1.0 if inter > 0 else (1.0 if not gold_titles and not retrieved_set else 0.0)
+                hit = 1.0 if inter > 0 else (1.0 if not gold_titles and not retrieved_titles else 0.0)
                 metrics[f"TitleRecall@{k}"] += recall
                 metrics[f"TitlePrec@{k}"] += prec
                 metrics[f"Hit@{k}"] += hit
 
+            # AnswerHit Metrics
+            gold_ans = gold_answers.get(pid)
+            if gold_ans:
+                n_ans += 1
+                for k in ks:
+                    # We pass retrieved (sorted) but answer_hit_at_k sorts again? 
+                    # Let's optimize: answer_hit_at_k sorts. It's fine.
+                    if answer_hit_at_k(retrieved, gold_ans, k):
+                        metrics[f"AnswerHit@{k}"] += 1
+
     if n == 0:
         return {}
-    return {k: v / n for k, v in metrics.items()}
+        
+    out = {k: v / n for k, v in metrics.items() if not k.startswith("AnswerHit")}
+    if n_ans > 0:
+        out.update({k: v / n_ans for k, v in metrics.items() if k.startswith("AnswerHit")})
+    else:
+        out.update({k: 0.0 for k, v in metrics.items() if k.startswith("AnswerHit")})
+        
+    return out
 
 
 def render_answer_table(metrics: Dict[str, Dict[str, float]]) -> str:
@@ -207,7 +303,7 @@ def render_answer_table(metrics: Dict[str, Dict[str, float]]) -> str:
 
 def render_retrieval_table(metrics: Dict[str, Dict[str, float]]) -> str:
     header = (
-        "| run | TitleRecall@5 | TitleRecall@10 | TitlePrec@5 | TitlePrec@10 | Hit@5 | Hit@10 |\n"
+        "| run | TitleRecall@5 | TitleRecall@10 | Hit@5 | Hit@10 | AnswerHit@5 | AnswerHit@10 |\n"
         "| --- | --- | --- | --- | --- | --- | --- |"
     )
     rows = []
@@ -217,8 +313,8 @@ def render_retrieval_table(metrics: Dict[str, Dict[str, float]]) -> str:
             continue
         rows.append(
             f"| {run} | {m.get('TitleRecall@5', 0):.3f} | {m.get('TitleRecall@10', 0):.3f} | "
-            f"{m.get('TitlePrec@5', 0):.3f} | {m.get('TitlePrec@10', 0):.3f} | "
-            f"{m.get('Hit@5', 0):.3f} | {m.get('Hit@10', 0):.3f} |"
+            f"{m.get('Hit@5', 0):.3f} | {m.get('Hit@10', 0):.3f} | "
+            f"{m.get('AnswerHit@5', 0):.3f} | {m.get('AnswerHit@10', 0):.3f} |"
         )
     if not rows:
         return ""
@@ -267,7 +363,7 @@ def main():
         run_metrics = evaluate_predictions(pred_path, gt["answers"])
         retrieval_path = run_dir / "retrieval.jsonl"
         if retrieval_path.exists():
-            retrieval_metrics = evaluate_retrieval(retrieval_path, gt["titles"])
+            retrieval_metrics = evaluate_retrieval(retrieval_path, gt["titles"], gt["answers"])
             run_metrics.update(retrieval_metrics)
         metrics[run_dir.name] = run_metrics
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import string
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -20,6 +21,54 @@ def _slugify(text: str) -> str:
     value = re.sub(r"[^a-z0-9]+", "_", value)
     value = re.sub(r"_+", "_", value).strip("_")
     return value
+
+
+def _norm(text: str) -> str:
+    if text is None:
+        return ""
+    text = str(text).lower()
+    # 把标点当空格（避免 "actor," 匹配不到 "actor"）
+    text = text.translate(str.maketrans({c: " " for c in string.punctuation}))
+    return " ".join(text.split())
+
+
+def _answer_pattern(ans_norm: str) -> re.Pattern:
+    # 词边界严格匹配：\bactor\b
+    return re.compile(rf"\b{re.escape(ans_norm)}\b", flags=re.IGNORECASE)
+
+
+def _extract_hit_text(hit: dict) -> str:
+    # 关键：从 retrieval.jsonl 的 hit 里取“chunk文本”
+    meta = hit.get("meta") or hit.get("metadata") or {}
+    return (
+        meta.get("text")
+        or meta.get("chunk")
+        or meta.get("content")
+        or hit.get("text")
+        or hit.get("content")
+        or hit.get("chunk")
+        or ""
+    )
+
+
+def answer_hit_at_k(hits: list, gold_answers: list[str], k: int) -> int:
+    # gold_answers: 允许多个可接受答案（别名/同义词）
+    # 严格：太短的答案不算（避免 "a"/"an"/"of" 这种假命中）
+    gold_norm = [_norm(a) for a in (gold_answers or []) if _norm(a)]
+    gold_norm = [a for a in gold_norm if len(a) >= 4]
+    if not gold_norm:
+        return 0
+
+    patterns = [_answer_pattern(a) for a in gold_norm]
+
+    for hit in hits[:k]:
+        text = _norm(_extract_hit_text(hit))
+        if not text:
+            continue
+        for pat in patterns:
+            if pat.search(text):
+                return 1
+    return 0
 
 
 def _unique_preserve(items: Iterable[str]) -> List[str]:
@@ -74,6 +123,23 @@ def _gold_doc_slugs(dataset: Sequence[dict]) -> Dict[str, Set[str]]:
     return gold
 
 
+def _gold_answers(dataset_items: list[dict]) -> dict[str, list[str]]:
+    gold = {}
+    for item in dataset_items:
+        qid = str(item.get("query_id") or item.get("id") or item.get("_id") or "")
+        if not qid:
+            continue
+
+        # 兼容 answer / answers 两种格式
+        if isinstance(item.get("answers"), list):
+            answers = [str(x) for x in item["answers"] if x is not None]
+        else:
+            answers = [str(item.get("answer") or "")]
+
+        gold[qid] = [a for a in answers if a and a.strip()]
+    return gold
+
+
 def _compute_doc_metrics(
     retrieved: Dict[str, List[str]],
     gold: Dict[str, Set[str]],
@@ -114,15 +180,27 @@ def _compute_doc_metrics(
 
 def _render_table(run_name: str, metrics: Dict[str, float], ks: Sequence[int]) -> str:
     ks = [int(k) for k in ks if int(k) > 0]
-    headers = ["run"] + [f"DocRecall@{k}" for k in ks] + [f"Hit@{k}" for k in ks]
-    header = "| " + " | ".join(headers) + " |\n"
-    header += "| " + " | ".join(["---"] * len(headers)) + " |\n"
-    row = [run_name]
+    
+    headers = ["Run", "Metric"] + [f"@{k}" for k in ks]
+    lines = []
+    lines.append("| " + " | ".join(headers) + " |")
+    lines.append("| " + " | ".join(["---"] * len(headers)) + " |")
+    
+    # Row 1: DocHit (Hit@k)
+    row1 = [run_name, "DocHit"]
     for k in ks:
-        row.append(f"{metrics.get(f'DocRecall@{k}', 0.0):.3f}")
+        val = metrics.get(f"Hit@{k}", 0.0)
+        row1.append(f"{val:.3f}")
+    lines.append("| " + " | ".join(row1) + " |")
+
+    # Row 2: AnswerHit (AnswerHit@k)
+    row2 = [run_name, "AnswerHit"]
     for k in ks:
-        row.append(f"{metrics.get(f'Hit@{k}', 0.0):.3f}")
-    return header + "| " + " | ".join(row) + " |"
+        val = metrics.get(f"AnswerHit@{k}", 0.0)
+        row2.append(f"{val:.3f}")
+    lines.append("| " + " | ".join(row2) + " |")
+    
+    return "\n".join(lines)
 
 
 @dataclass
@@ -150,8 +228,27 @@ def _eval_naive_index(
     if meta_path.exists():
         try:
             meta = json.loads(meta_path.read_text(encoding="utf-8"))
-            index_path = Path(str((meta or {}).get("index") or "")).expanduser()
-            chunks_path = Path(str((meta or {}).get("chunks") or "")).expanduser()
+            meta_index = str((meta or {}).get("index") or "")
+            meta_chunks = str((meta or {}).get("chunks") or "")
+            
+            # Try to resolve relative to cwd or absolute
+            p_idx = Path(meta_index).expanduser()
+            p_chk = Path(meta_chunks).expanduser()
+            
+            # If not found, try resolving relative to index_dir if they look relative
+            if not p_idx.exists() and not p_idx.is_absolute():
+                 p_idx = index_dir / meta_index
+            if not p_chk.exists() and not p_chk.is_absolute():
+                 p_chk = index_dir / meta_chunks
+                 
+            # Fallback to default names in index_dir if still not found
+            if not p_idx.exists() and (index_dir / "index.faiss").exists():
+                p_idx = index_dir / "index.faiss"
+            if not p_chk.exists() and (index_dir / "chunks.jsonl").exists():
+                p_chk = index_dir / "chunks.jsonl"
+                
+            index_path = p_idx
+            chunks_path = p_chk
         except Exception:
             index_path = index_dir / "index.faiss"
             chunks_path = index_dir / "chunks.jsonl"
@@ -164,6 +261,11 @@ def _eval_naive_index(
         raise FileNotFoundError(f"Missing chunks.jsonl: {chunks_path}")
 
     max_k = max(int(k) for k in ks)
+    ks_int = [int(k) for k in ks if int(k) > 0]
+    ans_hits = {k: 0 for k in ks_int}
+    total_ans = 0
+    gold_ans_map = _gold_answers(dataset)
+
     meta_model = (meta or {}).get("embed_model") or (meta or {}).get("embedding_model")
     meta_max_len = (meta or {}).get("embed_max_length")
     meta_norm = (meta or {}).get("normalize")
@@ -194,6 +296,19 @@ def _eval_naive_index(
         qid = str(item.get("query_id") or item.get("id") or idx)
         question = item.get("query") or item.get("question") or ""
         hits = retriever.retrieve(str(question), k=max_k)
+
+        if idx == 0 and hits:
+            print("DEBUG hit keys:", hits[0].keys())
+            print("DEBUG meta keys:", (hits[0].get("meta") or {}).keys())
+            print("DEBUG text preview:", _extract_hit_text(hits[0])[:200])
+
+        gold_answers = gold_ans_map.get(qid, [])
+        if qid in gold_ans_map: 
+             total_ans += 1
+             for k in ks_int:
+                 if answer_hit_at_k(hits, gold_answers, k):
+                     ans_hits[k] += 1
+
         doc_slugs: List[str] = []
         for hit in hits:
             meta = hit.get("metadata") or {}
@@ -203,7 +318,223 @@ def _eval_naive_index(
         retrieved[qid] = doc_slugs
 
     gold = _gold_doc_slugs(items)
-    return _compute_doc_metrics(retrieved, gold, ks)
+    metrics = _compute_doc_metrics(retrieved, gold, ks)
+    
+    if total_ans > 0:
+        for k in ks_int:
+            metrics[f"AnswerHit@{k}"] = ans_hits[k] / total_ans
+    else:
+        for k in ks_int:
+            metrics[f"AnswerHit@{k}"] = 0.0
+            
+    return metrics
+
+
+def _eval_raptor_index(
+    dataset: Sequence[dict],
+    *,
+    index_dir: Path,
+    ks: Sequence[int],
+    limit: Optional[int],
+    **kwargs,
+) -> Dict[str, float]:
+    from baselines.simple_raptor.retriever import SimpleRaptorRetriever
+    from config import config as config_loader
+
+    # Default paths for Raptor
+    index_path = index_dir / "simple_raptor_index.faiss"
+    nodes_path = index_dir / "simple_raptor_nodes.pkl"
+    chunk_store_path = index_dir / "simple_raptor_chunk_store.pkl"
+
+    if not index_path.exists():
+        # Try finding just "index.faiss" etc if defaults fail
+        if (index_dir / "index.faiss").exists():
+            index_path = index_dir / "index.faiss"
+            nodes_path = index_dir / "nodes.pkl"
+            chunk_store_path = index_dir / "chunks.jsonl" # Assuming symlinks
+
+    if not index_path.exists():
+         raise FileNotFoundError(f"Missing Raptor index: {index_path}")
+    if not nodes_path.exists():
+         raise FileNotFoundError(f"Missing Raptor nodes: {nodes_path}")
+    if not chunk_store_path.exists():
+         raise FileNotFoundError(f"Missing Raptor chunks: {chunk_store_path}")
+
+    # Create config override for embedding
+    cfg = config_loader.load_config()
+    embed_model = kwargs.get("embed_model")
+    embed_device = kwargs.get("embed_device")
+    if embed_model:
+        cfg.setdefault("retriever", {}).setdefault("embedding", {})["model"] = embed_model
+    if embed_device:
+        cfg.setdefault("retriever", {}).setdefault("embedding", {})["device"] = embed_device
+
+    retriever = SimpleRaptorRetriever(
+        str(index_path),
+        str(nodes_path),
+        str(chunk_store_path),
+        config=cfg,
+        top_k=max(ks)
+    )
+
+    max_k = max(int(k) for k in ks)
+    ks_int = [int(k) for k in ks if int(k) > 0]
+    ans_hits = {k: 0 for k in ks_int}
+    total_ans = 0
+    gold_ans_map = _gold_answers(dataset)
+
+    retrieved: Dict[str, List[str]] = {}
+    items = list(dataset)
+    if limit and limit > 0:
+        items = items[:limit]
+        
+    for idx, item in enumerate(items):
+        qid = str(item.get("query_id") or item.get("id") or idx)
+        question = item.get("query") or item.get("question") or ""
+        # Use retrieve method which should be available now or fallback
+        try:
+            hits = retriever.retrieve(str(question), k=max_k)
+        except AttributeError:
+             # Fallback if retrieve not implemented in class
+             # But I saw it in the file read earlier!
+             raise
+
+        if idx == 0 and hits:
+            print("DEBUG hit keys:", hits[0].keys())
+            print("DEBUG meta keys:", (hits[0].get("meta") or {}).keys())
+            print("DEBUG text preview:", _extract_hit_text(hits[0])[:200])
+
+        gold_answers = gold_ans_map.get(qid, [])
+        if qid in gold_ans_map: 
+             total_ans += 1
+             for k in ks_int:
+                 if answer_hit_at_k(hits, gold_answers, k):
+                     ans_hits[k] += 1
+
+        doc_slugs: List[str] = []
+        for hit in hits:
+            # Raptor hits usually don't have doc_title directly unless it's in text or metadata
+            # We can try to parse from text if formatted like "Title\nContent"
+            text = hit.get("text", "")
+            if "\n" in text:
+                doc_title = text.split("\n", 1)[0]
+                if len(doc_title) < 100: # Heuristic
+                     doc_slugs.append(_slugify(doc_title))
+        retrieved[qid] = doc_slugs
+
+    gold = _gold_doc_slugs(items)
+    metrics = _compute_doc_metrics(retrieved, gold, ks)
+    
+    if total_ans > 0:
+        for k in ks_int:
+            metrics[f"AnswerHit@{k}"] = ans_hits[k] / total_ans
+    else:
+        for k in ks_int:
+            metrics[f"AnswerHit@{k}"] = 0.0
+            
+    return metrics
+
+
+def _eval_selfrag_index(
+    dataset: Sequence[dict],
+    *,
+    index_dir: Path,
+    ks: Sequence[int],
+    limit: Optional[int],
+    **kwargs,
+) -> Dict[str, float]:
+    from baselines.simple_selfrag.retriever import SimpleSelfRAGRetriever
+    from config import config as config_loader
+
+    # Default paths for SelfRAG
+    index_path = index_dir / "simple_selfrag_index.faiss"
+    chunk_store_path = index_dir / "simple_selfrag_chunk_store.pkl"
+
+    if not index_path.exists():
+         if (index_dir / "index.faiss").exists():
+             index_path = index_dir / "index.faiss"
+             chunk_store_path = index_dir / "chunks.jsonl" # Symlink
+
+    if not index_path.exists():
+         raise FileNotFoundError(f"Missing SelfRAG index: {index_path}")
+    if not chunk_store_path.exists():
+         raise FileNotFoundError(f"Missing SelfRAG chunks: {chunk_store_path}")
+
+    # Create config override for embedding
+    cfg = config_loader.load_config()
+    embed_model = kwargs.get("embed_model")
+    embed_device = kwargs.get("embed_device")
+    # SimpleSelfRAGRetriever might not take config in __init__, it uses global config?
+    # Let's check SimpleSelfRAGRetriever source or assume it uses global_config.
+    # If it uses global_config, we should update it.
+    if embed_model:
+        # Update global config if possible or pass to retriever if supported
+        # The class usually loads config inside __init__
+        # I can try to patch it or pass config if it accepts it.
+        # Looking at run_simple_selfrag.py, it doesn't pass config to Retriever.
+        # It relies on global_config.
+        config_loader.set("retriever.embedding.model", embed_model)
+        config_loader.set("retriever.simple_selfrag.embedding.model", embed_model)
+    if embed_device:
+        config_loader.set("retriever.embedding.device", embed_device)
+
+    retriever = SimpleSelfRAGRetriever(str(index_path), str(chunk_store_path))
+    # Disable LLM for retrieval only if possible
+    retriever.llm_client = None
+
+    max_k = max(int(k) for k in ks)
+    ks_int = [int(k) for k in ks if int(k) > 0]
+    ans_hits = {k: 0 for k in ks_int}
+    total_ans = 0
+    gold_ans_map = _gold_answers(dataset)
+
+    retrieved: Dict[str, List[str]] = {}
+    items = list(dataset)
+    if limit and limit > 0:
+        items = items[:limit]
+        
+    for idx, item in enumerate(items):
+        qid = str(item.get("query_id") or item.get("id") or idx)
+        question = item.get("query") or item.get("question") or ""
+        
+        # SelfRAGRetriever usually has retrieve method?
+        # Let's assume yes or use default
+        hits = retriever.retrieve(str(question), top_k=max_k) # SelfRAG uses top_k
+
+        if idx == 0 and hits:
+            print("DEBUG hit keys:", hits[0].keys())
+            print("DEBUG meta keys:", (hits[0].get("meta") or {}).keys())
+            print("DEBUG text preview:", _extract_hit_text(hits[0])[:200])
+
+        gold_answers = gold_ans_map.get(qid, [])
+        if qid in gold_ans_map: 
+             total_ans += 1
+             for k in ks_int:
+                 if answer_hit_at_k(hits, gold_answers, k):
+                     ans_hits[k] += 1
+
+        doc_slugs: List[str] = []
+        for hit in hits:
+            # SelfRAG chunks usually have title prepended
+            text = hit.get("text", "")
+            if "\n" in text:
+                doc_title = text.split("\n", 1)[0]
+                if len(doc_title) < 100:
+                     doc_slugs.append(_slugify(doc_title))
+        retrieved[qid] = doc_slugs
+
+    gold = _gold_doc_slugs(items)
+    metrics = _compute_doc_metrics(retrieved, gold, ks)
+    
+    if total_ans > 0:
+        for k in ks_int:
+            metrics[f"AnswerHit@{k}"] = ans_hits[k] / total_ans
+    else:
+        for k in ks_int:
+            metrics[f"AnswerHit@{k}"] = 0.0
+            
+    return metrics
+
 
 
 def _eval_anorag(
@@ -262,6 +593,11 @@ def _eval_anorag(
         hybrid_inst = None
 
     max_k = max(int(k) for k in ks)
+    ks_int = [int(k) for k in ks if int(k) > 0]
+    ans_hits = {k: 0 for k in ks_int}
+    total_ans = 0
+    gold_ans_map = _gold_answers(dataset)
+
     items = list(dataset)
     if limit and limit > 0:
         items = items[:limit]
@@ -290,13 +626,20 @@ def _eval_anorag(
             note_ids = [str(nid) for nid in (structured.get("support_note_ids") or [])]
 
         doc_slugs: List[str] = []
+        retrieved_hits: List[dict] = []
+        
         for nid in note_ids:
+            note = note_store.get(nid)
+            if note:
+                retrieved_hits.append(note)
+            else:
+                retrieved_hits.append({})
+
             slug = _extract_doc_slug_from_note_id(nid)
             if slug:
                 doc_slugs.append(_slugify(slug))
                 continue
             # Fallback: load note and parse meta.source if the id format is unexpected.
-            note = note_store.get(nid)
             subj = (note or {}).get("subj")
             if isinstance(subj, str) and subj.strip():
                 doc_slugs.append(_slugify(subj))
@@ -305,10 +648,31 @@ def _eval_anorag(
             if isinstance(source_val, str) and source_val:
                 doc_slugs.append(_slugify(source_val.split("/", 1)[-1].split("__", 1)[0]))
 
+        if idx == 0 and retrieved_hits:
+            print("DEBUG hit keys:", retrieved_hits[0].keys())
+            print("DEBUG meta keys:", (retrieved_hits[0].get("meta") or {}).keys())
+            print("DEBUG text preview:", _extract_hit_text(retrieved_hits[0])[:200])
+
+        gold_answers = gold_ans_map.get(qid, [])
+        if qid in gold_ans_map:
+            total_ans += 1
+            for k in ks_int:
+                if answer_hit_at_k(retrieved_hits, gold_answers, k):
+                    ans_hits[k] += 1
+
         retrieved[qid] = doc_slugs[: max_k * 8]  # keep a few duplicates; metrics will dedup
 
     gold = _gold_doc_slugs(items)
-    return _compute_doc_metrics(retrieved, gold, ks)
+    metrics = _compute_doc_metrics(retrieved, gold, ks)
+
+    if total_ans > 0:
+        for k in ks_int:
+            metrics[f"AnswerHit@{k}"] = ans_hits[k] / total_ans
+    else:
+        for k in ks_int:
+            metrics[f"AnswerHit@{k}"] = 0.0
+
+    return metrics
 
 
 def main() -> None:
@@ -351,6 +715,16 @@ def main() -> None:
     )
     naive.set_defaults(embed_normalize=None)
 
+    raptor = sub.add_parser("raptor", parents=[common], help="Evaluate Simple Raptor retrieval")
+    raptor.add_argument("--index-dir", default="result/mirage_raptor", help="Directory with Simple Raptor artifacts")
+    raptor.add_argument("--embed-model", default="Qwen/Qwen3-Embedding-8B", help="Embedding model name")
+    raptor.add_argument("--embed-device", default="auto", help="Embedding device")
+
+    selfrag = sub.add_parser("selfrag", parents=[common], help="Evaluate Simple SelfRAG retrieval")
+    selfrag.add_argument("--index-dir", default="result/mirage_simple_selfrag", help="Directory with Simple SelfRAG artifacts")
+    selfrag.add_argument("--embed-model", default="Qwen/Qwen3-Embedding-8B", help="Embedding model name")
+    selfrag.add_argument("--embed-device", default="auto", help="Embedding device")
+
     anorag = sub.add_parser("anorag", parents=[common], help="Evaluate AnoRAG structured/hybrid retrieval recall")
     anorag.add_argument("--indexes-dir", required=True, help="Directory with AnoRAG indexes (entity_to_notes.json etc.)")
     anorag.add_argument("--notes-path", required=True, help="AnoRAG notes.jsonl path")
@@ -385,6 +759,26 @@ def main() -> None:
             embed_model=getattr(args, "embed_model", None),
             embed_max_length=embed_max_length,
             embed_normalize=getattr(args, "embed_normalize", None),
+        )
+        run_name = Path(args.index_dir).name
+    elif args.mode == "raptor":
+        metrics = _eval_raptor_index(
+            dataset,
+            index_dir=Path(args.index_dir),
+            ks=ks,
+            limit=limit,
+            embed_model=getattr(args, "embed_model", None),
+            embed_device=getattr(args, "embed_device", None),
+        )
+        run_name = Path(args.index_dir).name
+    elif args.mode == "selfrag":
+        metrics = _eval_selfrag_index(
+            dataset,
+            index_dir=Path(args.index_dir),
+            ks=ks,
+            limit=limit,
+            embed_model=getattr(args, "embed_model", None),
+            embed_device=getattr(args, "embed_device", None),
         )
         run_name = Path(args.index_dir).name
     else:

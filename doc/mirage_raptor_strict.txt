@@ -1,0 +1,7 @@
+DEBUG hit keys: dict_keys(['rank', 'score', 'doc_id', 'sent_ids', 'passage_id', 'text'])
+DEBUG meta keys: dict_keys([])
+DEBUG text preview: John Dawson Mayne Annie's first husband's name is unknown, but she was the daughter of Charles Craigie-Halkett-Inglis of Hallhill, Fife and Cramond House, near Edinburgh, by his wife Susan, the younge
+| Run | Metric | @1 | @3 | @5 | @10 |
+| --- | --- | --- | --- | --- | --- |
+| mirage_raptor | DocHit | 0.000 | 0.000 | 0.000 | 0.000 |
+| mirage_raptor | AnswerHit | 0.000 | 0.000 | 0.000 | 0.000 |
