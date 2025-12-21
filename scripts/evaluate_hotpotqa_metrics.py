@@ -322,7 +322,9 @@ def render_retrieval_table(metrics: Dict[str, Dict[str, float]]) -> str:
 
 
 def collect_runs(root: Path) -> List[Path]:
-    return sorted(d for d in root.iterdir() if d.is_dir() and d.name.startswith("hotpot_"))
+    if (root / "preds" / "pred.json").exists():
+        return [root]
+    return sorted(d for d in root.iterdir() if d.is_dir())
 
 
 def main():
@@ -334,39 +336,61 @@ def main():
     )
     parser.add_argument(
         "--root",
-        default="result/hotpotqa",
-        help="Root directory containing hotpot_* subdirectories.",
+        default=None,
+        help="Root directory containing run subdirectories (optional when --workdir is set).",
+    )
+    parser.add_argument(
+        "--workdir",
+        "--work-dir",
+        dest="work_dir",
+        default=None,
+        help="Dataset workdir to evaluate (expects preds/ and artifacts/ subdirs).",
+    )
+    parser.add_argument(
+        "--ks",
+        default="1,3,5,10",
+        help="Comma-separated k values for retrieval metrics (default: 1,3,5,10).",
     )
     parser.add_argument(
         "--output",
-        default="hotpot_metrics.json",
+        default=None,
         help="Path to write aggregated metrics JSON.",
     )
     args = parser.parse_args()
 
     dataset_path = Path(args.dataset)
-    root = Path(args.root)
-    output_path = Path(args.output)
-
     if not dataset_path.exists():
         raise FileNotFoundError(f"Dataset not found: {dataset_path}")
-    if not root.exists():
-        raise FileNotFoundError(f"Root directory not found: {root}")
+
+    if args.work_dir:
+        run_dirs = [Path(args.work_dir)]
+        default_output = Path(args.work_dir) / "metrics" / "hotpot_metrics.json"
+        output_path = Path(args.output) if args.output else default_output
+    else:
+        root = Path(args.root or "result_relrag")
+        if not root.exists():
+            raise FileNotFoundError(f"Root directory not found: {root}")
+        run_dirs = collect_runs(root)
+        output_path = Path(args.output) if args.output else root / "hotpot_metrics.json"
 
     gt = load_ground_truth(dataset_path)
+    ks = [int(k.strip()) for k in str(args.ks).split(",") if k.strip()]
     metrics: Dict[str, Dict[str, float]] = {}
 
-    for run_dir in collect_runs(root):
-        pred_path = run_dir / "pred.json"
+    for run_dir in run_dirs:
+        if not run_dir.exists():
+            continue
+        pred_path = run_dir / "preds" / "pred.json"
         if not pred_path.exists():
             continue
         run_metrics = evaluate_predictions(pred_path, gt["answers"])
-        retrieval_path = run_dir / "retrieval.jsonl"
+        retrieval_path = run_dir / "artifacts" / "retrieval.jsonl"
         if retrieval_path.exists():
-            retrieval_metrics = evaluate_retrieval(retrieval_path, gt["titles"], gt["answers"])
+            retrieval_metrics = evaluate_retrieval(retrieval_path, gt["titles"], gt["answers"], ks=ks)
             run_metrics.update(retrieval_metrics)
         metrics[run_dir.name] = run_metrics
 
+    output_path.parent.mkdir(parents=True, exist_ok=True)
     with output_path.open("w", encoding="utf-8") as f:
         json.dump(metrics, f, indent=2)
 

@@ -14,11 +14,14 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from baselines.simple_raptor.index import SimpleRaptorIndexer
+from utils.run_layout import ensure_workdir_layout, resolve_workdir
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Build Simple Raptor index for MIRAGE dataset")
     parser.add_argument("--doc-pool", default="data/mirage_sample/doc_pool.json", help="Path to doc_pool.json")
-    parser.add_argument("--out-dir", default="result/mirage_raptor", help="Directory to save index artifacts")
+    parser.add_argument("--out-dir", default=None, help="Directory to save index artifacts")
+    parser.add_argument("--result-root", default="result_relrag", help="Root directory for auto workspace creation")
+    parser.add_argument("--workdir", "--work-dir", dest="work_dir", default=None, help="Workspace directory (default: auto under result-root)")
     parser.add_argument("--cluster-size", type=int, default=16, help="K-means cluster size")
     parser.add_argument("--lmstudio-endpoint", default=None)
     parser.add_argument("--lmstudio-model", default=None)
@@ -90,7 +93,9 @@ def main() -> None:
     logger.info(f"Index built: {stats}")
     
     # 4. Save Artifacts
-    out_dir = Path(args.out_dir)
+    work_dir = resolve_workdir(args.work_dir, result_root=args.result_root, dataset="mirage")
+    paths = ensure_workdir_layout(work_dir)
+    out_dir = Path(args.out_dir) if args.out_dir else paths["artifacts"] / "simple_raptor"
     out_dir.mkdir(parents=True, exist_ok=True)
     
     index_path = out_dir / "simple_raptor_index.faiss"

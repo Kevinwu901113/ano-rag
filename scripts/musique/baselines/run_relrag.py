@@ -1,4 +1,5 @@
 import argparse
+import json
 import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
@@ -20,11 +21,51 @@ from scripts.hotpotqa.baselines.baseline_utils import (
     detect_device,
     format_context,
     get_embedding_model,
-    select_workspace,
 )
 from scripts.musique.baselines.musique_utils import load_dataset, save_musique_results_and_qa
 from utils.retrieval_logger import log_retrieval
+from utils.run_layout import ensure_workdir_layout, resolve_workdir
 
+
+def _get_qid(item: Dict[str, Any]) -> str:
+    return str(item.get("id") or item.get("_id") or item.get("query_id") or "")
+
+def _load_resume_state(
+    output_path: Path,
+    qa_path: Path,
+) -> Tuple[List[Dict[str, Any]], List[Tuple[str, str]], set[str]]:
+    results: List[Dict[str, Any]] = []
+    qa_rows: List[Tuple[str, str]] = []
+    completed: set[str] = set()
+
+    if output_path.exists():
+        try:
+            for line in output_path.read_text(encoding="utf-8").splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                row = json.loads(line)
+                results.append(row)
+                qid = str(row.get("id") or row.get("_id") or row.get("query_id") or "")
+                if qid:
+                    completed.add(qid)
+        except Exception as exc:
+            logger.warning("Failed to load existing results from {}: {}", output_path, exc)
+
+    if qa_path.exists():
+        try:
+            for line in qa_path.read_text(encoding="utf-8").splitlines():
+                if not line.strip():
+                    continue
+                if "\t" in line:
+                    q, a = line.split("\t", 1)
+                else:
+                    q, a = line, ""
+                qa_rows.append((q, a))
+        except Exception as exc:
+            logger.warning("Failed to load existing QA log from {}: {}", qa_path, exc)
+
+    return results, qa_rows, completed
 
 class MiniRelRAG:
     def __init__(self, encoder: Callable[[List[str]], np.ndarray]):
@@ -134,8 +175,8 @@ def main() -> None:
     parser.add_argument("--dataset", required=True)
     parser.add_argument("--output", default=None)
     parser.add_argument("--qa-path", default=None)
-    parser.add_argument("--result-root", default="result/musique")
-    parser.add_argument("--work-dir", default=None)
+    parser.add_argument("--result-root", default="result_relrag")
+    parser.add_argument("--workdir", "--work-dir", dest="work_dir", default=None)
     parser.add_argument("--new", action="store_true")
     parser.add_argument("--lm-endpoint", default="http://localhost:1234/v1")
     parser.add_argument("--lm-model", default="model-identifier")
@@ -146,6 +187,8 @@ def main() -> None:
     parser.add_argument("--limit", type=int, default=0)
     parser.add_argument("--max-context", type=int, default=20)
     parser.add_argument("--num-workers", type=int, default=1)
+    parser.add_argument("--resume", action="store_true", help="Resume from existing outputs in workdir")
+    parser.add_argument("--save-every", type=int, default=50, help="Checkpoint every N samples (0 disables)")
     args = parser.parse_args()
 
     data = load_dataset(args.dataset)
@@ -153,15 +196,14 @@ def main() -> None:
         data = data[: args.limit]
     logger.info(f"Loaded {len(data)} examples from {args.dataset}")
 
-    if args.work_dir:
-        work_dir = Path(args.work_dir)
-        work_dir.mkdir(parents=True, exist_ok=True)
-    else:
-        work_dir = select_workspace(Path(args.result_root), "musique_relrag", args.new)
+    work_dir = resolve_workdir(args.work_dir, result_root=args.result_root, dataset="musique")
+    paths = ensure_workdir_layout(work_dir)
+    artifacts_dir = paths["artifacts"]
+    preds_dir = paths["preds"]
     run_name = work_dir.name
     dataset_name = "musique"
-    output_path = Path(args.output) if args.output else work_dir / "musique_results.jsonl"
-    qa_path = Path(args.qa_path) if args.qa_path else work_dir / "qa.tsv"
+    output_path = Path(args.output) if args.output else preds_dir / "musique_results.jsonl"
+    qa_path = Path(args.qa_path) if args.qa_path else preds_dir / "qa.tsv"
     logger.info(f"Writing outputs to workspace {work_dir}")
 
     llm = LLMChatClient(endpoint=args.lm_endpoint, model=args.lm_model, temperature=0.0)
@@ -171,8 +213,34 @@ def main() -> None:
 
     results: List[Dict[str, Any]] = []
     qa_rows: List[Tuple[str, str]] = []
+    completed: set[str] = set()
+    if args.resume:
+        results, qa_rows, completed = _load_resume_state(output_path, qa_path)
+        if completed:
+            logger.info("Resuming with {} existing predictions", len(completed))
 
     num_workers = max(1, args.num_workers)
+    work_items: List[Dict[str, Any]] = []
+    skipped = 0
+    for item in data:
+        qid = _get_qid(item)
+        if qid and qid in completed:
+            skipped += 1
+            continue
+        work_items.append(item)
+    if skipped:
+        logger.info("Skipping {} already completed examples", skipped)
+    if not work_items:
+        logger.info("No new items to process; keeping existing outputs.")
+        save_musique_results_and_qa(
+            work_dir,
+            results,
+            qa_rows,
+            output_path=output_path,
+            qa_path=qa_path,
+        )
+        return
+
     with ThreadPoolExecutor(max_workers=num_workers) as ex:
         futures = [
             ex.submit(
@@ -183,10 +251,12 @@ def main() -> None:
                 args,
                 run_name=run_name,
                 dataset_name=dataset_name,
-                log_dir=work_dir,
+                log_dir=artifacts_dir,
             )
-            for item in data
+            for item in work_items
         ]
+        save_every = max(0, int(args.save_every))
+        processed = 0
         for fut in tqdm(as_completed(futures), total=len(futures)):
             qid, question, ans, pred_evidence = fut.result()
             if not qid:
@@ -194,7 +264,17 @@ def main() -> None:
             results.append(
                 {"id": qid, "predicted_answer": ans, "predicted_evidence": pred_evidence}
             )
+            completed.add(str(qid))
             qa_rows.append((question, ans))
+            processed += 1
+            if save_every and processed % save_every == 0:
+                save_musique_results_and_qa(
+                    work_dir,
+                    results,
+                    qa_rows,
+                    output_path=output_path,
+                    qa_path=qa_path,
+                )
 
     out_path, qa_file = save_musique_results_and_qa(
         work_dir,
@@ -209,4 +289,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

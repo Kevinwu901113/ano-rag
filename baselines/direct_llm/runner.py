@@ -48,6 +48,7 @@ class DirectLLMClient:
     ) -> None:
         if not endpoint or not model:
             raise ValueError("Both endpoint and model are required for direct LLM baseline")
+        self._mock = str(endpoint).strip().lower() == "mock"
         self.endpoint = endpoint.rstrip("/")
         self.model = model
         self.system_prompt = system_prompt
@@ -58,6 +59,8 @@ class DirectLLMClient:
         self.retries = max(0, retries)
 
     def answer(self, question: str) -> str:
+        if self._mock:
+            return "Mock Answer"
         q = (question or "").strip()
         if not q:
             return "Insufficient evidence"
@@ -146,13 +149,14 @@ class DirectLLMRunner:
             items = items[:limit]
 
         out_root = Path(work_dir)
-        out_root.mkdir(parents=True, exist_ok=True)
-        answers_json_path = out_root / "answers.json"
-        answers_direct_path = out_root / "answers_direct_llm.json"
-        answers_jsonl_path = out_root / "answers_direct_llm.jsonl"
-        qa_path = out_root / "qa.tsv"
-        qa_no_header_path = out_root / "qa.no_header.tsv"
-        qa_with_question_path = out_root / "qa_with_question.tsv"
+        preds_dir = out_root / "preds"
+        preds_dir.mkdir(parents=True, exist_ok=True)
+        answers_json_path = preds_dir / "answers.json"
+        answers_direct_path = preds_dir / "answers_direct_llm.json"
+        answers_jsonl_path = preds_dir / "answers_direct_llm.jsonl"
+        qa_path = preds_dir / "qa.tsv"
+        qa_no_header_path = preds_dir / "qa.no_header.tsv"
+        qa_with_question_path = preds_dir / "qa_with_question.tsv"
 
         results: List[DirectLLMResult] = []
         qa_lines: List[str] = []

@@ -29,7 +29,14 @@ LM_MAX_TOKENS="${LM_MAX_TOKENS:-512}"
 WORK_DIR="${WORK_DIR:-}"
 NUM_WORKERS="${NUM_WORKERS:-4}"
 
-LOG_DIR="${LOG_DIR:-result/hotpotqa/logs}"
+LOG_DIR="${LOG_DIR:-}"
+if [[ -z "$LOG_DIR" ]]; then
+  if [[ -n "$WORK_DIR" ]]; then
+    LOG_DIR="${WORK_DIR}/artifacts/logs"
+  else
+    LOG_DIR="result_relrag/logs"
+  fi
+fi
 mkdir -p "$LOG_DIR"
 VLLM_LOG="$LOG_DIR/vllm_graphrag.log"
 PID_FILE="$LOG_DIR/vllm_graphrag.pid"

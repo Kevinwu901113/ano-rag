@@ -25,6 +25,7 @@ except ImportError:
 from baselines.vanilla_rag import get_retriever
 from baselines.vanilla_rag.index import VanillaRAGIndexer
 from utils.retrieval_logger import log_retrieval
+from utils.run_layout import ensure_workdir_layout, resolve_workdir
 
 def _select_workspace(root: Path, prefix: str, force_new: bool) -> Path:
     root.mkdir(parents=True, exist_ok=True)
@@ -39,14 +40,14 @@ def _select_workspace(root: Path, prefix: str, force_new: bool) -> Path:
 def main():
     parser = argparse.ArgumentParser(description="Run Vanilla RAG Baseline on MIRAGE")
     parser.add_argument("--dataset-path", type=str, default="data/mirage/mirage_dataset.json", help="Path to MIRAGE dataset")
-    parser.add_argument("--result-root", type=str, default="result", help="Root directory for results")
-    parser.add_argument("--work-dir", type=str, help="Specific working directory (optional)")
+    parser.add_argument("--result-root", type=str, default="result_relrag", help="Root directory for results")
+    parser.add_argument("--workdir", "--work-dir", dest="work_dir", type=str, help="Specific working directory (optional)")
     parser.add_argument("--new", action="store_true", help="Force creating a new workspace")
     parser.add_argument("--limit", type=int, default=0, help="Limit number of queries")
     parser.add_argument("--lmstudio-endpoint", type=str, help="LM Studio endpoint override")
     parser.add_argument("--lmstudio-model", type=str, help="LM Studio model name override")
-    parser.add_argument("--index-path", type=str, help="Path to FAISS index (optional, default to work_dir/vanilla_rag_index.faiss)")
-    parser.add_argument("--chunk-store-path", type=str, help="Path to chunk store (optional, default to work_dir/vanilla_rag_chunk_store.pkl)")
+    parser.add_argument("--index-path", type=str, help="Path to FAISS index (optional, default to artifacts/vanilla_rag_index.faiss)")
+    parser.add_argument("--chunk-store-path", type=str, help="Path to chunk store (optional, default to artifacts/vanilla_rag_chunk_store.pkl)")
     
     args = parser.parse_args()
 
@@ -57,11 +58,10 @@ def main():
         global_config.set("lmstudio.model", args.lmstudio_model)
 
     # 1. Setup Workspace
-    if args.work_dir:
-        work_dir = Path(args.work_dir)
-        work_dir.mkdir(parents=True, exist_ok=True)
-    else:
-        work_dir = _select_workspace(Path(args.result_root), "mirage_vanilla_rag", args.new)
+    work_dir = resolve_workdir(args.work_dir, result_root=args.result_root, dataset="mirage")
+    paths = ensure_workdir_layout(work_dir)
+    artifacts_dir = paths["artifacts"]
+    preds_dir = paths["preds"]
     
     run_name = work_dir.name
     dataset_name = "mirage"
@@ -70,8 +70,8 @@ def main():
     logger.info(f"Starting Vanilla RAG run in {work_dir}")
 
     # 2. Determine Index Paths
-    index_path = Path(args.index_path) if args.index_path else work_dir / "vanilla_rag_index.faiss"
-    chunk_store_path = Path(args.chunk_store_path) if args.chunk_store_path else work_dir / "vanilla_rag_chunk_store.pkl"
+    index_path = Path(args.index_path) if args.index_path else artifacts_dir / "vanilla_rag_index.faiss"
+    chunk_store_path = Path(args.chunk_store_path) if args.chunk_store_path else artifacts_dir / "vanilla_rag_chunk_store.pkl"
 
     # 3. Check/Build Index
     if not index_path.exists() or not chunk_store_path.exists():
@@ -171,7 +171,7 @@ def main():
                         }
                         for hit in hits
                     ],
-                    log_dir=work_dir,
+                    log_dir=artifacts_dir,
                 )
             except Exception as log_exc:
                 logger.error(f"retrieval logging failed for {qid}: {log_exc}")
@@ -187,13 +187,13 @@ def main():
 
     # 6. Save Results
     # Save detailed JSONL
-    out_jsonl = work_dir / "results.jsonl"
+    out_jsonl = preds_dir / "results.jsonl"
     with open(out_jsonl, "w", encoding="utf-8") as f:
         for res in results:
             f.write(json.dumps(res, ensure_ascii=False) + "\n")
             
     # Save QA TSV (compatible with eval scripts)
-    out_tsv = work_dir / "qa.tsv"
+    out_tsv = preds_dir / "qa.tsv"
     with open(out_tsv, "w", encoding="utf-8") as f:
         for res in results:
             # Format: query_text\tmodel_answer

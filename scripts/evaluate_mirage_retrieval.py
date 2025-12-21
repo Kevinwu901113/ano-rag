@@ -681,12 +681,13 @@ def main() -> None:
 
     common = argparse.ArgumentParser(add_help=False)
     common.add_argument("--dataset", default="data/mirage_sample/dataset.json", help="Path to MIRAGE dataset.json")
+    common.add_argument("--workdir", "--work-dir", dest="work_dir", default=None, help="Dataset workdir to evaluate")
     common.add_argument("--ks", default="1,3,5,10", help="Comma-separated k values (default: 1,3,5,10)")
     common.add_argument("--limit", type=int, default=0, help="Evaluate first N samples (0=all)")
     common.add_argument("--json-out", default=None, help="Optional path to write metrics JSON")
 
     naive = sub.add_parser("naive", parents=[common], help="Evaluate naive FAISS chunk index recall")
-    naive.add_argument("--index-dir", default="result/mirage_naive", help="Directory with index.faiss + chunks.jsonl")
+    naive.add_argument("--index-dir", default=None, help="Directory with index.faiss + chunks.jsonl")
     naive.add_argument(
         "--embed-device",
         default="auto",
@@ -716,12 +717,12 @@ def main() -> None:
     naive.set_defaults(embed_normalize=None)
 
     raptor = sub.add_parser("raptor", parents=[common], help="Evaluate Simple Raptor retrieval")
-    raptor.add_argument("--index-dir", default="result/mirage_raptor", help="Directory with Simple Raptor artifacts")
+    raptor.add_argument("--index-dir", default=None, help="Directory with Simple Raptor artifacts")
     raptor.add_argument("--embed-model", default="Qwen/Qwen3-Embedding-8B", help="Embedding model name")
     raptor.add_argument("--embed-device", default="auto", help="Embedding device")
 
     selfrag = sub.add_parser("selfrag", parents=[common], help="Evaluate Simple SelfRAG retrieval")
-    selfrag.add_argument("--index-dir", default="result/mirage_simple_selfrag", help="Directory with Simple SelfRAG artifacts")
+    selfrag.add_argument("--index-dir", default=None, help="Directory with Simple SelfRAG artifacts")
     selfrag.add_argument("--embed-model", default="Qwen/Qwen3-Embedding-8B", help="Embedding model name")
     selfrag.add_argument("--embed-device", default="auto", help="Embedding device")
 
@@ -738,6 +739,23 @@ def main() -> None:
     anorag.add_argument("--disable-reranker", action="store_true", help="Disable LLM reranker during evaluation")
 
     args = parser.parse_args()
+
+    if args.work_dir:
+        work_dir = Path(args.work_dir)
+        artifacts_dir = work_dir / "artifacts"
+        if args.mode == "naive" and args.index_dir is None:
+            args.index_dir = str(artifacts_dir / "naive_index")
+        if args.mode == "raptor" and args.index_dir is None:
+            args.index_dir = str(artifacts_dir / "simple_raptor")
+        if args.mode == "selfrag" and args.index_dir is None:
+            args.index_dir = str(artifacts_dir)
+        if args.mode == "anorag":
+            if not getattr(args, "indexes_dir", None):
+                args.indexes_dir = str(artifacts_dir / "indexes")
+            if not getattr(args, "notes_path", None):
+                args.notes_path = str(artifacts_dir / "notes" / "notes.mirage.jsonl")
+        if args.json_out is None:
+            args.json_out = str(work_dir / "metrics" / "mirage_retrieval.json")
 
     dataset_path = Path(args.dataset)
     if not dataset_path.exists():

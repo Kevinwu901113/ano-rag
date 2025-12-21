@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import hashlib
 from typing import Optional, Sequence
 
 import numpy as np
@@ -48,6 +49,8 @@ class EmbeddingEncoder:
     ) -> np.ndarray:
         if not texts:
             return np.zeros((0, 0), dtype="float32")
+        if self.provider == "mock" or str(self.model_name).strip().lower() == "mock":
+            return self._encode_mock(texts, normalize=normalize)
         if self.provider == "qwen3":
             return self._encode_transformers(
                 texts,
@@ -65,6 +68,18 @@ class EmbeddingEncoder:
                 normalize=normalize,
             )
         raise ValueError(f"Unsupported embedding provider: {self.provider}")
+
+    def _encode_mock(self, texts: Sequence[str], *, normalize: Optional[bool]) -> np.ndarray:
+        dim = 8
+        vectors = np.zeros((len(texts), dim), dtype="float32")
+        for i, text in enumerate(texts):
+            seed = int(hashlib.md5(str(text).encode("utf-8")).hexdigest()[:8], 16)
+            rng = np.random.default_rng(seed)
+            vectors[i] = rng.normal(size=dim)
+        if normalize or (normalize is None and self.normalize):
+            norms = np.linalg.norm(vectors, axis=1, keepdims=True) + 1e-12
+            vectors = vectors / norms
+        return vectors
 
     @staticmethod
     def _is_cuda_oom(exc: BaseException) -> bool:

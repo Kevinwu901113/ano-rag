@@ -14,6 +14,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from baselines.direct_llm import DirectLLMRunner
+from utils.run_layout import ensure_workdir_layout, resolve_workdir
 
 
 def _select_workspace(root: Path, prefix: str, force_new: bool) -> Path:
@@ -30,8 +31,8 @@ def _select_workspace(root: Path, prefix: str, force_new: bool) -> Path:
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run direct LLM baseline on MIRAGE dataset.json")
     parser.add_argument("--dataset-path", default="data/mirage_sample/dataset.json")
-    parser.add_argument("--result-root", default="result")
-    parser.add_argument("--work-dir", default=None, help="Where to write outputs. Default: auto under result_root")
+    parser.add_argument("--result-root", default="result_relrag")
+    parser.add_argument("--workdir", "--work-dir", dest="work_dir", default=None, help="Where to write outputs. Default: auto under result_root")
     parser.add_argument("--new", action="store_true", help="Force creating a new workspace (do not reuse latest)")
     parser.add_argument("--limit", type=int, default=0, help="Limit number of questions (0=all)")
     parser.add_argument("--lmstudio-endpoint", default=None)
@@ -56,11 +57,8 @@ def main() -> None:
     with dataset_path.open("r", encoding="utf-8") as handle:
         dataset = json.load(handle)
 
-    if args.work_dir:
-        work_dir = Path(args.work_dir)
-        work_dir.mkdir(parents=True, exist_ok=True)
-    else:
-        work_dir = _select_workspace(Path(args.result_root), "mirage_direct_llm", args.new)
+    work_dir = resolve_workdir(args.work_dir, result_root=args.result_root, dataset="mirage")
+    ensure_workdir_layout(work_dir)
     logger.info("Writing direct LLM outputs to {}", work_dir)
 
     runner_kwargs = {

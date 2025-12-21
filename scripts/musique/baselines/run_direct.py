@@ -17,9 +17,9 @@ from scripts.hotpotqa.baselines.baseline_utils import (
     build_passage_entries,
     clean_hotpot_answer,
     format_context,
-    select_workspace,
 )
 from scripts.musique.baselines.musique_utils import load_dataset, save_musique_results_and_qa
+from utils.run_layout import ensure_workdir_layout, resolve_workdir
 
 
 def process_example(
@@ -56,8 +56,8 @@ def main() -> None:
     parser.add_argument("--dataset", required=True, help="Path to MuSiQue dev/test jsonl/json")
     parser.add_argument("--output", default=None, help="Output path for musique_results.jsonl")
     parser.add_argument("--qa-path", default=None, help="Optional QA tsv path")
-    parser.add_argument("--result-root", default="result/musique", help="Root directory for auto-created workspaces")
-    parser.add_argument("--work-dir", default=None, help="Workspace directory (default: auto under result-root)")
+    parser.add_argument("--result-root", default="result_relrag", help="Root directory for auto-created workspaces")
+    parser.add_argument("--workdir", "--work-dir", dest="work_dir", default=None, help="Workspace directory (default: auto under result-root)")
     parser.add_argument("--new", action="store_true", help="Force creating a new workspace under result-root")
     parser.add_argument("--lm-endpoint", default="http://localhost:1234/v1", help="LLM API endpoint")
     parser.add_argument("--lm-model", default="model-identifier", help="LLM model name")
@@ -73,14 +73,12 @@ def main() -> None:
         data = data[: args.limit]
     logger.info(f"Loaded {len(data)} examples from {args.dataset}")
 
-    if args.work_dir:
-        work_dir = Path(args.work_dir)
-        work_dir.mkdir(parents=True, exist_ok=True)
-    else:
-        work_dir = select_workspace(Path(args.result_root), "musique_direct", args.new)
+    work_dir = resolve_workdir(args.work_dir, result_root=args.result_root, dataset="musique")
+    paths = ensure_workdir_layout(work_dir)
+    preds_dir = paths["preds"]
     run_name = work_dir.name
-    output_path = Path(args.output) if args.output else work_dir / "musique_results.jsonl"
-    qa_path = Path(args.qa_path) if args.qa_path else work_dir / "qa.tsv"
+    output_path = Path(args.output) if args.output else preds_dir / "musique_results.jsonl"
+    qa_path = Path(args.qa_path) if args.qa_path else preds_dir / "qa.tsv"
     logger.info(f"Writing outputs to workspace {work_dir} (run={run_name})")
 
     llm = LLMChatClient(
@@ -118,4 +116,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

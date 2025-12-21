@@ -15,6 +15,7 @@ if str(ROOT) not in sys.path:
 
 from baselines.simple_graphrag import get_retriever
 from utils.retrieval_logger import log_retrieval
+from utils.run_layout import ensure_workdir_layout, resolve_workdir
 
 
 def _select_workspace(root: Path, prefix: str, force_new: bool) -> Path:
@@ -31,9 +32,9 @@ def _select_workspace(root: Path, prefix: str, force_new: bool) -> Path:
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run Simple GraphRAG baseline on MIRAGE dataset.json")
     parser.add_argument("--dataset-path", default="data/mirage_sample/dataset.json")
-    parser.add_argument("--result-root", default="result")
+    parser.add_argument("--result-root", default="result_relrag")
     parser.add_argument("--index-dir", default=None, help="Directory containing graph index files")
-    parser.add_argument("--work-dir", default=None, help="Where to write outputs. Default: auto under result_root")
+    parser.add_argument("--workdir", "--work-dir", dest="work_dir", default=None, help="Where to write outputs. Default: auto under result_root")
     parser.add_argument("--new", action="store_true", help="Force creating a new workspace")
     parser.add_argument("--limit", type=int, default=0, help="Limit number of questions (0=all)")
     parser.add_argument("--lmstudio-endpoint", required=True)
@@ -57,11 +58,10 @@ def main() -> None:
     with dataset_path.open("r", encoding="utf-8") as handle:
         dataset = json.load(handle)
 
-    if args.work_dir:
-        work_dir = Path(args.work_dir)
-        work_dir.mkdir(parents=True, exist_ok=True)
-    else:
-        work_dir = _select_workspace(Path(args.result_root), "mirage_simple_graphrag", args.new)
+    work_dir = resolve_workdir(args.work_dir, result_root=args.result_root, dataset="mirage")
+    paths = ensure_workdir_layout(work_dir)
+    artifacts_dir = paths["artifacts"]
+    preds_dir = paths["preds"]
     run_name = work_dir.name
     dataset_name = "mirage"
     
@@ -71,7 +71,8 @@ def main() -> None:
     logger.info("Writing Simple GraphRAG outputs to {}", work_dir)
 
     # Determine index directory: if not provided, default to work_dir
-    index_dir = args.index_dir if args.index_dir else str(work_dir)
+    index_dir = args.index_dir if args.index_dir else str(artifacts_dir / "simple_graphrag")
+    Path(index_dir).mkdir(parents=True, exist_ok=True)
     logger.info(f"Using graph index from: {index_dir}")
 
     # Check if index exists, if not, build it
@@ -179,7 +180,7 @@ def main() -> None:
                         }
                         for hit in hits
                     ],
-                    log_dir=work_dir,
+                    log_dir=artifacts_dir,
                 )
             except Exception as log_exc:
                 logger.error(f"retrieval logging failed for {qid}: {log_exc}")
@@ -194,8 +195,8 @@ def main() -> None:
             })
 
     # 3. Save results
-    output_path = work_dir / "answers.json"
-    qa_log_path = work_dir / "qa.tsv"
+    output_path = preds_dir / "answers.json"
+    qa_log_path = preds_dir / "qa.tsv"
     
     with open(output_path, "w", encoding="utf-8") as f:
         json.dump(results, f, ensure_ascii=False, indent=2)

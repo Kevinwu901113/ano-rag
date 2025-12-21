@@ -136,6 +136,7 @@ class LLMChatClient:
     ) -> None:
         if not endpoint or not model:
             raise ValueError("Both endpoint and model are required for LLM calls")
+        self._mock = str(endpoint).strip().lower() == "mock"
         self.endpoint = endpoint.rstrip("/")
         self.model = model
         self.temperature = temperature
@@ -153,6 +154,11 @@ class LLMChatClient:
         max_tokens: Optional[int] = None,
         response_format: Optional[Dict[str, Any]] = None,
     ) -> LLMResponse:
+        if self._mock:
+            last = messages[-1]["content"].lower() if messages else ""
+            if "json" in last or "triple" in last:
+                return LLMResponse(content="[]", raw={"mock": True})
+            return LLMResponse(content="Mock Answer", raw={"mock": True})
         urls = self._candidate_urls()
 
         last_exc: Optional[Exception] = None

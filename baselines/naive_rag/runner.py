@@ -332,13 +332,16 @@ class LLMClient:
     ) -> None:
         if not endpoint or not model:
             raise ValueError("Both endpoint and model are required for LLM calls")
-        self.endpoint = endpoint.rstrip("/")
-        if self.endpoint.endswith("/v1"):
-            self.endpoint = self.endpoint[:-3]
-        
-        # Fix: Ensure endpoint has scheme
-        if not self.endpoint.startswith("http://") and not self.endpoint.startswith("https://"):
-            self.endpoint = "http://" + self.endpoint
+        self._mock = str(endpoint).strip().lower() == "mock"
+        if self._mock:
+            self.endpoint = "mock"
+        else:
+            self.endpoint = endpoint.rstrip("/")
+            if self.endpoint.endswith("/v1"):
+                self.endpoint = self.endpoint[:-3]
+            # Ensure endpoint has scheme
+            if not self.endpoint.startswith("http://") and not self.endpoint.startswith("https://"):
+                self.endpoint = "http://" + self.endpoint
             
         self.model = model
         self.temperature = temperature
@@ -349,6 +352,8 @@ class LLMClient:
         self.retries = max(0, retries)
 
     def chat(self, messages: List[Dict[str, str]]) -> str:
+        if self._mock:
+            return "Mock Answer"
         url = f"{self.endpoint}/v1/chat/completions"
         headers = {"Content-Type": "application/json"}
         payload = {
@@ -423,19 +428,61 @@ class NaiveRAGRunner:
         debug: bool = True,
         dataset_name: str = "mirage",
         run_name: Optional[str] = None,
+        resume: bool = False,
+        save_every: int = 0,
     ) -> Dict[str, Any]:
         items = list(dataset)
         if limit:
             items = items[:limit]
         work_path = Path(work_dir)
-        work_path.mkdir(parents=True, exist_ok=True)
+        preds_dir = work_path / "preds"
+        artifacts_dir = work_path / "artifacts"
+        preds_dir.mkdir(parents=True, exist_ok=True)
+        artifacts_dir.mkdir(parents=True, exist_ok=True)
         resolved_run_name = run_name or work_path.name
         answers: List[Dict[str, Any]] = []
         qa_rows: List[str] = []
         debug_records: List[str] = []
+        completed: set[str] = set()
+
+        answers_path = preds_dir / "answers.json"
+        qa_path = preds_dir / "qa.tsv"
+        debug_dir = artifacts_dir / "debug"
+        debug_path = debug_dir / "retrieval_raw.jsonl"
+
+        if resume:
+            if answers_path.exists():
+                try:
+                    payload = json.loads(answers_path.read_text(encoding="utf-8"))
+                    if isinstance(payload, list):
+                        answers = payload
+                        completed = {str(a.get("query_id")) for a in answers if a.get("query_id") is not None}
+                except Exception as exc:
+                    logger.warning("Failed to load existing answers from {}: {}", answers_path, exc)
+            if qa_path.exists():
+                try:
+                    qa_rows = qa_path.read_text(encoding="utf-8").splitlines()
+                except Exception as exc:
+                    logger.warning("Failed to load existing QA log from {}: {}", qa_path, exc)
+            if debug and debug_path.exists():
+                try:
+                    debug_records = debug_path.read_text(encoding="utf-8").splitlines()
+                except Exception as exc:
+                    logger.warning("Failed to load existing debug log from {}: {}", debug_path, exc)
+
+        def _flush() -> None:
+            answers_path.write_text(json.dumps(answers, ensure_ascii=False, indent=2), encoding="utf-8")
+            qa_path.write_text("\n".join(qa_rows), encoding="utf-8")
+            if debug:
+                debug_dir.mkdir(parents=True, exist_ok=True)
+                debug_path.write_text("\n".join(debug_records), encoding="utf-8")
+
         for idx, item in enumerate(items):
             question = item.get("query") or item.get("question") or ""
             qid = item.get("query_id") or str(idx)
+            qid_key = str(qid)
+            if resume and qid_key in completed:
+                continue
             hits = self.retriever.retrieve(question, k=self.topk)
 
             context_blocks = []
@@ -459,6 +506,7 @@ class NaiveRAGRunner:
                 {"query_id": qid, "question": question, "answer": ans_text, "hits": hits}
             )
             qa_rows.append(f"{question}\t{ans_text}")
+            completed.add(qid_key)
             if debug:
                 debug_records.append(
                     json.dumps(
@@ -482,19 +530,15 @@ class NaiveRAGRunner:
                         }
                         for hit in hits
                     ],
-                    log_dir=work_path,
+                    log_dir=artifacts_dir,
                 )
             except Exception as log_exc:
                 logger.error("retrieval logging failed for {}: {}", qid, log_exc)
 
-        answers_path = work_path / "answers.json"
-        qa_path = work_path / "qa.tsv"
-        answers_path.write_text(json.dumps(answers, ensure_ascii=False, indent=2), encoding="utf-8")
-        qa_path.write_text("\n".join(qa_rows), encoding="utf-8")
-        if debug:
-            debug_dir = work_path / "debug"
-            debug_dir.mkdir(parents=True, exist_ok=True)
-            (debug_dir / "retrieval_raw.jsonl").write_text("\n".join(debug_records), encoding="utf-8")
+            if save_every and len(answers) % max(1, int(save_every)) == 0:
+                _flush()
+
+        _flush()
         return {"answers": str(answers_path), "qa": str(qa_path)}
 
     def answer(self, question: str) -> str:

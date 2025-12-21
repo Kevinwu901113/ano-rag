@@ -2,6 +2,7 @@ import json
 import os
 import re
 import threading
+import hashlib
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
@@ -147,6 +148,17 @@ def encode_passages(
     """
     if not texts:
         return np.array([])
+    if str(model_name).strip().lower() == "mock":
+        dim = 8
+        vectors = np.zeros((len(texts), dim), dtype="float32")
+        for i, text in enumerate(texts):
+            seed = int(hashlib.md5(str(text).encode("utf-8")).hexdigest()[:8], 16)
+            rng = np.random.default_rng(seed)
+            vectors[i] = rng.normal(size=dim)
+        if normalize:
+            norms = np.linalg.norm(vectors, axis=1, keepdims=True) + 1e-12
+            vectors = vectors / norms
+        return vectors
 
     try:
         resolved_dtype = _resolve_torch_dtype(device, torch_dtype)
@@ -402,12 +414,13 @@ def save_predictions_and_qa(
     Save HotpotQA prediction json (answer/sp dict) and a QA tsv log.
     """
     work_dir.mkdir(parents=True, exist_ok=True)
-    out_path = Path(output_path) if output_path else work_dir / "pred.json"
+    preds_dir = work_dir / "preds"
+    out_path = Path(output_path) if output_path else preds_dir / "pred.json"
     out_path.parent.mkdir(parents=True, exist_ok=True)
     with out_path.open("w", encoding="utf-8") as f:
         json.dump(predictions, f, ensure_ascii=False, indent=2)
 
-    qa_file = Path(qa_path) if qa_path else work_dir / "qa.tsv"
+    qa_file = Path(qa_path) if qa_path else preds_dir / "qa.tsv"
     qa_file.parent.mkdir(parents=True, exist_ok=True)
     qa_lines = []
     for question, answer in qa_rows:

@@ -1,32 +1,17 @@
 {
-  "hotpot_selfrag_strict": {
+  "hotpotqa": {
     "EM": 0.0,
     "AnswerP": 0.0,
     "AnswerR": 0.0,
     "AnswerF1": 0.0,
     "count": 200,
-    "TitleRecall@5": 0.32,
-    "TitleRecall@10": 0.32,
-    "TitlePrec@5": 0.21500000000000008,
-    "TitlePrec@10": 0.21500000000000008,
-    "Hit@5": 0.54,
-    "Hit@10": 0.54,
-    "AnswerHit@5": 0.43,
-    "AnswerHit@10": 0.43
-  },
-  "hotpot_test_strict_eval": {
-    "EM": 0.0,
-    "AnswerP": 0.0,
-    "AnswerR": 0.0,
-    "AnswerF1": 0.0,
-    "count": 200,
-    "TitleRecall@5": 0.32,
-    "TitleRecall@10": 0.32,
-    "TitlePrec@5": 0.21500000000000008,
-    "TitlePrec@10": 0.21500000000000008,
-    "Hit@5": 0.54,
-    "Hit@10": 0.54,
-    "AnswerHit@5": 0.43,
-    "AnswerHit@10": 0.43
+    "TitleRecall@5": 0.2575,
+    "TitleRecall@10": 0.2575,
+    "TitlePrec@5": 0.17333333333333328,
+    "TitlePrec@10": 0.17333333333333328,
+    "Hit@5": 0.465,
+    "Hit@10": 0.465,
+    "AnswerHit@5": 0.375,
+    "AnswerHit@10": 0.375
   }
 }

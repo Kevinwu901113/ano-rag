@@ -10,6 +10,7 @@ from typing import List
 
 from loguru import logger
 from baselines.direct_llm import DirectLLMRunner
+from utils.run_layout import ensure_workdir_layout, resolve_workdir
 
 
 def _list_workspaces(root: Path, dataset: str) -> List[Path]:
@@ -57,8 +58,8 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Run LM Studio answers for MIRAGE dataset")
     parser.add_argument("--dataset", default="mirage", help="Dataset name (used for workspace naming)")
     parser.add_argument("--dataset-path", default=None, help="Path to dataset.json")
-    parser.add_argument("--result-root", default="result")
-    parser.add_argument("--work-dir", default=None, help="Explicit workspace path")
+    parser.add_argument("--result-root", default="result_relrag")
+    parser.add_argument("--workdir", "--work-dir", dest="work_dir", default=None, help="Explicit workspace path")
     parser.add_argument("--indexes-dir", default=None)
     parser.add_argument("--notes", default=None)
     parser.add_argument("--lmstudio-endpoint", required=True)
@@ -79,21 +80,18 @@ def main() -> None:
     if not dataset_path.exists():
         raise FileNotFoundError(f"Dataset JSON not found at {dataset_path}")
 
-    result_root = Path(args.result_root)
-    if args.work_dir:
-        work_dir = Path(args.work_dir)
-        work_dir.mkdir(parents=True, exist_ok=True)
-    else:
-        result_root.mkdir(parents=True, exist_ok=True)
-        work_dir = _select_workspace(result_root, dataset_name, args.new)
+    work_dir = resolve_workdir(args.work_dir, result_root=args.result_root, dataset=dataset_name)
+    paths = ensure_workdir_layout(work_dir)
+    artifacts_dir = paths["artifacts"]
+    preds_dir = paths["preds"]
     logger.info("Using workspace: {}", work_dir)
 
     override_cfg = work_dir / "config.override.yaml"
     if override_cfg.exists():
         os.environ["ANO_RAG_CONFIG"] = str(override_cfg)
 
-    output_path = Path(args.out) if args.out else work_dir / "answers.json"
-    qa_log_path = Path(args.qa_log) if args.qa_log else work_dir / "qa.tsv"
+    output_path = Path(args.out) if args.out else preds_dir / "answers.json"
+    qa_log_path = Path(args.qa_log) if args.qa_log else preds_dir / "qa.tsv"
 
     with open(dataset_path, "r", encoding="utf-8") as handle:
         dataset = json.load(handle)
@@ -256,8 +254,8 @@ def main() -> None:
         logger.info("Simple Raptor baseline complete.")
         return
 
-    indexes_dir = Path(args.indexes_dir) if args.indexes_dir else work_dir / "indexes"
-    notes_path = Path(args.notes) if args.notes else work_dir / "notes" / f"notes.{dataset_name}.jsonl"
+    indexes_dir = Path(args.indexes_dir) if args.indexes_dir else artifacts_dir / "indexes"
+    notes_path = Path(args.notes) if args.notes else artifacts_dir / "notes" / f"notes.{dataset_name}.jsonl"
     if not indexes_dir.exists():
         raise FileNotFoundError(f"Indexes dir not found: {indexes_dir}")
     if not notes_path.exists():
@@ -300,6 +298,34 @@ def main() -> None:
             stripped = _strip_reasoning(str(answer_text))
             clean_answer = " ".join(stripped.splitlines())
         qa_lines.append(f"{question}\t{clean_answer}")
+        
+        # Log retrieval for evaluation
+        try:
+            structured = res.get("structured") or {}
+            evidences = structured.get("evidence") or []
+            # Convert evidences to format expected by log_retrieval
+            retrieved_items = []
+            for idx, ev in enumerate(evidences):
+                # Try to map note_id or source info to doc_id/passage_id if possible
+                # Assuming note_id might be useful or if there's source info
+                item = {
+                    "rank": idx + 1,
+                    "text": ev.get("evidence") or ev.get("text"),
+                    "score": ev.get("score"),
+                    "doc_id": ev.get("doc_id") or ev.get("note_id"),
+                    "passage_id": ev.get("passage_id") or ev.get("note_id")
+                }
+                retrieved_items.append(item)
+            
+            log_retrieval(
+                sample_id=qid or str(hash(question)),
+                dataset=dataset_name,
+                run_name=work_dir.name,
+                retrieved=retrieved_items,
+                log_dir=work_dir
+            )
+        except Exception as e:
+            logger.warning(f"Failed to log retrieval for {qid}: {e}")
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     with open(output_path, "w", encoding="utf-8") as handle:

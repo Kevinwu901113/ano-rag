@@ -17,6 +17,7 @@ class LLMChatClient:
         stop: Optional[List[str]] = None,
         retries: int = 3
     ):
+        self._mock = str(endpoint).strip().lower() == "mock"
         self.endpoint = endpoint.rstrip("/")
         # Auto-correct endpoint format if needed
         # Most OpenAI clients expect base_url to be just the host, but requests needs full path
@@ -35,6 +36,11 @@ class LLMChatClient:
         Send chat completion request with retries.
         messages: List of {"role": "...", "content": "..."}
         """
+        if self._mock:
+            last_msg = messages[-1]["content"] if messages else ""
+            if "json" in str(last_msg).lower():
+                return "{}"
+            return "Mock Answer"
         url = f"{self.endpoint}/chat/completions"
         logger.info(f"[RAPTOR-LLM] POST {url} model={self.model}")
         # Ensure we don't double-slash if endpoint already had trailing slash (handled by rstrip above)

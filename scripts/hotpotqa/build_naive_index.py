@@ -13,11 +13,14 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from baselines.naive_rag import MirageNaiveIndexer, NaiveChunker
+from utils.run_layout import ensure_workdir_layout, resolve_workdir
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Build naive HotpotQA RAG index from doc_pool.json")
     parser.add_argument("--doc-pool", default="data/hotpotqa/doc_pool.json", help="Path to HotpotQA doc_pool.json")
-    parser.add_argument("--out-dir", default="result/hotpot_naive", help="Output directory for FAISS + chunks.jsonl")
+    parser.add_argument("--out-dir", default=None, help="Output directory for FAISS + chunks.jsonl")
+    parser.add_argument("--result-root", default="result_relrag", help="Root directory for auto workspace creation")
+    parser.add_argument("--workdir", "--work-dir", dest="work_dir", default=None, help="Workspace directory (default: auto under result-root)")
     parser.add_argument(
         "--embed-device",
         default="auto",
@@ -49,10 +52,14 @@ def main() -> None:
         overlap_tokens=args.overlap_tokens,
         append_title=not args.no_title,
     )
+    work_dir = resolve_workdir(args.work_dir, result_root=args.result_root, dataset="hotpotqa")
+    paths = ensure_workdir_layout(work_dir)
+    out_dir = Path(args.out_dir) if args.out_dir else paths["artifacts"] / "naive_index"
+    out_dir.mkdir(parents=True, exist_ok=True)
     builder = MirageNaiveIndexer(chunker=chunker)
     stats = builder.build(
         args.doc_pool,
-        args.out_dir,
+        str(out_dir),
         embed_model=args.embed_model,
         embed_device=args.embed_device,
         embed_batch_size=args.embed_batch_size,

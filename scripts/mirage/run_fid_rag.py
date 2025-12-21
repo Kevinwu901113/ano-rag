@@ -14,6 +14,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from baselines.fid_rag import FiDRAGRunner
+from utils.run_layout import ensure_workdir_layout, resolve_workdir
 
 
 def _select_workspace(root: Path, prefix: str, force_new: bool) -> Path:
@@ -43,13 +44,13 @@ def _resolve_index_artifacts(index_dir: Path) -> tuple[Path, Path]:
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run FiD-style RAG baseline on MIRAGE dataset.json")
     parser.add_argument("--dataset-path", default="data/mirage_sample/dataset.json")
-    parser.add_argument("--index-dir", default="result/mirage_naive", help="Directory containing index.faiss + chunks.jsonl")
+    parser.add_argument("--index-dir", default=None, help="Directory containing index.faiss + chunks.jsonl")
     parser.add_argument("--index-path", default=None, help="Optional explicit FAISS index path")
     parser.add_argument("--chunks-path", default=None, help="Optional explicit chunks.jsonl path")
     parser.add_argument("--topk", type=int, default=5)
     parser.add_argument("--limit", type=int, default=0, help="Limit number of questions (0=all)")
-    parser.add_argument("--result-root", default="result")
-    parser.add_argument("--work-dir", default=None, help="Where to write qa.tsv etc. Default: auto under result_root")
+    parser.add_argument("--result-root", default="result_relrag")
+    parser.add_argument("--workdir", "--work-dir", dest="work_dir", default=None, help="Where to write outputs. Default: auto under result_root")
     parser.add_argument("--new", action="store_true", help="Force creating a new workspace (do not reuse latest)")
     parser.add_argument("--lmstudio-endpoint", default=None)
     parser.add_argument("--lmstudio-model", default=None)
@@ -71,7 +72,10 @@ def main() -> None:
     with dataset_path.open("r", encoding="utf-8") as handle:
         dataset = json.load(handle)
 
-    index_dir = Path(args.index_dir)
+    work_dir = resolve_workdir(args.work_dir, result_root=args.result_root, dataset="mirage")
+    paths = ensure_workdir_layout(work_dir)
+    artifacts_dir = paths["artifacts"]
+    index_dir = Path(args.index_dir) if args.index_dir else artifacts_dir / "fid_index"
     if args.index_path or args.chunks_path:
         index_path = Path(args.index_path) if args.index_path else index_dir / "index.faiss"
         chunks_path = Path(args.chunks_path) if args.chunks_path else index_dir / "chunks.jsonl"
@@ -82,11 +86,6 @@ def main() -> None:
     if not chunks_path.exists():
         raise FileNotFoundError(f"chunks.jsonl missing: {chunks_path}")
 
-    if args.work_dir:
-        work_dir = Path(args.work_dir)
-        work_dir.mkdir(parents=True, exist_ok=True)
-    else:
-        work_dir = _select_workspace(Path(args.result_root), "mirage_fid", args.new)
     run_name = work_dir.name
     logger.info("Writing outputs to {}", work_dir)
 

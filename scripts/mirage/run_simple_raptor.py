@@ -17,6 +17,7 @@ from baselines.simple_raptor.retriever import SimpleRaptorRetriever
 from baselines.common.model_clients import get_default_llm_client
 from rag_core.llm_client import LLMChatClient
 from utils.retrieval_logger import log_retrieval
+from utils.run_layout import ensure_workdir_layout, resolve_workdir
 
 def _select_workspace(root: Path, dataset: str, new: bool) -> Path:
     if not root.exists():
@@ -44,14 +45,14 @@ def _select_workspace(root: Path, dataset: str, new: bool) -> Path:
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run Simple Raptor baseline on MIRAGE dataset.json")
     parser.add_argument("--dataset-path", default="data/mirage_sample/dataset.json")
-    parser.add_argument("--index-dir", default="result/mirage_raptor", help="Directory containing Raptor index files")
+    parser.add_argument("--index-dir", default=None, help="Directory containing Raptor index files")
     parser.add_argument("--index-path", default=None, help="Optional explicit FAISS index path")
     parser.add_argument("--nodes-path", default=None, help="Optional explicit nodes.pkl path")
     parser.add_argument("--chunk-store-path", default=None, help="Optional explicit chunk_store.pkl path")
     parser.add_argument("--topk", type=int, default=5)
     parser.add_argument("--limit", type=int, default=0, help="Limit number of questions (0=all)")
-    parser.add_argument("--result-root", default="result")
-    parser.add_argument("--work-dir", default=None, help="Where to write qa.tsv etc. Default: auto under result_root")
+    parser.add_argument("--result-root", default="result_relrag")
+    parser.add_argument("--workdir", "--work-dir", dest="work_dir", default=None, help="Where to write outputs. Default: auto under result_root")
     parser.add_argument("--new", action="store_true", help="Force creating a new workspace (do not reuse latest)")
     parser.add_argument("--lmstudio-endpoint", default=None)
     parser.add_argument("--lmstudio-model", default=None)
@@ -74,7 +75,12 @@ def main() -> None:
     with dataset_path.open("r", encoding="utf-8") as handle:
         dataset = json.load(handle)
 
-    index_dir = Path(args.index_dir)
+    work_dir = resolve_workdir(args.work_dir, result_root=args.result_root, dataset="mirage")
+    paths = ensure_workdir_layout(work_dir)
+    artifacts_dir = paths["artifacts"]
+    preds_dir = paths["preds"]
+
+    index_dir = Path(args.index_dir) if args.index_dir else artifacts_dir / "simple_raptor"
     index_path = Path(args.index_path) if args.index_path else index_dir / "simple_raptor_index.faiss"
     nodes_path = Path(args.nodes_path) if args.nodes_path else index_dir / "simple_raptor_nodes.pkl"
     chunk_store_path = Path(args.chunk_store_path) if args.chunk_store_path else index_dir / "simple_raptor_chunk_store.pkl"
@@ -86,11 +92,6 @@ def main() -> None:
     if not chunk_store_path.exists():
         raise FileNotFoundError(f"Chunk store missing: {chunk_store_path}")
 
-    if args.work_dir:
-        work_dir = Path(args.work_dir)
-        work_dir.mkdir(parents=True, exist_ok=True)
-    else:
-        work_dir = _select_workspace(Path(args.result_root), "mirage_raptor", args.new)
     run_name = work_dir.name
     dataset_name = "mirage"
     logger.info("Writing outputs to {}", work_dir)
@@ -181,7 +182,7 @@ def main() -> None:
                         }
                         for hit in hits
                     ],
-                    log_dir=work_dir,
+                    log_dir=artifacts_dir,
                 )
             except Exception as log_exc:
                 logger.error(f"retrieval logging failed for {qid}: {log_exc}")
@@ -189,8 +190,8 @@ def main() -> None:
             logger.exception(f"Error Q{i}: {e}")
             
     # Save results
-    out_json = work_dir / "answers.json"
-    out_qa = work_dir / "qa.tsv"
+    out_json = preds_dir / "answers.json"
+    out_qa = preds_dir / "qa.tsv"
     
     with open(out_json, "w", encoding="utf-8") as f:
         json.dump(results, f, ensure_ascii=False, indent=2)

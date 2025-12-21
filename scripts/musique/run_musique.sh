@@ -13,7 +13,9 @@ set -euo pipefail
 # =====================
 DATASET_NAME="${DATASET_NAME:-musique}"
 DATASET_PATH="${DATASET_PATH:-data/${DATASET_NAME}_sample/${DATASET_NAME}.jsonl}"
-RESULT_ROOT="${RESULT_ROOT:-result}"
+RESULT_ROOT="${RESULT_ROOT:-result_relrag}"
+WORKDIR="${WORKDIR:-}"
+RUN_ID="${RUN_ID:-}"
 TAG="${TAG:-}"     # e.g. dev200-run1
 NEW_RUN=${NEW_RUN:-1}
 
@@ -62,33 +64,23 @@ wait_port_closed() {
 }
 
 ensure_workspace() {
-  mkdir -p "$RESULT_ROOT"
-  # list existing workspaces: NNN-<dataset>[-tag]
-  local entries; entries=$(ls -1 "$RESULT_ROOT" 2>/dev/null | grep -E "^[0-9]{3}-${DATASET_NAME}($|-.*)" || true)
-  local next_idx="000"
-  if [[ "${NEW_RUN}" -eq 1 || -z "$entries" ]]; then
-    if [[ -n "$entries" ]]; then
-      local last; last=$(echo "$entries" | sort | tail -n 1)
-      local last_prefix; last_prefix=${last%%-*}
-      local next_val=$((10#$last_prefix + 1))
-      next_idx=$(printf "%03d" "$next_val")
-    else
-      next_idx="000"
-    fi
-  else
-    local last; last=$(echo "$entries" | sort | tail -n 1)
-    next_idx=${last%%-*}
+  local run_id="${RUN_ID}"
+  if [[ -z "$run_id" ]]; then
+    run_id="$(date +%Y%m%d_%H%M%S)"
   fi
-  local name_suffix="${DATASET_NAME}"
-  if [[ -n "$TAG" ]]; then name_suffix="${name_suffix}-${TAG}"; fi
-  WORK_DIR="$RESULT_ROOT/${next_idx}-${name_suffix}"
-  mkdir -p "$WORK_DIR" "$WORK_DIR/logs" "$WORK_DIR/answers" "$WORK_DIR/pending"
 
-  VLLM_LOG0="$WORK_DIR/logs/vllm_gpu0.log"
-  VLLM_PID0="$WORK_DIR/vllm_gpu0.pid"
+  if [[ -n "$WORKDIR" ]]; then
+    WORK_DIR="$WORKDIR"
+  else
+    WORK_DIR="$RESULT_ROOT/run_${run_id}/${DATASET_NAME}"
+  fi
+  mkdir -p "$WORK_DIR/artifacts/logs" "$WORK_DIR/artifacts/answers" "$WORK_DIR/artifacts/pending" "$WORK_DIR/artifacts/notes" "$WORK_DIR/preds"
+
+  VLLM_LOG0="$WORK_DIR/artifacts/logs/vllm_gpu0.log"
+  VLLM_PID0="$WORK_DIR/artifacts/vllm_gpu0.pid"
   log "Workspace: $WORK_DIR"
   log "Dataset:   $DATASET_PATH"
-  log "Notes out: $WORK_DIR/notes/notes.musique.jsonl"
+  log "Notes out: $WORK_DIR/artifacts/notes/notes.musique.jsonl"
 }
 
 start_vllm_single() {
@@ -146,10 +138,10 @@ cleanup() {
 usage() {
   cat <<USAGE
 Usage:
-  $(basename "$0") [--new] [--tag TAG]
+  $(basename "$0") [--new] [--tag TAG] [--workdir <path>]
 
 Environment overrides:
-  DATASET_NAME, DATASET_PATH, RESULT_ROOT, TAG, NEW_RUN
+  DATASET_NAME, DATASET_PATH, RESULT_ROOT, WORKDIR, RUN_ID, TAG, NEW_RUN
   VLLM_MODEL, VLLM_HOST, VLLM_PORT, GPU0, DTYPE, MAX_MODEL_LEN, VLLM_BIN, VLLM_DOWNLOAD_DIR, QUANTIZATION
   LMSTUDIO_ENDPOINT, LMSTUDIO_MODEL, PRODUCER_WORKERS, CONSUMER_CONCURRENCY
 
@@ -172,6 +164,8 @@ while [[ $# -gt 0 ]]; do
       NEW_RUN=1; shift ;;
     --tag)
       TAG="$2"; shift 2 ;;
+    --workdir|--work-dir)
+      WORKDIR="$2"; shift 2 ;;
     -h|--help)
       usage; exit 0 ;;
     *)
@@ -189,7 +183,7 @@ log "Launching Musique pipeline"
 python scripts/musique/run.py \
   --dataset-path "$DATASET_PATH" \
   --result-root "$RESULT_ROOT" \
-  --work-dir "$WORK_DIR" \
+  --workdir "$WORK_DIR" \
   --new \
   --tag "$TAG" \
   --vllm-endpoint "http://${VLLM_HOST}:${VLLM_PORT}/v1" \
@@ -200,4 +194,4 @@ python scripts/musique/run.py \
   --consumer-concurrency "$CONSUMER_CONCURRENCY"
 
 stop_vllm_and_wait
-log "Done. Answers (if enabled) under: ${WORK_DIR}/answers"
+log "Done. Answers (if enabled) under: ${WORK_DIR}/preds"

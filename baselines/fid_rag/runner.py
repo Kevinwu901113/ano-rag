@@ -151,8 +151,12 @@ class FiDRAGRunner:
         items = list(dataset)
         if limit:
             items = items[:limit]
-        log_dir = Path(work_dir)
-        resolved_run_name = run_name or log_dir.name
+        work_path = Path(work_dir)
+        preds_dir = work_path / "preds"
+        artifacts_dir = work_path / "artifacts"
+        preds_dir.mkdir(parents=True, exist_ok=True)
+        artifacts_dir.mkdir(parents=True, exist_ok=True)
+        resolved_run_name = run_name or work_path.name
         answers: List[Dict[str, Any]] = []
         qa_rows: List[str] = []
         qa_rows_no_header: List[str] = []
@@ -201,7 +205,7 @@ class FiDRAGRunner:
                         }
                         for hit in hits
                     ],
-                    log_dir=log_dir,
+                    log_dir=artifacts_dir,
                 )
             except Exception as log_exc:
                 logger.error("retrieval logging failed for {}: {}", qid, log_exc)
@@ -219,13 +223,11 @@ class FiDRAGRunner:
                     )
                 )
 
-        out_root = Path(work_dir)
-        out_root.mkdir(parents=True, exist_ok=True)
-        answers_path = out_root / "answers.json"
-        qa_path = out_root / "qa.tsv"
-        qa_no_header_path = out_root / "qa.no_header.tsv"
-        qa_q_path = out_root / "qa_with_question.tsv"
-        debug_dir = out_root / "debug"
+        answers_path = preds_dir / "answers.json"
+        qa_path = preds_dir / "qa.tsv"
+        qa_no_header_path = preds_dir / "qa.no_header.tsv"
+        qa_q_path = preds_dir / "qa_with_question.tsv"
+        debug_dir = artifacts_dir / "debug"
         answers_path.write_text(json.dumps(answers, ensure_ascii=False, indent=2), encoding="utf-8")
         qa_path.write_text("\n".join(qa_rows), encoding="utf-8")
         qa_no_header_path.write_text("\n".join(qa_rows_no_header), encoding="utf-8")

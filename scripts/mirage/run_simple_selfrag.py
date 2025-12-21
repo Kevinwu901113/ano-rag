@@ -15,6 +15,7 @@ if str(ROOT) not in sys.path:
 
 from config.config_loader import config as global_config
 from utils.retrieval_logger import log_retrieval
+from utils.run_layout import ensure_workdir_layout, resolve_workdir
 
 def _select_workspace(root: Path, prefix: str, force_new: bool) -> Path:
     root.mkdir(parents=True, exist_ok=True)
@@ -29,8 +30,8 @@ def _select_workspace(root: Path, prefix: str, force_new: bool) -> Path:
 def main():
     parser = argparse.ArgumentParser(description="Run Simple Self-RAG Baseline on MIRAGE")
     parser.add_argument("--dataset-path", type=str, default="data/mirage/mirage_dataset.json", help="Path to MIRAGE dataset")
-    parser.add_argument("--result-root", type=str, default="result", help="Root directory for results")
-    parser.add_argument("--work-dir", type=str, help="Specific working directory (optional)")
+    parser.add_argument("--result-root", type=str, default="result_relrag", help="Root directory for results")
+    parser.add_argument("--workdir", "--work-dir", dest="work_dir", type=str, help="Specific working directory (optional)")
     parser.add_argument("--new", action="store_true", help="Force creating a new workspace")
     parser.add_argument("--limit", type=int, default=0, help="Limit number of queries")
     parser.add_argument("--lmstudio-endpoint", type=str, help="LM Studio endpoint override")
@@ -46,11 +47,10 @@ def main():
         global_config.set("lmstudio.model", args.lmstudio_model)
 
     # Setup workspace
-    if args.work_dir:
-        work_dir = Path(args.work_dir)
-        work_dir.mkdir(parents=True, exist_ok=True)
-    else:
-        work_dir = _select_workspace(Path(args.result_root), "mirage_simple_selfrag", args.new)
+    work_dir = resolve_workdir(args.work_dir, result_root=args.result_root, dataset="mirage")
+    paths = ensure_workdir_layout(work_dir)
+    artifacts_dir = paths["artifacts"]
+    preds_dir = paths["preds"]
     run_name = work_dir.name
     dataset_name = "mirage"
         
@@ -58,8 +58,8 @@ def main():
     logger.info(f"Writing Simple Self-RAG outputs to {work_dir}")
 
     # 2. Determine Index Paths
-    index_path = work_dir / "simple_selfrag_index.faiss"
-    chunk_store_path = work_dir / "simple_selfrag_chunk_store.pkl"
+    index_path = artifacts_dir / "simple_selfrag_index.faiss"
+    chunk_store_path = artifacts_dir / "simple_selfrag_chunk_store.pkl"
     
     # 3. Check/Build Index
     if not index_path.exists() or not chunk_store_path.exists():
@@ -212,7 +212,7 @@ def main():
                         }
                         for hit in hits
                     ],
-                    log_dir=work_dir,
+                    log_dir=artifacts_dir,
                 )
             except Exception as log_exc:
                 logger.error(f"retrieval logging failed for {qid}: {log_exc}")
@@ -227,12 +227,12 @@ def main():
             })
 
     # Save results
-    output_path = work_dir / "answers.json"
+    output_path = preds_dir / "answers.json"
     with output_path.open("w", encoding="utf-8") as f:
         json.dump(answers, f, indent=2, ensure_ascii=False)
         
     # Save QA TSV
-    qa_path = work_dir / "qa.tsv"
+    qa_path = preds_dir / "qa.tsv"
     with qa_path.open("w", encoding="utf-8") as f:
         for item in answers:
             q = item["question"].replace("\t", " ").strip()

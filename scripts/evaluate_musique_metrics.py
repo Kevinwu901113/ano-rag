@@ -107,7 +107,8 @@ def evaluate_run(run_dir: Path, gt_map: Dict[str, List[str]]):
     preds = {}
     
     # 1. Try musique_results.jsonl (NDJSON with id, predicted_answer)
-    res_path = run_dir / "musique_results.jsonl"
+    preds_dir = run_dir / "preds"
+    res_path = preds_dir / "musique_results.jsonl"
     if res_path.exists():
         with open(res_path, 'r', encoding='utf-8') as f:
             for line in f:
@@ -122,7 +123,7 @@ def evaluate_run(run_dir: Path, gt_map: Dict[str, List[str]]):
     
     # 2. Try pred.json (HotpotQA style: {"answer": {id: ans}, ...})
     if not preds:
-        pred_path = run_dir / "pred.json"
+        pred_path = preds_dir / "pred.json"
         if pred_path.exists():
             with open(pred_path, 'r', encoding='utf-8') as f:
                 data = json.load(f)
@@ -163,7 +164,9 @@ def evaluate_run(run_dir: Path, gt_map: Dict[str, List[str]]):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--dataset", default="data/musique_sample/musique.jsonl")
-    parser.add_argument("--result-root", default="result/musique")
+    parser.add_argument("--result-root", default="result_relrag")
+    parser.add_argument("--workdir", "--work-dir", dest="work_dir", default=None)
+    parser.add_argument("--output", default=None, help="Path to write metrics JSON.")
     args = parser.parse_args()
     
     dataset_path = Path(args.dataset)
@@ -175,21 +178,31 @@ def main():
     gt_map = load_musique_dataset(str(dataset_path))
     print(f"Loaded {len(gt_map)} questions.")
     
-    root_dir = Path(args.result_root)
-    if not root_dir.exists():
-        print(f"Result root not found: {root_dir}")
-        return
-        
     runs = []
-    for d in root_dir.iterdir():
-        if d.is_dir():
-            res = evaluate_run(d, gt_map)
-            if res:
-                runs.append((d.name, res[0], res[1], res[2]))
+    if args.work_dir:
+        run_dirs = [Path(args.work_dir)]
+    else:
+        root_dir = Path(args.result_root)
+        if not root_dir.exists():
+            print(f"Result root not found: {root_dir}")
+            return
+        run_dirs = [d for d in root_dir.iterdir() if d.is_dir()]
+
+    for d in run_dirs:
+        res = evaluate_run(d, gt_map)
+        if res:
+            runs.append((d.name, res[0], res[1], res[2]))
     
     # Sort by F1
     runs.sort(key=lambda x: x[2], reverse=True)
     
+    metrics = {name: {"EM": em, "AnswerF1": f1, "count": count} for name, em, f1, count in runs}
+    if args.output:
+        output_path = Path(args.output)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        with output_path.open("w", encoding="utf-8") as handle:
+            json.dump(metrics, handle, indent=2)
+
     print("\n| Run | EM | F1 | Count |")
     print("| --- | --- | --- | --- |")
     for name, em, f1, count in runs:

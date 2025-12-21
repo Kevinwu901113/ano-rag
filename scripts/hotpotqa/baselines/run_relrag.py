@@ -23,15 +23,55 @@ from scripts.hotpotqa.baselines.baseline_utils import (
     clean_hotpot_answer,
     format_context,
     save_predictions_and_qa,
-    select_workspace,
     TransformerEmbedder,
 )
 from utils.device import run_with_fallback
 from utils.retrieval_logger import log_retrieval
+from utils.run_layout import ensure_workdir_layout, resolve_workdir
 
 def load_dataset(path: str) -> List[Dict[str, Any]]:
     with open(path, "r", encoding="utf-8") as f:
         return json.load(f)
+
+def _get_qid(item: Dict[str, Any]) -> str:
+    return str(item.get("_id") or item.get("id") or "")
+
+def _load_resume_state(
+    output_path: Path,
+    qa_path: Path,
+) -> Tuple[Dict[str, Dict[str, Any]], List[Tuple[str, str]], Set[str]]:
+    predictions: Dict[str, Dict[str, Any]] = {"answer": {}, "sp": {}}
+    qa_rows: List[Tuple[str, str]] = []
+    completed: Set[str] = set()
+
+    if output_path.exists():
+        try:
+            payload = json.loads(output_path.read_text(encoding="utf-8"))
+            if isinstance(payload, dict):
+                answers = payload.get("answer")
+                sps = payload.get("sp")
+                if isinstance(answers, dict):
+                    predictions["answer"] = answers
+                    completed.update(str(k) for k in answers.keys())
+                if isinstance(sps, dict):
+                    predictions["sp"] = sps
+        except Exception as exc:
+            logger.warning("Failed to load existing predictions from {}: {}", output_path, exc)
+
+    if qa_path.exists():
+        try:
+            for line in qa_path.read_text(encoding="utf-8").splitlines():
+                if not line.strip():
+                    continue
+                if "\t" in line:
+                    q, a = line.split("\t", 1)
+                else:
+                    q, a = line, ""
+                qa_rows.append((q, a))
+        except Exception as exc:
+            logger.warning("Failed to load existing QA log from {}: {}", qa_path, exc)
+
+    return predictions, qa_rows, completed
 
 class RelRAG:
     """
@@ -196,8 +236,8 @@ def main():
     parser.add_argument("--dataset", required=True)
     parser.add_argument("--output", default=None, help="Output path for prediction json (default: work_dir/pred.json)")
     parser.add_argument("--qa-path", default=None, help="Optional QA log path (default: work_dir/qa.tsv)")
-    parser.add_argument("--result-root", default="result/hotpotqa", help="Root directory for auto workspace creation")
-    parser.add_argument("--work-dir", default=None, help="Workspace directory (default: auto under result-root)")
+    parser.add_argument("--result-root", default="result_relrag", help="Root directory for auto workspace creation")
+    parser.add_argument("--workdir", "--work-dir", dest="work_dir", default=None, help="Workspace directory (default: auto under result-root)")
     parser.add_argument("--new", action="store_true", help="Force creating a new workspace")
     parser.add_argument("--lm-endpoint", default="http://localhost:1234/v1")
     parser.add_argument("--lm-model", default="model-identifier")
@@ -233,6 +273,8 @@ def main():
     parser.add_argument("--limit", type=int, default=0)
     parser.add_argument("--max-context", type=int, default=10, help="Max number of paragraphs from context to keep")
     parser.add_argument("--num-workers", type=int, default=1, help="Number of parallel workers")
+    parser.add_argument("--resume", action="store_true", help="Resume from existing outputs in workdir")
+    parser.add_argument("--save-every", type=int, default=50, help="Checkpoint every N samples (0 disables)")
     
     args = parser.parse_args()
 
@@ -243,15 +285,14 @@ def main():
     logger.info(f"Loaded {len(data)} examples from {args.dataset}")
 
     # Workspace setup
-    if args.work_dir:
-        work_dir = Path(args.work_dir)
-        work_dir.mkdir(parents=True, exist_ok=True)
-    else:
-        work_dir = select_workspace(Path(args.result_root), "hotpot_relrag", args.new)
+    work_dir = resolve_workdir(args.work_dir, result_root=args.result_root, dataset="hotpotqa")
+    paths = ensure_workdir_layout(work_dir)
+    artifacts_dir = paths["artifacts"]
+    preds_dir = paths["preds"]
     run_name = work_dir.name
     dataset_name = "hotpotqa"
-    output_path = Path(args.output) if args.output else work_dir / "pred.json"
-    qa_path = Path(args.qa_path) if args.qa_path else work_dir / "qa.tsv"
+    output_path = Path(args.output) if args.output else preds_dir / "pred.json"
+    qa_path = Path(args.qa_path) if args.qa_path else preds_dir / "qa.tsv"
     logger.info(f"Writing outputs to workspace {work_dir}")
 
     llm = None
@@ -281,9 +322,35 @@ def main():
     
     predictions = {"answer": {}, "sp": {}}
     qa_rows: List[Tuple[str, str]] = []
+    completed: Set[str] = set()
+    if args.resume:
+        predictions, qa_rows, completed = _load_resume_state(output_path, qa_path)
+        if completed:
+            logger.info("Resuming with {} existing predictions", len(completed))
     
     num_workers = max(1, args.num_workers)
-    logger.info(f"Running RelRAG on {len(data)} examples with {num_workers} workers...")
+    work_items: List[Dict[str, Any]] = []
+    skipped = 0
+    for item in data:
+        qid = _get_qid(item)
+        if qid and qid in completed:
+            skipped += 1
+            continue
+        work_items.append(item)
+    if skipped:
+        logger.info("Skipping {} already completed examples", skipped)
+    logger.info(f"Running RelRAG on {len(work_items)} examples with {num_workers} workers...")
+
+    if not work_items:
+        logger.info("No new items to process; keeping existing outputs.")
+        save_predictions_and_qa(
+            work_dir,
+            predictions,
+            qa_rows,
+            output_path=output_path,
+            qa_path=qa_path,
+        )
+        return
     
     with ThreadPoolExecutor(max_workers=num_workers) as ex:
         futures = [
@@ -295,13 +362,15 @@ def main():
                 args,
                 run_name=run_name,
                 dataset_name=dataset_name,
-                log_dir=work_dir,
+                log_dir=artifacts_dir,
                 embed_meta=embed_meta,
                 embed_meta_lock=embed_meta_lock,
             )
-            for item in data
+            for item in work_items
         ]
 
+        save_every = max(0, int(args.save_every))
+        processed = 0
         for fut in tqdm(as_completed(futures), total=len(futures)):
             try:
                 qid, question, ans, sp = fut.result()
@@ -309,7 +378,17 @@ def main():
                     continue
                 predictions["answer"][qid] = ans
                 predictions["sp"][qid] = sp
+                completed.add(str(qid))
                 qa_rows.append((question, ans))
+                processed += 1
+                if save_every and processed % save_every == 0:
+                    save_predictions_and_qa(
+                        work_dir,
+                        predictions,
+                        qa_rows,
+                        output_path=output_path,
+                        qa_path=qa_path,
+                    )
             except Exception as e:
                 logger.error(f"Error in worker: {e}")
             
@@ -334,7 +413,7 @@ def main():
         "normalize": bool(args.embed_normalize),
         "dim": int(embed_meta["dim"] or 0),
     }
-    (work_dir / "meta.json").write_text(json.dumps(meta_payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    (artifacts_dir / "meta.json").write_text(json.dumps(meta_payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
 if __name__ == "__main__":
     main()

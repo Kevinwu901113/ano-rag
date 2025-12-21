@@ -14,6 +14,7 @@ from baselines.simple_graphrag import SimpleGraphRAGRunner
 from config import config as global_config
 from structrag import StructRAGBaselineRunner
 from utils import setup_logging
+from utils.run_layout import ensure_workdir_layout, resolve_workdir
 
 
 def _select_workspace(root: Path, prefix: str, force_new: bool) -> Path:
@@ -42,13 +43,13 @@ def main() -> None:
     parser.add_argument("--mode", choices=["structrag_baseline", "naive_rag", "direct_llm", "simple_graphrag"], default="structrag_baseline")
     parser.add_argument("--dataset-path", default="data/mirage_sample/dataset.json")
     parser.add_argument("--doc-pool", default="data/mirage_sample/doc_pool.json")
-    parser.add_argument("--index-dir", default="result/mirage_naive")
+    parser.add_argument("--index-dir", default=None)
     parser.add_argument("--index-path", default=None)
     parser.add_argument("--chunks-path", default=None)
     parser.add_argument("--topk", type=int, default=None)
     parser.add_argument("--limit", type=int, default=0)
-    parser.add_argument("--result-root", default="result")
-    parser.add_argument("--work-dir", default=None)
+    parser.add_argument("--result-root", default="result_relrag")
+    parser.add_argument("--workdir", "--work-dir", dest="work_dir", default=None)
     parser.add_argument("--new", action="store_true")
     parser.add_argument("--lmstudio-endpoint", default=None)
     parser.add_argument("--lmstudio-model", default=None)
@@ -67,16 +68,13 @@ def main() -> None:
     if args.limit and args.limit > 0:
         dataset = dataset[: args.limit]
 
-    result_root = Path(args.result_root)
-    if args.work_dir:
-        work_dir = Path(args.work_dir)
-        work_dir.mkdir(parents=True, exist_ok=True)
-    else:
-        work_dir = _select_workspace(result_root, f"mirage_{args.mode}", args.new)
+    work_dir = resolve_workdir(args.work_dir, result_root=args.result_root, dataset="mirage")
+    paths = ensure_workdir_layout(work_dir)
+    artifacts_dir = paths["artifacts"]
     setup_logging(str(work_dir / f"{args.mode}.log"))
     logger.info("Running mode={} workspace={}", args.mode, work_dir)
 
-    index_dir = Path(args.index_dir)
+    index_dir = Path(args.index_dir) if args.index_dir else artifacts_dir / "naive_index"
     index_path = Path(args.index_path) if args.index_path else index_dir / "index.faiss"
     chunks_path = Path(args.chunks_path) if args.chunks_path else index_dir / "chunks.jsonl"
 

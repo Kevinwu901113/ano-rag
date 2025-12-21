@@ -20,9 +20,9 @@ from scripts.hotpotqa.baselines.baseline_utils import (
     clean_hotpot_answer,
     format_context,
     save_predictions_and_qa,
-    select_workspace,
 )
 from utils.retrieval_logger import log_retrieval
+from utils.run_layout import ensure_workdir_layout, resolve_workdir
 
 def load_dataset(path: str) -> List[Dict[str, Any]]:
     with open(path, "r", encoding="utf-8") as f:
@@ -158,8 +158,8 @@ def main():
     parser.add_argument("--dataset", required=True)
     parser.add_argument("--output", default=None, help="Output path for prediction json (default: work_dir/pred.json)")
     parser.add_argument("--qa-path", default=None, help="Optional QA log path (default: work_dir/qa.tsv)")
-    parser.add_argument("--result-root", default="result/hotpotqa", help="Root directory for auto workspace creation")
-    parser.add_argument("--work-dir", default=None, help="Workspace directory (default: auto under result-root)")
+    parser.add_argument("--result-root", default="result_relrag", help="Root directory for auto workspace creation")
+    parser.add_argument("--workdir", "--work-dir", dest="work_dir", default=None, help="Workspace directory (default: auto under result-root)")
     parser.add_argument("--new", action="store_true", help="Force creating a new workspace")
     parser.add_argument("--lm-endpoint", default="http://localhost:1234/v1")
     parser.add_argument("--lm-model", default="model-identifier")
@@ -183,15 +183,14 @@ def main():
     logger.info(f"Loaded {len(data)} examples from {args.dataset}")
 
     # Workspace setup
-    if args.work_dir:
-        work_dir = Path(args.work_dir)
-        work_dir.mkdir(parents=True, exist_ok=True)
-    else:
-        work_dir = select_workspace(Path(args.result_root), "hotpot_graphrag", args.new)
+    work_dir = resolve_workdir(args.work_dir, result_root=args.result_root, dataset="hotpotqa")
+    paths = ensure_workdir_layout(work_dir)
+    artifacts_dir = paths["artifacts"]
+    preds_dir = paths["preds"]
     run_name = work_dir.name
     dataset_name = "hotpotqa"
-    output_path = Path(args.output) if args.output else work_dir / "pred.json"
-    qa_path = Path(args.qa_path) if args.qa_path else work_dir / "qa.tsv"
+    output_path = Path(args.output) if args.output else preds_dir / "pred.json"
+    qa_path = Path(args.qa_path) if args.qa_path else preds_dir / "qa.tsv"
     logger.info(f"Writing outputs to workspace {work_dir}")
 
     extract_endpoint = args.extract_endpoint or args.lm_endpoint
@@ -233,8 +232,8 @@ def main():
                 args,
                 run_name=run_name,
                 dataset_name=dataset_name,
-                log_dir=work_dir,
-            )
+                log_dir=artifacts_dir,
+                )
             for item in data
         ]
 

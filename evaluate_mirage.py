@@ -1,9 +1,11 @@
+import argparse
 import json
 import csv
 import sys
 import re
 import string
 from collections import Counter
+from pathlib import Path
 
 def normalize_answer(s):
     """Lower text and remove punctuation, articles and extra whitespace."""
@@ -93,24 +95,58 @@ def evaluate(dataset_path, results_path):
 
     if total_count == 0:
         print("No matching queries found between dataset and results.")
-        return
+        return {"EM": 0.0, "AnswerF1": 0.0, "count": 0, "missing": missing_in_dataset}
 
-    em_score = 100.0 * exact_match_total / total_count
-    f1_score_avg = 100.0 * f1_total / total_count
+    em_score = exact_match_total / total_count
+    f1_score_avg = f1_total / total_count
     
     print(f"\nEvaluation Results:")
     print(f"Total matched queries: {total_count}")
-    print(f"Exact Match (EM): {em_score:.2f}")
-    print(f"F1 Score: {f1_score_avg:.2f}")
+    print(f"Exact Match (EM): {em_score * 100.0:.2f}")
+    print(f"F1 Score: {f1_score_avg * 100.0:.2f}")
     
     if missing_in_dataset > 0:
         print(f"Warning: {missing_in_dataset} queries in results were not found in the dataset.")
 
+    return {
+        "EM": em_score,
+        "AnswerF1": f1_score_avg,
+        "count": total_count,
+        "missing": missing_in_dataset,
+    }
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Evaluate MIRAGE predictions against dataset.")
+    parser.add_argument("--dataset", default="data/mirage_sample/dataset.json")
+    parser.add_argument("--qa-path", default=None, help="Path to qa.tsv (question\\tanswer)")
+    parser.add_argument("--workdir", "--work-dir", dest="work_dir", default=None, help="Dataset workdir to evaluate")
+    parser.add_argument("--output", default=None, help="Path to write metrics JSON")
+    args = parser.parse_args()
+
+    dataset_file = Path(args.dataset)
+    if args.work_dir:
+        work_dir = Path(args.work_dir)
+        qa_path = Path(args.qa_path) if args.qa_path else work_dir / "preds" / "qa.tsv"
+        output_path = Path(args.output) if args.output else work_dir / "metrics" / "mirage_metrics.json"
+    else:
+        if not args.qa_path:
+            raise SystemExit("--qa-path is required when --workdir is not set")
+        qa_path = Path(args.qa_path)
+        output_path = Path(args.output) if args.output else None
+
+    if not dataset_file.exists():
+        raise FileNotFoundError(f"Dataset not found: {dataset_file}")
+    if not qa_path.exists():
+        raise FileNotFoundError(f"QA file not found: {qa_path}")
+
+    metrics = evaluate(str(dataset_file), str(qa_path))
+    if metrics is None:
+        return
+    if output_path:
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text(json.dumps(metrics, indent=2), encoding="utf-8")
+
+
 if __name__ == "__main__":
-    if len(sys.argv) != 3:
-        print("Usage: python evaluate_mirage.py <dataset_path> <results_path>")
-        sys.exit(1)
-    
-    dataset_file = sys.argv[1]
-    results_file = sys.argv[2]
-    evaluate(dataset_file, results_file)
+    main()

@@ -249,10 +249,11 @@ class SimpleGraphRAGRunner:
 
         # Save results
         out_root = Path(work_dir)
-        out_root.mkdir(parents=True, exist_ok=True)
+        preds_dir = out_root / "preds"
+        preds_dir.mkdir(parents=True, exist_ok=True)
         
-        output_path = out_root / "answers.json"
-        qa_log_path = out_root / "qa.tsv"
+        output_path = preds_dir / "answers.json"
+        qa_log_path = preds_dir / "qa.tsv"
         
         with open(output_path, "w", encoding="utf-8") as f:
             json.dump(answers, f, ensure_ascii=False, indent=2)
@@ -260,7 +261,7 @@ class SimpleGraphRAGRunner:
         with open(qa_log_path, "w", encoding="utf-8") as f:
             f.write("\n".join(qa_lines))
             
-        logger.info(f"Simple GraphRAG finished. Results saved to {out_root}")
+        logger.info(f"Simple GraphRAG finished. Results saved to {preds_dir}")
         
         return {
             "answers": str(output_path),

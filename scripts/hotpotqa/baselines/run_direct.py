@@ -19,8 +19,8 @@ from scripts.hotpotqa.baselines.baseline_utils import (
     clean_hotpot_answer,
     format_context,
     save_predictions_and_qa,
-    select_workspace,
 )
+from utils.run_layout import ensure_workdir_layout, resolve_workdir
 
 def load_dataset(path: str) -> List[Dict[str, Any]]:
     with open(path, "r", encoding="utf-8") as f:
@@ -69,8 +69,8 @@ def main():
     parser.add_argument("--dataset", required=True, help="Path to hotpotqa distractor dev/test json")
     parser.add_argument("--output", default=None, help="Output path for prediction json (default: work_dir/pred.json)")
     parser.add_argument("--qa-path", default=None, help="Optional QA tsv path (default: work_dir/qa.tsv)")
-    parser.add_argument("--result-root", default="result/hotpotqa", help="Root directory for auto-created workspaces")
-    parser.add_argument("--work-dir", default=None, help="Workspace directory (default: auto under result-root)")
+    parser.add_argument("--result-root", default="result_relrag", help="Root directory for auto-created workspaces")
+    parser.add_argument("--workdir", "--work-dir", dest="work_dir", default=None, help="Workspace directory (default: auto under result-root)")
     parser.add_argument("--new", action="store_true", help="Force creating a new workspace under result-root")
     parser.add_argument("--lm-endpoint", default="http://localhost:1234/v1", help="LLM API endpoint")
     parser.add_argument("--lm-model", default="model-identifier", help="LLM model name")
@@ -94,13 +94,11 @@ def main():
     logger.info(f"Loaded {len(data)} examples from {args.dataset}")
 
     # Workspace setup
-    if args.work_dir:
-        work_dir = Path(args.work_dir)
-        work_dir.mkdir(parents=True, exist_ok=True)
-    else:
-        work_dir = select_workspace(Path(args.result_root), "hotpot_direct", args.new)
-    output_path = Path(args.output) if args.output else work_dir / "pred.json"
-    qa_path = Path(args.qa_path) if args.qa_path else work_dir / "qa.tsv"
+    work_dir = resolve_workdir(args.work_dir, result_root=args.result_root, dataset="hotpotqa")
+    paths = ensure_workdir_layout(work_dir)
+    preds_dir = paths["preds"]
+    output_path = Path(args.output) if args.output else preds_dir / "pred.json"
+    qa_path = Path(args.qa_path) if args.qa_path else preds_dir / "qa.tsv"
     logger.info(f"Writing outputs to workspace {work_dir}")
 
     # Initialize LLM Client

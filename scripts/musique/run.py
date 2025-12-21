@@ -25,6 +25,7 @@ from generator.note_generator import NoteGenerator
 from generator.answerer import call_lmstudio
 from utils.logging_utils import setup_logging
 from utils.notes_cache import NotesCache
+from utils.run_layout import ensure_workdir_layout, resolve_workdir
 from utils.vllm_server_manager import VLLMServerManager
 
 
@@ -290,7 +291,9 @@ def _warm_up_lmstudio(endpoint: str, model: str, log_path: Path, max_wait_sec: i
 # Producer/Consumer pipeline
 # -------------------------------
 def _load_or_build_manifests(work_dir: Path, dataset_path: Path) -> List[ManifestItem]:
-    manifests_path = work_dir / "manifests.jsonl"
+    artifacts_dir = work_dir / "artifacts"
+    artifacts_dir.mkdir(parents=True, exist_ok=True)
+    manifests_path = artifacts_dir / "manifests.jsonl"
     items: List[ManifestItem] = []
     if manifests_path.exists():
         for row in ManifestReader.read_jsonl(str(manifests_path)):
@@ -335,8 +338,9 @@ class ManifestReader:
 
 def _append_notes_index(work_dir: Path, pairs: List[Tuple[str, str]]) -> None:
     # pairs: (hash, pid)
-    idx_path = work_dir / "notes_index.jsonl"
-    idx_path.parent.mkdir(parents=True, exist_ok=True)
+    artifacts_dir = work_dir / "artifacts"
+    artifacts_dir.mkdir(parents=True, exist_ok=True)
+    idx_path = artifacts_dir / "notes_index.jsonl"
     # avoid duplicates by in-memory set when file exists
     seen: set[Tuple[str, str]] = set()
     if idx_path.exists():
@@ -367,10 +371,14 @@ def run_pipeline(
     consumer_concurrency: int = 2,
 ) -> None:
     # Directories
-    logs_dir = work_dir / "logs"
-    pending_dir = work_dir / "pending"
-    answers_dir = work_dir / "answers"
-    notes_dir = work_dir / "notes"
+    artifacts_dir = work_dir / "artifacts"
+    preds_dir = work_dir / "preds"
+    artifacts_dir.mkdir(parents=True, exist_ok=True)
+    preds_dir.mkdir(parents=True, exist_ok=True)
+    logs_dir = artifacts_dir / "logs"
+    pending_dir = artifacts_dir / "pending"
+    answers_dir = artifacts_dir / "answers"
+    notes_dir = artifacts_dir / "notes"
     logs_dir.mkdir(parents=True, exist_ok=True)
     pending_dir.mkdir(parents=True, exist_ok=True)
     answers_dir.mkdir(parents=True, exist_ok=True)
@@ -445,7 +453,7 @@ def run_pipeline(
         qid_to_pid_text[qid] = mapping
 
     # Init cache
-    cache = NotesCache(str(work_dir / "notes_cache.parquet"))
+    cache = NotesCache(str(artifacts_dir / "notes_cache.parquet"))
 
     # Pending files
     pending_notes_path = pending_dir / "pending_notes.txt"
@@ -456,7 +464,7 @@ def run_pipeline(
     # Notes out (mirage-style naming)
     notes_out_path = notes_dir / "notes.musique.jsonl"
     # Official MuSiQue evaluation output (JSONL)
-    musique_results_path = work_dir / "musique_results.jsonl"
+    musique_results_path = preds_dir / "musique_results.jsonl"
 
     # Recover checkpoints
     completed: set[str] = set()
@@ -788,7 +796,7 @@ def run_pipeline(
 
     # Emit aggregated answers.json (mirage-style) if we generated answers
     if lmstudio_endpoint and lmstudio_model:
-        answers_json_path = work_dir / "answers.json"
+        answers_json_path = preds_dir / "answers.json"
         results: List[Dict[str, Any]] = []
         # Build quick lookup for question by id
         qid_to_question: Dict[str, str] = {}
@@ -825,8 +833,8 @@ def run_pipeline(
 def main() -> None:
     parser = argparse.ArgumentParser(description="Musique run orchestrator with two-stage pipeline")
     parser.add_argument("--dataset-path", default="data/musique_sample/musique.jsonl")
-    parser.add_argument("--result-root", default="result")
-    parser.add_argument("--work-dir", default=None)
+    parser.add_argument("--result-root", default="result_relrag")
+    parser.add_argument("--workdir", "--work-dir", dest="work_dir", default=None)
     parser.add_argument("--new", action="store_true")
     parser.add_argument("--tag", default=None, help="Custom tag for <id> (e.g., dev200-run1)")
     parser.add_argument("--vllm-endpoint", default=None)
@@ -848,16 +856,14 @@ def main() -> None:
     lmstudio_endpoint = args.lmstudio_endpoint or cfg.get("lmstudio.endpoint")
     lmstudio_model = args.lmstudio_model or cfg.get("lmstudio.model")
 
-    result_root = Path(args.result_root)
-    if args.work_dir:
-        work_dir = Path(args.work_dir)
-        work_dir.mkdir(parents=True, exist_ok=True)
-    else:
-        work_dir = _select_workspace(result_root, args.new, args.tag)
-    (work_dir / "answers").mkdir(parents=True, exist_ok=True)
-    (work_dir / "pending").mkdir(parents=True, exist_ok=True)
-    (work_dir / "logs").mkdir(parents=True, exist_ok=True)
-    (work_dir / "notes").mkdir(parents=True, exist_ok=True)
+    work_dir = resolve_workdir(args.work_dir, result_root=args.result_root, dataset="musique")
+    paths = ensure_workdir_layout(work_dir)
+    artifacts_dir = paths["artifacts"]
+    preds_dir = paths["preds"]
+    (artifacts_dir / "answers").mkdir(parents=True, exist_ok=True)
+    (artifacts_dir / "pending").mkdir(parents=True, exist_ok=True)
+    (artifacts_dir / "logs").mkdir(parents=True, exist_ok=True)
+    (artifacts_dir / "notes").mkdir(parents=True, exist_ok=True)
 
     # Lock
     _acquire_lock(work_dir)
@@ -899,7 +905,7 @@ def main() -> None:
                     return 8001
             manager = VLLMServerManager({
                 "enabled": True,
-                "log_dir": str(work_dir / "logs"),
+                "log_dir": str(artifacts_dir / "logs"),
                 "servers": [
                     {
                         "name": "vllm_gpu0",
@@ -915,7 +921,7 @@ def main() -> None:
             manager.start_all()
             # Log PID and GPU binding
             for meta in manager.get_process_info():
-                with open(work_dir / "logs" / "vllm.log", "a", encoding="utf-8") as fh:
+                with open(artifacts_dir / "logs" / "vllm.log", "a", encoding="utf-8") as fh:
                     fh.write(f"PID {meta.get('pid')} on {meta.get('host')}:{meta.get('port')} CUDA={meta.get('cuda_devices')}\n")
 
         # Signal handling for graceful shutdown

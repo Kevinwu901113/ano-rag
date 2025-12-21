@@ -41,13 +41,14 @@ def save_musique_results_and_qa(
 ) -> Tuple[Path, Path]:
     """Save MuSiQue official results.jsonl and qa.tsv."""
     work_dir.mkdir(parents=True, exist_ok=True)
-    out_path = Path(output_path) if output_path else work_dir / "musique_results.jsonl"
+    preds_dir = work_dir / "preds"
+    out_path = Path(output_path) if output_path else preds_dir / "musique_results.jsonl"
     out_path.parent.mkdir(parents=True, exist_ok=True)
     with out_path.open("w", encoding="utf-8") as handle:
         for row in results:
             handle.write(json.dumps(row, ensure_ascii=False) + "\n")
 
-    qa_file = Path(qa_path) if qa_path else work_dir / "qa.tsv"
+    qa_file = Path(qa_path) if qa_path else preds_dir / "qa.tsv"
     qa_file.parent.mkdir(parents=True, exist_ok=True)
     lines: List[str] = []
     for question, answer in qa_rows:
@@ -56,4 +57,3 @@ def save_musique_results_and_qa(
         lines.append(f"{q}\t{a}")
     qa_file.write_text("\n".join(lines), encoding="utf-8")
     return out_path, qa_file
-

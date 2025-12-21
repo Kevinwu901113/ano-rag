@@ -13,7 +13,9 @@ GPU0="${GPU0:-0}"
 GPU1="${GPU1:-1}"
 DTYPE="${DTYPE:-float16}"
 MAX_MODEL_LEN="${MAX_MODEL_LEN:-10000}"
-RESULT_ROOT="${RESULT_ROOT:-result}"
+RESULT_ROOT="${RESULT_ROOT:-result_relrag}"
+WORKDIR="${WORKDIR:-}"
+RUN_ID="${RUN_ID:-}"
 USE_GUIDED_JSON="${USE_GUIDED_JSON:-1}"
 JSON_SCHEMA_NAME="${JSON_SCHEMA_NAME:-ano-note}"
 VLLM_GUIDED_BACKEND="${VLLM_GUIDED_BACKEND:-xgrammar}"
@@ -56,7 +58,7 @@ prepare_run_config() {
   local faiss_dir="$IDX_DIR/faiss"
   local bm25_store="$IDX_DIR/bm25/notes"
   mkdir -p "$faiss_dir" "$bm25_store"
-  RUN_CONFIG="$WORK_DIR/config.override.yaml"
+  RUN_CONFIG="$ARTIFACTS_DIR/config.override.yaml"
   python - "$base_cfg" "$RUN_CONFIG" "$OUT_MERGED" "$IDX_DIR" "$faiss_dir" "$bm25_store" <<'PY'
 import os, sys, yaml
 base_cfg, out_cfg, notes_path, idx_dir, faiss_dir, bm25_store = sys.argv[1:7]
@@ -175,54 +177,33 @@ resolve_model_path() {
 }
 
 ensure_workspace() {
-  mkdir -p "$RESULT_ROOT"
-  local selection=""
-  local latest=""
-  local max_index=0
-  while IFS= read -r dir; do
-    base="$(basename "$dir")"
-    if [[ $base =~ ^([0-9]{3})-(.*)$ ]]; then
-      local idx_raw=${BASH_REMATCH[1]}
-      local ds=${BASH_REMATCH[2]}
-      local idx=$((10#$idx_raw))
-      (( idx > max_index )) && max_index=$idx
-      if [[ $ds == "$DATASET" ]]; then
-        latest="$dir"
-      fi
-    fi
-  done < <(find "$RESULT_ROOT" -maxdepth 1 -mindepth 1 -type d | sort)
-
-  if (( NEW_RUN )); then
-    local next=$((max_index + 1))
-    local id=$(printf "%03d" "$next")
-    selection="$RESULT_ROOT/${id}-${DATASET}"
-  else
-    if [[ -n "$latest" ]]; then
-      selection="$latest"
-    else
-      local next=$((max_index + 1))
-      local id=$(printf "%03d" "$next")
-      selection="$RESULT_ROOT/${id}-${DATASET}"
-    fi
+  local run_id="${RUN_ID}"
+  if [[ -z "$run_id" ]]; then
+    run_id="$(date +%Y%m%d_%H%M%S)"
   fi
 
-  WORK_DIR="$selection"
+  if [[ -n "$WORKDIR" ]]; then
+    WORK_DIR="$WORKDIR"
+  else
+    WORK_DIR="${RESULT_ROOT}/run_${run_id}/${DATASET}"
+  fi
   mkdir -p "$WORK_DIR"
 
-  LOG_DIR="$WORK_DIR/logs"
+  ARTIFACTS_DIR="$WORK_DIR/artifacts"
+  LOG_DIR="$ARTIFACTS_DIR/logs"
   mkdir -p "$LOG_DIR"
 
-  NOTES_DIR="$WORK_DIR/notes"
-  IDX_DIR="$WORK_DIR/indexes"
+  NOTES_DIR="$ARTIFACTS_DIR/notes"
+  IDX_DIR="$ARTIFACTS_DIR/indexes"
   mkdir -p "$NOTES_DIR" "$IDX_DIR"
 
   OUT_MERGED="$NOTES_DIR/notes.${DATASET}.jsonl"
 
   VLLM_LOG="$LOG_DIR/vllm.log"
-  VLLM_PID="$WORK_DIR/vllm.pid"
+  VLLM_PID="$ARTIFACTS_DIR/vllm.pid"
   BUILD_LOG="$LOG_DIR/build_single.log"
-  BUILD_PID="$WORK_DIR/build_single.pid"
-  PROG_SINGLE="$WORK_DIR/progress.json"
+  BUILD_PID="$ARTIFACTS_DIR/build_single.pid"
+  PROG_SINGLE="$ARTIFACTS_DIR/progress.json"
 
   log "Workspace: $WORK_DIR"
   log "Dataset dir: $DATA_DIR"
@@ -361,19 +342,29 @@ cleanup() {
 usage() {
   cat <<USAGE
 Usage:
-  $(basename "$0") [--new]
+  $(basename "$0") [--new] [--workdir <path>]
 
-Environment overrides: DATA_DIR, DATASET, RESULT_ROOT, VLLM_MODEL, ...
+Environment overrides: DATA_DIR, DATASET, RESULT_ROOT, WORKDIR, RUN_ID, VLLM_MODEL, ...
 USAGE
 }
 
 trap cleanup EXIT
+
+SKIP_VLLM=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --new)
       NEW_RUN=1
       shift
+      ;;
+    --skip-vllm)
+      SKIP_VLLM=1
+      shift
+      ;;
+    --workdir|--work-dir)
+      WORKDIR="${2:-}"
+      shift 2
       ;;
     -h|--help)
       usage

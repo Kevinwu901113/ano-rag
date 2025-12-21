@@ -53,11 +53,20 @@ profile_default/
 Thumbs.db
 Desktop.ini
 
+# Logs / temp files
+*.log
+*.tmp
+*.swp
+*.bak
+*.orig
+
 # Project artifacts (datasets / runs / indexes)
 data/
 notes/
 indexes/
 result/
+result_200/
+result_relrag/
 result_hotpot/
 logs/
 ans/

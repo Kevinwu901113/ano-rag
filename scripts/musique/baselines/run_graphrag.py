@@ -20,10 +20,10 @@ from scripts.hotpotqa.baselines.baseline_utils import (
     detect_device,
     format_context,
     get_embedding_model,
-    select_workspace,
 )
 from scripts.musique.baselines.musique_utils import load_dataset, save_musique_results_and_qa
 from utils.retrieval_logger import log_retrieval
+from utils.run_layout import ensure_workdir_layout, resolve_workdir
 
 
 class MiniGraphRAG:
@@ -132,8 +132,8 @@ def main() -> None:
     parser.add_argument("--dataset", required=True)
     parser.add_argument("--output", default=None)
     parser.add_argument("--qa-path", default=None)
-    parser.add_argument("--result-root", default="result/musique")
-    parser.add_argument("--work-dir", default=None)
+    parser.add_argument("--result-root", default="result_relrag")
+    parser.add_argument("--workdir", "--work-dir", dest="work_dir", default=None)
     parser.add_argument("--new", action="store_true")
     parser.add_argument("--lm-endpoint", default="http://localhost:1234/v1")
     parser.add_argument("--lm-model", default="model-identifier")
@@ -151,15 +151,14 @@ def main() -> None:
         data = data[: args.limit]
     logger.info(f"Loaded {len(data)} examples from {args.dataset}")
 
-    if args.work_dir:
-        work_dir = Path(args.work_dir)
-        work_dir.mkdir(parents=True, exist_ok=True)
-    else:
-        work_dir = select_workspace(Path(args.result_root), "musique_graphrag", args.new)
+    work_dir = resolve_workdir(args.work_dir, result_root=args.result_root, dataset="musique")
+    paths = ensure_workdir_layout(work_dir)
+    artifacts_dir = paths["artifacts"]
+    preds_dir = paths["preds"]
     run_name = work_dir.name
     dataset_name = "musique"
-    output_path = Path(args.output) if args.output else work_dir / "musique_results.jsonl"
-    qa_path = Path(args.qa_path) if args.qa_path else work_dir / "qa.tsv"
+    output_path = Path(args.output) if args.output else preds_dir / "musique_results.jsonl"
+    qa_path = Path(args.qa_path) if args.qa_path else preds_dir / "qa.tsv"
     logger.info(f"Writing outputs to workspace {work_dir}")
 
     llm = LLMChatClient(endpoint=args.lm_endpoint, model=args.lm_model, temperature=0.0)
@@ -181,7 +180,7 @@ def main() -> None:
                 args,
                 run_name=run_name,
                 dataset_name=dataset_name,
-                log_dir=work_dir,
+                log_dir=artifacts_dir,
             )
             for item in data
         ]
@@ -207,4 +206,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
