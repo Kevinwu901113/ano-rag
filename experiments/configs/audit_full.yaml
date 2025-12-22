@@ -1,0 +1,58 @@
+include:
+  - ../manifests/datasets.yaml
+  - ../manifests/methods.yaml
+
+exp:
+  name: audit_full_matrix
+  goal: "Full matrix audit for E1, E2, E5, E7"
+  # llm_profile: default
+
+llm_profiles:
+  - name: default
+    model: ${LLM_MODEL:-Qwen/Qwen2.5-7B-Instruct}
+    endpoint: ${LLM_ENDPOINT:-http://localhost:8000/v1}
+  - name: secondary
+    model: ${LLM_MODEL:-Qwen/Qwen2.5-7B-Instruct}
+    endpoint: ${LLM_ENDPOINT:-http://localhost:8000/v1}
+
+datasets:
+  - hotpotqa_distractor_200
+
+methods:
+  - relrag_full
+  - hybrid_rag
+
+ablations:
+  - name: full
+  - name: hop_2
+    overrides:
+      graph:
+        hop: 2
+  - name: w_o_scheduler
+    overrides:
+      scheduler:
+        enable: false
+
+budgets:
+  token_budgets: [2000]
+
+embedding:
+  model: BAAI/bge-small-en-v1.5
+
+runtime:
+  limit: 20
+  workers: 1
+  resume: false
+  save_every: 10
+  run_eval: true
+
+decode:
+  temperature: 0.0
+  max_tokens: 200
+
+topk:
+  retrieve_k: 5
+  gen_k: 5
+
+retrieval_eval:
+  ks: [1, 3, 5]

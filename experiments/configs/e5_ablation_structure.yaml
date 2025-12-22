@@ -16,28 +16,34 @@ methods:
 
 ablations:
   - name: w_o_graph_expansion
+    cli_args: ["--hop", "1"]
     overrides:
       graph:
         enable_expansion: false
 
   - name: w_o_context_scheduler
+    cli_args: ["--no-scheduler"]
     overrides:
       scheduler:
         enable: false
 
   - name: hop_1
+    cli_args: ["--hop", "1"]
     overrides:
       graph:
         hop: 1
   - name: hop_2
+    cli_args: ["--hop", "2"]
     overrides:
       graph:
         hop: 2
   - name: hop_3
+    cli_args: ["--hop", "3"]
     overrides:
       graph:
         hop: 3
   - name: hop_4
+    cli_args: ["--hop", "4"]
     overrides:
       graph:
         hop: 4
