@@ -12,7 +12,7 @@ from loguru import logger
 from config import config as config_loader
 from utils.device import run_with_fallback
 from utils.embedding_utils import EmbeddingEncoder
-from utils.answer_cleaner import _strip_reasoning
+from utils.answer_cleaner import _enforce_short_answer, _strip_reasoning
 from utils.retrieval_logger import log_retrieval
 
 try:
@@ -45,6 +45,42 @@ def _paragraphs_from_record(record: Dict[str, Any]) -> List[str]:
     
     # Split by double newline as naive paragraph separator
     return [p.strip() for p in str(text).split("\n\n") if p.strip()]
+
+def _extract_answer_span(text: str) -> Optional[str]:
+    patterns = [
+        r"(?:^|\b)(?:final\s+answer|answer)\s*(?:is|should be)?\s*[:：]?\s*\"?([^\n\.]+)",
+    ]
+    for pattern in patterns:
+        matches = list(re.finditer(pattern, text, flags=re.IGNORECASE))
+        if matches:
+            candidate = matches[-1].group(1).strip()
+            return candidate.strip(" \"'")
+    return None
+
+def _clean_naive_answer(raw: str) -> str:
+    cleaned = _strip_reasoning(raw)
+    if cleaned:
+        return cleaned
+    if not raw:
+        return ""
+    # Fallback: if <think> is unclosed, keep text and extract a short answer.
+    fallback = raw.replace("<think>", "").replace("</think>", "")
+    extracted = _extract_answer_span(fallback)
+    if extracted:
+        return extracted
+    compact = _enforce_short_answer(fallback)
+    words = compact.split()
+    if len(words) > 30:
+        parts = re.split(r"[.!?]+", compact)
+        for part in reversed(parts):
+            candidate = part.strip()
+            if candidate:
+                compact = candidate
+                words = compact.split()
+                break
+        if len(words) > 30:
+            compact = " ".join(words[-30:])
+    return compact.strip()
 
 def _load_doc_pool(path: str) -> Iterable[Dict[str, Any]]:
     """Stream records from doc_pool.json or .jsonl."""
@@ -497,7 +533,7 @@ class NaiveRAGRunner:
             ]
             try:
                 raw_answer = self.lm.chat(messages)
-                ans_text = _strip_reasoning(raw_answer)
+                ans_text = _clean_naive_answer(raw_answer)
             except Exception as exc:
                 logger.error("LLM call failed for {}: {}", qid, exc)
                 ans_text = "Insufficient evidence"
@@ -505,7 +541,9 @@ class NaiveRAGRunner:
             answers.append(
                 {"query_id": qid, "question": question, "answer": ans_text, "hits": hits}
             )
-            qa_rows.append(f"{question}\t{ans_text}")
+            safe_q = " ".join(str(question).replace("\t", " ").split())
+            safe_a = " ".join(str(ans_text).replace("\t", " ").replace('"', "'").split())
+            qa_rows.append(f"{safe_q}\t{safe_a}")
             completed.add(qid_key)
             if debug:
                 debug_records.append(
@@ -561,7 +599,7 @@ class NaiveRAGRunner:
         
         # 4. Generate
         ans = self.lm.chat(messages)
-        return _strip_reasoning(ans)
+        return _clean_naive_answer(ans)
 
 def answer(
     question: str, 

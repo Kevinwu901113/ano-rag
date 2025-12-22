@@ -1,0 +1,28 @@
+include:
+  - experiments/configs/common.yaml
+  - experiments/manifests/datasets.yaml
+  - experiments/manifests/methods.yaml
+
+exp:
+  name: e1_main_qwen
+  goal: "Main QA results under matched token budgets (LLM-A)"
+  llm_profile: llm_a
+
+datasets:
+  - hotpotqa_distractor_200
+  - mirage_sample_200
+  - musique_sample
+
+methods:
+  - bm25_rag
+  - dense_rag
+  - hybrid_rag
+  - raptor
+  - relrag_full
+
+report:
+  metrics:
+    qa: [EM, AnswerF1]
+    retrieval: [Recall@1, Recall@3, Recall@5, Recall@10, Hit@1, Hit@3, Hit@5, Hit@10]
+  budgets:
+    token_budgets: [4096, 8192, 16384]

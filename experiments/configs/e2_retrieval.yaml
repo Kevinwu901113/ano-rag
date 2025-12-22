@@ -1,0 +1,23 @@
+include:
+  - experiments/configs/common.yaml
+  - experiments/manifests/datasets.yaml
+  - experiments/manifests/methods.yaml
+
+exp:
+  name: e2_retrieval
+  goal: "Retrieval-only evidence evaluation (LLM independent)"
+
+datasets:
+  - hotpotqa_distractor_200
+  - musique_sample
+
+methods:
+  - bm25_rag
+  - dense_rag
+  - hybrid_rag
+  - relrag_full
+
+retrieval_eval:
+  ks: [1, 3, 5, 10]
+  multi_hop_coverage: true
+  hop_definition: "supporting_facts_or_docs"

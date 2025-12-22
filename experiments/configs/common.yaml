@@ -1,0 +1,35 @@
+meta:
+  project: relrag
+  result_root: result_relrag
+  timezone: Asia/Singapore
+
+runtime:
+  workers: 1
+  resume: true
+  save_every: 20
+  run_eval: true
+
+llm:
+  endpoint: "http://127.0.0.1:1234/v1"
+  model: "qwen/qwen3-30b-a3b"
+  no_proxy: true
+
+embedding:
+  model: "sentence-transformers/all-MiniLM-L6-v2"
+  device: "cpu"
+  batch_size: 4
+  max_length: 512
+  normalize: true
+  dtype: null
+
+budgets:
+  token_budgets: [4096, 8192, 16384]
+
+topk:
+  retrieve_k: [1, 3, 5, 10]
+  gen_k: 10
+
+answer_format:
+  mode: "short_answer"
+  forbid_think_tags: true
+  min_answer_chars: 1

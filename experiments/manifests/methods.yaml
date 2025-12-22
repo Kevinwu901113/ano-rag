@@ -1,0 +1,37 @@
+direct_llm:
+  kind: qa
+  desc: "No retrieval"
+  entry_hotpotqa: scripts/hotpotqa/baselines/run_direct.py
+  entry_musique: scripts/musique/baselines/run_direct.py
+  entry_mirage: scripts/mirage/run_direct_llm.py
+
+bm25_rag:
+  kind: qa
+  desc: "Sparse BM25 RAG (fill entry when available)"
+  entry: null
+
+dense_rag:
+  kind: qa
+  desc: "Dense embedding RAG"
+  entry_hotpotqa: scripts/hotpotqa/baselines/run_vanilla_rag.py
+  entry_musique: scripts/musique/baselines/run_vanilla_rag.py
+  entry_mirage: scripts/mirage/run_vanilla_rag.py
+
+hybrid_rag:
+  kind: qa
+  desc: "BM25 + dense hybrid (fill entry when available)"
+  entry: null
+
+raptor:
+  kind: qa
+  desc: "RAPTOR-style hierarchical retrieval"
+  entry_hotpotqa: scripts/hotpotqa/baselines/run_raptor.py
+  entry_musique: scripts/musique/baselines/run_raptor.py
+  entry_mirage: scripts/mirage/run_simple_raptor.py
+
+relrag_full:
+  kind: qa
+  desc: "RelRAG full pipeline"
+  entry_hotpotqa: scripts/hotpotqa/baselines/run_relrag.py
+  entry_musique: scripts/musique/baselines/run_relrag.py
+  entry_mirage: null

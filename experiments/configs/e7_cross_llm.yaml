@@ -1,0 +1,28 @@
+include:
+  - experiments/configs/common.yaml
+  - experiments/manifests/datasets.yaml
+  - experiments/manifests/methods.yaml
+
+exp:
+  name: e7_cross_llm
+  goal: "Robustness across LLMs (LLM-A vs LLM-B) on key subset"
+
+datasets:
+  - hotpotqa_distractor_200
+
+methods:
+  - hybrid_rag
+  - relrag_full
+
+llm_profiles:
+  - name: llm_a_qwen
+    endpoint: "http://127.0.0.1:1234/v1"
+    model: "qwen/qwen3-30b-a3b"
+  - name: llm_b_gpt4o
+    endpoint: "${OPENAI_BASE_URL:-https://api.openai.com/v1}"
+    model: "gpt-4o"
+    api_key_env: "OPENAI_API_KEY"
+
+report:
+  metrics:
+    qa: [EM, AnswerF1]

@@ -1,0 +1,48 @@
+include:
+  - experiments/configs/common.yaml
+  - experiments/manifests/datasets.yaml
+  - experiments/manifests/methods.yaml
+
+exp:
+  name: e5_ablation_structure
+  goal: "Ablation: structure components within RelRAG (matched budget)"
+
+datasets:
+  - hotpotqa_distractor_200
+  - musique_sample
+
+methods:
+  - relrag_full
+
+ablations:
+  - name: w_o_graph_expansion
+    overrides:
+      graph:
+        enable_expansion: false
+
+  - name: w_o_context_scheduler
+    overrides:
+      scheduler:
+        enable: false
+
+  - name: hop_1
+    overrides:
+      graph:
+        hop: 1
+  - name: hop_2
+    overrides:
+      graph:
+        hop: 2
+  - name: hop_3
+    overrides:
+      graph:
+        hop: 3
+  - name: hop_4
+    overrides:
+      graph:
+        hop: 4
+
+report:
+  metrics:
+    qa: [EM, AnswerF1]
+    retrieval: [Recall@5, Recall@10, Hit@5, Hit@10]
