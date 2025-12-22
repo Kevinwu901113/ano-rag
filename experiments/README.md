@@ -37,9 +37,18 @@ like `${OPENAI_BASE_URL:-https://api.openai.com/v1}`.
   CLI flags for an ablation, add `cli_args` in the ablation entry.
 - Token budgets are passed to known flags if the script supports them.
   If your script uses a different arg, add it to `cli_args`.
+- `runtime.resume` defaults to false for auditability; enable explicitly per experiment.
+- `fairness.enforce_budget/topk` will skip jobs when the entry script does not
+  expose the required flags (to prevent unfair comparisons).
+- `runtime.seed` sets `PYTHONHASHSEED`; if a script lacks `--seed`, the runner
+  wraps it with `experiments/seeded_run.py` to seed Python/NumPy/Torch.
+- `summary.json` records full command lines, applied flags, and code hashes.
+- To hash prompts explicitly, add `prompt_paths` (or `prompt_paths_<dataset>`)
+  to the method entry in `experiments/manifests/methods.yaml`.
 
 ## Reproducibility checklist
 - Record git commit hash in the run root summary.
 - Fix token budgets and top-k across methods.
 - Use the same dataset split files (no regenerated samples).
 - Enforce a strict answer format (avoid empty / think-only outputs).
+- Track prompt/code hashes in summary to lock prompt versions.

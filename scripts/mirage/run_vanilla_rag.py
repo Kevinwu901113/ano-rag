@@ -1,6 +1,7 @@
 import argparse
 import json
 import os
+import pickle
 import time
 import sys
 from pathlib import Path
@@ -15,17 +16,21 @@ if str(ROOT) not in sys.path:
 # Now we can import from project modules
 try:
     from config.config_loader import config as global_config
-    from utils.answer_cleaner import clean_model_answer
 except ImportError:
-    # Fallback if running as script without package context setup (though sys.path fix should handle it)
-    # Try to mock or load manually if needed, but sys.path should work.
-    logger.warning("Could not import config.config_loader or utils.answer_cleaner, ensuring PYTHONPATH is set correctly.")
+    logger.warning("Could not import config.config_loader; ensure PYTHONPATH is set correctly.")
     pass
 
+from baselines.common.model_clients import get_default_llm_client
 from baselines.vanilla_rag import get_retriever
 from baselines.vanilla_rag.index import VanillaRAGIndexer
+from utils.bm25 import BM25Index, rrf_fuse
+from utils.context_budget import pack_contexts
+from utils.jsonl_utils import write_jsonl
+from utils.logging_utils import setup_logging
+from utils.output_protocol import build_final_instruction
 from utils.retrieval_logger import log_retrieval
 from utils.run_layout import ensure_workdir_layout, resolve_workdir
+from utils.run_metadata import build_basic_config, write_config_resolved
 
 def _select_workspace(root: Path, prefix: str, force_new: bool) -> Path:
     root.mkdir(parents=True, exist_ok=True)
@@ -46,8 +51,17 @@ def main():
     parser.add_argument("--limit", type=int, default=0, help="Limit number of queries")
     parser.add_argument("--lmstudio-endpoint", type=str, help="LM Studio endpoint override")
     parser.add_argument("--lmstudio-model", type=str, help="LM Studio model name override")
+    parser.add_argument("--max-new-tokens", type=int, default=None, help="Max new tokens for LLM decoding")
     parser.add_argument("--index-path", type=str, help="Path to FAISS index (optional, default to artifacts/vanilla_rag_index.faiss)")
     parser.add_argument("--chunk-store-path", type=str, help="Path to chunk store (optional, default to artifacts/vanilla_rag_chunk_store.pkl)")
+    parser.add_argument("--context-budget", type=int, default=0, help="Max context tokens (0 disables)")
+    parser.add_argument(
+        "--retriever",
+        choices=["dense", "bm25", "hybrid"],
+        default="dense",
+        help="Retrieval mode (dense, bm25, hybrid)",
+    )
+    parser.add_argument("--hybrid-rrf-k", type=int, default=60, help="RRF k for hybrid fusion")
     
     args = parser.parse_args()
 
@@ -66,8 +80,20 @@ def main():
     run_name = work_dir.name
     dataset_name = "mirage"
     
-    logger.add(work_dir / "vanilla_rag.log")
+    setup_logging(str(work_dir / "run.log"))
     logger.info(f"Starting Vanilla RAG run in {work_dir}")
+    write_config_resolved(
+        work_dir,
+        build_basic_config(
+            dataset="mirage",
+            model=args.lmstudio_model or "unknown",
+            endpoint=args.lmstudio_endpoint or "unknown",
+            temperature=None,
+            max_tokens=args.max_new_tokens,
+            context_budget=args.context_budget or None,
+            extra={"retriever": args.retriever},
+        ),
+    )
 
     # 2. Determine Index Paths
     index_path = Path(args.index_path) if args.index_path else artifacts_dir / "vanilla_rag_index.faiss"
@@ -121,7 +147,37 @@ def main():
         indexer = VanillaRAGIndexer()
         indexer.build(docs, str(index_path), str(chunk_store_path))
         logger.info("Index built successfully.")
-    retriever = get_retriever(index_path=str(index_path), chunk_store_path=str(chunk_store_path))
+    retriever = None
+    if args.retriever in ("dense", "hybrid"):
+        retriever = get_retriever(
+            index_path=str(index_path),
+            chunk_store_path=str(chunk_store_path),
+            context_budget=args.context_budget,
+        )
+    llm = get_default_llm_client()
+
+    bm25_index = None
+    bm25_ids: List[str] = []
+    bm25_texts: List[str] = []
+    bm25_id_to_idx: Dict[str, int] = {}
+    if args.retriever in ("bm25", "hybrid"):
+        try:
+            with open(chunk_store_path, "rb") as f:
+                chunk_store = pickle.load(f)
+            meta_path = index_path.with_name(index_path.name + ".meta.pkl")
+            with open(meta_path, "rb") as f:
+                chunk_ids = pickle.load(f)
+        except Exception as e:
+            logger.error(f"Failed to load chunk store/meta for BM25: {e}")
+            return
+        for cid in chunk_ids:
+            text = chunk_store.get(cid)
+            if not text:
+                continue
+            bm25_ids.append(str(cid))
+            bm25_texts.append(str(text))
+        bm25_id_to_idx = {cid: idx for idx, cid in enumerate(bm25_ids)}
+        bm25_index = BM25Index(bm25_texts)
 
     # 4. Load Dataset
     try:
@@ -135,6 +191,19 @@ def main():
         dataset = dataset[:args.limit]
         
     results = []
+    pred_raw_records: List[Dict[str, Any]] = []
+
+    def _bm25_hit(idx: int, score: float) -> Dict[str, Any]:
+        cid = bm25_ids[idx]
+        text = bm25_texts[idx]
+        doc_id = cid.split("::", 1)[0] if "::" in cid else None
+        return {
+            "text": text,
+            "score": float(score),
+            "doc_id": doc_id,
+            "sent_ids": None,
+            "passage_id": cid,
+        }
     
     # 5. Run Inference
     for i, item in enumerate(dataset):
@@ -143,8 +212,51 @@ def main():
         
         try:
             logger.info(f"Processing Q{i}: {question}")
-            ans = retriever.answer(question)
-            final_ans = clean_model_answer(ans)
+            hits: List[Dict[str, Any]] = []
+            if args.retriever == "dense":
+                if retriever is None:
+                    raise RuntimeError("Dense retriever unavailable.")
+                hits = retriever.retrieve(question, top_k=args.topk)
+            elif args.retriever == "bm25":
+                if bm25_index is None:
+                    raise RuntimeError("BM25 index unavailable.")
+                scores = bm25_index.get_scores(question)
+                indices = sorted(range(len(scores)), key=lambda i: scores[i], reverse=True)[: args.topk]
+                hits = [_bm25_hit(idx, scores[idx]) for idx in indices]
+            else:
+                if retriever is None or bm25_index is None:
+                    raise RuntimeError("Hybrid retriever unavailable.")
+                dense_hits = retriever.retrieve(question, top_k=args.topk)
+                bm25_scores = bm25_index.get_scores(question)
+                bm25_rank = sorted(range(len(bm25_scores)), key=lambda i: bm25_scores[i], reverse=True)
+                dense_rank = [
+                    bm25_id_to_idx[hit["passage_id"]]
+                    for hit in dense_hits
+                    if hit.get("passage_id") in bm25_id_to_idx
+                ]
+                fused = rrf_fuse([dense_rank, bm25_rank], k=int(getattr(args, "hybrid_rrf_k", 60)))
+                indices = sorted(fused, key=fused.get, reverse=True)[: args.topk]
+                hits = [_bm25_hit(idx, fused.get(idx, 0.0)) for idx in indices]
+
+            annotated_hits = []
+            for idx, hit in enumerate(hits):
+                annotated_hits.append({**hit, "text": f"[{idx+1}] {hit.get('text', '')}"})
+            context_str, contexts_used, context_tokens = pack_contexts(
+                annotated_hits, int(args.context_budget or 0)
+            )
+            prompt = f"""Answer the question based on the context.
+Keep the answer concise.
+{build_final_instruction()}
+
+{context_str}
+
+Question: {question}
+Answer:"""
+            ans = llm.chat(
+                [{"role": "user", "content": prompt}],
+                max_tokens=args.max_new_tokens if args.max_new_tokens is not None else 1024,
+            )
+            final_ans = ans
             
             results.append({
                 "query_id": qid,
@@ -153,7 +265,6 @@ def main():
                 "raw_answer": ans
             })
             try:
-                hits = getattr(retriever, "last_hits", [])
                 log_retrieval(
                     sample_id=qid,
                     dataset=dataset_name,
@@ -162,19 +273,23 @@ def main():
                         {**hit, "rank": idx + 1} for idx, hit in enumerate(hits)
                     ],
                     topk=len(hits),
-                    final_context=[
-                        {
-                            "doc_id": hit.get("doc_id"),
-                            "sent_ids": hit.get("sent_ids"),
-                            "passage_id": hit.get("passage_id"),
-                            "text": hit.get("text"),
-                        }
-                        for hit in hits
-                    ],
+                    final_context=contexts_used,
+                    final_context_tokens=context_tokens,
+                    context_budget_tokens=int(args.context_budget or 0) or None,
                     log_dir=artifacts_dir,
                 )
             except Exception as log_exc:
                 logger.error(f"retrieval logging failed for {qid}: {log_exc}")
+            pred_raw_records.append(
+                {
+                    "id": str(qid),
+                    "question": question,
+                    "pred_raw": ans,
+                    "contexts_used": contexts_used,
+                    "context_tokens_used": context_tokens,
+                    "context_budget_tokens": int(args.context_budget or 0) or None,
+                }
+            )
             
         except Exception as e:
             logger.error(f"Error processing Q{i}: {e}")
@@ -200,6 +315,7 @@ def main():
             q_text = res["question"].replace("\t", " ").strip()
             a_text = res["answer"].replace("\t", " ").replace("\n", " ").strip()
             f.write(f"{q_text}\t{a_text}\n")
+    write_jsonl(preds_dir / "pred_raw.jsonl", pred_raw_records)
 
     logger.info(f"Finished. Results saved to {work_dir}")
 

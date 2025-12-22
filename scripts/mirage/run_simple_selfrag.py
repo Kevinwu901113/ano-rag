@@ -14,8 +14,12 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from config.config_loader import config as global_config
+from utils.context_budget import pack_contexts
+from utils.jsonl_utils import write_jsonl
+from utils.logging_utils import setup_logging
 from utils.retrieval_logger import log_retrieval
 from utils.run_layout import ensure_workdir_layout, resolve_workdir
+from utils.run_metadata import build_basic_config, write_config_resolved
 
 def _select_workspace(root: Path, prefix: str, force_new: bool) -> Path:
     root.mkdir(parents=True, exist_ok=True)
@@ -37,6 +41,7 @@ def main():
     parser.add_argument("--lmstudio-endpoint", type=str, help="LM Studio endpoint override")
     parser.add_argument("--lmstudio-model", type=str, help="LM Studio model name override")
     parser.add_argument("--retrieval-only", action="store_true", help="Skip LLM calls; only run retrieval and log retrieval.jsonl")
+    parser.add_argument("--context-budget", type=int, default=0, help="Max context tokens (0 disables)")
     
     args = parser.parse_args()
 
@@ -54,8 +59,19 @@ def main():
     run_name = work_dir.name
     dataset_name = "mirage"
         
-    logger.add(work_dir / "simple_selfrag.log")
+    setup_logging(str(work_dir / "run.log"))
     logger.info(f"Writing Simple Self-RAG outputs to {work_dir}")
+    write_config_resolved(
+        work_dir,
+        build_basic_config(
+            dataset="mirage",
+            model=args.lmstudio_model or "unknown",
+            endpoint=args.lmstudio_endpoint or "unknown",
+            temperature=None,
+            max_tokens=None,
+            context_budget=args.context_budget or None,
+        ),
+    )
 
     # 2. Determine Index Paths
     index_path = artifacts_dir / "simple_selfrag_index.faiss"
@@ -119,7 +135,11 @@ def main():
         
     # Initialize retriever with specific paths
     from baselines.simple_selfrag.retriever import SimpleSelfRAGRetriever
-    retriever = SimpleSelfRAGRetriever(str(index_path), str(chunk_store_path))
+    retriever = SimpleSelfRAGRetriever(
+        str(index_path),
+        str(chunk_store_path),
+        context_budget=args.context_budget,
+    )
     
     # Disable LLM if retrieval-only
     if args.retrieval_only:
@@ -145,12 +165,7 @@ def main():
 
     # Run processing
     answers = []
-    
-    # Import answer cleaner
-    try:
-        from utils.answer_cleaner import clean_model_answer
-    except ImportError:
-        def clean_model_answer(x): return x.strip()
+    pred_raw_records: List[Dict[str, Any]] = []
     
     for item in tqdm(dataset, desc="Processing"):
         qid = item.get("id") or item.get("question_id") or item.get("query_id")
@@ -162,40 +177,27 @@ def main():
         try:
             # Use the local retriever instance instead of the global singleton
             if args.retrieval_only:
-                 # Check if the retriever has a dedicated retrieval method or if we need to call retrieve_and_reflect
-                 # Assuming retrieve_and_reflect handles None LLM gracefully or we need to access internal methods.
-                 # Let's inspect SimpleSelfRAGRetriever later if this fails.
-                 # But looking at baselines/simple_selfrag/retriever.py (not visible here), it likely has 'retrieve' or 'answer'
-                 # If answer() is called, it calls retrieve -> generate -> critique.
-                  # If we only want retrieval, we should call .retrieve() if available.
-                  if hasattr(retriever, "retrieve"):
-                      hits = retriever.retrieve(question, top_k=5) # Default top_k=5 if not specified
-                      ans_text = "Retrieval Only"
-                  else:
-                      # Fallback to answer(), hoping it stops if LLM is None or we mock it.
-                      # But better: just access the index directly if possible?
-                      # Let's assume for now answer() might fail if LLM is None.
-                      # Let's try to find a retrieve method or similar.
-                      # Actually, baselines usually have a .retrieve() method.
-                      hits = retriever.retrieve(question, top_k=5) # Assuming this exists
-                      ans_text = "Retrieval Only"
+                hits = retriever.retrieve(question, top_k=5)
+                ans_text = ""
             else:
                 ans_text = retriever.answer(question)
                 hits = getattr(retriever, "last_hits", [])
 
-            final_ans = clean_model_answer(ans_text)
-            
-            # Ensure we have some answer, even if cleaning stripped it
-            if not final_ans and ans_text:
-                final_ans = ans_text.strip()
+            final_ans = ans_text.strip()
             
             answers.append({
                 "question_id": qid,
                 "question": question,
                 "answer": final_ans,
                 "raw_answer": ans_text,
-                "gold_answer": item.get("answer") # Preserve gold if available
+                "gold_answer": item.get("answer")
             })
+            annotated_hits = []
+            for i, hit in enumerate(hits):
+                annotated_hits.append({**hit, "text": f"[{i+1}] {hit.get('text', '')}"})
+            context_str, contexts_used, context_tokens = pack_contexts(
+                annotated_hits, int(args.context_budget or 0)
+            )
             try:
                 log_retrieval(
                     sample_id=qid,
@@ -203,19 +205,23 @@ def main():
                     run_name=run_name,
                     retrieved=[{**hit, "rank": i + 1} for i, hit in enumerate(hits)],
                     topk=len(hits),
-                    final_context=[
-                        {
-                            "doc_id": hit.get("doc_id"),
-                            "sent_ids": hit.get("sent_ids"),
-                            "passage_id": hit.get("passage_id"),
-                            "text": hit.get("text"),
-                        }
-                        for hit in hits
-                    ],
+                    final_context=contexts_used,
+                    final_context_tokens=context_tokens,
+                    context_budget_tokens=int(args.context_budget or 0) or None,
                     log_dir=artifacts_dir,
                 )
             except Exception as log_exc:
                 logger.error(f"retrieval logging failed for {qid}: {log_exc}")
+            pred_raw_records.append(
+                {
+                    "id": str(qid),
+                    "question": question,
+                    "pred_raw": ans_text,
+                    "contexts_used": contexts_used,
+                    "context_tokens_used": context_tokens,
+                    "context_budget_tokens": int(args.context_budget or 0) or None,
+                }
+            )
             
         except Exception as e:
             logger.exception(f"Error processing question {qid}: {e}")
@@ -238,6 +244,7 @@ def main():
             q = item["question"].replace("\t", " ").strip()
             a = item["answer"].replace("\t", " ").replace("\n", " ").strip()
             f.write(f"{q}\t{a}\n")
+    write_jsonl(preds_dir / "pred_raw.jsonl", pred_raw_records)
             
     logger.info(f"Done. Saved {len(answers)} answers to {work_dir}")
 

@@ -44,7 +44,8 @@ def main() -> None:
     for row in rows:
         if args.dataset and row.get("dataset") != args.dataset:
             continue
-        if row.get("status") not in ("ok", "skipped", "skipped_missing_entry"):
+        status = row.get("status") or ""
+        if status not in ("ok", "skipped", "skipped_missing_entry") and not status.startswith("skipped"):
             continue
         if not row.get("budget"):
             continue

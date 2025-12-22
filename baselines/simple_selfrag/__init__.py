@@ -5,7 +5,7 @@ from config.config_loader import config as global_config
 
 _retriever: Optional[SimpleSelfRAGRetriever] = None
 
-def get_retriever() -> SimpleSelfRAGRetriever:
+def get_retriever(context_budget: Optional[int] = None) -> SimpleSelfRAGRetriever:
     global _retriever
     if _retriever is None:
         # Default paths
@@ -15,13 +15,13 @@ def get_retriever() -> SimpleSelfRAGRetriever:
         if not os.path.exists(index_path) or not os.path.exists(chunk_store_path):
             raise FileNotFoundError(f"Index files not found at {index_path} or {chunk_store_path}. Please run build_simple_selfrag_index.py first.")
             
-        _retriever = SimpleSelfRAGRetriever(index_path, chunk_store_path)
+        _retriever = SimpleSelfRAGRetriever(index_path, chunk_store_path, context_budget=context_budget)
         
     return _retriever
 
-def answer(question: str) -> str:
+def answer(question: str, context_budget: Optional[int] = None) -> str:
     """
     Main entry point for Simple Self-RAG.
     """
-    retriever = get_retriever()
+    retriever = get_retriever(context_budget=context_budget)
     return retriever.answer(question)

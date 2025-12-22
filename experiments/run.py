@@ -2,9 +2,11 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
+import shlex
 import subprocess
 import sys
 import time
@@ -20,6 +22,8 @@ RESERVED_KEYS = {
     "llm",
     "embedding",
     "budgets",
+    "fairness",
+    "decode",
     "topk",
     "answer_format",
     "context",
@@ -176,6 +180,28 @@ def _pick_cli_args(method_def: Dict[str, Any], dataset_type: str) -> List[str]:
     return args
 
 
+def _pick_arg_list(method_def: Dict[str, Any], dataset_type: str, key: str, default: Iterable[str]) -> List[str]:
+    val = method_def.get(f"{key}_{dataset_type}", method_def.get(key))
+    if val is None:
+        return list(default)
+    if isinstance(val, list):
+        return list(val)
+    return [str(val)]
+
+
+def _pick_prompt_paths(method_def: Dict[str, Any], dataset_type: str) -> List[str]:
+    paths: List[str] = []
+    for key in ("prompt_paths", f"prompt_paths_{dataset_type}"):
+        val = method_def.get(key)
+        if not val:
+            continue
+        if isinstance(val, list):
+            paths.extend(str(v) for v in val)
+        else:
+            paths.append(str(val))
+    return paths
+
+
 def _resolve_repo_path(root: Path, value: Optional[str]) -> Optional[str]:
     if value is None:
         return None
@@ -185,22 +211,112 @@ def _resolve_repo_path(root: Path, value: Optional[str]) -> Optional[str]:
     return str(path)
 
 
-def _add_first_supported(cmd: List[str], supported: set, flags: Iterable[str], value: Any) -> bool:
+def _hash_file(path: Path, cache: Dict[str, str]) -> str:
+    key = str(path)
+    if key in cache:
+        return cache[key]
+    if not path.exists():
+        cache[key] = "missing"
+        return cache[key]
+    try:
+        result = subprocess.run(
+            ["git", "hash-object", key],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        digest = result.stdout.strip()
+        if result.returncode == 0 and digest:
+            cache[key] = f"git:{digest}"
+            return cache[key]
+    except Exception:
+        pass
+    data = path.read_bytes()
+    digest = hashlib.sha256(data).hexdigest()
+    cache[key] = f"sha256:{digest}"
+    return cache[key]
+
+
+def _record_applied(applied: Dict[str, Any], flag: Optional[str], value: Any) -> None:
+    if flag:
+        applied[flag] = value
+
+
+def _count_pred_entries(payload: Any) -> Optional[int]:
+    if isinstance(payload, dict):
+        answers = payload.get("answer")
+        if isinstance(answers, dict):
+            return len(answers)
+        return len(payload)
+    if isinstance(payload, list):
+        return len(payload)
+    return None
+
+
+def _count_non_empty_lines(path: Path) -> Optional[int]:
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            return sum(1 for line in handle if line.strip())
+    except Exception:
+        return None
+
+
+def _resume_state(workdir: Path) -> Dict[str, Any]:
+    state: Dict[str, Any] = {}
+    pred_path = workdir / "preds" / "pred.json"
+    if pred_path.exists():
+        try:
+            payload = json.loads(pred_path.read_text(encoding="utf-8"))
+            state["pred_json"] = {
+                "path": str(pred_path),
+                "count": _count_pred_entries(payload),
+            }
+        except Exception:
+            state["pred_json"] = {"path": str(pred_path), "count": None}
+
+    qa_path = workdir / "preds" / "qa.tsv"
+    if qa_path.exists():
+        state["qa_tsv"] = {
+            "path": str(qa_path),
+            "count": _count_non_empty_lines(qa_path),
+        }
+
+    retrieval_path = workdir / "artifacts" / "retrieval.jsonl"
+    if retrieval_path.exists():
+        state["retrieval_jsonl"] = {
+            "path": str(retrieval_path),
+            "count": _count_non_empty_lines(retrieval_path),
+        }
+
+    return state
+
+
+def _resume_delta(before: Dict[str, Any], after: Dict[str, Any]) -> Dict[str, Any]:
+    delta: Dict[str, Any] = {}
+    for key in ("pred_json", "qa_tsv", "retrieval_jsonl"):
+        before_count = before.get(key, {}).get("count") if before else None
+        after_count = after.get(key, {}).get("count") if after else None
+        if before_count is not None and after_count is not None:
+            delta[key] = after_count - before_count
+    return delta
+
+
+def _add_first_supported(cmd: List[str], supported: set, flags: Iterable[str], value: Any) -> Optional[str]:
     if value is None:
-        return False
+        return None
     for flag in flags:
         if flag in supported:
             cmd.extend([flag, str(value)])
-            return True
-    return False
+            return flag
+    return None
 
 
-def _add_flag(cmd: List[str], supported: set, flags: Iterable[str]) -> bool:
+def _add_flag(cmd: List[str], supported: set, flags: Iterable[str]) -> Optional[str]:
     for flag in flags:
         if flag in supported:
             cmd.append(flag)
-            return True
-    return False
+            return flag
+    return None
 
 
 def _collect_metrics(workdir: Path) -> Dict[str, Any]:
@@ -250,44 +366,20 @@ def _eval_command(
     if not dataset_path:
         return None
 
-    if dataset_type == "hotpotqa":
+    if dataset_type in ("hotpotqa", "musique", "mirage"):
         ks = cfg.get("retrieval_eval", {}).get("ks") or cfg.get("topk", {}).get("retrieve_k") or [1, 3, 5, 10]
         ks_str = ",".join(str(k) for k in ks)
         return [
             sys.executable,
-            "scripts/evaluate_hotpotqa_metrics.py",
+            "scripts/evaluate_relrag.py",
             "--dataset",
             str(dataset_path),
+            "--dataset-name",
+            dataset_type,
             "--workdir",
             str(workdir),
             "--ks",
             ks_str,
-            "--output",
-            str(workdir / "metrics" / "hotpot_metrics.json"),
-        ]
-
-    if dataset_type == "musique":
-        return [
-            sys.executable,
-            "scripts/evaluate_musique_metrics.py",
-            "--dataset",
-            str(dataset_path),
-            "--workdir",
-            str(workdir),
-            "--output",
-            str(workdir / "metrics" / "musique_metrics.json"),
-        ]
-
-    if dataset_type == "mirage":
-        return [
-            sys.executable,
-            "evaluate_mirage.py",
-            "--dataset",
-            str(dataset_path),
-            "--workdir",
-            str(workdir),
-            "--output",
-            str(workdir / "metrics" / "mirage_metrics.json"),
         ]
 
     return None
@@ -329,6 +421,8 @@ def main() -> None:
     runtime = cfg.get("runtime", {})
     embedding = cfg.get("embedding", {})
     topk = cfg.get("topk", {})
+    decode = cfg.get("decode", {})
+    fairness = cfg.get("fairness", {})
     budgets = cfg.get("report", {}).get("budgets", {}).get("token_budgets")
     if budgets is None:
         budgets = cfg.get("budgets", {}).get("token_budgets", [])
@@ -354,8 +448,11 @@ def main() -> None:
     if llm_default.get("no_proxy"):
         env["NO_PROXY"] = "127.0.0.1,localhost"
         env["no_proxy"] = "127.0.0.1,localhost"
+    if runtime.get("seed") is not None:
+        env["PYTHONHASHSEED"] = str(runtime.get("seed"))
 
     supported_cache: Dict[str, set] = {}
+    hash_cache: Dict[str, str] = {}
     built_indexes: set = set()
     job_results: List[Dict[str, Any]] = []
 
@@ -428,9 +525,242 @@ def main() -> None:
                         status = "ok"
                         message = ""
                         cmd: List[str] = []
+                        cmd_str = ""
+                        applied_flags: Dict[str, Any] = {}
+                        resume_state_before = _resume_state(workdir)
+                        resume_state_after: Optional[Dict[str, Any]] = None
+                        seed_wrapper_used = False
+                        budget_flag = None
+                        topk_flag = None
+                        seed_flag = None
+                        method_cli_args: List[str] = []
+
+                        entry_hash = _hash_file(entry_path, hash_cache)
+                        prompt_hashes: Dict[str, str] = {}
+                        for prompt_path in _pick_prompt_paths(method_def, dataset_type):
+                            resolved_prompt = Path(_resolve_repo_path(repo_root, prompt_path))
+                            prompt_hashes[str(resolved_prompt)] = _hash_file(resolved_prompt, hash_cache)
+
+                        requires_topk = bool(method_def.get("requires_topk", False))
+                        enforce_budget = bool(fairness.get("enforce_budget", runtime.get("enforce_budget", False)))
+                        enforce_topk = bool(fairness.get("enforce_topk", runtime.get("enforce_topk", False)))
+                        require_prompt_hash = bool(
+                            fairness.get("require_prompt_hash", runtime.get("require_prompt_hash", False))
+                        )
 
                         try:
                             supported = _supported_flags(entry_path, supported_cache)
+
+                            dataset_path = dataset_def.get("path") or dataset_def.get("dataset")
+                            dataset_path = _resolve_repo_path(repo_root, dataset_path)
+                            doc_pool = dataset_def.get("doc_pool")
+                            doc_pool = _resolve_repo_path(repo_root, doc_pool)
+
+                            dataset_flags = _pick_arg_list(
+                                method_def,
+                                dataset_type,
+                                "dataset_args",
+                                ["--dataset", "--dataset-path"],
+                            )
+                            doc_pool_flags = _pick_arg_list(method_def, dataset_type, "doc_pool_args", ["--doc-pool"])
+                            lm_endpoint_flags = _pick_arg_list(
+                                method_def,
+                                dataset_type,
+                                "lm_endpoint_args",
+                                ["--lm-endpoint", "--lmstudio-endpoint"],
+                            )
+                            lm_model_flags = _pick_arg_list(
+                                method_def,
+                                dataset_type,
+                                "lm_model_args",
+                                ["--lm-model", "--lmstudio-model"],
+                            )
+
+                            cmd = [sys.executable, str(entry_path)]
+                            if dataset_path:
+                                flag = _add_first_supported(cmd, supported, dataset_flags, dataset_path)
+                                _record_applied(applied_flags, flag, dataset_path)
+
+                            if doc_pool:
+                                flag = _add_first_supported(cmd, supported, doc_pool_flags, doc_pool)
+                                _record_applied(applied_flags, flag, doc_pool)
+
+                            flag = _add_first_supported(cmd, supported, ["--workdir", "--work-dir"], workdir)
+                            _record_applied(applied_flags, flag, str(workdir))
+                            flag = _add_first_supported(cmd, supported, ["--result-root"], result_root)
+                            _record_applied(applied_flags, flag, result_root)
+
+                            flag = _add_first_supported(cmd, supported, lm_endpoint_flags, llm.get("endpoint"))
+                            _record_applied(applied_flags, flag, llm.get("endpoint"))
+                            flag = _add_first_supported(cmd, supported, lm_model_flags, llm.get("model"))
+                            _record_applied(applied_flags, flag, llm.get("model"))
+
+                            flag = _add_first_supported(cmd, supported, ["--embed-model", "--emb-model"], embedding.get("model"))
+                            _record_applied(applied_flags, flag, embedding.get("model"))
+                            flag = _add_first_supported(cmd, supported, ["--embed-device", "--emb-device"], embedding.get("device"))
+                            _record_applied(applied_flags, flag, embedding.get("device"))
+                            flag = _add_first_supported(cmd, supported, ["--embed-batch-size"], embedding.get("batch_size"))
+                            _record_applied(applied_flags, flag, embedding.get("batch_size"))
+                            flag = _add_first_supported(cmd, supported, ["--embed-max-length"], embedding.get("max_length"))
+                            _record_applied(applied_flags, flag, embedding.get("max_length"))
+                            flag = _add_first_supported(cmd, supported, ["--emb-dtype"], embedding.get("dtype"))
+                            _record_applied(applied_flags, flag, embedding.get("dtype"))
+
+                            if embedding.get("normalize") is True:
+                                flag = _add_flag(cmd, supported, ["--embed-normalize"])
+                                _record_applied(applied_flags, flag, True)
+                            elif embedding.get("normalize") is False:
+                                flag = _add_flag(cmd, supported, ["--no-embed-normalize"])
+                                _record_applied(applied_flags, flag, True)
+
+                            flag = _add_first_supported(cmd, supported, ["--num-workers"], runtime.get("workers"))
+                            _record_applied(applied_flags, flag, runtime.get("workers"))
+                            flag = _add_first_supported(cmd, supported, ["--save-every"], runtime.get("save_every"))
+                            _record_applied(applied_flags, flag, runtime.get("save_every"))
+
+                            resume_flag = None
+                            if runtime.get("resume") and not args.force:
+                                resume_flag = _add_flag(cmd, supported, ["--resume"])
+                                _record_applied(applied_flags, resume_flag, True)
+
+                            if runtime.get("limit"):
+                                flag = _add_first_supported(cmd, supported, ["--limit"], runtime.get("limit"))
+                                _record_applied(applied_flags, flag, runtime.get("limit"))
+
+                            if topk.get("gen_k") is not None:
+                                topk_flag = _add_first_supported(cmd, supported, ["--topk"], topk.get("gen_k"))
+                                _record_applied(applied_flags, topk_flag, topk.get("gen_k"))
+
+                            if budget is not None:
+                                budget_flag = _add_first_supported(
+                                    cmd,
+                                    supported,
+                                    [
+                                        "--context-budget",
+                                        "--context-budget-tokens",
+                                        "--max-tokens",
+                                        "--max-new-tokens",
+                                        "--lm-max-tokens",
+                                        "--context-max-tokens",
+                                    ],
+                                    budget,
+                                )
+                                _record_applied(applied_flags, budget_flag, budget)
+
+                            if decode.get("temperature") is not None:
+                                flag = _add_first_supported(cmd, supported, ["--temperature"], decode.get("temperature"))
+                                _record_applied(applied_flags, flag, decode.get("temperature"))
+
+                            if decode.get("top_p") is not None:
+                                flag = _add_first_supported(cmd, supported, ["--top-p", "--top_p"], decode.get("top_p"))
+                                _record_applied(applied_flags, flag, decode.get("top_p"))
+
+                            if decode.get("repetition_penalty") is not None:
+                                flag = _add_first_supported(
+                                    cmd,
+                                    supported,
+                                    ["--repetition-penalty", "--repetition_penalty"],
+                                    decode.get("repetition_penalty"),
+                                )
+                                _record_applied(applied_flags, flag, decode.get("repetition_penalty"))
+
+                            if decode.get("max_tokens") is not None:
+                                flag = _add_first_supported(
+                                    cmd,
+                                    supported,
+                                    ["--max-new-tokens", "--max-tokens", "--lm-max-tokens"],
+                                    decode.get("max_tokens"),
+                                )
+                                _record_applied(applied_flags, flag, decode.get("max_tokens"))
+
+                            if retrieval_only:
+                                flag = _add_flag(cmd, supported, ["--retrieval-only"])
+                                _record_applied(applied_flags, flag, True)
+
+                            seed = runtime.get("seed")
+                            if seed is not None:
+                                seed_flag = _add_first_supported(cmd, supported, ["--seed"], seed)
+                                _record_applied(applied_flags, seed_flag, seed)
+
+                            method_cli_args = _pick_cli_args(method_def, dataset_type)
+                            cmd.extend(method_cli_args)
+                            cmd.extend(variant_cli_args)
+
+                            if seed is not None and seed_flag is None:
+                                seed_wrapper_used = True
+                                wrapper_path = repo_root / "experiments" / "seeded_run.py"
+                                cmd = [sys.executable, str(wrapper_path), "--seed", str(seed), str(entry_path)] + cmd[2:]
+
+                            cmd_str = shlex.join(cmd)
+
+                            if require_prompt_hash and not prompt_hashes:
+                                status = "skipped_prompt_hash_missing"
+                                message = "No prompt_paths configured for this method"
+                            elif budget is not None and enforce_budget and budget_flag is None:
+                                status = "skipped_budget_not_applied"
+                                message = "No supported budget flag in entry script"
+                            elif requires_topk and enforce_topk and topk_flag is None:
+                                status = "skipped_topk_not_applied"
+                                message = "No supported --topk flag in entry script"
+
+                            if status.startswith("skipped"):
+                                budget_applied = budget_flag is not None if budget is not None else None
+                                topk_applied = topk_flag is not None if topk.get("gen_k") is not None else None
+                                resume_delta = _resume_delta(resume_state_before, resume_state_before)
+                                job_results.append(
+                                    {
+                                        "dataset": dataset_id,
+                                        "method": method_id,
+                                        "dataset_def": dataset_def,
+                                        "method_def": method_def,
+                                        "llm": llm_name,
+                                        "budget": budget,
+                                        "variant": variant_name,
+                                        "status": status,
+                                        "message": message,
+                                        "started_at": started_at,
+                                        "ended_at": datetime.now().isoformat(timespec="seconds"),
+                                        "duration_s": 0.0,
+                                        "workdir": str(workdir),
+                                        "cmd": cmd,
+                                        "cmd_str": cmd_str,
+                                        "entry": str(entry_path),
+                                        "entry_hash": entry_hash,
+                                        "prompt_hashes": prompt_hashes,
+                                        "applied_flags": applied_flags,
+                                        "method_cli_args": method_cli_args,
+                                        "variant_cli_args": variant_cli_args,
+                                        "budget_applied": budget_applied,
+                                        "topk_applied": topk_applied,
+                                        "resume": bool(runtime.get("resume")),
+                                        "resume_state_before": resume_state_before,
+                                        "resume_state_after": resume_state_before,
+                                        "resume_delta": resume_delta,
+                                        "seed_wrapper_used": seed_wrapper_used,
+                                        "requires_topk": requires_topk,
+                                        "effective_config": {
+                                            "llm": llm,
+                                            "embedding": embedding,
+                                            "runtime": {
+                                                "workers": runtime.get("workers"),
+                                                "resume": runtime.get("resume"),
+                                                "seed": runtime.get("seed"),
+                                                "save_every": runtime.get("save_every"),
+                                                "limit": runtime.get("limit"),
+                                            },
+                                            "decode": decode,
+                                            "topk": topk,
+                                            "budget": budget,
+                                            "retrieval_only": retrieval_only,
+                                        },
+                                        "fairness": {
+                                            "enforce_budget": enforce_budget,
+                                            "enforce_topk": enforce_topk,
+                                            "require_prompt_hash": require_prompt_hash,
+                                        },
+                                    }
+                                )
+                                continue
 
                             if build_entry_path:
                                 build_key = (dataset_id, method_id, str(workdir))
@@ -439,83 +769,30 @@ def main() -> None:
                                     build_cmd = [sys.executable, str(build_entry_path)]
                                     _add_first_supported(build_cmd, build_supported, ["--workdir", "--work-dir"], workdir)
                                     _add_first_supported(build_cmd, build_supported, ["--result-root"], result_root)
-                                dataset_path = dataset_def.get("path") or dataset_def.get("dataset")
-                                dataset_path = _resolve_repo_path(repo_root, dataset_path)
                                     if dataset_path:
-                                        _add_first_supported(build_cmd, build_supported, ["--dataset"], dataset_path)
-                                    doc_pool = dataset_def.get("doc_pool")
-                                    doc_pool = _resolve_repo_path(repo_root, doc_pool)
+                                        _add_first_supported(build_cmd, build_supported, dataset_flags, dataset_path)
                                     if doc_pool:
-                                        _add_first_supported(build_cmd, build_supported, ["--doc-pool"], doc_pool)
+                                        _add_first_supported(build_cmd, build_supported, doc_pool_flags, doc_pool)
                                     _run_cmd(build_cmd, workdir / "build.log", env, args.dry_run)
                                     built_indexes.add(build_key)
 
-                            cmd = [sys.executable, str(entry_path)]
-                            dataset_path = dataset_def.get("path") or dataset_def.get("dataset")
-                            dataset_path = _resolve_repo_path(repo_root, dataset_path)
-                            if dataset_path:
-                                _add_first_supported(cmd, supported, ["--dataset"], dataset_path)
-
-                            doc_pool = dataset_def.get("doc_pool")
-                            doc_pool = _resolve_repo_path(repo_root, doc_pool)
-                            if doc_pool:
-                                _add_first_supported(cmd, supported, ["--doc-pool"], doc_pool)
-
-                            _add_first_supported(cmd, supported, ["--workdir", "--work-dir"], workdir)
-                            _add_first_supported(cmd, supported, ["--result-root"], result_root)
-
-                            _add_first_supported(cmd, supported, ["--lm-endpoint"], llm.get("endpoint"))
-                            _add_first_supported(cmd, supported, ["--lm-model"], llm.get("model"))
-
-                            _add_first_supported(cmd, supported, ["--embed-model", "--emb-model"], embedding.get("model"))
-                            _add_first_supported(cmd, supported, ["--embed-device", "--emb-device"], embedding.get("device"))
-                            _add_first_supported(cmd, supported, ["--embed-batch-size"], embedding.get("batch_size"))
-                            _add_first_supported(cmd, supported, ["--embed-max-length"], embedding.get("max_length"))
-                            _add_first_supported(cmd, supported, ["--emb-dtype"], embedding.get("dtype"))
-
-                            if embedding.get("normalize") is True:
-                                _add_flag(cmd, supported, ["--embed-normalize"])
-                            elif embedding.get("normalize") is False:
-                                _add_flag(cmd, supported, ["--no-embed-normalize"])
-
-                            _add_first_supported(cmd, supported, ["--num-workers"], runtime.get("workers"))
-                            _add_first_supported(cmd, supported, ["--save-every"], runtime.get("save_every"))
-
-                            if runtime.get("resume") and not args.force:
-                                _add_flag(cmd, supported, ["--resume"])
-
-                            if runtime.get("limit"):
-                                _add_first_supported(cmd, supported, ["--limit"], runtime.get("limit"))
-
-                            if topk.get("gen_k") is not None:
-                                _add_first_supported(cmd, supported, ["--topk"], topk.get("gen_k"))
-
-                            if budget is not None:
-                                _add_first_supported(
-                                    cmd,
-                                    supported,
-                                    ["--max-tokens", "--max-new-tokens", "--lm-max-tokens", "--context-max-tokens"],
-                                    budget,
-                                )
-
-                            if retrieval_only:
-                                _add_flag(cmd, supported, ["--retrieval-only"])
-
-                            method_cli_args = _pick_cli_args(method_def, dataset_type)
-                            cmd.extend(method_cli_args)
-                            cmd.extend(variant_cli_args)
-
                             _run_cmd(cmd, workdir / "run.log", env, args.dry_run)
+                            if not args.dry_run:
+                                resume_state_after = _resume_state(workdir)
                         except Exception as exc:
                             status = "failed"
                             message = str(exc)
                             if not args.continue_on_error:
                                 ended = time.time()
                                 ended_at = datetime.now().isoformat(timespec="seconds")
+                                budget_applied = budget_flag is not None if budget is not None else None
+                                topk_applied = topk_flag is not None if topk.get("gen_k") is not None else None
                                 job_results.append(
                                     {
                                         "dataset": dataset_id,
                                         "method": method_id,
+                                        "dataset_def": dataset_def,
+                                        "method_def": method_def,
                                         "llm": llm_name,
                                         "budget": budget,
                                         "variant": variant_name,
@@ -526,6 +803,43 @@ def main() -> None:
                                         "duration_s": round(ended - started, 2),
                                         "workdir": str(workdir),
                                         "cmd": cmd,
+                                        "cmd_str": cmd_str,
+                                        "entry": str(entry_path),
+                                        "entry_hash": entry_hash,
+                                        "prompt_hashes": prompt_hashes,
+                                        "applied_flags": applied_flags,
+                                        "method_cli_args": method_cli_args,
+                                        "variant_cli_args": variant_cli_args,
+                                        "budget_applied": budget_applied,
+                                        "topk_applied": topk_applied,
+                                        "resume": bool(runtime.get("resume")),
+                                        "resume_state_before": resume_state_before,
+                                        "resume_state_after": resume_state_after or resume_state_before,
+                                        "resume_delta": _resume_delta(
+                                            resume_state_before, resume_state_after or resume_state_before
+                                        ),
+                                        "seed_wrapper_used": seed_wrapper_used,
+                                        "requires_topk": requires_topk,
+                                        "effective_config": {
+                                            "llm": llm,
+                                            "embedding": embedding,
+                                            "runtime": {
+                                                "workers": runtime.get("workers"),
+                                                "resume": runtime.get("resume"),
+                                                "seed": runtime.get("seed"),
+                                                "save_every": runtime.get("save_every"),
+                                                "limit": runtime.get("limit"),
+                                            },
+                                            "decode": decode,
+                                            "topk": topk,
+                                            "budget": budget,
+                                            "retrieval_only": retrieval_only,
+                                        },
+                                        "fairness": {
+                                            "enforce_budget": enforce_budget,
+                                            "enforce_topk": enforce_topk,
+                                            "require_prompt_hash": require_prompt_hash,
+                                        },
                                         "metrics": {},
                                     }
                                 )
@@ -550,10 +864,15 @@ def main() -> None:
                         ended_at = datetime.now().isoformat(timespec="seconds")
 
                         metrics = _normalize_metrics(_collect_metrics(workdir), workdir.name)
+                        budget_applied = budget_flag is not None if budget is not None else None
+                        topk_applied = topk_flag is not None if topk.get("gen_k") is not None else None
+                        resume_state_final = resume_state_after or resume_state_before
                         job_results.append(
                             {
                                 "dataset": dataset_id,
                                 "method": method_id,
+                                "dataset_def": dataset_def,
+                                "method_def": method_def,
                                 "llm": llm_name,
                                 "budget": budget,
                                 "variant": variant_name,
@@ -564,6 +883,41 @@ def main() -> None:
                                 "duration_s": round(ended - started, 2),
                                 "workdir": str(workdir),
                                 "cmd": cmd,
+                                "cmd_str": cmd_str,
+                                "entry": str(entry_path),
+                                "entry_hash": entry_hash,
+                                "prompt_hashes": prompt_hashes,
+                                "applied_flags": applied_flags,
+                                "method_cli_args": method_cli_args,
+                                "variant_cli_args": variant_cli_args,
+                                "budget_applied": budget_applied,
+                                "topk_applied": topk_applied,
+                                "resume": bool(runtime.get("resume")),
+                                "resume_state_before": resume_state_before,
+                                "resume_state_after": resume_state_final,
+                                "resume_delta": _resume_delta(resume_state_before, resume_state_final),
+                                "seed_wrapper_used": seed_wrapper_used,
+                                "requires_topk": requires_topk,
+                                "effective_config": {
+                                    "llm": llm,
+                                    "embedding": embedding,
+                                    "runtime": {
+                                        "workers": runtime.get("workers"),
+                                        "resume": runtime.get("resume"),
+                                        "seed": runtime.get("seed"),
+                                        "save_every": runtime.get("save_every"),
+                                        "limit": runtime.get("limit"),
+                                    },
+                                    "decode": decode,
+                                    "topk": topk,
+                                    "budget": budget,
+                                    "retrieval_only": retrieval_only,
+                                },
+                                "fairness": {
+                                    "enforce_budget": enforce_budget,
+                                    "enforce_topk": enforce_topk,
+                                    "require_prompt_hash": require_prompt_hash,
+                                },
                                 "metrics": metrics,
                                 "eval_status": eval_status,
                                 "eval_message": eval_message,

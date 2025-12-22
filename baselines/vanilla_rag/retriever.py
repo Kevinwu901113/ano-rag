@@ -15,6 +15,8 @@ from loguru import logger
 from config import config as config_loader
 from utils.device import run_with_fallback
 from utils.embedding_utils import EmbeddingEncoder
+from utils.context_budget import pack_contexts
+from utils.output_protocol import build_final_instruction
 from baselines.common.model_clients import get_default_llm_client
 
 DEFAULT_SYSTEM_PROMPT = (
@@ -28,6 +30,7 @@ PROMPT_TEMPLATE = """Context:
 {context}
 
 Question: {question}
+{final_instruction}
 
 Answer the question with a short phrase. If the answer is not contained in the context, say "unknown"."""
 
@@ -45,6 +48,7 @@ class VanillaRAGRetriever:
         embed_batch_size: Optional[int] = None,
         embed_max_length: Optional[int] = None,
         embed_normalize: Optional[bool] = None,
+        context_budget: Optional[int] = None,
     ) -> None:
         self.cfg = config or config_loader.load_config()
         self.index_path = Path(index_path)
@@ -62,6 +66,7 @@ class VanillaRAGRetriever:
         self._embed_normalize_override = embed_normalize
         self.embed_device_used: Optional[str] = None
         self.fallback_reason: Optional[str] = None
+        self.context_budget = int(context_budget or 0)
         
         # Load Index
         if not self.index_path.exists():
@@ -195,12 +200,16 @@ class VanillaRAGRetriever:
         """End-to-end retrieve and answer."""
         docs = self.retrieve(question, top_k=top_k)
         
-        context_blocks = []
+        annotated_hits = []
         for i, hit in enumerate(docs):
-            context_blocks.append(f"[{i+1}] {hit.get('text', '')}")
-        context_str = "\n\n".join(context_blocks)
+            annotated_hits.append({**hit, "text": f"[{i+1}] {hit.get('text', '')}"})
+        context_str, _, _ = pack_contexts(annotated_hits, self.context_budget)
         
-        prompt = PROMPT_TEMPLATE.format(context=context_str, question=question)
+        prompt = PROMPT_TEMPLATE.format(
+            context=context_str,
+            question=question,
+            final_instruction=build_final_instruction(),
+        )
         
         messages = [
             {"role": "system", "content": DEFAULT_SYSTEM_PROMPT},

@@ -17,14 +17,17 @@ if str(ROOT) not in sys.path:
 from structrag.llm_client import LLMChatClient
 from scripts.hotpotqa.baselines.baseline_utils import (
     build_passage_entries,
-    clean_hotpot_answer,
     detect_device,
-    format_context,
     get_embedding_model,
 )
 from scripts.musique.baselines.musique_utils import load_dataset, save_musique_results_and_qa
+from utils.context_budget import pack_contexts
+from utils.jsonl_utils import write_jsonl
+from utils.logging_utils import setup_logging
+from utils.output_protocol import build_final_instruction
 from utils.retrieval_logger import log_retrieval
 from utils.run_layout import ensure_workdir_layout, resolve_workdir
+from utils.run_metadata import build_basic_config, write_config_resolved
 
 
 class SelfReflectiveRetriever:
@@ -99,7 +102,7 @@ def process_example(
     run_name: str,
     dataset_name: str,
     log_dir: Path,
-) -> Tuple[str, str, str, List[str]]:
+) -> Tuple[str, str, str, List[str], List[Dict[str, Any]], int]:
     qid = str(item.get("id") or item.get("_id") or item.get("query_id") or "")
     question = str(item.get("question") or item.get("query") or "").strip()
     paragraphs = item.get("paragraphs") or item.get("contexts") or item.get("passages") or []
@@ -109,8 +112,12 @@ def process_example(
     retriever.build_index(passages)
     hits = retriever.retrieve_and_reflect(question, topk=args.topk)
 
-    context_str = format_context([hit["text"] for hit in hits])
+    context_str, contexts_used, context_tokens = pack_contexts(
+        hits, int(getattr(args, "context_budget", 0) or 0)
+    )
     prompt = f"""Answer the question using the provided context.
+Keep the answer concise.
+{build_final_instruction()}
 
 {context_str}
 
@@ -118,7 +125,7 @@ Question: {question}
 Answer:"""
     try:
         resp = llm.chat([{"role": "user", "content": prompt}])
-        ans = clean_hotpot_answer(resp.content)
+        ans = resp.content
         try:
             log_retrieval(
                 sample_id=qid,
@@ -126,15 +133,9 @@ Answer:"""
                 run_name=run_name,
                 retrieved=hits,
                 topk=len(hits),
-                final_context=[
-                    {
-                        "doc_id": hit.get("doc_id"),
-                        "sent_ids": hit.get("sent_ids"),
-                        "passage_id": hit.get("passage_id"),
-                        "text": hit.get("text"),
-                    }
-                    for hit in hits
-                ],
+                final_context=contexts_used,
+                final_context_tokens=context_tokens,
+                context_budget_tokens=int(getattr(args, "context_budget", 0) or 0) or None,
                 log_dir=log_dir,
             )
         except Exception as log_exc:
@@ -143,10 +144,10 @@ Answer:"""
         pred_evidence = [str(h.get("passage_id")) for h in hits if h.get("passage_id")]
         seen = set()
         pred_evidence = [p for p in pred_evidence if not (p in seen or seen.add(p))]
-        return qid, question, ans, pred_evidence
+        return qid, question, ans, pred_evidence, contexts_used, context_tokens
     except Exception as e:
         logger.error(f"Error Q {qid}: {e}")
-        return qid, question, "error", []
+        return qid, question, "error", [], contexts_used, context_tokens
 
 
 def main() -> None:
@@ -165,6 +166,7 @@ def main() -> None:
     parser.add_argument("--topk", type=int, default=3)
     parser.add_argument("--limit", type=int, default=0)
     parser.add_argument("--max-context", type=int, default=20)
+    parser.add_argument("--context-budget", type=int, default=0, help="Max context tokens (0 disables)")
     parser.add_argument("--num-workers", type=int, default=1)
     args = parser.parse_args()
 
@@ -182,6 +184,20 @@ def main() -> None:
     output_path = Path(args.output) if args.output else preds_dir / "musique_results.jsonl"
     qa_path = Path(args.qa_path) if args.qa_path else preds_dir / "qa.tsv"
     logger.info(f"Writing outputs to workspace {work_dir}")
+    setup_logging(str(work_dir / "run.log"))
+    write_config_resolved(
+        work_dir,
+        build_basic_config(
+            dataset="musique",
+            model=args.lm_model,
+            endpoint=args.lm_endpoint,
+            temperature=0.0,
+            max_tokens=None,
+            context_budget=args.context_budget or None,
+            topk=args.topk,
+            extra={"max_context": args.max_context, "emb_model": args.emb_model},
+        ),
+    )
 
     llm = LLMChatClient(endpoint=args.lm_endpoint, model=args.lm_model, temperature=0.0)
     device = args.emb_device or detect_device()
@@ -190,6 +206,7 @@ def main() -> None:
 
     results: List[Dict[str, Any]] = []
     qa_rows: List[Tuple[str, str]] = []
+    pred_raw_records: List[Dict[str, Any]] = []
 
     num_workers = max(1, args.num_workers)
     with ThreadPoolExecutor(max_workers=num_workers) as ex:
@@ -207,13 +224,23 @@ def main() -> None:
             for item in data
         ]
         for fut in tqdm(as_completed(futures), total=len(futures)):
-            qid, question, ans, pred_evidence = fut.result()
+            qid, question, ans, pred_evidence, contexts_used, context_tokens = fut.result()
             if not qid:
                 continue
             results.append(
                 {"id": qid, "predicted_answer": ans, "predicted_evidence": pred_evidence}
             )
             qa_rows.append((question, ans))
+            pred_raw_records.append(
+                {
+                    "id": str(qid),
+                    "question": question,
+                    "pred_raw": ans,
+                    "contexts_used": contexts_used,
+                    "context_tokens_used": context_tokens,
+                    "context_budget_tokens": int(args.context_budget or 0) or None,
+                }
+            )
 
     out_path, qa_file = save_musique_results_and_qa(
         work_dir,
@@ -222,6 +249,7 @@ def main() -> None:
         output_path=output_path,
         qa_path=qa_path,
     )
+    write_jsonl(preds_dir / "pred_raw.jsonl", pred_raw_records)
     logger.info(f"Saved results to {out_path}")
     logger.info(f"Saved QA log to {qa_file}")
 

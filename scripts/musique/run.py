@@ -465,6 +465,7 @@ def run_pipeline(
     notes_out_path = notes_dir / "notes.musique.jsonl"
     # Official MuSiQue evaluation output (JSONL)
     musique_results_path = preds_dir / "musique_results.jsonl"
+    pred_raw_path = preds_dir / "pred_raw.jsonl"
 
     # Recover checkpoints
     completed: set[str] = set()
@@ -771,6 +772,16 @@ def run_pipeline(
                         "id": mitem.qid,
                         "predicted_answer": answer,
                         "predicted_evidence": pred_evidence,
+                    }, ensure_ascii=False) + "\n")
+                # pred_raw.jsonl for unified evaluation
+                with open(pred_raw_path, "a", encoding="utf-8") as prf:
+                    prf.write(json.dumps({
+                        "id": mitem.qid,
+                        "question": question,
+                        "pred_raw": answer,
+                        "contexts_used": lm_evs,
+                        "context_tokens_used": None,
+                        "context_budget_tokens": None,
                     }, ensure_ascii=False) + "\n")
             return mitem.qid, True
         except Exception as exc:

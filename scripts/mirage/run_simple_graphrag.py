@@ -14,8 +14,12 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from baselines.simple_graphrag import get_retriever
+from utils.context_budget import pack_contexts
+from utils.jsonl_utils import write_jsonl
+from utils.logging_utils import setup_logging
 from utils.retrieval_logger import log_retrieval
 from utils.run_layout import ensure_workdir_layout, resolve_workdir
+from utils.run_metadata import build_basic_config, write_config_resolved
 
 
 def _select_workspace(root: Path, prefix: str, force_new: bool) -> Path:
@@ -39,6 +43,7 @@ def main() -> None:
     parser.add_argument("--limit", type=int, default=0, help="Limit number of questions (0=all)")
     parser.add_argument("--lmstudio-endpoint", required=True)
     parser.add_argument("--lmstudio-model", required=True)
+    parser.add_argument("--context-budget", type=int, default=0, help="Max context tokens (0 disables)")
     args = parser.parse_args()
 
     # 1. Setup config for the baseline (it uses global config)
@@ -65,10 +70,19 @@ def main() -> None:
     run_name = work_dir.name
     dataset_name = "mirage"
     
-    # Add logger sink to work_dir
-    logger.add(work_dir / "simple_graphrag.log")
-    
+    setup_logging(str(work_dir / "run.log"))
     logger.info("Writing Simple GraphRAG outputs to {}", work_dir)
+    write_config_resolved(
+        work_dir,
+        build_basic_config(
+            dataset="mirage",
+            model=args.lmstudio_model,
+            endpoint=args.lmstudio_endpoint,
+            temperature=None,
+            max_tokens=None,
+            context_budget=args.context_budget or None,
+        ),
+    )
 
     # Determine index directory: if not provided, default to work_dir
     index_dir = args.index_dir if args.index_dir else str(artifacts_dir / "simple_graphrag")
@@ -140,9 +154,9 @@ def main() -> None:
         
     results = []
     qa_lines = []
+    pred_raw_records: List[Dict[str, Any]] = []
     
-    from baselines.simple_graphrag.runner import _strip_reasoning, _enforce_short_answer
-    retriever = get_retriever(index_dir=index_dir)
+    retriever = get_retriever(index_dir=index_dir, context_budget=args.context_budget)
     
     for i, item in enumerate(dataset):
         question = item.get("query") or item.get("question")
@@ -151,8 +165,7 @@ def main() -> None:
         try:
             logger.info(f"Processing Q{i}: {question}")
             ans = retriever.answer(question)
-            cleaned_ans = _strip_reasoning(ans)
-            final_ans = _enforce_short_answer(cleaned_ans)
+            final_ans = ans.strip()
             
             results.append({
                 "query_id": qid,
@@ -165,25 +178,35 @@ def main() -> None:
             qa_lines.append(f"{question}\t{clean_ans}")
             try:
                 hits = getattr(retriever, "last_hits", [])
+                annotated_hits = []
+                for idx, hit in enumerate(hits):
+                    annotated_hits.append({**hit, "text": f"[{idx+1}] {hit.get('text', '')}"})
+                context_str, contexts_used, context_tokens = pack_contexts(
+                    annotated_hits, int(args.context_budget or 0)
+                )
                 log_retrieval(
                     sample_id=qid,
                     dataset=dataset_name,
                     run_name=run_name,
                     retrieved=hits,
                     topk=len(hits),
-                    final_context=[
-                        {
-                            "doc_id": hit.get("doc_id"),
-                            "sent_ids": hit.get("sent_ids"),
-                            "passage_id": hit.get("passage_id"),
-                            "text": hit.get("text"),
-                        }
-                        for hit in hits
-                    ],
+                    final_context=contexts_used,
+                    final_context_tokens=context_tokens,
+                    context_budget_tokens=int(args.context_budget or 0) or None,
                     log_dir=artifacts_dir,
                 )
             except Exception as log_exc:
                 logger.error(f"retrieval logging failed for {qid}: {log_exc}")
+            pred_raw_records.append(
+                {
+                    "id": str(qid),
+                    "question": question,
+                    "pred_raw": ans,
+                    "contexts_used": contexts_used,
+                    "context_tokens_used": context_tokens,
+                    "context_budget_tokens": int(args.context_budget or 0) or None,
+                }
+            )
             
         except Exception as e:
             logger.error(f"Error processing Q{i}: {e}")
@@ -203,6 +226,7 @@ def main() -> None:
         
     with open(qa_log_path, "w", encoding="utf-8") as f:
         f.write("\n".join(qa_lines))
+    write_jsonl(preds_dir / "pred_raw.jsonl", pred_raw_records)
     
     # Also copy log file to work_dir if possible, or ensure logger writes there
     # The logger is configured globally, but we can add a sink here

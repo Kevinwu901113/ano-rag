@@ -14,7 +14,9 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from baselines.direct_llm import DirectLLMRunner
+from utils.logging_utils import setup_logging
 from utils.run_layout import ensure_workdir_layout, resolve_workdir
+from utils.run_metadata import build_basic_config, write_config_resolved
 
 
 def _select_workspace(root: Path, prefix: str, force_new: bool) -> Path:
@@ -40,6 +42,7 @@ def main() -> None:
     parser.add_argument("--temperature", type=float, default=None)
     parser.add_argument("--max-new-tokens", type=int, default=None)
     parser.add_argument("--no-system-prompt", action="store_true", help="Skip the default direct-LLM system prompt")
+    parser.add_argument("--context-budget", type=int, default=0, help="Max context tokens (ignored for direct LLM)")
     args = parser.parse_args()
 
     # 1. Setup config for the baseline (it uses global config)
@@ -60,6 +63,18 @@ def main() -> None:
     work_dir = resolve_workdir(args.work_dir, result_root=args.result_root, dataset="mirage")
     ensure_workdir_layout(work_dir)
     logger.info("Writing direct LLM outputs to {}", work_dir)
+    setup_logging(str(work_dir / "run.log"))
+    write_config_resolved(
+        work_dir,
+        build_basic_config(
+            dataset="mirage",
+            model=args.lmstudio_model or "unknown",
+            endpoint=args.lmstudio_endpoint or "unknown",
+            temperature=args.temperature,
+            max_tokens=args.max_new_tokens,
+            context_budget=args.context_budget or None,
+        ),
+    )
 
     runner_kwargs = {
         "lm_endpoint": args.lmstudio_endpoint,

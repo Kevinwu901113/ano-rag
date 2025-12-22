@@ -17,12 +17,16 @@ if str(ROOT) not in sys.path:
 from structrag.llm_client import LLMChatClient
 from scripts.hotpotqa.baselines.baseline_utils import (
     build_passage_entries,
-    clean_hotpot_answer,
     format_context,
     save_predictions_and_qa,
 )
+from utils.context_budget import pack_contexts
+from utils.jsonl_utils import write_jsonl
+from utils.logging_utils import setup_logging
+from utils.output_protocol import build_final_instruction
 from utils.retrieval_logger import log_retrieval
 from utils.run_layout import ensure_workdir_layout, resolve_workdir
+from utils.run_metadata import build_basic_config, write_config_resolved
 
 def load_dataset(path: str) -> List[Dict[str, Any]]:
     with open(path, "r", encoding="utf-8") as f:
@@ -75,6 +79,7 @@ JSON:"""
         full_text = format_context(passages)
         
         prompt = f"""Answer the question using the knowledge graph and text below.
+{build_final_instruction()}
         
 Graph:
 {graph_desc[:4000]} 
@@ -95,7 +100,7 @@ def process_example(item: Dict[str, Any],
                     *,
                     run_name: str,
                     dataset_name: str,
-                    log_dir: Path) -> Tuple[str, str, str, List[List[Any]]]:
+                    log_dir: Path) -> Tuple[str, str, str, List[List[Any]], List[Dict[str, Any]], int]:
     """
     Process a single HotpotQA example using GraphRAG.
     """
@@ -104,7 +109,9 @@ def process_example(item: Dict[str, Any],
     context = item["context"]
     passages = build_passage_entries(context, max_passages=args.max_context)
     
-    # GraphRAG baseline uses all provided paragraphs; log them regardless of generation success.
+    budget_tokens = int(getattr(args, "context_budget", 0) or 0)
+    context_str, contexts_used, context_tokens = pack_contexts(passages, budget_tokens)
+    # GraphRAG baseline uses provided paragraphs; log them regardless of generation success.
     try:
         log_retrieval(
             sample_id=qid,
@@ -121,22 +128,16 @@ def process_example(item: Dict[str, Any],
                 for idx, entry in enumerate(passages)
             ],
             topk=len(passages),
-            final_context=[
-                {
-                    "doc_id": entry.get("doc_id"),
-                    "sent_ids": entry.get("sent_ids"),
-                    "passage_id": entry.get("passage_id"),
-                    "text": entry.get("text"),
-                }
-                for entry in passages
-            ],
+            final_context=contexts_used,
+            final_context_tokens=context_tokens,
+            context_budget_tokens=budget_tokens or None,
             log_dir=log_dir,
         )
     except Exception as log_exc:
         logger.error(f"retrieval logging failed for {qid}: {log_exc}")
 
     if bool(getattr(args, "retrieval_only", False)):
-        return qid, question, "", []
+        return qid, question, "", [], contexts_used, context_tokens
 
     if llm_extract is None or llm_answer is None:
         raise RuntimeError("LLM clients are required unless --retrieval-only is set")
@@ -145,13 +146,12 @@ def process_example(item: Dict[str, Any],
     graph_rag = MiniGraphRAG(llm_extract, llm_answer)
     
     try:
-        ans = graph_rag.build_and_query([p["text"] for p in passages], question)
-        ans = clean_hotpot_answer(ans)
+        ans = graph_rag.build_and_query([p["text"] for p in contexts_used], question)
         sp = []
-        return qid, question, ans, sp
+        return qid, question, ans, sp, contexts_used, context_tokens
     except Exception as e:
         logger.error(f"Error Q {qid}: {e}")
-        return qid, question, "error", []
+        return qid, question, "error", [], contexts_used, context_tokens
 
 def main():
     parser = argparse.ArgumentParser(description="Run Mini GraphRAG on HotpotQA Distractor")
@@ -172,6 +172,7 @@ def main():
     parser.add_argument("--retrieval-only", action="store_true", help="Skip LLM calls; only run retrieval and log retrieval.jsonl")
     parser.add_argument("--limit", type=int, default=0)
     parser.add_argument("--max-context", type=int, default=10, help="Max number of paragraphs from context to keep")
+    parser.add_argument("--context-budget", type=int, default=0, help="Max context tokens (0 disables)")
     parser.add_argument("--num-workers", type=int, default=4, help="Number of parallel workers")
     
     args = parser.parse_args()
@@ -192,6 +193,19 @@ def main():
     output_path = Path(args.output) if args.output else preds_dir / "pred.json"
     qa_path = Path(args.qa_path) if args.qa_path else preds_dir / "qa.tsv"
     logger.info(f"Writing outputs to workspace {work_dir}")
+    setup_logging(str(work_dir / "run.log"))
+    write_config_resolved(
+        work_dir,
+        build_basic_config(
+            dataset="hotpotqa",
+            model=args.lm_model,
+            endpoint=args.lm_endpoint,
+            temperature=0.0,
+            max_tokens=args.lm_max_tokens,
+            context_budget=args.context_budget or None,
+            extra={"max_context": args.max_context},
+        ),
+    )
 
     extract_endpoint = args.extract_endpoint or args.lm_endpoint
     extract_model = args.extract_model or args.lm_model
@@ -218,6 +232,7 @@ def main():
     
     predictions = {"answer": {}, "sp": {}}
     qa_rows: List[Tuple[str, str]] = []
+    pred_raw_records: List[Dict[str, Any]] = []
     
     num_workers = max(1, args.num_workers)
     logger.info(f"Running GraphRAG on {len(data)} examples with {num_workers} workers...")
@@ -239,12 +254,22 @@ def main():
 
         for fut in tqdm(as_completed(futures), total=len(futures)):
             try:
-                qid, question, ans, sp = fut.result()
+                qid, question, ans, sp, contexts_used, context_tokens = fut.result()
                 if not qid:
                     continue
                 predictions["answer"][qid] = ans
                 predictions["sp"][qid] = sp
                 qa_rows.append((question, ans))
+                pred_raw_records.append(
+                    {
+                        "id": str(qid),
+                        "question": question,
+                        "pred_raw": ans,
+                        "contexts_used": contexts_used,
+                        "context_tokens_used": context_tokens,
+                        "context_budget_tokens": int(args.context_budget or 0) or None,
+                    }
+                )
             except Exception as e:
                 logger.error(f"Error in worker: {e}")
             
@@ -257,6 +282,7 @@ def main():
         output_path=output_path,
         qa_path=qa_path,
     )
+    write_jsonl(preds_dir / "pred_raw.jsonl", pred_raw_records)
     logger.info(f"Saved predictions to {out_path}")
     logger.info(f"Saved QA log to {qa_file}")
 

@@ -19,14 +19,17 @@ if str(ROOT) not in sys.path:
 
 from scripts.hotpotqa.baselines.baseline_utils import (
     build_passage_entries,
-    clean_hotpot_answer,
-    format_context,
     save_predictions_and_qa,
     TransformerEmbedder,
 )
+from utils.context_budget import pack_contexts
 from utils.device import run_with_fallback
+from utils.jsonl_utils import write_jsonl
+from utils.logging_utils import setup_logging
+from utils.output_protocol import build_final_instruction
 from utils.retrieval_logger import log_retrieval
 from utils.run_layout import ensure_workdir_layout, resolve_workdir
+from utils.run_metadata import build_basic_config, write_config_resolved
 
 def load_dataset(path: str) -> List[Dict[str, Any]]:
     with open(path, "r", encoding="utf-8") as f:
@@ -161,7 +164,7 @@ def process_example(item: Dict[str, Any],
                     dataset_name: str,
                     log_dir: Path,
                     embed_meta: Dict[str, Any],
-                    embed_meta_lock: threading.Lock) -> Tuple[str, str, str, List[List[Any]]]:
+                    embed_meta_lock: threading.Lock) -> Tuple[str, str, str, List[List[Any]], List[Dict[str, Any]], int]:
     """
     Process a single HotpotQA example.
     """
@@ -187,7 +190,9 @@ def process_example(item: Dict[str, Any],
         if embed_meta.get("dim") is None and retriever.dim:
             embed_meta["dim"] = int(retriever.dim)
     
-    context_str = format_context([hit["text"] for hit in hits])
+    context_str, contexts_used, context_tokens = pack_contexts(
+        hits, int(getattr(args, "context_budget", 0) or 0)
+    )
 
     try:
         log_retrieval(
@@ -196,15 +201,9 @@ def process_example(item: Dict[str, Any],
             run_name=run_name,
             retrieved=hits,
             topk=len(hits),
-            final_context=[
-                {
-                    "doc_id": hit.get("doc_id"),
-                    "sent_ids": hit.get("sent_ids"),
-                    "passage_id": hit.get("passage_id"),
-                    "text": hit.get("text"),
-                }
-                for hit in hits
-            ],
+            final_context=contexts_used,
+            final_context_tokens=context_tokens,
+            context_budget_tokens=int(getattr(args, "context_budget", 0) or 0) or None,
             log_dir=log_dir,
         )
     except Exception as log_exc:
@@ -212,10 +211,12 @@ def process_example(item: Dict[str, Any],
 
     if retrieval_only:
         sp = []
-        return qid, question, "", sp
+        return qid, question, "", sp, contexts_used, context_tokens
     
     prompt = f"""Answer the question using the provided context.
-    
+Keep the answer concise.
+{build_final_instruction()}
+
 {context_str}
 
 Question: {question}
@@ -225,12 +226,12 @@ Answer:"""
         if llm is None:
             raise RuntimeError("LLM client is required unless --retrieval-only is set")
         resp = llm.chat([{"role": "user", "content": prompt}])
-        ans = clean_hotpot_answer(resp.content)
+        ans = resp.content
         sp = [] # Not predicting supporting facts for now
-        return qid, question, ans, sp
+        return qid, question, ans, sp, contexts_used, context_tokens
     except Exception as e:
         logger.error(f"Error Q {qid}: {e}")
-        return qid, question, "error", []
+        return qid, question, "error", [], contexts_used, context_tokens
 
 def main():
     parser = argparse.ArgumentParser(description="Run Self-RAG Baseline on HotpotQA Distractor Setting")
@@ -273,6 +274,7 @@ def main():
     parser.add_argument("--retrieval-only", action="store_true", help="Skip LLM calls; only run retrieval and log retrieval.jsonl")
     parser.add_argument("--limit", type=int, default=0)
     parser.add_argument("--max-context", type=int, default=10, help="Max number of paragraphs from context to keep")
+    parser.add_argument("--context-budget", type=int, default=0, help="Max context tokens (0 disables)")
     parser.add_argument("--num-workers", type=int, default=1, help="Number of parallel workers")
     
     args = parser.parse_args()
@@ -293,6 +295,20 @@ def main():
     output_path = Path(args.output) if args.output else preds_dir / "pred.json"
     qa_path = Path(args.qa_path) if args.qa_path else preds_dir / "qa.tsv"
     logger.info(f"Writing outputs to workspace {work_dir}")
+    setup_logging(str(work_dir / "run.log"))
+    write_config_resolved(
+        work_dir,
+        build_basic_config(
+            dataset="hotpotqa",
+            model=args.lm_model,
+            endpoint=args.lm_endpoint,
+            temperature=0.0,
+            max_tokens=None,
+            context_budget=args.context_budget or None,
+            topk=args.topk,
+            extra={"max_context": args.max_context, "embed_model": args.embed_model},
+        ),
+    )
 
     llm = None
     if not args.retrieval_only:
@@ -321,6 +337,7 @@ def main():
     
     predictions = {"answer": {}, "sp": {}}
     qa_rows: List[Tuple[str, str]] = []
+    pred_raw_records: List[Dict[str, Any]] = []
     
     num_workers = max(1, args.num_workers)
     logger.info(f"Running Self-RAG on {len(data)} examples with {num_workers} workers...")
@@ -344,12 +361,22 @@ def main():
 
         for fut in tqdm(as_completed(futures), total=len(futures)):
             try:
-                qid, question, ans, sp = fut.result()
+                qid, question, ans, sp, contexts_used, context_tokens = fut.result()
                 if not qid:
                     continue
                 predictions["answer"][qid] = ans
                 predictions["sp"][qid] = sp
                 qa_rows.append((question, ans))
+                pred_raw_records.append(
+                    {
+                        "id": str(qid),
+                        "question": question,
+                        "pred_raw": ans,
+                        "contexts_used": contexts_used,
+                        "context_tokens_used": context_tokens,
+                        "context_budget_tokens": int(args.context_budget or 0) or None,
+                    }
+                )
             except Exception as e:
                 logger.error(f"Error in worker: {e}")
     
@@ -362,6 +389,7 @@ def main():
         output_path=output_path,
         qa_path=qa_path,
     )
+    write_jsonl(preds_dir / "pred_raw.jsonl", pred_raw_records)
     logger.info(f"Saved predictions to {out_path}")
     logger.info(f"Saved QA log to {qa_file}")
     devices = sorted(str(d) for d in embed_meta["used_devices"])

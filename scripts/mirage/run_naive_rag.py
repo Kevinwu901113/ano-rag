@@ -14,7 +14,9 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from baselines.naive_rag import NaiveRAGRunner
+from utils.logging_utils import setup_logging
 from utils.run_layout import ensure_workdir_layout, resolve_workdir
+from utils.run_metadata import build_basic_config, write_config_resolved
 
 
 def _select_workspace(root: Path, prefix: str, force_new: bool) -> Path:
@@ -61,6 +63,7 @@ def main() -> None:
     parser.add_argument("--no-debug", action="store_true", help="Skip writing retrieval debug JSONL")
     parser.add_argument("--resume", action="store_true", help="Resume from existing outputs in workdir")
     parser.add_argument("--save-every", type=int, default=50, help="Checkpoint every N samples (0 disables)")
+    parser.add_argument("--context-budget", type=int, default=0, help="Max context tokens (0 disables)")
     args = parser.parse_args()
     
     # 1. Setup config for the baseline (it uses global config)
@@ -96,6 +99,19 @@ def main() -> None:
 
     run_name = work_dir.name
     logger.info("Writing outputs to {}", work_dir)
+    setup_logging(str(work_dir / "run.log"))
+    write_config_resolved(
+        work_dir,
+        build_basic_config(
+            dataset="mirage",
+            model=args.lmstudio_model or "unknown",
+            endpoint=args.lmstudio_endpoint or "unknown",
+            temperature=args.temperature,
+            max_tokens=args.max_new_tokens,
+            context_budget=args.context_budget or None,
+            topk=args.topk,
+        ),
+    )
 
     runner = NaiveRAGRunner(
         str(index_path),
@@ -105,6 +121,7 @@ def main() -> None:
         lm_model=args.lmstudio_model,
         temperature=args.temperature,
         max_tokens=args.max_new_tokens,
+        context_budget=args.context_budget,
     )
     limit = args.limit if args.limit and args.limit > 0 else None
     artifacts = runner.run_dataset(

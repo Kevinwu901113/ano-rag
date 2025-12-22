@@ -1,93 +1,28 @@
 from __future__ import annotations
 
 import json
-import time
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional
 
-import requests
 from loguru import logger
 
-from baselines.naive_rag import NaiveIndex
+from baselines.fid_rag.retriever import NaiveIndex
 from config import config as config_loader
-from utils.answer_cleaner import _enforce_short_answer, _strip_reasoning
+from utils.context_budget import pack_contexts
+from utils.jsonl_utils import write_jsonl
+from utils.output_protocol import build_final_instruction
 from utils.retrieval_logger import log_retrieval
 from baselines.common.model_clients import get_default_llm_client
 
 
-FID_PROMPT_TEMPLATE = """You are a question answering system.
-Use ONLY the information from the passages below to answer the question.
-If the passages are insufficient, reply EXACTLY with: Insufficient evidence.
-Respond with EXACTLY TWO lines and nothing else.
-  Line 1: ONLY the final answer as one short noun phrase (no quotes, no punctuation, no analysis).
-  Line 2: Passages used: i1, i2, ... (list the passage indices you relied on).
-Do NOT include any reasoning, explanation, bullet points, or extra lines.
+PROMPT_TEMPLATE = """Answer the question based on the context.
+Keep the answer concise.
+{final_instruction}
 
-Question:
-{question}
+{context}
 
-Passages:
-{passages}
-
-First, output the two required lines.
-"""
-
-
-class LLMClient:
-    """Minimal LM Studio/OpenAI-compatible chat client for FiD prompting."""
-
-    def __init__(
-        self,
-        endpoint: str,
-        model: str,
-        temperature: float = 0.0,
-        max_tokens: int = 128,
-        stop: Optional[List[str]] = None,
-        retries: int = 2,
-    ) -> None:
-        if not endpoint or not model:
-            raise ValueError("Both endpoint and model are required for LLM calls")
-        self.endpoint = endpoint.rstrip("/")
-        self.model = model
-        self.temperature = temperature
-        self.max_tokens = max_tokens
-        self.stop = [] if stop is None else stop
-        self.retries = max(0, retries)
-
-    def answer_raw_prompt(self, prompt: str) -> str:
-        if not prompt.strip():
-            return "Insufficient evidence"
-        payload = {
-            "model": self.model,
-            "temperature": self.temperature,
-            "max_tokens": self.max_tokens,
-            "messages": [{"role": "user", "content": prompt}],
-        }
-        if self.stop:
-            payload["stop"] = self.stop
-        for attempt in range(self.retries + 1):
-            try:
-                resp = requests.post(f"{self.endpoint}/chat/completions", json=payload, timeout=60)
-                resp.raise_for_status()
-                data = resp.json()
-                content = data["choices"][0]["message"]["content"]
-                
-                # Handle <think> blocks
-                import re
-                content = re.sub(r"<think>.*?</think>", "", content, flags=re.DOTALL).strip()
-                if content.startswith("<think>"):
-                    content = re.sub(r"^<think>.*", "", content, flags=re.DOTALL).strip()
-                    
-                cleaned = _strip_reasoning(content)
-                return cleaned or "Insufficient evidence"
-            except requests.RequestException as exc:  # noqa: PERF203
-                if attempt >= self.retries:
-                    logger.error("LLM call failed after {} attempts: {}", attempt + 1, exc)
-                    return "Insufficient evidence"
-                backoff = 2**attempt
-                logger.warning("LLM call failed (attempt {}): {}; retrying in {}s", attempt + 1, exc, backoff)
-                time.sleep(backoff)
-        return "Insufficient evidence"
+Question: {question}
+Answer:"""
 
 
 class FiDRAGRunner:
@@ -99,6 +34,7 @@ class FiDRAGRunner:
         chunks_path: str,
         *,
         topk: int = 5,
+        context_budget: Optional[int] = None,
         lm_endpoint: Optional[str] = None,
         lm_model: Optional[str] = None,
         temperature: Optional[float] = None,
@@ -108,6 +44,7 @@ class FiDRAGRunner:
     ) -> None:
         self.cfg = config or config_loader.load_config()
         self.topk = max(1, int(topk))
+        self.context_budget = int(context_budget or 0)
         lm_cfg = self.cfg.get("lmstudio", {}) or {}
         endpoint = lm_endpoint or lm_cfg.get("endpoint")
         model = lm_model or lm_cfg.get("model")
@@ -118,6 +55,8 @@ class FiDRAGRunner:
         
         temp = temperature if temperature is not None else lm_cfg.get("temperature", 0.0)
         max_new_tokens = max_tokens if max_tokens is not None else lm_cfg.get("max_tokens", 128)
+        self.temperature = float(temp or 0.0)
+        self.max_new_tokens = int(max_new_tokens or 128)
         self.retriever = NaiveIndex(index_path, chunks_path, config=self.cfg)
         
         # Override config if args provided
@@ -162,31 +101,42 @@ class FiDRAGRunner:
         qa_rows_no_header: List[str] = []
         qa_with_q: List[str] = []
         debug_records: List[str] = []
+        pred_raw_records: List[Dict[str, Any]] = []
         for idx, item in enumerate(items):
             question = item.get("query") or item.get("question") or ""
             qid = item.get("query_id") or str(idx)
             hits = self.retriever.search(question, self.topk)
-            context = _format_fid_context(hits)
-            if not context.strip():
-                raw_output = "Insufficient evidence"
-            else:
-                prompt = _build_fid_prompt(question, hits)
-                raw_output = self.lm.chat([{"role": "user", "content": prompt}])
-            answer_text, used_indices = _parse_fid_output(raw_output)
-            used_indices = _filter_indices(used_indices, len(hits))
-            answer_text = _enforce_short_answer(answer_text)
+            annotated_hits = []
+            for rank, hit in enumerate(hits, start=1):
+                annotated_hits.append({**hit, "text": f"[{rank}] {hit.get('text', '')}"})
+            context_str, contexts_used, context_tokens = pack_contexts(
+                annotated_hits, self.context_budget
+            )
+            prompt = PROMPT_TEMPLATE.format(
+                context=context_str,
+                question=question,
+                final_instruction=build_final_instruction(),
+            )
+            raw_output = (
+                self.lm.chat(
+                    [{"role": "user", "content": prompt}],
+                    max_tokens=self.max_new_tokens,
+                    temperature=self.temperature,
+                )
+                if prompt.strip()
+                else ""
+            )
             answers.append(
                 {
                     "query_id": qid,
                     "question": question,
-                    "answer": answer_text,
+                    "answer": raw_output,
                     "hits": hits,
-                    "passages_used": used_indices,
                 }
             )
-            qa_rows.append(f"{question}\t{answer_text}")
-            qa_rows_no_header.append(f"{question}\t{answer_text}")
-            qa_with_q.append(f"{question}\t{answer_text}")
+            qa_rows.append(f"{question}\t{raw_output}")
+            qa_rows_no_header.append(f"{question}\t{raw_output}")
+            qa_with_q.append(f"{question}\t{raw_output}")
             try:
                 log_retrieval(
                     sample_id=qid,
@@ -196,15 +146,9 @@ class FiDRAGRunner:
                         {**hit, "rank": idx + 1} for idx, hit in enumerate(hits)
                     ],
                     topk=len(hits),
-                    final_context=[
-                        {
-                            "doc_id": hit.get("doc_id"),
-                            "sent_ids": hit.get("sent_ids"),
-                            "passage_id": hit.get("passage_id"),
-                            "text": hit.get("text"),
-                        }
-                        for hit in hits
-                    ],
+                    final_context=contexts_used,
+                    final_context_tokens=context_tokens,
+                    context_budget_tokens=self.context_budget or None,
                     log_dir=artifacts_dir,
                 )
             except Exception as log_exc:
@@ -215,13 +159,22 @@ class FiDRAGRunner:
                         {
                             "query_id": qid,
                             "question": question,
-                            "answer": answer_text,
-                            "passages_used": used_indices,
+                            "answer": raw_output,
                             "hits": hits,
                         },
                         ensure_ascii=False,
                     )
                 )
+            pred_raw_records.append(
+                {
+                    "id": str(qid),
+                    "question": question,
+                    "pred_raw": raw_output,
+                    "contexts_used": contexts_used,
+                    "context_tokens_used": context_tokens,
+                    "context_budget_tokens": self.context_budget or None,
+                }
+            )
 
         answers_path = preds_dir / "answers.json"
         qa_path = preds_dir / "qa.tsv"
@@ -232,6 +185,7 @@ class FiDRAGRunner:
         qa_path.write_text("\n".join(qa_rows), encoding="utf-8")
         qa_no_header_path.write_text("\n".join(qa_rows_no_header), encoding="utf-8")
         qa_q_path.write_text("\n".join(qa_with_q), encoding="utf-8")
+        write_jsonl(preds_dir / "pred_raw.jsonl", pred_raw_records)
         if debug:
             debug_dir.mkdir(parents=True, exist_ok=True)
             (debug_dir / "retrieval.jsonl").write_text("\n".join(debug_records), encoding="utf-8")
@@ -243,63 +197,3 @@ class FiDRAGRunner:
             "qa_with_question": str(qa_q_path),
             "debug": str(debug_dir) if debug else None,
         }
-
-
-def _format_fid_context(hits: List[Dict[str, Any]]) -> str:
-    lines = []
-    for idx, hit in enumerate(hits, start=1):
-        text = str(hit.get("text") or "")
-        lines.append(f"[{idx}] {text}")
-    return "\n\n".join(lines)
-
-
-def _build_fid_prompt(question: str, hits: List[Dict[str, Any]]) -> str:
-    context = _format_fid_context(hits)
-    safe_context = context.replace("{", "{{").replace("}", "}}")
-    safe_question = question.replace("{", "{{").replace("}", "}}")
-    return FID_PROMPT_TEMPLATE.format(question=safe_question, passages=safe_context)
-
-
-def _parse_fid_output(text: str) -> Tuple[str, List[int]]:
-    """
-    Parse LLM raw output and return (answer_text, used_indices).
-    The first non-empty line is treated as the answer. A later line starting with
-    "Passages used:" is parsed for referenced indices.
-    """
-
-    if not text:
-        return "Insufficient evidence", []
-    lines = [line.strip() for line in text.splitlines()]
-    lines = [line for line in lines if line]
-    if not lines:
-        return "Insufficient evidence", []
-    answer_text = lines[0]
-    used_indices: List[int] = []
-    answer_before_used: Optional[str] = None
-    for idx, line in enumerate(lines):
-        lower = line.lower()
-        if lower.startswith("passages used"):
-            if idx > 0:
-                answer_before_used = lines[idx - 1]
-            _, _, suffix = line.partition(":")
-            candidates = suffix.replace(",", " ").split()
-            for token in candidates:
-                if token.isdigit():
-                    used_indices.append(int(token))
-            break
-    if answer_before_used:
-        answer_text = answer_before_used
-    return answer_text, used_indices
-
-
-def _filter_indices(indices: List[int], max_index: int) -> List[int]:
-    seen = set()
-    filtered: List[int] = []
-    for idx in indices:
-        if idx <= 0 or idx > max_index:
-            continue
-        if idx in seen:
-            continue
-        seen.add(idx)
-        filtered.append(idx)
-    return filtered

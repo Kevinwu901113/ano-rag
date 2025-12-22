@@ -10,7 +10,7 @@ from baselines.common.model_clients import get_default_llm_client
 # Global retriever instance
 _retriever: Optional[GraphRetriever] = None
 
-def get_retriever(index_dir: Optional[str] = None) -> GraphRetriever:
+def get_retriever(index_dir: Optional[str] = None, *, context_budget: Optional[int] = None) -> GraphRetriever:
     global _retriever
     if _retriever is None:
         # Load config
@@ -24,7 +24,7 @@ def get_retriever(index_dir: Optional[str] = None) -> GraphRetriever:
         if not os.path.exists(graph_path) or not os.path.exists(chunk_store_path):
             raise FileNotFoundError(f"Graph files not found in {base_dir}. Run build_graph first.")
             
-        _retriever = GraphRetriever(graph_path, chunk_store_path, llm_client)
+        _retriever = GraphRetriever(graph_path, chunk_store_path, llm_client, context_budget=context_budget)
         
     return _retriever
 
@@ -32,7 +32,8 @@ def answer(
     question: str, 
     index_dir: Optional[str] = None,
     graph_path: Optional[str] = None,
-    chunk_store_path: Optional[str] = None
+    chunk_store_path: Optional[str] = None,
+    context_budget: Optional[int] = None,
 ) -> str:
     """
     Main entry point for the baseline.
@@ -46,8 +47,8 @@ def answer(
         llm_client = get_default_llm_client(global_config.load_config())
         
         # Create ephemeral retriever
-        temp_retriever = GraphRetriever(graph_path, chunk_store_path, llm_client)
+        temp_retriever = GraphRetriever(graph_path, chunk_store_path, llm_client, context_budget=context_budget)
         return temp_retriever.answer(question)
 
-    retriever = get_retriever(index_dir)
+    retriever = get_retriever(index_dir, context_budget=context_budget)
     return retriever.answer(question)

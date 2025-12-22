@@ -20,15 +20,17 @@ if str(ROOT) not in sys.path:
 
 from scripts.hotpotqa.baselines.baseline_utils import (
     build_passage_entries,
-    clean_hotpot_answer,
-    format_context,
     save_predictions_and_qa,
-    truncate_text,
     TransformerEmbedder,
 )
+from utils.context_budget import pack_contexts
 from utils.device import run_with_fallback
+from utils.jsonl_utils import write_jsonl
+from utils.logging_utils import setup_logging
+from utils.output_protocol import build_final_instruction
 from utils.retrieval_logger import log_retrieval
 from utils.run_layout import ensure_workdir_layout, resolve_workdir
+from utils.run_metadata import build_basic_config, write_config_resolved
 
 def load_dataset(path: str) -> List[Dict[str, Any]]:
     with open(path, "r", encoding="utf-8") as f:
@@ -158,7 +160,7 @@ def process_example(item: Dict[str, Any],
                     dataset_name: str,
                     log_dir: Path,
                     embed_meta: Dict[str, Any],
-                    embed_meta_lock: threading.Lock) -> Tuple[str, str, str, List[List[Any]]]:
+                    embed_meta_lock: threading.Lock) -> Tuple[str, str, str, List[List[Any]], List[Dict[str, Any]], int]:
     """
     Process a single HotpotQA example using RAPTOR.
     """
@@ -182,6 +184,10 @@ def process_example(item: Dict[str, Any],
             if embed_meta.get("dim") is None and raptor.dim:
                 embed_meta["dim"] = int(raptor.dim)
         
+        budget_tokens = int(getattr(args, "context_budget", 0) or 0)
+        if budget_tokens <= 0 and getattr(args, "max_prompt_tokens", 0):
+            budget_tokens = int(args.max_prompt_tokens)
+        context_str, contexts_used, context_tokens = pack_contexts(hits, budget_tokens)
         try:
             log_retrieval(
                 sample_id=qid,
@@ -189,30 +195,20 @@ def process_example(item: Dict[str, Any],
                 run_name=run_name,
                 retrieved=hits,
                 topk=len(hits),
-                final_context=[
-                    {
-                        "doc_id": hit.get("doc_id"),
-                        "sent_ids": hit.get("sent_ids"),
-                        "passage_id": hit.get("passage_id"),
-                        "text": hit.get("text"),
-                    }
-                    for hit in hits
-                ],
+                final_context=contexts_used,
+                final_context_tokens=context_tokens,
+                context_budget_tokens=budget_tokens or None,
                 log_dir=log_dir,
             )
         except Exception as log_exc:
             logger.error(f"retrieval logging failed for {qid}: {log_exc}")
 
         if retrieval_only:
-            return qid, question, "", []
-
-        context_str = format_context([node["text"] for node in hits])
-        # Clip context to avoid exceeding small ctx-length models (approx 4 chars per token)
-        max_chars = args.max_prompt_tokens * 4 if args.max_prompt_tokens and args.max_prompt_tokens > 0 else None
-        context_str = truncate_text(context_str, max_chars)
+            return qid, question, "", [], contexts_used, context_tokens
         
         prompt = f"""Answer the question based on the context (which may include summaries).
-	    
+{build_final_instruction()}
+
 {context_str}
 
 Question: {question}
@@ -221,12 +217,12 @@ Answer:"""
         if llm is None:
             raise RuntimeError("LLM client is required unless --retrieval-only is set")
         ans = llm.chat([{"role": "user", "content": prompt}])
-        ans = clean_hotpot_answer(ans.content)
+        ans = ans.content
         sp = []
-        return qid, question, ans, sp
+        return qid, question, ans, sp, contexts_used, context_tokens
     except Exception as e:
         logger.error(f"Error Q {qid}: {e}")
-        return qid, question, "error", []
+        return qid, question, "error", [], [], 0
 
 def main():
     parser = argparse.ArgumentParser(description="Run Mini RAPTOR on HotpotQA Distractor")
@@ -238,6 +234,7 @@ def main():
     parser.add_argument("--new", action="store_true", help="Force creating a new workspace")
     parser.add_argument("--lm-endpoint", default="http://localhost:1234/v1")
     parser.add_argument("--lm-model", default="model-identifier")
+    parser.add_argument("--max-new-tokens", type=int, default=None, help="Max new tokens for LLM decoding")
     parser.add_argument(
         "--embed-model",
         "--emb-model",
@@ -270,11 +267,12 @@ def main():
     parser.add_argument("--limit", type=int, default=0)
     parser.add_argument("--max-context", type=int, default=10, help="Max number of paragraphs from context to keep")
     parser.add_argument("--num-workers", type=int, default=1, help="Number of parallel workers")
+    parser.add_argument("--context-budget", type=int, default=0, help="Max context tokens (0 disables)")
     parser.add_argument(
         "--max-prompt-tokens",
         type=int,
         default=3000,
-        help="Approx upper bound for prompt tokens; context will be truncated to avoid ctx overflow.",
+        help="Legacy prompt token cap (used only when --context-budget is 0).",
     )
     
     args = parser.parse_args()
@@ -295,12 +293,31 @@ def main():
     output_path = Path(args.output) if args.output else preds_dir / "pred.json"
     qa_path = Path(args.qa_path) if args.qa_path else preds_dir / "qa.tsv"
     logger.info(f"Writing outputs to workspace {work_dir}")
+    setup_logging(str(work_dir / "run.log"))
+    write_config_resolved(
+        work_dir,
+        build_basic_config(
+            dataset="hotpotqa",
+            model=args.lm_model,
+            endpoint=args.lm_endpoint,
+            temperature=0.0,
+            max_tokens=args.max_new_tokens,
+            context_budget=args.context_budget or None,
+            topk=args.topk,
+            extra={"max_context": args.max_context, "embed_model": args.embed_model},
+        ),
+    )
 
     llm = None
     if not args.retrieval_only:
         from structrag.llm_client import LLMChatClient
 
-        llm = LLMChatClient(endpoint=args.lm_endpoint, model=args.lm_model, temperature=0.0)
+        llm = LLMChatClient(
+            endpoint=args.lm_endpoint,
+            model=args.lm_model,
+            temperature=0.0,
+            max_tokens=args.max_new_tokens if args.max_new_tokens is not None else 8192,
+        )
 
     embedder = TransformerEmbedder(
         args.embed_model,
@@ -323,6 +340,7 @@ def main():
     
     predictions = {"answer": {}, "sp": {}}
     qa_rows: List[Tuple[str, str]] = []
+    pred_raw_records: List[Dict[str, Any]] = []
     
     num_workers = max(1, args.num_workers)
     logger.info(f"Running RAPTOR on {len(data)} examples with {num_workers} workers...")
@@ -346,12 +364,22 @@ def main():
 
         for fut in tqdm(as_completed(futures), total=len(futures)):
             try:
-                qid, question, ans, sp = fut.result()
+                qid, question, ans, sp, contexts_used, context_tokens = fut.result()
                 if not qid:
                     continue
                 predictions["answer"][qid] = ans
                 predictions["sp"][qid] = sp
                 qa_rows.append((question, ans))
+                pred_raw_records.append(
+                    {
+                        "id": str(qid),
+                        "question": question,
+                        "pred_raw": ans,
+                        "contexts_used": contexts_used,
+                        "context_tokens_used": context_tokens,
+                        "context_budget_tokens": int(args.context_budget or 0) or None,
+                    }
+                )
             except Exception as e:
                 logger.error(f"Error in worker: {e}")
             
@@ -364,6 +392,7 @@ def main():
         output_path=output_path,
         qa_path=qa_path,
     )
+    write_jsonl(preds_dir / "pred_raw.jsonl", pred_raw_records)
     logger.info(f"Saved predictions to {out_path}")
     logger.info(f"Saved QA log to {qa_file}")
     devices = sorted(str(d) for d in embed_meta["used_devices"])

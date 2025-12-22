@@ -54,6 +54,8 @@ def log_retrieval(
     retrieved: Iterable[Dict[str, Any]],
     topk: Optional[int] = None,
     final_context: Optional[Iterable[Dict[str, Any]]] = None,
+    final_context_tokens: Optional[int] = None,
+    context_budget_tokens: Optional[int] = None,
     log_dir: Optional[Path] = None,
 ) -> Path:
     """
@@ -74,6 +76,10 @@ def log_retrieval(
     }
     if final_context is not None:
         record["final_context"] = _normalize_context(final_context)
+    if final_context_tokens is not None:
+        record["final_context_tokens"] = int(final_context_tokens)
+    if context_budget_tokens is not None:
+        record["context_budget_tokens"] = int(context_budget_tokens)
 
     data = json.dumps(record, ensure_ascii=False)
     lock = _get_lock(log_path)

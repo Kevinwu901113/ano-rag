@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import re
 import time
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
@@ -12,7 +11,9 @@ from loguru import logger
 from config import config as config_loader
 from utils.device import run_with_fallback
 from utils.embedding_utils import EmbeddingEncoder
-from utils.answer_cleaner import _enforce_short_answer, _strip_reasoning
+from utils.context_budget import pack_contexts
+from utils.jsonl_utils import write_jsonl
+from utils.output_protocol import build_final_instruction
 from utils.retrieval_logger import log_retrieval
 
 try:
@@ -34,6 +35,7 @@ PROMPT_TEMPLATE = """Context:
 {context}
 
 Question: {question}
+{final_instruction}
 
 Answer the question with a short phrase. If the answer is not contained in the context, say "unknown"."""
 
@@ -45,42 +47,6 @@ def _paragraphs_from_record(record: Dict[str, Any]) -> List[str]:
     
     # Split by double newline as naive paragraph separator
     return [p.strip() for p in str(text).split("\n\n") if p.strip()]
-
-def _extract_answer_span(text: str) -> Optional[str]:
-    patterns = [
-        r"(?:^|\b)(?:final\s+answer|answer)\s*(?:is|should be)?\s*[:：]?\s*\"?([^\n\.]+)",
-    ]
-    for pattern in patterns:
-        matches = list(re.finditer(pattern, text, flags=re.IGNORECASE))
-        if matches:
-            candidate = matches[-1].group(1).strip()
-            return candidate.strip(" \"'")
-    return None
-
-def _clean_naive_answer(raw: str) -> str:
-    cleaned = _strip_reasoning(raw)
-    if cleaned:
-        return cleaned
-    if not raw:
-        return ""
-    # Fallback: if <think> is unclosed, keep text and extract a short answer.
-    fallback = raw.replace("<think>", "").replace("</think>", "")
-    extracted = _extract_answer_span(fallback)
-    if extracted:
-        return extracted
-    compact = _enforce_short_answer(fallback)
-    words = compact.split()
-    if len(words) > 30:
-        parts = re.split(r"[.!?]+", compact)
-        for part in reversed(parts):
-            candidate = part.strip()
-            if candidate:
-                compact = candidate
-                words = compact.split()
-                break
-        if len(words) > 30:
-            compact = " ".join(words[-30:])
-    return compact.strip()
 
 def _load_doc_pool(path: str) -> Iterable[Dict[str, Any]]:
     """Stream records from doc_pool.json or .jsonl."""
@@ -431,11 +397,13 @@ class NaiveRAGRunner:
         temperature: Optional[float] = None,
         max_tokens: Optional[int] = None,
         stop: Optional[List[str]] = None,
+        context_budget: Optional[int] = None,
         config: Optional[Dict[str, Any]] = None,
         llm_client: Optional[LLMClient] = None,
     ) -> None:
         self.cfg = config or config_loader.load_config()
         self.topk = max(1, int(topk))
+        self.context_budget = int(context_budget or 0)
         lm_cfg = self.cfg.get("lmstudio", {}) or {}
         endpoint = lm_endpoint or lm_cfg.get("endpoint")
         model = lm_model or lm_cfg.get("model")
@@ -479,10 +447,12 @@ class NaiveRAGRunner:
         answers: List[Dict[str, Any]] = []
         qa_rows: List[str] = []
         debug_records: List[str] = []
+        pred_raw_records: List[Dict[str, Any]] = []
         completed: set[str] = set()
 
         answers_path = preds_dir / "answers.json"
         qa_path = preds_dir / "qa.tsv"
+        pred_raw_path = preds_dir / "pred_raw.jsonl"
         debug_dir = artifacts_dir / "debug"
         debug_path = debug_dir / "retrieval_raw.jsonl"
 
@@ -505,10 +475,20 @@ class NaiveRAGRunner:
                     debug_records = debug_path.read_text(encoding="utf-8").splitlines()
                 except Exception as exc:
                     logger.warning("Failed to load existing debug log from {}: {}", debug_path, exc)
+            if pred_raw_path.exists():
+                try:
+                    pred_raw_records = [
+                        json.loads(line)
+                        for line in pred_raw_path.read_text(encoding="utf-8").splitlines()
+                        if line.strip()
+                    ]
+                except Exception as exc:
+                    logger.warning("Failed to load existing pred_raw.jsonl: {}", exc)
 
         def _flush() -> None:
             answers_path.write_text(json.dumps(answers, ensure_ascii=False, indent=2), encoding="utf-8")
             qa_path.write_text("\n".join(qa_rows), encoding="utf-8")
+            write_jsonl(pred_raw_path, pred_raw_records)
             if debug:
                 debug_dir.mkdir(parents=True, exist_ok=True)
                 debug_path.write_text("\n".join(debug_records), encoding="utf-8")
@@ -521,25 +501,49 @@ class NaiveRAGRunner:
                 continue
             hits = self.retriever.retrieve(question, k=self.topk)
 
-            context_blocks = []
+            annotated_hits = []
             for i, doc in enumerate(hits):
-                context_blocks.append(f"[{i+1}] {doc['text']}")
-            context_str = "\n\n".join(context_blocks)
+                annotated_hits.append({**doc, "text": f"[{i+1}] {doc['text']}"})
+            context_str, contexts_used, context_tokens = pack_contexts(
+                annotated_hits, self.context_budget
+            )
 
-            prompt = PROMPT_TEMPLATE.format(context=context_str, question=question)
+            prompt = PROMPT_TEMPLATE.format(
+                context=context_str,
+                question=question,
+                final_instruction=build_final_instruction(),
+            )
             messages = [
                 {"role": "system", "content": DEFAULT_SYSTEM_PROMPT},
                 {"role": "user", "content": prompt},
             ]
             try:
                 raw_answer = self.lm.chat(messages)
-                ans_text = _clean_naive_answer(raw_answer)
+                ans_text = raw_answer
             except Exception as exc:
                 logger.error("LLM call failed for {}: {}", qid, exc)
                 ans_text = "Insufficient evidence"
 
             answers.append(
-                {"query_id": qid, "question": question, "answer": ans_text, "hits": hits}
+                {
+                    "query_id": qid,
+                    "question": question,
+                    "answer": ans_text,
+                    "hits": hits,
+                    "contexts_used": contexts_used,
+                    "context_tokens_used": context_tokens,
+                    "context_budget_tokens": self.context_budget or None,
+                }
+            )
+            pred_raw_records.append(
+                {
+                    "id": str(qid),
+                    "question": question,
+                    "pred_raw": ans_text,
+                    "contexts_used": contexts_used,
+                    "context_tokens_used": context_tokens,
+                    "context_budget_tokens": self.context_budget or None,
+                }
             )
             safe_q = " ".join(str(question).replace("\t", " ").split())
             safe_a = " ".join(str(ans_text).replace("\t", " ").replace('"', "'").split())
@@ -559,15 +563,9 @@ class NaiveRAGRunner:
                     run_name=resolved_run_name,
                     retrieved=[{**hit, "rank": i + 1} for i, hit in enumerate(hits)],
                     topk=len(hits),
-                    final_context=[
-                        {
-                            "doc_id": hit.get("doc_id"),
-                            "sent_ids": hit.get("sent_ids"),
-                            "passage_id": hit.get("passage_id"),
-                            "text": hit.get("text"),
-                        }
-                        for hit in hits
-                    ],
+                    final_context=contexts_used,
+                    final_context_tokens=context_tokens,
+                    context_budget_tokens=self.context_budget or None,
                     log_dir=artifacts_dir,
                 )
             except Exception as log_exc:
@@ -584,13 +582,17 @@ class NaiveRAGRunner:
         docs = self.retriever.retrieve(question, k=self.topk)
         
         # 2. Construct context
-        context_blocks = []
+        annotated_hits = []
         for i, doc in enumerate(docs):
-            context_blocks.append(f"[{i+1}] {doc['text']}")
-        context_str = "\n\n".join(context_blocks)
+            annotated_hits.append({**doc, "text": f"[{i+1}] {doc['text']}"})
+        context_str, _, _ = pack_contexts(annotated_hits, self.context_budget)
         
         # 3. Prompt
-        prompt = PROMPT_TEMPLATE.format(context=context_str, question=question)
+        prompt = PROMPT_TEMPLATE.format(
+            context=context_str,
+            question=question,
+            final_instruction=build_final_instruction(),
+        )
         
         messages = [
             {"role": "system", "content": DEFAULT_SYSTEM_PROMPT},
@@ -599,14 +601,15 @@ class NaiveRAGRunner:
         
         # 4. Generate
         ans = self.lm.chat(messages)
-        return _clean_naive_answer(ans)
+        return ans
 
 def answer(
     question: str, 
     index_path: str, 
     chunk_store_path: str, 
     top_k: int = 5,
-    llm_client: Optional[LLMClient] = None
+    llm_client: Optional[LLMClient] = None,
+    context_budget: Optional[int] = None,
 ) -> str:
     """Convenience function for external scripts."""
     # This instantiates a new runner every time, which is inefficient for loops.
@@ -615,6 +618,7 @@ def answer(
         index_path, 
         chunk_store_path, 
         topk=top_k,
-        llm_client=llm_client
+        llm_client=llm_client,
+        context_budget=context_budget,
     )
     return runner.answer(question)

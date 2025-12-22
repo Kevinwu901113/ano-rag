@@ -1,30 +1,41 @@
 direct_llm:
   kind: qa
   desc: "No retrieval"
+  requires_topk: false
   entry_hotpotqa: scripts/hotpotqa/baselines/run_direct.py
   entry_musique: scripts/musique/baselines/run_direct.py
   entry_mirage: scripts/mirage/run_direct_llm.py
 
 bm25_rag:
   kind: qa
-  desc: "Sparse BM25 RAG (fill entry when available)"
-  entry: null
+  desc: "Sparse BM25 RAG"
+  requires_topk: true
+  entry_hotpotqa: scripts/hotpotqa/baselines/run_vanilla_rag.py
+  entry_musique: scripts/musique/baselines/run_vanilla_rag.py
+  entry_mirage: scripts/mirage/run_vanilla_rag.py
+  cli_args: ["--retriever", "bm25"]
 
 dense_rag:
   kind: qa
   desc: "Dense embedding RAG"
+  requires_topk: true
   entry_hotpotqa: scripts/hotpotqa/baselines/run_vanilla_rag.py
   entry_musique: scripts/musique/baselines/run_vanilla_rag.py
   entry_mirage: scripts/mirage/run_vanilla_rag.py
 
 hybrid_rag:
   kind: qa
-  desc: "BM25 + dense hybrid (fill entry when available)"
-  entry: null
+  desc: "BM25 + dense hybrid"
+  requires_topk: true
+  entry_hotpotqa: scripts/hotpotqa/baselines/run_vanilla_rag.py
+  entry_musique: scripts/musique/baselines/run_vanilla_rag.py
+  entry_mirage: scripts/mirage/run_vanilla_rag.py
+  cli_args: ["--retriever", "hybrid"]
 
 raptor:
   kind: qa
   desc: "RAPTOR-style hierarchical retrieval"
+  requires_topk: true
   entry_hotpotqa: scripts/hotpotqa/baselines/run_raptor.py
   entry_musique: scripts/musique/baselines/run_raptor.py
   entry_mirage: scripts/mirage/run_simple_raptor.py
@@ -32,6 +43,7 @@ raptor:
 relrag_full:
   kind: qa
   desc: "RelRAG full pipeline"
+  requires_topk: true
   entry_hotpotqa: scripts/hotpotqa/baselines/run_relrag.py
   entry_musique: scripts/musique/baselines/run_relrag.py
   entry_mirage: null

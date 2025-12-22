@@ -20,14 +20,17 @@ if str(ROOT) not in sys.path:
 
 from scripts.hotpotqa.baselines.baseline_utils import (
     build_passage_entries,
-    clean_hotpot_answer,
-    format_context,
     save_predictions_and_qa,
     TransformerEmbedder,
 )
+from utils.context_budget import pack_contexts
+from utils.jsonl_utils import write_jsonl
+from utils.logging_utils import setup_logging
+from utils.output_protocol import build_final_instruction
 from utils.device import run_with_fallback
 from utils.retrieval_logger import log_retrieval
 from utils.run_layout import ensure_workdir_layout, resolve_workdir
+from utils.run_metadata import build_basic_config, write_config_resolved
 
 def load_dataset(path: str) -> List[Dict[str, Any]]:
     with open(path, "r", encoding="utf-8") as f:
@@ -84,6 +87,8 @@ class RelRAG:
         self.embed_device = embed_device
         self.llm = llm
         self.last_hits: List[Dict[str, Any]] = []
+        self.last_context: List[Dict[str, Any]] = []
+        self.last_context_tokens: int = 0
         self.embed_used_devices: Set[str] = set()
         self.embed_fallback_reasons: List[str] = []
         self.dim: Optional[int] = None
@@ -107,6 +112,7 @@ class RelRAG:
         *,
         topk: int = 3,
         retrieval_only: bool = False,
+        context_budget: int = 0,
     ) -> str:
         texts = passages
         
@@ -151,7 +157,9 @@ class RelRAG:
             }
             for rank, i in enumerate(indices)
         ]
-        selected_texts = [item["text"] for item in selected]
+        context_str, contexts_used, context_tokens = pack_contexts(selected, int(context_budget or 0))
+        self.last_context = contexts_used
+        self.last_context_tokens = context_tokens
 
         if retrieval_only:
             return ""
@@ -159,8 +167,8 @@ class RelRAG:
         # 5. Answer
         if self.llm is None:
             raise RuntimeError("LLM client is required unless --retrieval-only is set")
-        context_str = format_context(selected_texts)
         prompt = f"""Answer the question based on the context.
+{build_final_instruction()}
         
 {context_str}
 
@@ -179,7 +187,7 @@ def process_example(item: Dict[str, Any],
                     dataset_name: str,
                     log_dir: Path,
                     embed_meta: Dict[str, Any],
-                    embed_meta_lock: threading.Lock) -> Tuple[str, str, str, List[List[Any]]]:
+                    embed_meta_lock: threading.Lock) -> Tuple[str, str, str, List[List[Any]], List[Dict[str, Any]], int]:
     """
     Process a single HotpotQA example using RelRAG.
     """
@@ -193,10 +201,14 @@ def process_example(item: Dict[str, Any],
     
     try:
         retrieval_only = bool(getattr(args, "retrieval_only", False))
-        ans = relrag.solve(passages, question, topk=int(getattr(args, "topk", 3)), retrieval_only=retrieval_only)
-        if not retrieval_only:
-            ans = clean_hotpot_answer(ans)
-        else:
+        ans = relrag.solve(
+            passages,
+            question,
+            topk=int(getattr(args, "topk", 3)),
+            retrieval_only=retrieval_only,
+            context_budget=int(getattr(args, "context_budget", 0) or 0),
+        )
+        if retrieval_only:
             ans = ""
         try:
             log_retrieval(
@@ -205,15 +217,9 @@ def process_example(item: Dict[str, Any],
                 run_name=run_name,
                 retrieved=relrag.last_hits,
                 topk=len(relrag.last_hits),
-                final_context=[
-                    {
-                        "doc_id": hit.get("doc_id"),
-                        "sent_ids": hit.get("sent_ids"),
-                        "passage_id": hit.get("passage_id"),
-                        "text": hit.get("text"),
-                    }
-                    for hit in relrag.last_hits
-                ],
+                final_context=relrag.last_context,
+                final_context_tokens=relrag.last_context_tokens,
+                context_budget_tokens=int(getattr(args, "context_budget", 0) or 0) or None,
                 log_dir=log_dir,
             )
         except Exception as log_exc:
@@ -226,10 +232,10 @@ def process_example(item: Dict[str, Any],
             if embed_meta.get("dim") is None and relrag.dim:
                 embed_meta["dim"] = int(relrag.dim)
         sp = []
-        return qid, question, ans, sp
+        return qid, question, ans, sp, relrag.last_context, relrag.last_context_tokens
     except Exception as e:
         logger.error(f"Error Q {qid}: {e}")
-        return qid, question, "error", []
+        return qid, question, "error", [], [], 0
 
 def main():
     parser = argparse.ArgumentParser(description="Run RelRAG on HotpotQA Distractor")
@@ -241,6 +247,7 @@ def main():
     parser.add_argument("--new", action="store_true", help="Force creating a new workspace")
     parser.add_argument("--lm-endpoint", default="http://localhost:1234/v1")
     parser.add_argument("--lm-model", default="model-identifier")
+    parser.add_argument("--max-new-tokens", type=int, default=None, help="Max new tokens for LLM decoding")
     parser.add_argument(
         "--embed-model",
         "--emb-model",
@@ -272,6 +279,7 @@ def main():
     parser.add_argument("--retrieval-only", action="store_true", help="Skip LLM calls; only run retrieval and log retrieval.jsonl")
     parser.add_argument("--limit", type=int, default=0)
     parser.add_argument("--max-context", type=int, default=10, help="Max number of paragraphs from context to keep")
+    parser.add_argument("--context-budget", type=int, default=0, help="Max context tokens (0 disables)")
     parser.add_argument("--num-workers", type=int, default=1, help="Number of parallel workers")
     parser.add_argument("--resume", action="store_true", help="Resume from existing outputs in workdir")
     parser.add_argument("--save-every", type=int, default=50, help="Checkpoint every N samples (0 disables)")
@@ -294,12 +302,31 @@ def main():
     output_path = Path(args.output) if args.output else preds_dir / "pred.json"
     qa_path = Path(args.qa_path) if args.qa_path else preds_dir / "qa.tsv"
     logger.info(f"Writing outputs to workspace {work_dir}")
+    setup_logging(str(work_dir / "run.log"))
+    write_config_resolved(
+        work_dir,
+        build_basic_config(
+            dataset="hotpotqa",
+            model=args.lm_model,
+            endpoint=args.lm_endpoint,
+            temperature=0.0,
+            max_tokens=args.max_new_tokens,
+            context_budget=args.context_budget or None,
+            topk=args.topk,
+            extra={"max_context": args.max_context, "embed_model": args.embed_model},
+        ),
+    )
 
     llm = None
     if not args.retrieval_only:
         from structrag.llm_client import LLMChatClient
 
-        llm = LLMChatClient(endpoint=args.lm_endpoint, model=args.lm_model, temperature=0.0)
+        llm = LLMChatClient(
+            endpoint=args.lm_endpoint,
+            model=args.lm_model,
+            temperature=0.0,
+            max_tokens=args.max_new_tokens if args.max_new_tokens is not None else 8192,
+        )
 
     embedder = TransformerEmbedder(
         args.embed_model,
@@ -322,6 +349,7 @@ def main():
     
     predictions = {"answer": {}, "sp": {}}
     qa_rows: List[Tuple[str, str]] = []
+    pred_raw_records: List[Dict[str, Any]] = []
     completed: Set[str] = set()
     if args.resume:
         predictions, qa_rows, completed = _load_resume_state(output_path, qa_path)
@@ -373,13 +401,23 @@ def main():
         processed = 0
         for fut in tqdm(as_completed(futures), total=len(futures)):
             try:
-                qid, question, ans, sp = fut.result()
+                qid, question, ans, sp, contexts_used, context_tokens = fut.result()
                 if not qid:
                     continue
                 predictions["answer"][qid] = ans
                 predictions["sp"][qid] = sp
                 completed.add(str(qid))
                 qa_rows.append((question, ans))
+                pred_raw_records.append(
+                    {
+                        "id": str(qid),
+                        "question": question,
+                        "pred_raw": ans,
+                        "contexts_used": contexts_used,
+                        "context_tokens_used": context_tokens,
+                        "context_budget_tokens": int(args.context_budget or 0) or None,
+                    }
+                )
                 processed += 1
                 if save_every and processed % save_every == 0:
                     save_predictions_and_qa(
@@ -401,6 +439,7 @@ def main():
         output_path=output_path,
         qa_path=qa_path,
     )
+    write_jsonl(preds_dir / "pred_raw.jsonl", pred_raw_records)
     logger.info(f"Saved predictions to {out_path}")
     logger.info(f"Saved QA log to {qa_file}")
     devices = sorted(str(d) for d in embed_meta["used_devices"])

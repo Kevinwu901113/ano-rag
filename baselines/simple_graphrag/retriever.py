@@ -1,11 +1,13 @@
 import json
 import re
 import pickle
-from typing import List, Set, Dict
+from typing import Any, Dict, List, Set
 from baselines.simple_graphrag.graph import SimpleGraph
 from structrag.llm_client import LLMChatClient
 from loguru import logger
 from utils.answer_cleaner import _strip_reasoning
+from utils.context_budget import pack_contexts
+from utils.output_protocol import build_final_instruction
 
 DEFAULT_SYSTEM_PROMPT = (
     "You are a helpful assistant for multi-hop question answering.\n"
@@ -19,6 +21,7 @@ PROMPT_TEMPLATE = """Context:
 
 Question:
 {question}
+{final_instruction}
 
 Answer the question with a short phrase.
 If the answer is not contained in the context, say "unknown".
@@ -27,7 +30,14 @@ If the answer is not contained in the context, say "unknown".
 from config.config_loader import config as global_config
 
 class GraphRetriever:
-    def __init__(self, graph_path: str, chunk_store_path: str, llm_client: LLMChatClient):
+    def __init__(
+        self,
+        graph_path: str,
+        chunk_store_path: str,
+        llm_client: LLMChatClient,
+        *,
+        context_budget: int | None = None,
+    ):
         self.graph = SimpleGraph.load(graph_path)
         with open(chunk_store_path, 'rb') as f:
             self.chunk_store = pickle.load(f)
@@ -38,6 +48,7 @@ class GraphRetriever:
         cfg = global_config.load_config()
         self.relrag_cfg = cfg.get("relrag", {})
         self.top_k = int(self.relrag_cfg.get("top_k", 15))
+        self.context_budget = int(context_budget or 0)
         # max_context_tokens usage is implicit via chunk limit, 
         # but we can use it to limit chunk count dynamically if we had a tokenizer.
         # For now, we'll just use top_k as chunk limit.
@@ -77,10 +88,13 @@ class GraphRetriever:
         self.last_hits = [
             {**hit, "rank": idx + 1} for idx, hit in enumerate(hits)
         ]
-        chunks = [hit["text"] for hit in hits]
+        annotated_hits = []
+        for i, hit in enumerate(hits):
+            annotated_hits.append({**hit, "text": f"[{i+1}] {hit['text']}"})
+        context_str, _, _ = pack_contexts(annotated_hits, self.context_budget)
         
         # 5. Generate answer
-        return self._generate_answer(question, chunks)
+        return self._generate_answer(question, context_str)
 
     def _extract_query_entities(self, question: str) -> List[str]:
         prompt = f"""
@@ -190,13 +204,12 @@ class GraphRetriever:
             
         return relevant_chunks
 
-    def _generate_answer(self, question: str, chunks: List[str]) -> str:
-        context_blocks = []
-        for i, chunk in enumerate(chunks):
-            context_blocks.append(f"[{i+1}] {chunk}")
-        context_str = "\n\n".join(context_blocks)
-
-        prompt = PROMPT_TEMPLATE.format(context=context_str, question=question)
+    def _generate_answer(self, question: str, context_str: str) -> str:
+        prompt = PROMPT_TEMPLATE.format(
+            context=context_str,
+            question=question,
+            final_instruction=build_final_instruction(),
+        )
 
         messages = [
             {"role": "system", "content": DEFAULT_SYSTEM_PROMPT},
@@ -206,15 +219,7 @@ class GraphRetriever:
         try:
             response = self.llm_client.chat(messages, max_tokens=8192, temperature=0.0)
             content = response if isinstance(response, str) else response.content
-            
-            # Handle <think> blocks
-            content = _strip_reasoning(content)
-                
-            try:
-                from utils.rag_normalization import normalize_model_answer
-                return normalize_model_answer(content)
-            except ImportError:
-                return content
+            return content
                 
         except Exception as e:
             logger.error(f"Failed to generate answer: {e}")

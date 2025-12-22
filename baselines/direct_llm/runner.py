@@ -10,16 +10,17 @@ import requests
 from loguru import logger
 
 from config import config as config_loader
+from utils.jsonl_utils import write_jsonl
+from utils.output_protocol import build_final_instruction
 
 DEFAULT_SYSTEM_PROMPT = (
     "You are a factual question answering assistant. Use only your own knowledge to answer. "
-    'Return ONLY one concise noun phrase in English (e.g., "American lawyer"). '
-    "Do NOT include any reasoning, explanation, analysis, apologies, or restating of the question. "
     'If you do not know, reply with exactly "Insufficient evidence".'
 )
 DEFAULT_USER_TEMPLATE = (
     "Question: {question}\n"
-    "Respond with a single short noun phrase in English. Do not add any other words or sentences."
+    "{final_instruction}\n"
+    "Respond with a concise answer. You may include reasoning, but the FINAL line must follow the protocol."
 )
 
 
@@ -54,8 +55,7 @@ class DirectLLMClient:
         self.system_prompt = system_prompt
         self.temperature = temperature
         self.max_tokens = max_tokens
-        # Default: cut at first newline to avoid long chatter.
-        self.stop = ["\n"] if stop is None else stop
+        self.stop = stop
         self.retries = max(0, retries)
 
     def answer(self, question: str) -> str:
@@ -64,7 +64,7 @@ class DirectLLMClient:
         q = (question or "").strip()
         if not q:
             return "Insufficient evidence"
-        user_msg = DEFAULT_USER_TEMPLATE.format(question=q)
+        user_msg = DEFAULT_USER_TEMPLATE.format(question=q, final_instruction=build_final_instruction())
         messages = [
             {"role": "system", "content": self.system_prompt},
             {"role": "user", "content": user_msg},
@@ -84,15 +84,7 @@ class DirectLLMClient:
                 resp.raise_for_status()
                 data = resp.json()
                 content = data["choices"][0]["message"]["content"]
-                
-                # Handle <think> blocks
-                import re
-                content = re.sub(r"<think>.*?</think>", "", content, flags=re.DOTALL).strip()
-                if content.startswith("<think>"):
-                    content = re.sub(r"^<think>.*", "", content, flags=re.DOTALL).strip()
-                
-                from baselines.direct_llm.utils import _strip_reasoning
-                return _strip_reasoning(content)
+                return content
             except requests.RequestException as exc:  # noqa: PERF203
                 if attempt >= self.retries:
                     logger.error("Direct LLM call failed after {} attempts: {}", attempt + 1, exc)
@@ -154,6 +146,7 @@ class DirectLLMRunner:
         answers_json_path = preds_dir / "answers.json"
         answers_direct_path = preds_dir / "answers_direct_llm.json"
         answers_jsonl_path = preds_dir / "answers_direct_llm.jsonl"
+        pred_raw_path = preds_dir / "pred_raw.jsonl"
         qa_path = preds_dir / "qa.tsv"
         qa_no_header_path = preds_dir / "qa.no_header.tsv"
         qa_with_question_path = preds_dir / "qa_with_question.tsv"
@@ -163,6 +156,7 @@ class DirectLLMRunner:
         qa_no_header: List[str] = []
         qa_with_q: List[str] = []
         jsonl_lines: List[str] = []
+        pred_raw_records: List[Dict[str, Any]] = []
 
         for idx, item in enumerate(items):
             question = str(item.get("query") or item.get("question") or "").strip()
@@ -195,6 +189,16 @@ class DirectLLMRunner:
                     ensure_ascii=False,
                 )
             )
+            pred_raw_records.append(
+                {
+                    "id": result.query_id,
+                    "question": result.question,
+                    "pred_raw": result.answer,
+                    "contexts_used": [],
+                    "context_tokens_used": 0,
+                    "context_budget_tokens": None,
+                }
+            )
 
         payload = [
             {
@@ -210,6 +214,7 @@ class DirectLLMRunner:
         answers_json_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
         answers_direct_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
         answers_jsonl_path.write_text("\n".join(jsonl_lines), encoding="utf-8")
+        write_jsonl(pred_raw_path, pred_raw_records)
         qa_path.write_text("\n".join(qa_lines), encoding="utf-8")
         qa_no_header_path.write_text("\n".join(qa_no_header), encoding="utf-8")
         qa_with_question_path.write_text("\n".join(qa_with_q), encoding="utf-8")

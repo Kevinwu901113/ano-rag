@@ -10,7 +10,8 @@ from rag_core.embedding_client import EmbeddingEncoder
 from rag_core.llm_client import LLMChatClient
 from baselines.common.model_clients import get_default_embedding_client, get_default_llm_client
 from baselines.simple_raptor.tree import TreeNode
-from utils.answer_cleaner import clean_model_answer
+from utils.context_budget import pack_contexts
+from utils.output_protocol import build_final_instruction
 
 DEFAULT_SYSTEM_PROMPT = (
     "You are a helpful assistant for multi-hop question answering.\n"
@@ -23,6 +24,7 @@ PROMPT_TEMPLATE = """Context:
 {context}
 
 Question: {question}
+{final_instruction}
 
 Answer the question with a short phrase. If the answer is not contained in the context, say "unknown"."""
 
@@ -35,7 +37,8 @@ class SimpleRaptorRetriever:
         config: Optional[Dict] = None,
         embedding_client: Optional[EmbeddingEncoder] = None,
         llm_client: Optional[LLMChatClient] = None,
-        top_k: Optional[int] = None
+        top_k: Optional[int] = None,
+        context_budget: Optional[int] = None,
     ):
         self.config = config or global_config.load_config()
         
@@ -82,6 +85,7 @@ class SimpleRaptorRetriever:
         self.max_answer_chunks = int(self.raptor_config.get("max_answer_chunks", 5))
         self.enable_name_rerank = bool(self.raptor_config.get("enable_name_rerank", True))
         self.last_hits: List[Dict[str, Any]] = []
+        self.context_budget = int(context_budget or 0)
 
     def _extract_name_from_question(self, question: str) -> Optional[str]:
         """
@@ -237,11 +241,6 @@ class SimpleRaptorRetriever:
         context_block = "\n\n".join([f"[{i+1}] {c}" for i, c in enumerate(context_texts)])
         
         # Truncate to avoid 400 error (similar to index.py fix)
-        # The model has 4096 limit, so we should be conservative.
-        # 12000 chars approx 3000 tokens
-        if len(context_block) > 12000:
-             context_block = context_block[:12000] + "..."
-
         # Record retrieval for logging
         self.last_hits = []
         for rank, cid in enumerate(chunk_ids):
@@ -258,9 +257,17 @@ class SimpleRaptorRetriever:
                     "text": self.chunk_store.get(cid),
                 }
             )
+        annotated_hits = []
+        for hit in self.last_hits:
+            annotated_hits.append({**hit, "text": f"[{hit['rank']}] {hit.get('text', '')}"})
+        context_block, _, _ = pack_contexts(annotated_hits, self.context_budget)
         
         # Construct messages for LLMChatClient
-        prompt = PROMPT_TEMPLATE.format(context=context_block, question=question)
+        prompt = PROMPT_TEMPLATE.format(
+            context=context_block,
+            question=question,
+            final_instruction=build_final_instruction(),
+        )
         
         messages = [
             {"role": "system", "content": DEFAULT_SYSTEM_PROMPT},
@@ -273,66 +280,8 @@ class SimpleRaptorRetriever:
             # We use self.llm.chat directly
             logger.info(f"[RAPTOR] answering qid={question[:50]}..., ctx_len={len(context_block)}")
             answer = self.llm.chat(messages)
-            
-            # Apply strict filtering rules as requested
-            final_answer = self._filter_answer(answer)
-            return final_answer
+            return answer
             
         except Exception as e:
             logger.error(f"Raptor answer generation failed: {e}")
             return "Insufficient evidence"
-
-    def _filter_answer(self, raw_answer: str) -> str:
-        """
-        Strictly filter the answer to match baseline standards.
-        1. Remove reasoning/thinking process
-        2. Apply keyword blacklist
-        3. Enforce length limits
-        """
-        # 1. Clean reasoning and basic formatting
-        cleaned = clean_model_answer(raw_answer)
-        
-        # 2. Keyword Blacklist (Case-insensitive)
-        # Standard blacklist for "I don't know" responses
-        blacklist = [
-            "i am not sure",
-            "i'm not sure", 
-            "i do not know",
-            "i don't know",
-            "insufficient evidence",
-            "not mentioned",
-            "no information",
-            "cannot answer",
-            "cannot be answered",
-            "context does not contain",
-            "context does not provide",
-            "you are not sure",  # Handle LLM echo of instructions
-            "not sure",
-            "unknown"
-        ]
-        
-        cleaned_lower = cleaned.lower()
-        
-        # Remove bold markers if present
-        cleaned = cleaned.replace("**", "").strip()
-        
-        if cleaned_lower in ["unknown", "unknown.", "unknown!"]:
-             return "Insufficient evidence"
-
-        for phrase in blacklist:
-            if phrase in cleaned_lower:
-                return "Insufficient evidence"
-
-                
-        # 3. Length Limit
-        # Standard short answer limit (e.g. < 100 chars or < 20 words)
-        # If it's too long, it might be hallucinations or non-compliant
-        if len(cleaned) > 200:
-             logger.warning(f"Answer too long ({len(cleaned)} chars), truncating or rejecting. Answer: {cleaned[:50]}...")
-             # Option A: Reject
-             # return "Insufficient evidence"
-             # Option B: Truncate (risky for correctness)
-             # Let's reject for now to be safe and high-precision
-             return "Insufficient evidence"
-             
-        return cleaned

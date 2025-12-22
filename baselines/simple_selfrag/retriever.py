@@ -12,6 +12,8 @@ from config.config_loader import config as global_config
 from rag_core.embedding_client import EmbeddingEncoder
 from rag_core.llm_client import LLMChatClient
 from baselines.common.model_clients import get_default_llm_client, get_default_embedding_client
+from utils.context_budget import pack_contexts
+from utils.output_protocol import build_final_instruction
 
 DEFAULT_SYSTEM_PROMPT = (
     "You are a helpful assistant for multi-hop question answering.\n"
@@ -24,6 +26,7 @@ PROMPT_TEMPLATE = """Context:
 {context}
 
 Question: {question}
+{final_instruction}
 
 Answer the question with a short phrase. If the answer is not contained in the context, say "unknown"."""
 
@@ -34,7 +37,8 @@ class SimpleSelfRAGRetriever:
         chunk_store_path: str, 
         config: Optional[Dict] = None,
         embedding_client: Optional[EmbeddingEncoder] = None,
-        llm_client: Optional[LLMChatClient] = None
+        llm_client: Optional[LLMChatClient] = None,
+        context_budget: Optional[int] = None,
     ):
         self.config = config or global_config
         self.selfrag_config = self.config.get("retriever", {}).get("simple_selfrag", {})
@@ -69,6 +73,7 @@ class SimpleSelfRAGRetriever:
         self.top_k_first = self.selfrag_config.get("top_k_first", 5)
         self.top_k_second = self.selfrag_config.get("top_k_second", 10)
         self.last_hits: List[Dict[str, Any]] = []
+        self.context_budget = int(context_budget or 0)
 
     def retrieve(self, question: str, top_k: int) -> List[Dict[str, Any]]:
         """
@@ -114,9 +119,14 @@ class SimpleSelfRAGRetriever:
         # Step 1: First Retrieval
         logger.info(f"First retrieval for: {question}")
         contexts_1 = self.retrieve(question, self.top_k_first)
-        context_block_1 = "\n\n".join([f"[{i+1}] {c['text']}" for i, c in enumerate(contexts_1)])
+        annotated_1 = [{**c, "text": f"[{i+1}] {c['text']}"} for i, c in enumerate(contexts_1)]
+        context_block_1, _, _ = pack_contexts(annotated_1, self.context_budget)
         
-        prompt_1 = PROMPT_TEMPLATE.format(context=context_block_1, question=question)
+        prompt_1 = PROMPT_TEMPLATE.format(
+            context=context_block_1,
+            question=question,
+            final_instruction=build_final_instruction(),
+        )
         
         messages_1 = [
             {"role": "system", "content": DEFAULT_SYSTEM_PROMPT},
@@ -161,10 +171,12 @@ Verdict (sufficient / insufficient):"""
         
         # Merge contexts (simple concatenation here, could be deduplicated)
         # We use the new contexts primarily
-        context_block_2 = "\n\n".join([f"[{i+1}] {c['text']}" for i, c in enumerate(contexts_2)])
+        annotated_2 = [{**c, "text": f"[{i+1}] {c['text']}"} for i, c in enumerate(contexts_2)]
+        context_block_2, _, _ = pack_contexts(annotated_2, self.context_budget)
         
         prompt_2 = f"""The previous answer was judged insufficient.
 Use the following context to give a more complete and well-supported answer.
+{build_final_instruction()}
 
 Question:
 {question}

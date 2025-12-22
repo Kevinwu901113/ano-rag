@@ -14,7 +14,9 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from baselines.fid_rag import FiDRAGRunner
+from utils.logging_utils import setup_logging
 from utils.run_layout import ensure_workdir_layout, resolve_workdir
+from utils.run_metadata import build_basic_config, write_config_resolved
 
 
 def _select_workspace(root: Path, prefix: str, force_new: bool) -> Path:
@@ -56,6 +58,7 @@ def main() -> None:
     parser.add_argument("--lmstudio-model", default=None)
     parser.add_argument("--temperature", type=float, default=None)
     parser.add_argument("--max-new-tokens", type=int, default=None)
+    parser.add_argument("--context-budget", type=int, default=0, help="Max context tokens (0 disables)")
     parser.add_argument("--no-debug", action="store_true", help="Skip writing retrieval debug JSONL")
     args = parser.parse_args()
 
@@ -87,12 +90,26 @@ def main() -> None:
         raise FileNotFoundError(f"chunks.jsonl missing: {chunks_path}")
 
     run_name = work_dir.name
+    setup_logging(str(work_dir / "run.log"))
     logger.info("Writing outputs to {}", work_dir)
+    write_config_resolved(
+        work_dir,
+        build_basic_config(
+            dataset="mirage",
+            model=args.lmstudio_model or "unknown",
+            endpoint=args.lmstudio_endpoint or "unknown",
+            temperature=args.temperature,
+            max_tokens=args.max_new_tokens,
+            context_budget=args.context_budget or None,
+            topk=args.topk,
+        ),
+    )
 
     runner = FiDRAGRunner(
         str(index_path),
         str(chunks_path),
         topk=args.topk,
+        context_budget=args.context_budget,
         lm_endpoint=args.lmstudio_endpoint,
         lm_model=args.lmstudio_model,
         temperature=args.temperature,

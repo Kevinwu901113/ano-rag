@@ -16,8 +16,12 @@ if str(ROOT) not in sys.path:
 from baselines.simple_raptor.retriever import SimpleRaptorRetriever
 from baselines.common.model_clients import get_default_llm_client
 from rag_core.llm_client import LLMChatClient
+from utils.context_budget import pack_contexts
+from utils.jsonl_utils import write_jsonl
+from utils.logging_utils import setup_logging
 from utils.retrieval_logger import log_retrieval
 from utils.run_layout import ensure_workdir_layout, resolve_workdir
+from utils.run_metadata import build_basic_config, write_config_resolved
 
 def _select_workspace(root: Path, dataset: str, new: bool) -> Path:
     if not root.exists():
@@ -60,6 +64,7 @@ def main() -> None:
     parser.add_argument("--max-new-tokens", type=int, default=None)
     parser.add_argument("--no-debug", action="store_true", help="Skip writing retrieval debug JSONL")
     parser.add_argument("--retrieval-only", action="store_true", help="Skip LLM calls; only run retrieval and log retrieval.jsonl")
+    parser.add_argument("--context-budget", type=int, default=0, help="Max context tokens (0 disables)")
     args = parser.parse_args()
     
     # 1. Setup config for the baseline (it uses global config)
@@ -94,7 +99,20 @@ def main() -> None:
 
     run_name = work_dir.name
     dataset_name = "mirage"
+    setup_logging(str(work_dir / "run.log"))
     logger.info("Writing outputs to {}", work_dir)
+    write_config_resolved(
+        work_dir,
+        build_basic_config(
+            dataset="mirage",
+            model=args.lmstudio_model or "unknown",
+            endpoint=args.lmstudio_endpoint or "unknown",
+            temperature=args.temperature,
+            max_tokens=args.max_new_tokens,
+            context_budget=args.context_budget or None,
+            topk=args.topk,
+        ),
+    )
     
     # Configure LLM Client explicit overrides if provided
     llm_client = None
@@ -107,12 +125,14 @@ def main() -> None:
         str(nodes_path),
         str(chunk_store_path),
         llm_client=llm_client,
-        top_k=args.topk
+        top_k=args.topk,
+        context_budget=args.context_budget,
     )
     
     # Run Dataset
     results = []
     qa_lines = []
+    pred_raw_records: List[Dict[str, Any]] = []
     
     limit = args.limit if args.limit and args.limit > 0 else len(dataset)
     logger.info(f"Running Raptor baseline on {limit} questions...")
@@ -148,14 +168,8 @@ def main() -> None:
                  pass
 
             if args.retrieval_only:
-                # Temporary workaround: Access internal logic if possible
-                # Or just fail if not implemented.
-                # Actually, I should modify the retriever class to add `retrieve`.
-                # But since I cannot edit baselines/simple_raptor/retriever.py right now easily (I can read it),
-                # I'll just use what I have.
-                # Let's assume I can call `retrieve` after I fix the class.
                 hits = retriever.retrieve(question, k=args.topk)
-                ans = "Retrieval Only"
+                ans = ""
             else:
                 ans = retriever.answer(question)
                 hits = getattr(retriever, "last_hits", [])
@@ -165,6 +179,12 @@ def main() -> None:
                 "question": question,
                 "answer": ans,
             })
+            annotated_hits = []
+            for i, hit in enumerate(hits):
+                annotated_hits.append({**hit, "text": f"[{i+1}] {hit.get('text', '')}"})
+            context_str, contexts_used, context_tokens = pack_contexts(
+                annotated_hits, int(args.context_budget or 0)
+            )
             qa_lines.append(f"{question}\t{ans.replace(chr(10), ' ')}")
             try:
                 log_retrieval(
@@ -173,19 +193,23 @@ def main() -> None:
                     run_name=run_name,
                     retrieved=hits,
                     topk=len(hits),
-                    final_context=[
-                        {
-                            "doc_id": hit.get("doc_id"),
-                            "sent_ids": hit.get("sent_ids"),
-                            "passage_id": hit.get("passage_id"),
-                            "text": hit.get("text"),
-                        }
-                        for hit in hits
-                    ],
+                    final_context=contexts_used,
+                    final_context_tokens=context_tokens,
+                    context_budget_tokens=int(args.context_budget or 0) or None,
                     log_dir=artifacts_dir,
                 )
             except Exception as log_exc:
                 logger.error(f"retrieval logging failed for {qid}: {log_exc}")
+            pred_raw_records.append(
+                {
+                    "id": str(qid),
+                    "question": question,
+                    "pred_raw": ans,
+                    "contexts_used": contexts_used,
+                    "context_tokens_used": context_tokens,
+                    "context_budget_tokens": int(args.context_budget or 0) or None,
+                }
+            )
         except Exception as e:
             logger.exception(f"Error Q{i}: {e}")
             
@@ -198,6 +222,7 @@ def main() -> None:
         
     with open(out_qa, "w", encoding="utf-8") as f:
         f.write("\n".join(qa_lines))
+    write_jsonl(preds_dir / "pred_raw.jsonl", pred_raw_records)
         
     logger.info("Raptor baseline complete. qa.tsv: {}", out_qa)
 

@@ -6,12 +6,14 @@ import requests
 from loguru import logger
 
 from generator.extractor import judge_and_compress
+from utils.output_protocol import build_final_instruction
 
 
 ANS_PROMPT = """You are a factual answerer. Use the provided evidence sentences to answer the question.
 If the evidence is insufficient, respond EXACTLY with "Insufficient evidence".
 Prioritize high-confidence evidence, but do not ignore weak evidence if it provides a reasonable answer and does not conflict with strong evidence.
 {label_instruction}
+{final_instruction}
 Question: {q}
 [STRUCTURED EVIDENCE]
 {strong_block}
@@ -22,7 +24,6 @@ Rules:
 - You can use weak evidence if it directly answers the question and is not contradicted by strong evidence.
 - If weak evidence conflicts with strong evidence, ignore the weak evidence.
 - If no sufficient evidence exists, answer "Insufficient evidence".
-Respond with exactly one label and nothing else.
 Answer:
 """
 
@@ -53,6 +54,7 @@ def call_lmstudio(
         strong_block=strong_block,
         weak_block=weak_block,
         label_instruction=_label_instruction(sanitized_labels, attribute_name),
+        final_instruction=build_final_instruction(),
     )
 
     for attempt in range(retries + 1):
@@ -70,7 +72,7 @@ def call_lmstudio(
             response.raise_for_status()
             data = response.json()
             raw_answer = data["choices"][0]["message"]["content"].strip()
-            return _enforce_single_label(raw_answer, sanitized_labels)
+            return raw_answer
         except requests.RequestException as exc:  # noqa: PERF203
             if attempt == retries:
                 raise
