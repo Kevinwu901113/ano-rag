@@ -55,6 +55,7 @@ def main():
     parser.add_argument("--index-path", type=str, help="Path to FAISS index (optional, default to artifacts/vanilla_rag_index.faiss)")
     parser.add_argument("--chunk-store-path", type=str, help="Path to chunk store (optional, default to artifacts/vanilla_rag_chunk_store.pkl)")
     parser.add_argument("--context-budget", type=int, default=0, help="Max context tokens (0 disables)")
+    parser.add_argument("--topk", type=int, default=10, help="Number of passages to retrieve")
     parser.add_argument(
         "--retriever",
         choices=["dense", "bm25", "hybrid"],
@@ -82,15 +83,36 @@ def main():
     
     setup_logging(str(work_dir / "run.log"))
     logger.info(f"Starting Vanilla RAG run in {work_dir}")
+    cfg_snapshot = global_config.load_config()
+    emb_cfg = cfg_snapshot.get("retriever", {}).get("embedding", {})
     write_config_resolved(
         work_dir,
         build_basic_config(
             dataset="mirage",
             model=args.lmstudio_model or "unknown",
             endpoint=args.lmstudio_endpoint or "unknown",
-            temperature=None,
+            temperature=cfg_snapshot.get("lmstudio", {}).get("temperature"),
             max_tokens=args.max_new_tokens,
             context_budget=args.context_budget or None,
+            topk=args.topk,
+            decode={
+                "temperature": cfg_snapshot.get("lmstudio", {}).get("temperature"),
+                "top_p": None,
+                "repetition_penalty": None,
+                "max_tokens": args.max_new_tokens,
+            },
+            embedding={
+                "model": emb_cfg.get("model"),
+                "device": emb_cfg.get("device"),
+                "batch_size": None,
+                "max_length": emb_cfg.get("max_len_note"),
+                "normalize": emb_cfg.get("normalize"),
+                "dtype": emb_cfg.get("dtype"),
+            },
+            budgets={
+                "context_budget_tokens": args.context_budget or None,
+                "topk": args.topk,
+            },
             extra={"retriever": args.retriever},
         ),
     )

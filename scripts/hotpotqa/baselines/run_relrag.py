@@ -113,6 +113,8 @@ class RelRAG:
         topk: int = 3,
         retrieval_only: bool = False,
         context_budget: int = 0,
+        hop: int = 1,
+        use_scheduler: bool = True,
     ) -> str:
         texts = passages
         
@@ -127,6 +129,12 @@ class RelRAG:
         sim_matrix = np.dot(vecs, vecs.T)
         threshold = 0.7
         adj = (sim_matrix > threshold).astype(float)
+        hop_steps = max(1, int(hop))
+        if hop_steps > 1:
+            adj_hop = adj.copy()
+            for _ in range(1, hop_steps):
+                adj_hop = (adj_hop @ adj) > 0
+            adj = adj_hop.astype(float)
         
         # 3. Vector Search for Question
         q_vec = self._encode([question])
@@ -137,9 +145,12 @@ class RelRAG:
         
         # 4. Spread Activation / PageRank-like re-ranking
         # Final Score = alpha * Initial + (1-alpha) * Neighbor_Avg
-        alpha = 0.6
-        neighbor_scores = np.dot(adj, initial_scores) / (np.sum(adj, axis=1) + 1e-10)
-        final_scores = alpha * initial_scores + (1 - alpha) * neighbor_scores
+        if use_scheduler:
+            alpha = 0.6
+            neighbor_scores = np.dot(adj, initial_scores) / (np.sum(adj, axis=1) + 1e-10)
+            final_scores = alpha * initial_scores + (1 - alpha) * neighbor_scores
+        else:
+            final_scores = initial_scores
         
         # Select Top K
         limit = max(1, int(topk))
@@ -207,6 +218,8 @@ def process_example(item: Dict[str, Any],
             topk=int(getattr(args, "topk", 3)),
             retrieval_only=retrieval_only,
             context_budget=int(getattr(args, "context_budget", 0) or 0),
+            hop=int(getattr(args, "hop", 1)),
+            use_scheduler=not bool(getattr(args, "no_scheduler", False)),
         )
         if retrieval_only:
             ans = ""
@@ -276,6 +289,8 @@ def main():
     parser.set_defaults(embed_normalize=True)
     parser.add_argument("--emb-dtype", default=None, help="Embedding torch dtype (e.g., float16, bfloat16)")
     parser.add_argument("--topk", type=int, default=3, help="Number of paragraphs to retrieve")
+    parser.add_argument("--hop", type=int, default=1, help="Graph hop expansion for neighbor re-ranking")
+    parser.add_argument("--no-scheduler", action="store_true", help="Disable graph-aware re-ranking scheduler")
     parser.add_argument("--retrieval-only", action="store_true", help="Skip LLM calls; only run retrieval and log retrieval.jsonl")
     parser.add_argument("--limit", type=int, default=0)
     parser.add_argument("--max-context", type=int, default=10, help="Max number of paragraphs from context to keep")
@@ -313,7 +328,30 @@ def main():
             max_tokens=args.max_new_tokens,
             context_budget=args.context_budget or None,
             topk=args.topk,
-            extra={"max_context": args.max_context, "embed_model": args.embed_model},
+            decode={
+                "temperature": 0.0,
+                "top_p": None,
+                "repetition_penalty": None,
+                "max_tokens": args.max_new_tokens,
+            },
+            embedding={
+                "model": args.embed_model,
+                "device": args.embed_device,
+                "batch_size": args.embed_batch_size,
+                "max_length": args.embed_max_length,
+                "normalize": args.embed_normalize,
+                "dtype": args.emb_dtype,
+            },
+            budgets={
+                "context_budget_tokens": args.context_budget or None,
+                "topk": args.topk,
+            },
+            extra={
+                "max_context": args.max_context,
+                "embed_model": args.embed_model,
+                "graph_hop": args.hop,
+                "scheduler_enabled": not args.no_scheduler,
+            },
         ),
     )
 

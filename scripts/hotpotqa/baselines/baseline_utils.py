@@ -1,6 +1,5 @@
 import json
 import os
-import re
 import threading
 import hashlib
 from pathlib import Path
@@ -11,7 +10,6 @@ import torch
 from loguru import logger
 from transformers import AutoModel, AutoTokenizer
 
-from utils.answer_cleaner import _strip_reasoning, clean_model_answer
 
 # Cache for the closure (get_embedding_model)
 _embedding_lock = threading.Lock()
@@ -358,26 +356,6 @@ def format_context(passages: List[str]) -> str:
     """Join passages with spacing for prompting."""
     return "\n\n".join(passages)
 
-
-def clean_hotpot_answer(text: str) -> str:
-    """
-    Strip <think>...</think> and common prefixes to keep only the final short answer.
-    Provides fallback to avoid empty outputs.
-    """
-    if text is None:
-        return ""
-    raw = str(text)
-    cleaned = clean_model_answer(raw)
-    cleaned = _strip_reasoning(cleaned)
-    cleaned = re.sub(r"^answer\s*[:：]\s*", "", cleaned, flags=re.IGNORECASE).strip()
-    cleaned = cleaned.strip("\"'“”‘’").strip()
-    cleaned = " ".join(cleaned.split())
-    if cleaned:
-        return cleaned
-    fallback = re.sub(r"^answer\s*[:：]\s*", "", raw, flags=re.IGNORECASE).strip()
-    fallback = fallback.strip("\"'“”‘’").strip()
-    fallback = " ".join(fallback.split())
-    return fallback or "Insufficient evidence"
 
 def detect_device(prefer: str = "cuda") -> str:
     """

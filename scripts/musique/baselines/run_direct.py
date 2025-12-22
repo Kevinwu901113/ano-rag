@@ -122,6 +122,14 @@ def main() -> None:
             temperature=args.temperature,
             max_tokens=args.max_tokens,
             context_budget=args.context_budget or None,
+            decode={
+                "temperature": args.temperature,
+                "top_p": None,
+                "repetition_penalty": None,
+                "max_tokens": args.max_tokens,
+            },
+            embedding={"model": None},
+            budgets={"context_budget_tokens": args.context_budget or None},
             extra={"max_context": args.max_context},
         ),
     )

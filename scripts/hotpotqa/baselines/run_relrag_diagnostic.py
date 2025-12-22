@@ -14,6 +14,7 @@ from __future__ import annotations
 import argparse
 import json
 import random
+import re
 import sys
 import time
 from pathlib import Path
@@ -31,10 +32,31 @@ if str(ROOT) not in sys.path:
 from structrag.llm_client import LLMChatClient
 from scripts.hotpotqa.baselines.baseline_utils import (  # noqa: E402
     build_passages_from_context,
-    clean_hotpot_answer,
     detect_device,
     get_embedding_model,
 )
+from utils.answer_cleaner import _strip_reasoning, clean_model_answer
+
+
+def clean_hotpot_answer(text: str) -> str:
+    """
+    Strip <think>...</think> and common prefixes to keep only the final short answer.
+    Provides fallback to avoid empty outputs.
+    """
+    if text is None:
+        return ""
+    raw = str(text)
+    cleaned = clean_model_answer(raw)
+    cleaned = _strip_reasoning(cleaned)
+    cleaned = re.sub(r"^answer\s*[:\uff1a]\s*", "", cleaned, flags=re.IGNORECASE).strip()
+    cleaned = cleaned.strip("\"'\u201c\u201d\u2018\u2019").strip()
+    cleaned = " ".join(cleaned.split())
+    if cleaned:
+        return cleaned
+    fallback = re.sub(r"^answer\s*[:\uff1a]\s*", "", raw, flags=re.IGNORECASE).strip()
+    fallback = fallback.strip("\"'\u201c\u201d\u2018\u2019").strip()
+    fallback = " ".join(fallback.split())
+    return fallback or "Insufficient evidence"
 
 
 def normalize_answer(text: str) -> str:

@@ -101,6 +101,8 @@ def main() -> None:
     dataset_name = "mirage"
     setup_logging(str(work_dir / "run.log"))
     logger.info("Writing outputs to {}", work_dir)
+    cfg_snapshot = global_config.load_config()
+    emb_cfg = cfg_snapshot.get("retriever", {}).get("embedding", {})
     write_config_resolved(
         work_dir,
         build_basic_config(
@@ -111,6 +113,24 @@ def main() -> None:
             max_tokens=args.max_new_tokens,
             context_budget=args.context_budget or None,
             topk=args.topk,
+            decode={
+                "temperature": args.temperature,
+                "top_p": None,
+                "repetition_penalty": None,
+                "max_tokens": args.max_new_tokens,
+            },
+            embedding={
+                "model": emb_cfg.get("model"),
+                "device": emb_cfg.get("device"),
+                "batch_size": None,
+                "max_length": emb_cfg.get("max_len_note"),
+                "normalize": emb_cfg.get("normalize"),
+                "dtype": emb_cfg.get("dtype"),
+            },
+            budgets={
+                "context_budget_tokens": args.context_budget or None,
+                "topk": args.topk,
+            },
         ),
     )
     

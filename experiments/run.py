@@ -368,6 +368,8 @@ def _eval_command(
 
     if dataset_type in ("hotpotqa", "musique", "mirage"):
         ks = cfg.get("retrieval_eval", {}).get("ks") or cfg.get("topk", {}).get("retrieve_k") or [1, 3, 5, 10]
+        if isinstance(ks, int):
+            ks = [ks]
         ks_str = ",".join(str(k) for k in ks)
         return [
             sys.executable,
@@ -430,7 +432,7 @@ def main() -> None:
     datasets = cfg.get("datasets") or list(datasets_manifest.keys())
     methods = cfg.get("methods") or list(methods_manifest.keys())
     ablations = cfg.get("ablations") or []
-    retrieval_only = bool(cfg.get("retrieval_eval"))
+    retrieval_only = bool(cfg.get("runtime", {}).get("retrieval_only", False))
 
     config_snapshot = {
         "config": cfg,
@@ -506,6 +508,8 @@ def main() -> None:
 
                 for llm in llm_profiles:
                     llm_name = llm.get("name", llm.get("model", "default"))
+                    job_env = dict(env)
+                    job_env["LLM_PROFILE"] = str(llm_name)
 
                     budget_list = budgets or [None]
                     for budget in budget_list:
@@ -773,10 +777,10 @@ def main() -> None:
                                         _add_first_supported(build_cmd, build_supported, dataset_flags, dataset_path)
                                     if doc_pool:
                                         _add_first_supported(build_cmd, build_supported, doc_pool_flags, doc_pool)
-                                    _run_cmd(build_cmd, workdir / "build.log", env, args.dry_run)
+                                    _run_cmd(build_cmd, workdir / "build.log", job_env, args.dry_run)
                                     built_indexes.add(build_key)
 
-                            _run_cmd(cmd, workdir / "run.log", env, args.dry_run)
+                            _run_cmd(cmd, workdir / "run.log", job_env, args.dry_run)
                             if not args.dry_run:
                                 resume_state_after = _resume_state(workdir)
                         except Exception as exc:
@@ -851,7 +855,7 @@ def main() -> None:
                             eval_cmd = _eval_command(dataset_def, workdir, cfg, repo_root)
                             if eval_cmd:
                                 try:
-                                    _run_cmd(eval_cmd, workdir / "eval.log", env, args.dry_run)
+                                    _run_cmd(eval_cmd, workdir / "eval.log", job_env, args.dry_run)
                                     eval_status = "ok"
                                 except Exception as exc:
                                     eval_status = "failed"
@@ -867,6 +871,14 @@ def main() -> None:
                         budget_applied = budget_flag is not None if budget is not None else None
                         topk_applied = topk_flag is not None if topk.get("gen_k") is not None else None
                         resume_state_final = resume_state_after or resume_state_before
+                        
+                        eval_entry_script = None
+                        if runtime.get("run_eval") and not args.dry_run:
+                            # Re-derive eval command to get the script path (safe even if skipped above).
+                            temp_eval_cmd = _eval_command(dataset_def, workdir, cfg, repo_root)
+                            if temp_eval_cmd and len(temp_eval_cmd) > 1:
+                                eval_entry_script = temp_eval_cmd[1]
+
                         job_results.append(
                             {
                                 "dataset": dataset_id,
@@ -882,6 +894,8 @@ def main() -> None:
                                 "ended_at": ended_at,
                                 "duration_s": round(ended - started, 2),
                                 "workdir": str(workdir),
+                                "pred_source": str(workdir / "preds" / "pred_raw.jsonl"),
+                                "eval_entry": eval_entry_script or "none",
                                 "cmd": cmd,
                                 "cmd_str": cmd_str,
                                 "entry": str(entry_path),

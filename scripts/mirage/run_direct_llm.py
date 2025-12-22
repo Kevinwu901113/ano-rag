@@ -61,7 +61,9 @@ def main() -> None:
         dataset = json.load(handle)
 
     work_dir = resolve_workdir(args.work_dir, result_root=args.result_root, dataset="mirage")
-    ensure_workdir_layout(work_dir)
+    paths = ensure_workdir_layout(work_dir)
+    artifacts_dir = paths["artifacts"]
+    run_name = work_dir.name
     logger.info("Writing direct LLM outputs to {}", work_dir)
     setup_logging(str(work_dir / "run.log"))
     write_config_resolved(
@@ -73,6 +75,14 @@ def main() -> None:
             temperature=args.temperature,
             max_tokens=args.max_new_tokens,
             context_budget=args.context_budget or None,
+            decode={
+                "temperature": args.temperature,
+                "top_p": None,
+                "repetition_penalty": None,
+                "max_tokens": args.max_new_tokens,
+            },
+            embedding={"model": None},
+            budgets={"context_budget_tokens": args.context_budget or None},
         ),
     )
 
@@ -87,7 +97,15 @@ def main() -> None:
 
     runner = DirectLLMRunner(**runner_kwargs)
     limit = args.limit if args.limit and args.limit > 0 else None
-    artifacts = runner.run_dataset(dataset, work_dir=str(work_dir), limit=limit)
+    artifacts = runner.run_dataset(
+        dataset,
+        work_dir=str(work_dir),
+        limit=limit,
+        context_budget_tokens=args.context_budget or 0,
+        log_dir=str(artifacts_dir),
+        run_name=run_name,
+        dataset_name="mirage",
+    )
     logger.info("Direct LLM baseline finished. qa.tsv: {}", artifacts.get("qa"))
 
 

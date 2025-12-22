@@ -304,6 +304,24 @@ def main():
             max_tokens=args.max_new_tokens,
             context_budget=args.context_budget or None,
             topk=args.topk,
+            decode={
+                "temperature": 0.0,
+                "top_p": None,
+                "repetition_penalty": None,
+                "max_tokens": args.max_new_tokens,
+            },
+            embedding={
+                "model": args.embed_model,
+                "device": args.embed_device,
+                "batch_size": args.embed_batch_size,
+                "max_length": args.embed_max_length,
+                "normalize": args.embed_normalize,
+                "dtype": args.emb_dtype,
+            },
+            budgets={
+                "context_budget_tokens": args.context_budget or None,
+                "topk": args.topk,
+            },
             extra={"max_context": args.max_context, "embed_model": args.embed_model},
         ),
     )

@@ -11,6 +11,7 @@ from loguru import logger
 
 from config import config as config_loader
 from utils.jsonl_utils import write_jsonl
+from utils.retrieval_logger import log_retrieval
 from utils.output_protocol import build_final_instruction
 
 DEFAULT_SYSTEM_PROMPT = (
@@ -135,6 +136,10 @@ class DirectLLMRunner:
         *,
         work_dir: str,
         limit: Optional[int] = None,
+        context_budget_tokens: Optional[int] = None,
+        log_dir: Optional[str] = None,
+        run_name: Optional[str] = None,
+        dataset_name: Optional[str] = None,
     ) -> Dict[str, Any]:
         items = list(dataset)
         if limit:
@@ -196,9 +201,23 @@ class DirectLLMRunner:
                     "pred_raw": result.answer,
                     "contexts_used": [],
                     "context_tokens_used": 0,
-                    "context_budget_tokens": None,
+                    "context_budget_tokens": (
+                        int(context_budget_tokens) if context_budget_tokens is not None else None
+                    ),
                 }
             )
+            if log_dir and dataset_name and run_name:
+                log_retrieval(
+                    sample_id=result.query_id,
+                    dataset=dataset_name,
+                    run_name=run_name,
+                    retrieved=[],
+                    topk=0,
+                    final_context=[],
+                    final_context_tokens=0,
+                    context_budget_tokens=context_budget_tokens,
+                    log_dir=Path(log_dir),
+                )
 
         payload = [
             {
@@ -228,18 +247,3 @@ class DirectLLMRunner:
             "qa_no_header": str(qa_no_header_path),
             "qa_with_question": str(qa_with_question_path),
         }
-
-
-def _strip_reasoning(text: str) -> str:
-    output = text or ""
-    while True:
-        start = output.find("<think>")
-        if start == -1:
-            break
-        end = output.find("</think>", start + len("<think>"))
-        if end == -1:
-            output = output[:start] + output[start + len("<think>") :]
-            break
-        output = output[:start] + output[end + len("</think>") :]
-    cleaned = output.strip()
-    return cleaned or "Insufficient evidence"

@@ -5,10 +5,16 @@ import argparse
 import json
 import re
 import string
+import subprocess
+import sys
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
-from utils.output_protocol import extract_final_answer, has_final_tag, normalize_text
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from utils.output_eval import extract_final_answer, has_final_tag, normalize_text
 
 
 def _normalize_answer(text: str) -> str:
@@ -233,6 +239,19 @@ def _write_json(path: Path, payload: Dict[str, Any]) -> None:
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
+def _git_commit() -> str:
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        return result.stdout.strip()
+    except Exception:
+        return "unknown"
+
+
 def _write_jsonl(path: Path, rows: Iterable[Dict[str, Any]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8") as handle:
@@ -319,12 +338,26 @@ def evaluate_run(
             retrieval_metrics = _evaluate_retrieval(records, support_map, ks=ks, use_passage_id=False, doc_match=True)
     _write_json(metrics_dir / "retrieval_metrics.json", retrieval_metrics)
 
+    git_commit = "unknown"
+    config_path = run_dir / "config.resolved.json"
+    if config_path.exists():
+        try:
+            config_payload = json.loads(config_path.read_text(encoding="utf-8"))
+            git_commit = config_payload.get("git_commit") or git_commit
+        except Exception:
+            git_commit = "unknown"
+    if git_commit == "unknown":
+        git_commit = _git_commit()
+
     summary = {
         "run_dir": str(run_dir),
         "qa_norm": qa_norm,
         "qa_final": qa_final,
         "format_metrics": format_metrics,
         "retrieval_metrics": retrieval_metrics,
+        "eval_entry": "scripts/evaluate_relrag.py",
+        "pred_source": str(pred_raw_path),
+        "git_commit": git_commit,
         "pred_raw": str(pred_raw_path),
         "pred_norm": str(preds_dir / "pred_norm.jsonl"),
         "pred_final": str(preds_dir / "pred_final.jsonl"),
