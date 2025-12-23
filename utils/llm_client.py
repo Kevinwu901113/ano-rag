@@ -15,7 +15,7 @@ from config.config_loader import config as global_config
 
 VLLM_ENDPOINT = "http://127.0.0.1:8000/v1"
 SERVED_MODEL_NAME = "qwen3-30b-a3b"
-HF_MODEL_ID = "Qwen/Qwen3-30B-A3B"
+HF_MODEL_ID = "Qwen/Qwen3-30B-A3B-GPTQ-Int4"
 
 _DEFAULT_PROFILES = {
     "extract": {"temperature": 0.0, "max_tokens": 256, "thinking": False},
