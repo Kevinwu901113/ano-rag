@@ -28,6 +28,7 @@ from utils.output_protocol import build_final_instruction
 from utils.retrieval_logger import log_retrieval
 from utils.run_layout import ensure_workdir_layout, resolve_workdir
 from utils.run_metadata import build_basic_config, write_config_resolved
+from config.config_loader import DEFAULT_EMBED_MODEL, DEFAULT_EMBED_DEVICE
 
 
 class InMemoryVanillaRetriever:
@@ -191,8 +192,8 @@ def main() -> None:
     parser.add_argument("--lm-endpoint", default="http://127.0.0.1:8000/v1")
     parser.add_argument("--lm-model", default="qwen3-30b-a3b")
     parser.add_argument("--max-new-tokens", type=int, default=None, help="Max new tokens for LLM decoding")
-    parser.add_argument("--emb-model", default="Qwen/Qwen3-Embedding-8B")
-    parser.add_argument("--emb-device", default=None)
+    parser.add_argument("--emb-model", default=DEFAULT_EMBED_MODEL)
+    parser.add_argument("--emb-device", default=DEFAULT_EMBED_DEVICE)
     parser.add_argument("--emb-dtype", default=None)
     parser.add_argument("--topk", type=int, default=3)
     parser.add_argument(

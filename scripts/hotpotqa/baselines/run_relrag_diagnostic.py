@@ -35,6 +35,7 @@ from scripts.hotpotqa.baselines.baseline_utils import (  # noqa: E402
     detect_device,
     get_embedding_model,
 )
+from config.config_loader import DEFAULT_EMBED_MODEL, DEFAULT_EMBED_DEVICE
 from utils.answer_cleaner import _strip_reasoning, clean_model_answer
 
 

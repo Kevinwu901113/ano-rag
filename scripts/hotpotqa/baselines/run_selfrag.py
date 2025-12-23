@@ -247,7 +247,7 @@ def main():
         "--embed-model",
         "--emb-model",
         dest="embed_model",
-        default="Qwen/Qwen3-Embedding-8B",
+        default=DEFAULT_EMBED_MODEL,
         help="Embedding model name or path",
     )
     parser.add_argument(
@@ -255,7 +255,7 @@ def main():
         "--emb-device",
         dest="embed_device",
         choices=["auto", "cuda", "cpu"],
-        default="auto",
+        default=DEFAULT_EMBED_DEVICE,
         help="Embedding device preference (auto prefers CUDA, falls back to CPU)",
     )
     parser.add_argument("--embed-batch-size", type=int, default=4, help="Embedding batch size")

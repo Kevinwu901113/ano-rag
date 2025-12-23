@@ -7,7 +7,8 @@ from typing import Any, Dict
 
 
 CONFIG_ENV_VAR = "ANO_RAG_CONFIG"
-DEFAULT_EMBED_MODEL = "/home/wjk/models/hf-cache/models--sentence-transformers--all-MiniLM-L6-v2/snapshots/c9745ed1d9f207416be6d2e6f8de32d1f16199bf"
+DEFAULT_EMBED_MODEL = "/home/wjk/models/qwen3-emb"
+DEFAULT_EMBED_DEVICE = "cpu"
 
 
 DEFAULT_CONFIG: Dict[str, Any] = {
@@ -96,7 +97,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
             "model_path_override": None,
             "cache_dir": None,
             "download_dir": None,
-            "device": "cpu",
+            "device": DEFAULT_EMBED_DEVICE,
             "dtype": None,
             "auto_build": False,
             "offline_index_path": "indexes/faiss/notes.faiss",

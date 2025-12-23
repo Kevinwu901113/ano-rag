@@ -718,13 +718,13 @@ def main() -> None:
 
     raptor = sub.add_parser("raptor", parents=[common], help="Evaluate Simple Raptor retrieval")
     raptor.add_argument("--index-dir", default=None, help="Directory with Simple Raptor artifacts")
-    raptor.add_argument("--embed-model", default="Qwen/Qwen3-Embedding-8B", help="Embedding model name")
-    raptor.add_argument("--embed-device", default="auto", help="Embedding device")
+    raptor.add_argument("--embed-model", default=DEFAULT_EMBED_MODEL, help="Embedding model name")
+    raptor.add_argument("--embed-device", default=DEFAULT_EMBED_DEVICE, help="Embedding device")
 
     selfrag = sub.add_parser("selfrag", parents=[common], help="Evaluate Simple SelfRAG retrieval")
     selfrag.add_argument("--index-dir", default=None, help="Directory with Simple SelfRAG artifacts")
-    selfrag.add_argument("--embed-model", default="Qwen/Qwen3-Embedding-8B", help="Embedding model name")
-    selfrag.add_argument("--embed-device", default="auto", help="Embedding device")
+    selfrag.add_argument("--embed-model", default=DEFAULT_EMBED_MODEL, help="Embedding model name")
+    selfrag.add_argument("--embed-device", default=DEFAULT_EMBED_DEVICE, help="Embedding device")
 
     anorag = sub.add_parser("anorag", parents=[common], help="Evaluate AnoRAG structured/hybrid retrieval recall")
     anorag.add_argument("--indexes-dir", required=True, help="Directory with AnoRAG indexes (entity_to_notes.json etc.)")

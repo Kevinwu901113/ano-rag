@@ -31,6 +31,7 @@ from utils.output_protocol import build_final_instruction
 from utils.retrieval_logger import log_retrieval
 from utils.run_layout import ensure_workdir_layout, resolve_workdir
 from utils.run_metadata import build_basic_config, write_config_resolved
+from config.config_loader import DEFAULT_EMBED_MODEL, DEFAULT_EMBED_DEVICE
 
 def load_dataset(path: str) -> List[Dict[str, Any]]:
     with open(path, "r", encoding="utf-8") as f:
@@ -254,7 +255,7 @@ def main():
         "--embed-model",
         "--emb-model",
         dest="embed_model",
-        default="Qwen/Qwen3-Embedding-8B",
+        default=DEFAULT_EMBED_MODEL,
         help="Embedding model name or path",
     )
     parser.add_argument(
@@ -262,7 +263,7 @@ def main():
         "--emb-device",
         dest="embed_device",
         choices=["auto", "cuda", "cpu"],
-        default="auto",
+        default=DEFAULT_EMBED_DEVICE,
         help="Embedding device preference (auto prefers CUDA, falls back to CPU)",
     )
     parser.add_argument("--embed-batch-size", type=int, default=4, help="Embedding batch size")

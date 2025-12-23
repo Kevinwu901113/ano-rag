@@ -248,8 +248,8 @@ def main() -> None:
     parser.add_argument("--topk", type=int, default=10, help="Top-k passages to rank (>= max ks)")
     parser.add_argument("--ks", default="5,10", help="Comma-separated ks for recall/prec/hit (e.g., 1,3,5,10)")
 
-    parser.add_argument("--embed-model", default=_default_embed_model(), help="Embedding model name or local path")
-    parser.add_argument("--embed-device", choices=["cpu", "cuda", "auto"], default="cpu", help="Embedding device")
+    parser.add_argument("--embed-model", default=DEFAULT_EMBED_MODEL, help="Embedding model name or local path")
+    parser.add_argument("--embed-device", choices=["cpu", "cuda", "auto"], default=DEFAULT_EMBED_DEVICE, help="Embedding device")
     parser.add_argument("--embed-batch-size", type=int, default=2, help="Embedding batch size")
     parser.add_argument("--embed-max-length", type=int, default=256, help="Embedding max sequence length")
     norm = parser.add_mutually_exclusive_group()

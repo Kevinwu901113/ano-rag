@@ -19,7 +19,7 @@ def get_default_embedding_client(config: Optional[Dict[str, Any]] = None):
     emb_cfg = retriever_cfg.get("embedding", {})
 
     provider = str(emb_cfg.get("provider", "huggingface")).strip()
-    model = str(emb_cfg.get("model", "sentence-transformers/all-MiniLM-L6-v2")).strip()
+    model = str(emb_cfg.get("model", DEFAULT_EMBED_MODEL)).strip()
     device = emb_cfg.get("device", "cpu")
 
     # --- provider == qwen3: use utils.embedding_utils, implementing local cache + local path ---

@@ -14,6 +14,7 @@ if str(ROOT) not in sys.path:
 
 from baselines.naive_rag import MirageNaiveIndexer, NaiveChunker
 from utils.run_layout import ensure_workdir_layout, resolve_workdir
+from config.config_loader import DEFAULT_EMBED_MODEL, DEFAULT_EMBED_DEVICE
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Build naive HotpotQA RAG index from doc_pool.json")
@@ -23,13 +24,13 @@ def main() -> None:
     parser.add_argument("--workdir", "--work-dir", dest="work_dir", default=None, help="Workspace directory (default: auto under result-root)")
     parser.add_argument(
         "--embed-device",
-        default="auto",
+        default=DEFAULT_EMBED_DEVICE,
         choices=["auto", "cuda", "cpu"],
         help="Embedding device preference (auto prefers CUDA, falls back to CPU)",
     )
     parser.add_argument("--embed-batch-size", type=int, default=4, help="Embedding batch size")
     parser.add_argument("--embed-max-length", type=int, default=512, help="Embedding max sequence length")
-    parser.add_argument("--embed-model", default="Qwen/Qwen3-Embedding-8B", help="Embedding model name or path")
+    parser.add_argument("--embed-model", default=DEFAULT_EMBED_MODEL, help="Embedding model name or path")
     norm = parser.add_mutually_exclusive_group()
     norm.add_argument("--embed-normalize", dest="embed_normalize", action="store_true", help="L2-normalize embeddings")
     norm.add_argument(

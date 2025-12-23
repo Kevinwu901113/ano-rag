@@ -31,6 +31,7 @@ from utils.output_protocol import build_final_instruction
 from utils.retrieval_logger import log_retrieval
 from utils.run_layout import ensure_workdir_layout, resolve_workdir
 from utils.run_metadata import build_basic_config, write_config_resolved
+from config.config_loader import DEFAULT_EMBED_MODEL, DEFAULT_EMBED_DEVICE
 
 def load_dataset(path: str) -> List[Dict[str, Any]]:
     with open(path, "r", encoding="utf-8") as f:
