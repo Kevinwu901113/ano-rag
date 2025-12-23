@@ -4,19 +4,19 @@
 - Unified entry: `python experiments/run.py --config <config>`
 - Evaluator: `scripts/evaluate_relrag.py` (triggered by `runtime.run_eval=true`)
 - Result root: `result_relrag/<exp_name>/run_<timestamp>/...`
-- Ensure LLM and embedding endpoints/keys are available (for example `OPENAI_API_KEY`).
+- Ensure vLLM and embedding endpoints are available.
 
 ## 1. Recommended Order (HotpotQA -> Mirage -> MuSiQue)
 
 | Experiment | Config | Datasets | Methods | Default Budgets | LLM Profiles |
 | --- | --- | --- | --- | --- | --- |
-| E1 | `experiments/configs/e1_main_qwen.yaml` | hotpotqa_distractor_200 -> mirage_sample_200 -> musique_sample | bm25_rag, dense_rag, hybrid_rag, raptor, relrag_full | 4096/8192/16384 | llm_a |
+| E1 | `experiments/configs/e1_main_qwen.yaml` | hotpotqa_distractor_200 -> mirage_sample_200 -> musique_sample | bm25_rag, dense_rag, hybrid_rag, raptor, relrag_full | 4096/8192/16384 | default |
 | E2 | `experiments/configs/e2_retrieval.yaml` | hotpotqa_distractor_200 -> musique_sample | bm25_rag, dense_rag, hybrid_rag, relrag_full | [] | default |
 | E3 | `experiments/configs/e3_noise_robustness.yaml` | hotpotqa_distractor_200 -> mirage_sample_200 | relrag_full, hybrid_rag | 2000 | default |
 | E5 | `experiments/configs/e5_ablation_structure.yaml` | hotpotqa_distractor_200 -> musique_sample | relrag_full | 4096/8192/16384 | default |
-| E7 | `experiments/configs/e7_cross_llm.yaml` | hotpotqa_distractor_200 | hybrid_rag, relrag_full | 4096/8192/16384 | llm_a_qwen, llm_b_gpt4o |
+| E7 | `experiments/configs/e7_cross_llm.yaml` | hotpotqa_distractor_200 | hybrid_rag, relrag_full | 4096/8192/16384 | qwen3_30b_a3b |
 | E8 | `experiments/configs/e8_budget_scaling.yaml` | hotpotqa_distractor_200 | relrag_full | 500/1000/2000/4000 | default |
-| E9 | `experiments/configs/e9_generator_scaling.yaml` | hotpotqa_distractor_200 | relrag_full | 2000 | default/small/large |
+| E9 | `experiments/configs/e9_generator_scaling.yaml` | hotpotqa_distractor_200 | relrag_full | 2000 | default/small/large (same model) |
 | E10 | `experiments/configs/e10_end_to_end.yaml` | hotpotqa_distractor_200 | relrag_full, hybrid_rag | 2000 | default |
 
 E4 and E6 are optional missing.

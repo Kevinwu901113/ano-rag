@@ -13,8 +13,8 @@ Concatenates 10 paragraphs and prompts LLM directly.
 ```bash
 python scripts/hotpotqa/baselines/run_direct.py \
   --dataset path/to/hotpot_dev_distractor_v1.json \
-  --lm-endpoint http://localhost:1234/v1 \
-  --lm-model model-id
+  --lm-endpoint http://127.0.0.1:8000/v1 \
+  --lm-model qwen3-30b-a3b
 ```
 
 ### 2. Vanilla RAG (Distractor)
@@ -66,8 +66,8 @@ MuSiQue 数据集为 `.jsonl`（每行一个样本），每个问题自带若干
 ```bash
 python scripts/musique/baselines/run_direct.py \
   --dataset data/musique/musique_full_v1.0_dev.jsonl \
-  --lm-endpoint http://localhost:1234/v1 \
-  --lm-model model-id
+  --lm-endpoint http://127.0.0.1:8000/v1 \
+  --lm-model qwen3-30b-a3b
 ```
 
 ### 2. Vanilla RAG
@@ -134,8 +134,8 @@ python scripts/musique/build_doc_pool.py \
 from baselines.direct_llm.runner import DirectLLMRunner
 
 runner = DirectLLMRunner(
-    lm_endpoint="http://localhost:1234/v1", # 或从 config 读取
-    lm_model="model-name"
+    lm_endpoint="http://127.0.0.1:8000/v1", # 或从 config 读取
+    lm_model="qwen3-30b-a3b"
 )
 
 # dataset 需包含 "question" 或 "query" 字段
@@ -171,7 +171,7 @@ retriever = NaiveIndex(
 hits = retriever.search("What is X?", topk=5)
 
 # 3. 生成回答
-llm = LLMClient(endpoint="...", model="...")
+llm = LLMClient(endpoint="http://127.0.0.1:8000/v1", model="qwen3-30b-a3b")
 context = "\n".join([h["text"] for h in hits])
 answer = llm.answer(question="What is X?", context=context)
 ```
@@ -215,8 +215,8 @@ indexer = SimpleRaptorIndexer(
         "device": "cuda:0"
     },
     llm_config={
-        "endpoint": "http://localhost:8001/v1", 
-        "model": "qwen2.5-7b-instruct"
+        "endpoint": "http://127.0.0.1:8000/v1", 
+        "model": "qwen3-30b-a3b"
     }
 )
 

@@ -29,7 +29,7 @@ PYTHONPATH=. python experiments/run.py \
 - `manifests/methods.yaml`: method name -> script entry mapping.
 
 The runner supports `include:` to merge YAML files and simple env expansion
-like `${OPENAI_BASE_URL:-https://api.openai.com/v1}`.
+like `${LLM_ENDPOINT:-http://127.0.0.1:8000/v1}`.
 
 ## Notes
 - If a method entry is missing for a dataset, the runner skips that combo.

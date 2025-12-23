@@ -15,7 +15,7 @@ flowchart LR
     PR --> OP{Operators\nBIND / EXPAND}
     OP --> RP[Retriever Pipeline]
     RP --> EV[Evidence Extraction]
-    EV --> AN[Answerer → LM Studio]
+    EV --> AN[Answerer → vLLM]
     RP -. Fallback: Vector / BM25 .-> EV
   end
 

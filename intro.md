@@ -3,7 +3,7 @@
 ANO-RAG 是一个以“结构化事实笔记（subj–pred–obj）”为核心的最小 RAG 实现。它将端到端流程拆分为两阶段：
 
 1) 构建阶段：把原始文档切分为句级窗口，调用 vLLM 抽取严格 JSON 的事实笔记，随后进行校验与归一，并写出轻量索引（倒排、类型边、图边、属性值倒排、别名、mentions/corefers/anchor）。
-2) 检索阶段：将自然语言问题解析为结构化 IR，在索引中执行别名绑定与图扩展，进行路径打分与属性感知重排；当结构信号不足时，在结构范围内进行向量/或 BM25 兜底；最终把证据交给 LM 接口生成答案。
+2) 检索阶段：将自然语言问题解析为结构化 IR，在索引中执行别名绑定与图扩展，进行路径打分与属性感知重排；当结构信号不足时，在结构范围内进行向量/或 BM25 兜底；最终把证据交给 vLLM 生成答案。
 
 ## 动机
 
@@ -25,7 +25,7 @@ ANO-RAG 是一个以“结构化事实笔记（subj–pred–obj）”为核心�
   - 证据派生边：`mentions_edges.jsonl`、`corefers_edges.jsonl`
   - 锚点实体：`anchor_index.json`
   - 清单：`manifest.json`
-- 检索与答案：`retriever/pipeline.py` 执行 BIND/EXPAND、路径打分与兜底；`generator/answerer.py` 把证据传给 LM Studio 生成答案。
+- 检索与答案：`retriever/pipeline.py` 执行 BIND/EXPAND、路径打分与兜底；`generator/answerer.py` 把证据传给 vLLM 生成答案。
 
 ### 架构图
 
@@ -40,7 +40,7 @@ flowchart LR
   P --> O{BIND / EXPAND}
   O --> R[Retriever Pipeline]
   R --> V[Evidence]
-  V --> L[LM Studio]
+  V --> L[vLLM]
   R -. Vector / BM25 Fallback .-> V
   F --> R
 ```
@@ -52,8 +52,8 @@ flowchart LR
 ```bash
 python main.py process \
   --data-dir data/sample \
-  --vllm-endpoint http://127.0.0.1:8001/v1 \
-  --vllm-model qwen2.5-7b-instruct
+  --vllm-endpoint http://127.0.0.1:8000/v1 \
+  --vllm-model qwen3-30b-a3b
 ```
 
 - 查询：
@@ -61,8 +61,8 @@ python main.py process \
 ```bash
 python main.py query \
   "Who is the spouse of the Green performer?" \
-  --lmstudio-endpoint http://127.0.0.1:1234/v1 \
-  --lmstudio-model openai/gpt-oss-20b
+  --indexes-dir indexes \
+  --notes-path notes/notes.jsonl
 ```
 
 ## 扩展能力

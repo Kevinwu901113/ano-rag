@@ -4,12 +4,13 @@
 
 ## 概览
 - 生成阶段（vLLM）：`generator/note_generator.py::NoteGenerator` 调用 OpenAI 兼容 `chat/completions` 端点抽取严格 JSON 的“原子笔记”。
-- 查询阶段（LM Studio）：`generator/answerer.py::call_lmstudio` 调用 `chat/completions` 端点生成最终自然语言回答。
-- 证据压缩（LM Studio/兼容端）：`generator/extractor.py::EvidenceExtractor` 对候选笔记进行判定与压缩，返回严格 JSON（keep/summary/labels）。
+- 查询阶段（vLLM）：`generator/answerer.py::call_llm` 通过统一 `LLMChatClient` 调用 `chat/completions` 端点生成最终自然语言回答。
+- 证据压缩（vLLM）：`generator/extractor.py::EvidenceExtractor` 通过 `LLMChatClient` 对候选笔记进行判定与压缩，返回严格 JSON（keep/summary/labels）。
 - 重排（LLM）：`retriever/rerank.py::LLMReranker` 分批调用 `chat/completions` 端点为候选笔记打分与标注。
 - 向量嵌入（本地模型）：`utils/embedding_utils.py::EmbeddingEncoder` 使用 `transformers` 或 `sentence_transformers` 在本地编码文本；`retriever/embedding_client.py` 与 `indexer/embedding_index.py` 负责在线检索与离线索引构建。
 
 > 以上所有 HTTP LLM 调用均使用 OpenAI 兼容接口 `POST {endpoint}/chat/completions`。
+> 统一入口：`utils/llm_client.py::LLMChatClient`，按 `llm_profile` 注入 `extract` / `generate` 参数；其中 `extract` 会通过 `chat_template_kwargs.enable_thinking=false` 关闭 thinking。
 
 ## 详细调用点
 
@@ -38,11 +39,11 @@
   - 日志：`endpoint_log_every` 控制端点选择日志频率；阶段计时（call/parse/validate）。
 - 提示词要点：`build_prompt(doc_text, doc_id)` 要求严格 JSON/JSONL，禁止代词主体，提供 `meta.attribute` 与 `subject_profile/object_profile` 结构，附带中英文规范说明与示例。
 
-### 2) 最终答案生成（LM Studio）
+### 2) 最终答案生成（vLLM）
 - 位置：`generator/answerer.py`
-- 函数：`call_lmstudio(endpoint, model, question, evidences, temperature=0.2, max_tokens=64, retries=2)`
+- 函数：`call_llm(endpoint, model, question, evidences, temperature=0.2, max_tokens=64, retries=2)`
 - 端点与模型：
-  - `endpoint`/`model`：来自 `QueryProcessor` 初始化参数或 `config.lmstudio.*`。
+  - `endpoint`/`model`：来自 `config.vllm.*`（统一到 `http://127.0.0.1:8000/v1` 与 `qwen3-30b-a3b`）。
 - 请求负载（payload）：
   - `model`, `temperature`, `max_tokens`
   - `messages`: `[{"role":"user","content": <ANS_PROMPT>}]`
@@ -70,7 +71,7 @@
 - 位置：`retriever/rerank.py`
 - 类/方法：`LLMReranker.score(question, candidates)`（按 `batch` 批次循环）
 - 端点与模型：
-  - 来自 `cfg.reranker.llm` 或传入的 `lm_cfg`，默认指向 `config.lmstudio.*`。
+  - 来自 `cfg.reranker.llm` 或传入的 `lm_cfg`，默认指向 `config.vllm.*`。
 - 请求负载（payload）：
   - `model`, `messages: [{"role":"user","content": PROMPT_TEMPLATE}]`, `temperature: 0.0`, `max_tokens: 64`
   - `PROMPT_TEMPLATE` 要求返回包含 `idx/score/labels` 的严格 JSON 列表。
@@ -120,7 +121,7 @@
 - 文件：`config/config_loader.py`（默认值）与项目根 `config.yaml`（可覆盖）。
 - 关键键：
   - `vllm.*`：`endpoint`、`model`、`temperature`、`max_tokens`、`concurrency.*`（`max_workers`、`endpoints`、`connect_timeout_sec`、`read_timeout_sec`、`retry_*`、`blacklist_duration_sec`、`endpoint_log_every`）、`adaptive.*`。
-  - `lmstudio.*`：`endpoint`、`model`、`temperature`、`max_tokens`。
+  - `llm_profiles.*`：`extract`/`generate` 的 `temperature`、`max_tokens`、`thinking`。
   - `reranker.llm.*`：`endpoint`、`model`、`batch`、`timeout_s`。
   - `retriever.embedding.*`：`enabled`、`provider`、`model`、`model_path_override`、`cache_dir`、`download_dir`、`device`、`dtype`、`offline_index_path`、`meta_path`、`max_len_note`、`faiss.*`、`normalize`、`topn`、`auto_build`。
   - `notes.*`、`chunk.*`、`parsing.*`：与生成/解析相关的辅助配置。
@@ -128,19 +129,19 @@
 
 ## 端到端调用链
 - 构建阶段：`main.py process` → `pipeline/structured_builder.py` → `NoteGenerator`（vLLM → JSON 解析 → 校验）→ 索引构建（倒排/图/嵌入/BM25）。
-- 查询阶段：`main.py query` → 结构化检索（`retriever/pipeline.py`）→ 候选重排（`LLMReranker`，可回退）→ 证据压缩（`EvidenceExtractor`）→ 最终回答（`call_lmstudio`）。
+- 查询阶段：`main.py query` → 结构化检索（`retriever/pipeline.py`）→ 候选重排（`LLMReranker`，可回退）→ 证据压缩（`EvidenceExtractor`）→ 最终回答（`call_llm`）。
 
 ## 安全与稳定性注意事项
 - 所有对 `chat/completions` 的调用均要求严格 JSON 或受控输出；解析端有健壮容错与回退。
 - vLLM 并发与会话复用需结合服务吞吐与 `--max-num-batched-tokens` 等参数调优；多端点下建议开启健康标记与短重试上限。
-- LM Studio 与重排/压缩阶段均设有超时与回退，防止链路阻塞。
+- vLLM 与重排/压缩阶段均设有超时与回退，防止链路阻塞。
 - 嵌入编码在本地完成，不依赖外部 HTTP；需准备 GPU/CPU 与对应库版本。
 
 ## 审计清单（代码引用）
-- 生成：`generator/note_generator.py::_call` → `requests.Session.post("{endpoint}/chat/completions", json=payload, timeout=(connect,read))`
-- 答案：`generator/answerer.py::call_lmstudio` → `requests.post("{endpoint}/chat/completions", json=payload, timeout=60)`
-- 压缩：`generator/extractor.py::EvidenceExtractor.judge_and_compress` → `requests.post("{endpoint}/chat/completions", json=payload, timeout=timeout_s)`
-- 重排：`retriever/rerank.py::LLMReranker.score` → `requests.post("{endpoint}/chat/completions", json=payload, timeout=timeout_s)`
+- 生成：`generator/note_generator.py::_call` → `LLMChatClient.post_chat` → `POST {endpoint}/chat/completions`
+- 答案：`generator/answerer.py::call_llm` → `LLMChatClient.chat` → `POST {endpoint}/chat/completions`
+- 压缩：`generator/extractor.py::EvidenceExtractor.judge_and_compress` → `LLMChatClient.chat` → `POST {endpoint}/chat/completions`
+- 重排：`retriever/rerank.py::LLMReranker.score` → `LLMChatClient.chat` → `POST {endpoint}/chat/completions`
 - 嵌入：`utils/embedding_utils.py::EmbeddingEncoder.encode`（本地 `transformers/sentence_transformers`），`retriever/embedding_client.py`, `indexer/embedding_index.py`
 
 ## 维护建议

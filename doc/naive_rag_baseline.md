@@ -21,8 +21,8 @@ python scripts/mirage/run_naive_rag.py \
   --topk 5 \
   --result-root result \
   --new \
-  --lmstudio-endpoint http://127.0.0.1:1234/v1 \
-  --lmstudio-model openai/gpt-oss-20b
+  --lm-endpoint http://127.0.0.1:8000/v1 \
+  --lm-model qwen3-30b-a3b
 ```
 
 - `--index-path/--chunks-path` 可显式指定索引文件；`--limit` 限制样本数；`--no-debug` 关闭调试输出；`--new` 强制创建新的结果目录（如 `result/mirage_naive_000`）。***

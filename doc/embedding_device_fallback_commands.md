@@ -1,7 +1,7 @@
 ## Embedding-only baselines：GPU→CPU 自动回退验证命令
 
 说明：
-- 这些命令不依赖 LM Studio / vLLM（仅做 embedding + 检索/评测）。
+- 这些命令不依赖 LLM（仅做 embedding + 检索/评测）。
 - 为避免网络下载，请把 `--embed-model` 指向本机已存在的 embedding 模型路径（示例：`/home/wjk/models/qwen3-emb`）。
 - `--embed-device auto`（默认）会优先用 GPU（若可用），遇到 OOM / CUDA 错误等会自动打印 `fallback to cpu because <reason>` 并回退 CPU（只重试一次）。
 

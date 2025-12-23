@@ -1,4 +1,4 @@
-# Embedding-only baselines：本地可复现运行结果（不依赖 LM Studio / vLLM）
+# Embedding-only baselines：本地可复现运行结果（不依赖 LLM）
 
 运行环境（本次记录）：
 - 日期：2025-12-15

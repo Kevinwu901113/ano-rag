@@ -3,7 +3,7 @@
 Ano‑RAG 是一个以“原子笔记（subj–pred–obj）”为中间表示的两阶段 RAG 最小实现：
 
 1. **构建阶段**：对文档做句级滑窗分块，调用 vLLM 抽取严格 JSON 的事实笔记，完成校验/归一后写出轻量结构索引（倒排、类型边、图边、属性值倒排、别名与提及/共指等）。
-2. **查询阶段**：把自然语言问题解析为结构化 IR，在索引中执行别名绑定与图扩展并做路径打分；当结构信号不足时，可在候选范围内用向量/BM25 兜底；最终把证据交给 LM Studio（或任意 OpenAI 兼容端）生成答案。
+2. **查询阶段**：把自然语言问题解析为结构化 IR，在索引中执行别名绑定与图扩展并做路径打分；当结构信号不足时，可在候选范围内用向量/BM25 兜底；最终把证据交给 vLLM 生成答案。
 
 ## 为什么选择结构化
 
@@ -32,7 +32,7 @@ flowchart LR
     PR --> OP{Operators\nBIND / EXPAND}
     OP --> RP[Retriever Pipeline]
     RP --> EV[Evidence Extraction]
-    EV --> AN[Answerer → LM Studio]
+    EV --> AN[Answerer → vLLM]
     RP -. Fallback: Vector / BM25 .-> EV
   end
 
@@ -78,18 +78,17 @@ pip install -r requirements.txt
 
 ### 2) 准备服务
 
-- vLLM（用于笔记抽取），需提供 OpenAI 风格 `chat/completions` 端点。
-- LM Studio/兼容端（用于最终回答，可选）。
+- vLLM（用于笔记抽取与最终回答），需提供 OpenAI 风格 `chat/completions` 端点。
 
 ### 3) 构建笔记与结构索引
 
 ```bash
 python main.py process \
   --data-dir data/sample \
-  --vllm-endpoint http://127.0.0.1:8001/v1 \
-  --vllm-model qwen2.5-7b-instruct \
+  --vllm-endpoint http://127.0.0.1:8000/v1 \
+  --vllm-model qwen3-30b-a3b \
   --temperature 0.0 \
-  --max-tokens 8000
+  --max-tokens 8192
 ```
 
 - 默认输出：`notes/notes.jsonl`、`notes/chunks.jsonl`、`indexes/`。
@@ -101,9 +100,7 @@ python main.py process \
 python main.py query \
   "Who is the spouse of the Green performer?" \
   --indexes-dir indexes \
-  --notes-path notes/notes.jsonl \
-  --lmstudio-endpoint http://127.0.0.1:1234/v1 \
-  --lmstudio-model openai/gpt-oss-20b
+  --notes-path notes/notes.jsonl
 ```
 
 输出为 JSON，包含结构化检索结果、证据与答案文本。
@@ -143,8 +140,8 @@ python main.py query \
   - `vllm.concurrency.endpoints`：多端点轮询池（不填则用单端点）。
   - `vllm.concurrency.connect_timeout_sec` / `read_timeout_sec` / `retry_*`：超时与重试退避。
   - `vllm.adaptive.*`：可选自适应并发（见下方示例）。
-- LM Studio：
-  - `lmstudio.endpoint` / `lmstudio.model` / `lmstudio.temperature` / `lmstudio.max_tokens`
+- LLM profiles：
+  - `llm_profiles.extract` / `llm_profiles.generate`：`temperature`、`max_tokens`、`thinking`
 - 其他：
   - `notes.out_path` / `notes.indexes_dir`
   - `chunk.n_sent` / `chunk.overlap` / `chunk.max_tokens`
