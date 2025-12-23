@@ -7,6 +7,7 @@ from typing import Any, Dict
 
 
 CONFIG_ENV_VAR = "ANO_RAG_CONFIG"
+DEFAULT_EMBED_MODEL = "/home/wjk/models/hf-cache/models--sentence-transformers--all-MiniLM-L6-v2/snapshots/c9745ed1d9f207416be6d2e6f8de32d1f16199bf"
 
 
 DEFAULT_CONFIG: Dict[str, Any] = {
@@ -91,11 +92,11 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "embedding": {
             "enabled": True,
             "provider": "qwen3",
-            "model": "Qwen/Qwen3-Embedding-8B",
+            "model": DEFAULT_EMBED_MODEL,
             "model_path_override": None,
             "cache_dir": None,
             "download_dir": None,
-            "device": None,
+            "device": "cpu",
             "dtype": None,
             "auto_build": False,
             "offline_index_path": "indexes/faiss/notes.faiss",

@@ -15,6 +15,7 @@ from loguru import logger
 from config import config as config_loader
 from utils.device import run_with_fallback
 from utils.embedding_utils import EmbeddingEncoder
+from config.config_loader import DEFAULT_EMBED_MODEL
 from utils.context_budget import pack_contexts
 from utils.output_protocol import build_final_instruction
 from baselines.common.model_clients import get_default_llm_client

@@ -8,6 +8,7 @@ import pandas as pd
 from loguru import logger
 
 from config import config as config_loader
+from config.config_loader import DEFAULT_EMBED_MODEL
 from utils.text_builders import build_note_text_for_embed
 from utils.embedding_utils import EmbeddingEncoder
 

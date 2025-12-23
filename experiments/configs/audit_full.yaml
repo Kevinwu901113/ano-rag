@@ -37,10 +37,10 @@ budgets:
   token_budgets: [2000]
 
 embedding:
-  model: BAAI/bge-small-en-v1.5
+  model: sentence-transformers/all-MiniLM-L6-v2
 
 runtime:
-  limit: 20
+  limit: 5
   workers: 1
   resume: false
   save_every: 10

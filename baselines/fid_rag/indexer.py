@@ -15,6 +15,7 @@ from config import config as config_loader
 from utils import TextUtils
 from utils.device import run_with_fallback
 from utils.embedding_utils import EmbeddingEncoder
+from config.config_loader import DEFAULT_EMBED_MODEL
 
 try:
     import faiss  # type: ignore

@@ -13,6 +13,7 @@ from loguru import logger
 from config import config as config_loader
 from utils import TextUtils
 from utils.embedding_utils import EmbeddingEncoder
+from config.config_loader import DEFAULT_EMBED_MODEL
 
 
 @dataclass
@@ -187,11 +188,11 @@ class VanillaRAGIndexer:
 
     def _resolve_model_name(self) -> str:
         override = self.embed_cfg.get("model_path_override")
-        base = self.embed_cfg.get("model", "sentence-transformers/all-MiniLM-L6-v2")
+        base = self.embed_cfg.get("model", DEFAULT_EMBED_MODEL)
         candidate = str(override or base).strip()
         if not candidate:
             # Fallback if config is missing
-            return "sentence-transformers/all-MiniLM-L6-v2"
+            return DEFAULT_EMBED_MODEL
         if override:
             logger.info("Embedding model override detected: {}", candidate)
         return candidate

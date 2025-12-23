@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Optional, Dict, Any
 from loguru import logger
-from config.config_loader import config as global_config
+from config.config_loader import config as global_config, DEFAULT_EMBED_MODEL
 from rag_core.embedding_client import EmbeddingEncoder as RagEmbeddingEncoder
 from utils.embedding_utils import EmbeddingEncoder as QwenEmbeddingEncoder
 
@@ -29,7 +29,7 @@ def get_default_embedding_client(config: Optional[Dict[str, Any]] = None):
         cache_dir = str(Path(cache_dir).expanduser()) if cache_dir else None
 
         override = emb_cfg.get("model_path_override")
-        base = model or "Qwen/Qwen3-Embedding-8B"
+        base = model or DEFAULT_EMBED_MODEL
         model_name = str(override or base).strip()
         if override:
             logger.info("Embedding model override detected for qwen3: {}", model_name)

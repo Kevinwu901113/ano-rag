@@ -27,12 +27,14 @@ class Example:
     passage_titles: List[str]
     passage_texts: List[str]
 
+from pathlib import Path
+from config.config_loader import DEFAULT_EMBED_MODEL
 
 def _default_embed_model() -> str:
     local = Path("/home/wjk/models/qwen3-emb")
     if local.exists():
         return str(local)
-    return "Qwen/Qwen3-Embedding-8B"
+    return DEFAULT_EMBED_MODEL
 
 
 def load_dataset(path: Path, *, max_context: int) -> List[Example]:
