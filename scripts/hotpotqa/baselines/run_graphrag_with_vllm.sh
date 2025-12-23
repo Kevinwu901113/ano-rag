@@ -10,7 +10,7 @@ export https_proxy="http://192.168.192.246:7890"
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 cd "$ROOT_DIR"
 
-VLLM_MODEL="Qwen/Qwen3-30B-A3B"
+VLLM_MODEL="Qwen/Qwen3-30B-A3B-GPTQ-Int4"
 VLLM_SERVED_MODEL="qwen3-30b-a3b"
 VLLM_HOST="127.0.0.1"
 VLLM_PORT="8000"
@@ -92,30 +92,16 @@ start_vllm() {
     exit 1
   fi
 
-  VLLM_MODEL_RESOLVED=$(resolve_model_path "$VLLM_MODEL")
+  echo "Starting vLLM using unified script..."
+  # Use VLLM_HOST to control binding (unified script defaults to 0.0.0.0)
+  export VLLM_HOST="${VLLM_HOST}"
+  
+  # Run the unified script in background
+  nohup bash scripts/llm/start_vllm_qwen3_30b_a3b.sh > "$VLLM_LOG" 2>&1 &
+  echo $! > "$PID_FILE"
 
-  extra_args=()
-  if [[ -n "$VLLM_DOWNLOAD_DIR" ]]; then
-    extra_args+=(--download-dir "$VLLM_DOWNLOAD_DIR")
-  fi
-  if [[ -n "$VLLM_GPU_MEMORY_UTIL" ]]; then
-    extra_args+=(--gpu-memory-utilization "$VLLM_GPU_MEMORY_UTIL")
-  fi
-  if [[ -n "$VLLM_QUANTIZATION" ]]; then
-    extra_args+=(--quantization "$VLLM_QUANTIZATION")
-  fi
-
-  CUDA_VISIBLE_DEVICES="${GPU}" nohup ${VLLM_BIN} \
-    --model "${VLLM_MODEL_RESOLVED}" \
-    --served-model-name "${VLLM_SERVED_MODEL}" \
-    --host 0.0.0.0 --port "${VLLM_PORT}" \
-    --dtype "${DTYPE}" \
-    --max-model-len "${MAX_MODEL_LEN}" \
-    "${extra_args[@]}" ${VLLM_EXTRA_ARGS} \
-    > "$VLLM_LOG" 2>&1 & echo $! > "$PID_FILE"
-
-  echo "Starting vLLM (${VLLM_MODEL_RESOLVED}) on ${VLLM_HOST}:${VLLM_PORT} ..."
-  wait_http_ok "http://${VLLM_HOST}:${VLLM_PORT}/v1/models" 90 2 || {
+  echo "Waiting for vLLM on ${VLLM_HOST}:${VLLM_PORT} ..."
+  wait_http_ok "http://${VLLM_HOST}:${VLLM_PORT}/v1/models" 120 2 || {
     echo "vLLM not ready; see log ${VLLM_LOG}" >&2
     exit 1
   }
@@ -131,4 +117,5 @@ python scripts/hotpotqa/baselines/run_graphrag.py \
   --lm-timeout "${LM_TIMEOUT}" \
   --lm-max-tokens "${LM_MAX_TOKENS}" \
   --num-workers "${NUM_WORKERS}" \
-  ${WORK_DIR:+--work-dir "$WORK_DIR"}
+  ${WORK_DIR:+--work-dir "$WORK_DIR"} \
+  "$@"

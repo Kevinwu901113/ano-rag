@@ -487,7 +487,7 @@ def main() -> None:
     parser.add_argument("--lm-endpoint", default="http://127.0.0.1:8000/v1")
     parser.add_argument("--lm-model", default="qwen3-30b-a3b")
     parser.add_argument("--temperature", type=float, default=0.0)
-    parser.add_argument("--emb-model", default="Qwen/Qwen3-Embedding-8B")
+    parser.add_argument("--emb-model", default="sentence-transformers/all-MiniLM-L6-v2")
     parser.add_argument("--emb-device", default=None)
     parser.add_argument("--emb-dtype", default=None)
     args = parser.parse_args()

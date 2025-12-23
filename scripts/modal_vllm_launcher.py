@@ -31,7 +31,7 @@ def start_vllm_managed():
     log(f"Detected {n_gpu} GPUs.")
 
     # 2. Configuration
-    model_name = "Qwen/Qwen3-30B-A3B"
+    model_name = "Qwen/Qwen3-30B-A3B-GPTQ-Int4"
     served_name = "qwen3-30b-a3b"
     port = "8000"
     download_dir = os.path.expanduser("~/.cache/huggingface")
@@ -48,7 +48,8 @@ def start_vllm_managed():
         "--uvicorn-log-level", "info",
         "--download-dir", download_dir,
         "--tensor-parallel-size", str(n_gpu),
-        "--dtype", "bfloat16",
+        "--dtype", "float16",
+        "--quantization", "gptq",
         "--gpu-memory-utilization", "0.90",
         "--max-model-len", "8192",
         "--limit-mm-per-prompt.image", "1",

@@ -187,11 +187,11 @@ class VanillaRAGIndexer:
 
     def _resolve_model_name(self) -> str:
         override = self.embed_cfg.get("model_path_override")
-        base = self.embed_cfg.get("model", "Qwen/Qwen3-Embedding-8B")
+        base = self.embed_cfg.get("model", "sentence-transformers/all-MiniLM-L6-v2")
         candidate = str(override or base).strip()
         if not candidate:
             # Fallback if config is missing
-            return "Qwen/Qwen3-Embedding-8B"
+            return "sentence-transformers/all-MiniLM-L6-v2"
         if override:
             logger.info("Embedding model override detected: {}", candidate)
         return candidate

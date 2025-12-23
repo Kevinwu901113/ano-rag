@@ -95,7 +95,7 @@ class EmbeddingClient:
 
     def _resolve_model_name(self) -> str:
         override = self.cfg.get("model_path_override")
-        base = self.cfg.get("model", "Qwen/Qwen3-Embedding-8B")
+        base = self.cfg.get("model", "sentence-transformers/all-MiniLM-L6-v2")
         candidate = str(override or base).strip()
         if not candidate:
             raise ValueError("Embedding model name is not configured")

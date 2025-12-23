@@ -110,7 +110,7 @@ echo "Running Project Pipeline (Ano-RAG)..."
 # Build Notes
 export DATA_DIR="$DATA_DIR"
 export DATASET="mirage"
-export VLLM_MODEL="Qwen/Qwen3-30B-A3B"
+export VLLM_MODEL="Qwen/Qwen3-30B-A3B-GPTQ-Int4"
 # Force a new run for notes
 bash scripts/mirage/build_notes.sh --new
 

@@ -68,7 +68,7 @@ class MiniRaptor:
 
 Summary:"""
             try:
-                resp = self.llm.chat([{"role": "user", "content": prompt}])
+                resp = self.llm.chat([{"role": "user", "content": prompt}], llm_profile="extract")
                 summary = truncate_text(resp.content, 800)
             except Exception:
                 summary = truncate_text(cluster_text, 800)

@@ -221,6 +221,7 @@ def main():
             temperature=0.0,
             timeout=args.lm_timeout,
             max_tokens=args.lm_max_tokens,
+            llm_profile="extract",
         )
         llm_answer = LLMChatClient(
             endpoint=answer_endpoint,

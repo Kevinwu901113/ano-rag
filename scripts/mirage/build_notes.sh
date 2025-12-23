@@ -10,7 +10,7 @@ export https_proxy="http://192.168.192.246:7890"
 
 DATASET="${DATASET:-mirage}"
 DATA_DIR="${DATA_DIR:-data/${DATASET}_sample}"
-VLLM_MODEL="Qwen/Qwen3-30B-A3B"
+VLLM_MODEL="Qwen/Qwen3-30B-A3B-GPTQ-Int4"
 VLLM_SERVED_MODEL="qwen3-30b-a3b"
 VLLM_HOST="127.0.0.1"
 VLLM_PORT="8000"
@@ -222,49 +222,23 @@ start_vllm_tp() {
     cuda_devices="${GPU0},${GPU1}"
   fi
 
-  local tp_size=0
-  IFS=',' read -r -a _devs <<< "${cuda_devices}"
-  for d in "${_devs[@]}"; do
-    [[ -n "${d}" ]] && tp_size=$((tp_size + 1))
-  done
-  (( tp_size < 1 )) && tp_size=1
-
-  log "Starting vLLM (TP=${tp_size}) on CUDA_VISIBLE_DEVICES=${cuda_devices} -> ${VLLM_HOST}:${VLLM_PORT}"
-
-  VLLM_MODEL_RESOLVED=$(resolve_model_path "$VLLM_MODEL")
-  if [[ "$VLLM_MODEL_RESOLVED" != "$VLLM_MODEL" ]]; then
-    log "Resolved model path: $VLLM_MODEL_RESOLVED"
-  fi
-
-  extra_args=()
-  if [[ -n "${VLLM_DOWNLOAD_DIR}" ]]; then
-    extra_args+=(--download-dir "$VLLM_DOWNLOAD_DIR")
-  fi
-  if [[ -n "$VLLM_GPU_MEMORY_UTIL" ]]; then
-    extra_args+=(--gpu-memory-utilization "$VLLM_GPU_MEMORY_UTIL")
-  fi
-  if [[ "$USE_GUIDED_JSON" != "0" && -n "$VLLM_GUIDED_BACKEND" ]]; then
-    extra_args+=(--guided-decoding-backend "$VLLM_GUIDED_BACKEND")
-  fi
+  log "Starting vLLM (Unified Script) on CUDA_VISIBLE_DEVICES=${cuda_devices} -> ${VLLM_HOST}:${VLLM_PORT}"
 
   if nc -z "${VLLM_HOST}" "${VLLM_PORT}" 2>/dev/null; then
     log "Port ${VLLM_PORT} already in use; aborting."
     exit 1
   fi
 
-  CUDA_VISIBLE_DEVICES="${cuda_devices}" nohup ${VLLM_BIN} \
-    --model "${VLLM_MODEL_RESOLVED}" \
-    --served-model-name "${VLLM_SERVED_MODEL}" \
-    --host 0.0.0.0 --port "${VLLM_PORT}" \
-    --tensor-parallel-size "${tp_size}" \
-    --dtype "${DTYPE}" \
-    --max-model-len "${MAX_MODEL_LEN}" \
-    --uvicorn-log-level info \
-    "${extra_args[@]}" ${VLLM_EXTRA_ARGS} \
-    > "$VLLM_LOG" 2>&1 & echo $! > "$VLLM_PID"
+  # Export variables for the unified script
+  export VLLM_HOST="${VLLM_HOST}"
+  export CUDA_VISIBLE_DEVICES="${cuda_devices}"
+  # Note: The unified script handles TP detection based on CUDA_VISIBLE_DEVICES
+  
+  nohup bash scripts/llm/start_vllm_qwen3_30b_a3b.sh > "$VLLM_LOG" 2>&1 &
+  echo $! > "$VLLM_PID"
 
   log "Waiting for vLLM endpoints ready ..."
-  wait_http_ok "http://${VLLM_HOST}:${VLLM_PORT}/v1/models" 90 2 || { log "vLLM endpoint not ready"; exit 1; }
+  wait_http_ok "http://${VLLM_HOST}:${VLLM_PORT}/v1/models" 120 2 || { log "vLLM endpoint not ready"; exit 1; }
   log "vLLM endpoint is healthy."
   STARTED_VLLM=1
 }

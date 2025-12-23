@@ -265,7 +265,7 @@ def main():
         "--embed-model",
         "--emb-model",
         dest="embed_model",
-        default="Qwen/Qwen3-Embedding-8B",
+        default="sentence-transformers/all-MiniLM-L6-v2",
         help="Embedding model name or path",
     )
     parser.add_argument(
