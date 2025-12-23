@@ -186,17 +186,23 @@ class SimpleGraphRAGRunner:
     ) -> None:
         self.cfg = config or config_loader.load_config()
         
-        lm_cfg = self.cfg.get("lmstudio", {}) or {}
+        lm_cfg = self.cfg.get("vllm", {}) or {}
         endpoint = lm_endpoint or lm_cfg.get("endpoint")
         model = lm_model or lm_cfg.get("model")
         
         if not endpoint or not model:
-             raise ValueError("LM Studio endpoint/model must be configured")
+             raise ValueError("vLLM endpoint/model must be configured")
              
         temp = temperature if temperature is not None else lm_cfg.get("temperature", 0.0)
         max_new_tokens = max_tokens if max_tokens is not None else lm_cfg.get("max_tokens", 8192)
         
-        llm_client = LLMChatClient(endpoint=endpoint, model=model, temperature=float(temp), max_tokens=int(max_new_tokens))
+        llm_client = LLMChatClient(
+            endpoint=endpoint,
+            model=model,
+            llm_profile="generate",
+            temperature=float(temp),
+            max_tokens=int(max_new_tokens),
+        )
         
         if not os.path.exists(graph_path) or not os.path.exists(chunk_store_path):
             raise FileNotFoundError(f"Graph files not found: {graph_path}, {chunk_store_path}")

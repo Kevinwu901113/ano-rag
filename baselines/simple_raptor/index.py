@@ -78,7 +78,7 @@ class SimpleRaptorIndexer:
         )
 
         if llm_client is None:
-            self.llm = get_default_llm_client(config)
+            self.llm = get_default_llm_client(config, llm_profile="extract")
         else:
             self.llm = llm_client
 
@@ -184,8 +184,8 @@ Summary:"""
                     {"role": "system", "content": "You are a helpful assistant."},
                     {"role": "user", "content": prompt}
                 ]
-                # LLMChatClient.chat returns string content directly
-                summary = self.llm.chat(messages, max_tokens=512)
+                summary_resp = self.llm.chat(messages, max_tokens=512, llm_profile="extract")
+                summary = summary_resp.content
                 
                 # Aggregate descendants
                 descendants = []

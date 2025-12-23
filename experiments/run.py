@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import yaml
+from utils.llm_client import get_all_profile_snapshots
 
 RESERVED_KEYS = {
     "meta",
@@ -441,6 +442,10 @@ def main() -> None:
         "git_commit": _git_commit(),
         "generated_at": datetime.now().isoformat(timespec="seconds"),
         "argv": sys.argv,
+        "llm_profiles_resolved": get_all_profile_snapshots(
+            generate_max_tokens=decode.get("max_tokens"),
+            generate_temperature=decode.get("temperature"),
+        ),
     }
     (run_root / "config.resolved.json").write_text(
         json.dumps(config_snapshot, indent=2), encoding="utf-8"
@@ -571,13 +576,13 @@ def main() -> None:
                                 method_def,
                                 dataset_type,
                                 "lm_endpoint_args",
-                                ["--lm-endpoint", "--lmstudio-endpoint"],
+                                ["--lm-endpoint"],
                             )
                             lm_model_flags = _pick_arg_list(
                                 method_def,
                                 dataset_type,
                                 "lm_model_args",
-                                ["--lm-model", "--lmstudio-model"],
+                                ["--lm-model"],
                             )
 
                             cmd = [sys.executable, str(entry_path)]

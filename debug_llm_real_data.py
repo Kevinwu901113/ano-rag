@@ -1,5 +1,6 @@
-import requests
 import json
+
+from utils.llm_client import LLMChatClient
 
 def check_llm_on_data():
     # Manually checking the first few questions that failed
@@ -14,11 +15,7 @@ British lawyer (1828–1917) John Dawson Mayne (1828–1917) was a British lawye
         }
     ]
 
-    url = "http://127.0.0.1:8001/v1/chat/completions"
-    headers = {
-        "Content-Type": "application/json",
-        "Authorization": "Bearer sk-no-key-required"
-    }
+    client = LLMChatClient(endpoint="http://127.0.0.1:8000/v1", model="qwen3-30b-a3b", llm_profile="generate", retries=0, timeout=20)
     
     prompt_template = """Answer the question based on the context below. Keep the answer short and concise. Do not output reasoning.
 
@@ -30,17 +27,13 @@ Answer:"""
 
     for case in cases:
         prompt = prompt_template.format(context=case["context"], question=case["question"])
-        payload = {
-            "model": "Qwen/Qwen2.5-7B-Instruct",
-            "messages": [{"role": "user", "content": prompt}],
-            "temperature": 0.0,
-            "max_tokens": 100
-        }
-        
         try:
-            response = requests.post(url, headers=headers, json=payload, timeout=20)
-            response.raise_for_status()
-            content = response.json()['choices'][0]['message']['content']
+            response = client.chat(
+                [{"role": "user", "content": prompt}],
+                temperature=0.0,
+                max_tokens=100,
+            )
+            content = response.content
             print(f"Question: {case['question']}")
             print(f"Raw Answer: {content!r}")
         except Exception as e:

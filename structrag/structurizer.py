@@ -75,6 +75,7 @@ class Structurizer:
                     [{"role": "user", "content": prompt}],
                     max_tokens=256,
                     temperature=0.0,
+                    llm_profile="extract",
                 )
                 parsed = self._parse_triples(resp.content)
                 for idx, t in enumerate(parsed):

@@ -79,7 +79,7 @@ class SimpleRaptorRetriever:
         if llm_client:
             self.llm = llm_client
         else:
-            self.llm = get_default_llm_client(self.config)
+            self.llm = get_default_llm_client(self.config, llm_profile="generate")
             
         self.top_k_nodes = top_k or int(self.raptor_config.get("top_k_nodes", 10))
         self.max_answer_chunks = int(self.raptor_config.get("max_answer_chunks", 5))
@@ -279,8 +279,8 @@ class SimpleRaptorRetriever:
             # Max tokens can be passed if needed, but client handles defaults
             # We use self.llm.chat directly
             logger.info(f"[RAPTOR] answering qid={question[:50]}..., ctx_len={len(context_block)}")
-            answer = self.llm.chat(messages)
-            return answer
+            response = self.llm.chat(messages, llm_profile="generate")
+            return response.content
             
         except Exception as e:
             logger.error(f"Raptor answer generation failed: {e}")

@@ -22,8 +22,9 @@ if str(REPO_ROOT) not in sys.path:
 
 from config import config as global_config
 from generator.note_generator import NoteGenerator
-from generator.answerer import call_lmstudio
+from generator.answerer import call_llm
 from utils.logging_utils import setup_logging
+from utils.llm_client import HF_MODEL_ID, SERVED_MODEL_NAME, LLMChatClient
 from utils.notes_cache import NotesCache
 from utils.run_layout import ensure_workdir_layout, resolve_workdir
 from utils.vllm_server_manager import VLLMServerManager
@@ -193,98 +194,24 @@ def _release_lock(work_dir: Path) -> None:
 
 def _warm_up_vllm(endpoint: str, model: str, log_path: Path) -> None:
     try:
-        import requests
-        payload = {
-            "model": model,
-            "temperature": 0.0,
-            "max_tokens": 8,
-            "messages": [{"role": "user", "content": "ping"}],
-        }
-        resp = requests.post(f"{endpoint.rstrip('/')}/chat/completions", json=payload, timeout=60)
-        resp.raise_for_status()
+        client = LLMChatClient(
+            endpoint=endpoint,
+            model=model,
+            llm_profile="extract",
+            retries=0,
+            timeout=60,
+        )
+        client.chat(
+            [{"role": "user", "content": "ping"}],
+            temperature=0.0,
+            max_tokens=8,
+            llm_profile="extract",
+        )
         with open(log_path, "a", encoding="utf-8") as handle:
-            handle.write(f"{time.strftime('%H:%M:%S')} vLLM ready\n")
+            handle.write(f"{time.strftime('%H:%M:%S')} vLLM warm-up ok\n")
     except Exception as exc:
         with open(log_path, "a", encoding="utf-8") as handle:
             handle.write(f"{time.strftime('%H:%M:%S')} vLLM warm-up failed: {exc}\n")
-
-
-def _warm_up_lmstudio(endpoint: str, model: str, log_path: Path, max_wait_sec: int = 120) -> None:
-    """Warm up LM Studio by triggering model load and verifying chat readiness.
-
-    Conditions to finish:
-    - `/models` lists the target model id, and
-    - a test `POST /chat/completions` returns 200 with choices.
-    """
-    start_ts = time.time()
-    try:
-        import requests
-        payload = {
-            "model": model,
-            "temperature": 0.0,
-            "max_tokens": 8,
-            "messages": [{"role": "user", "content": "ping"}],
-        }
-        # Initial ping to trigger lazy load (ignore errors during spin-up)
-        try:
-            requests.post(f"{endpoint.rstrip('/')}/chat/completions", json=payload, timeout=10)
-        except Exception:
-            pass
-
-        models_ready = False
-        chat_ready = False
-        deadline = start_ts + max_wait_sec
-        attempts = 0
-        while time.time() < deadline:
-            attempts += 1
-            # Check /models
-            try:
-                r2 = requests.get(f"{endpoint.rstrip('/')}/models", timeout=5)
-                if r2.ok:
-                    data = r2.json()
-                    items = data.get("data") or []
-                    models_ready = any(str(it.get("id") or "") == str(model) for it in items)
-                else:
-                    models_ready = False
-            except Exception:
-                models_ready = False
-
-            # If models look ready, verify chat/completions success
-            if models_ready:
-                try:
-                    resp = requests.post(
-                        f"{endpoint.rstrip('/')}/chat/completions", json=payload, timeout=10
-                    )
-                    if resp.ok:
-                        data = resp.json()
-                        if isinstance(data, dict) and (data.get("choices") or []):
-                            chat_ready = True
-                            break
-                except Exception:
-                    chat_ready = False
-
-            # Re-trigger loader occasionally
-            if (attempts % 5) == 0:
-                try:
-                    requests.post(
-                        f"{endpoint.rstrip('/')}/chat/completions", json=payload, timeout=8
-                    )
-                except Exception:
-                    pass
-            time.sleep(2)
-
-        with open(log_path, "a", encoding="utf-8") as handle:
-            waited = int(time.time() - start_ts)
-            status = "ready" if (models_ready and chat_ready) else "timeout"
-            handle.write(
-                f"{time.strftime('%H:%M:%S')} LM Studio warm-up {status} (waited={waited}s, attempts={attempts}, models_ready={models_ready}, chat_ready={chat_ready})\n"
-            )
-    except Exception as exc:
-        try:
-            with open(log_path, "a", encoding="utf-8") as handle:
-                handle.write(f"{time.strftime('%H:%M:%S')} LM Studio warm-up failed: {exc}\n")
-        except Exception:
-            pass
 
 
 # -------------------------------
@@ -365,8 +292,6 @@ def run_pipeline(
     dataset_path: Path,
     vllm_endpoint: str,
     vllm_model: str,
-    lmstudio_endpoint: Optional[str],
-    lmstudio_model: Optional[str],
     max_producer_workers: int = 8,
     consumer_concurrency: int = 2,
 ) -> None:
@@ -495,9 +420,6 @@ def run_pipeline(
 
     # Warm up vLLM
     _warm_up_vllm(vllm_endpoint, vllm_model, logs_dir / "vllm.log")
-    # Warm up LM Studio (if configured): single ping then brief readiness wait
-    if lmstudio_endpoint and lmstudio_model:
-        _warm_up_lmstudio(lmstudio_endpoint, lmstudio_model, logs_dir / "lmstudio.log")
 
     # Producer: fill cache for missing hashes (global de-dup)
     to_process: List[Tuple[str, str, str]] = []  # (hash, pid, text)
@@ -626,9 +548,6 @@ def run_pipeline(
                         pbar2.set_postfix({"ok": ok2, "fail": fail2})
 
     # Consumer: answer questions using restricted evidence set
-    if not lmstudio_endpoint or not lmstudio_model:
-        logger.warning("LM Studio config not provided; skipping answer generation")
-        return
 
     # Build queue of qids where all allowed_hashes are present in cache
     ready_qids: List[ManifestItem] = []
@@ -713,7 +632,7 @@ def run_pipeline(
             question = next((row.get("question") or row.get("query") for row in dataset_rows if str(row.get("id") or row.get("query_id") or row.get("qid") or "") == mitem.qid), None)
             question = str(question or "")
             evidences, trace = _restricted_retrieve(question, mitem)
-            # Format evidences for LM Studio
+            # Format evidences for LLM answering
             lm_evs = []
             evidence_ids = []
             for note in evidences:
@@ -723,10 +642,10 @@ def run_pipeline(
                     "canonical": (note.get("meta") or {}).get("evidence_canonical") or (note.get("evidence") or ""),
                     "evidence": note.get("evidence") or "",
                 })
-            # Do not retry: LM Studio is pre-warmed; one-shot call avoids repeated access
-            answer = call_lmstudio(
-                lmstudio_endpoint,
-                lmstudio_model,
+            # Do not retry: one-shot call avoids repeated access
+            answer = call_llm(
+                vllm_endpoint,
+                vllm_model,
                 question,
                 lm_evs,
                 temperature=0.2,
@@ -805,40 +724,39 @@ def run_pipeline(
                     if ((ok_ans + fail_ans) % 5) == 0:
                         pbar_ans.set_postfix({"ok": ok_ans, "fail": fail_ans})
 
-    # Emit aggregated answers.json (mirage-style) if we generated answers
-    if lmstudio_endpoint and lmstudio_model:
-        answers_json_path = preds_dir / "answers.json"
-        results: List[Dict[str, Any]] = []
-        # Build quick lookup for question by id
-        qid_to_question: Dict[str, str] = {}
-        for item in dataset_rows:
-            qid = str(item.get("id") or item.get("query_id") or item.get("qid") or "")
-            question = str(item.get("question") or item.get("query") or "")
-            if qid:
-                qid_to_question[qid] = question
-        # Read pred.jsonl and aggregate
-        if pred_jsonl_path.exists():
-            with open(pred_jsonl_path, "r", encoding="utf-8") as handle:
-                for line in handle:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    row = json.loads(line)
-                    qid = str(row.get("id") or "")
-                    ans = row.get("predicted_answer")
-                    structured = {
-                        "trace": row.get("trace"),
-                        "evidence_note_ids": row.get("evidence_note_ids"),
-                    }
-                    results.append({
-                        "query_id": qid,
-                        "question": qid_to_question.get(qid, ""),
-                        "answer": ans,
-                        "structured": structured,
-                    })
-        with open(answers_json_path, "w", encoding="utf-8") as out:
-            json.dump(results, out, ensure_ascii=False, indent=2)
-        logger.info("Wrote {} answers to {}", len(results), answers_json_path)
+    # Emit aggregated answers.json (mirage-style) after answer generation
+    answers_json_path = preds_dir / "answers.json"
+    results: List[Dict[str, Any]] = []
+    # Build quick lookup for question by id
+    qid_to_question: Dict[str, str] = {}
+    for item in dataset_rows:
+        qid = str(item.get("id") or item.get("query_id") or item.get("qid") or "")
+        question = str(item.get("question") or item.get("query") or "")
+        if qid:
+            qid_to_question[qid] = question
+    # Read pred.jsonl and aggregate
+    if pred_jsonl_path.exists():
+        with open(pred_jsonl_path, "r", encoding="utf-8") as handle:
+            for line in handle:
+                line = line.strip()
+                if not line:
+                    continue
+                row = json.loads(line)
+                qid = str(row.get("id") or "")
+                ans = row.get("predicted_answer")
+                structured = {
+                    "trace": row.get("trace"),
+                    "evidence_note_ids": row.get("evidence_note_ids"),
+                }
+                results.append({
+                    "query_id": qid,
+                    "question": qid_to_question.get(qid, ""),
+                    "answer": ans,
+                    "structured": structured,
+                })
+    with open(answers_json_path, "w", encoding="utf-8") as out:
+        json.dump(results, out, ensure_ascii=False, indent=2)
+    logger.info("Wrote {} answers to {}", len(results), answers_json_path)
 
 
 def main() -> None:
@@ -850,8 +768,6 @@ def main() -> None:
     parser.add_argument("--tag", default=None, help="Custom tag for <id> (e.g., dev200-run1)")
     parser.add_argument("--vllm-endpoint", default=None)
     parser.add_argument("--vllm-model", default=None)
-    parser.add_argument("--lmstudio-endpoint", default=None)
-    parser.add_argument("--lmstudio-model", default=None)
     parser.add_argument("--autostart-vllm", action="store_true")
     parser.add_argument("--gpu0", default="0", help="GPU id for vLLM")
     parser.add_argument("--producer-workers", type=int, default=8)
@@ -863,9 +779,6 @@ def main() -> None:
     vllm_model = args.vllm_model or cfg.get("vllm.model")
     if not vllm_endpoint or not vllm_model:
         raise ValueError("vLLM endpoint/model must be provided via CLI or config")
-
-    lmstudio_endpoint = args.lmstudio_endpoint or cfg.get("lmstudio.endpoint")
-    lmstudio_model = args.lmstudio_model or cfg.get("lmstudio.model")
 
     work_dir = resolve_workdir(args.work_dir, result_root=args.result_root, dataset="musique")
     paths = ensure_workdir_layout(work_dir)
@@ -887,8 +800,6 @@ def main() -> None:
         "params": {
             "vllm_endpoint": vllm_endpoint,
             "vllm_model": vllm_model,
-            "lmstudio_endpoint": lmstudio_endpoint,
-            "lmstudio_model": lmstudio_model,
             "producer_workers": int(args.producer_workers),
             "consumer_concurrency": int(args.consumer_concurrency),
         },
@@ -911,9 +822,9 @@ def main() -> None:
                     # fallback: regex search
                     import re as _re
                     m = _re.search(r":(\d+)", url)
-                    return int(m.group(1)) if m else 8001
+                    return int(m.group(1)) if m else 8000
                 except Exception:
-                    return 8001
+                    return 8000
             manager = VLLMServerManager({
                 "enabled": True,
                 "log_dir": str(artifacts_dir / "logs"),
@@ -921,11 +832,12 @@ def main() -> None:
                     {
                         "name": "vllm_gpu0",
                         "port": _parse_port_from_endpoint(vllm_endpoint),
-                        "model": vllm_model,
+                        "model": HF_MODEL_ID,
                         "host": "0.0.0.0",
                         "cuda_devices": str(args.gpu0),
                         "dtype": "float16",
                         "max_model_len": int(cfg.get("chunk.max_tokens", 8192)),
+                        "extra_args": ["--served-model-name", SERVED_MODEL_NAME],
                     }
                 ],
             })
@@ -951,8 +863,6 @@ def main() -> None:
             dataset_path=Path(args.dataset_path),
             vllm_endpoint=vllm_endpoint,
             vllm_model=vllm_model,
-            lmstudio_endpoint=lmstudio_endpoint,
-            lmstudio_model=lmstudio_model,
             max_producer_workers=int(args.producer_workers),
             consumer_concurrency=int(args.consumer_concurrency),
         )

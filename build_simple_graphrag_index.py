@@ -16,11 +16,11 @@ async def main():
     args = parser.parse_args()
 
     # 1. Initialize LLM Client
-    lm_cfg = global_config.get("lmstudio", {})
+    lm_cfg = global_config.get("vllm", {})
     endpoint = lm_cfg.get("endpoint")
     model = lm_cfg.get("model")
     if not endpoint or not model:
-        logger.error("LM Studio endpoint/model must be configured in config.yaml")
+        logger.error("vLLM endpoint/model must be configured in config.yaml")
         return
 
     llm_client = LLMChatClient(endpoint=endpoint, model=model, temperature=0.0)

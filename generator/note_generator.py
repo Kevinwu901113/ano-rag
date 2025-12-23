@@ -20,6 +20,7 @@ from validators.note_validator import validate_and_normalize
 from utils import TextUtils
 from doc import split_into_entity_aware_spans
 from utils.adaptive_concurrency import AdaptiveConcurrencyController, AdaptiveConfig
+from utils.llm_client import LLMChatClient
 
 
 class NoteGenerator:
@@ -101,6 +102,13 @@ class NoteGenerator:
         self.temperature = temperature
         self.max_tokens = max_tokens
         self._stats: Dict[str, int] = {}
+        self._llm = LLMChatClient(
+            endpoint=endpoint,
+            model=model,
+            llm_profile="extract",
+            timeout=(self._connect_timeout_sec, self._read_timeout_sec),
+            retries=0,
+        )
 
         # Adaptive concurrency hooks (latency sampling)
         acfg_dict = (vllm_cfg.get("adaptive", {}) or {})
@@ -404,19 +412,12 @@ class NoteGenerator:
             self._inflight_tokens[endpoint] = self._inflight_tokens.get(endpoint, 0) + req_tokens
             t0 = time.time()
             try:
-                payload: Dict[str, Any] = {
-                    "model": self.model,
-                    "temperature": self.temperature,
-                    "max_tokens": call_max_tokens,
-                    "messages": [{"role": "user", "content": prompt}],
-                }
-                if stop:
-                    payload["stop"] = stop
+                extra_body = None
+                response_format = None
                 if self._use_guided_json:
-                    payload.setdefault("extra_body", {})
-                    payload["extra_body"]["guided_json"] = self._note_schema
+                    extra_body = {"guided_json": self._note_schema}
                 elif self._use_response_format:
-                    payload["response_format"] = {
+                    response_format = {
                         "type": "json_schema",
                         "json_schema": {"name": self._schema_name, "schema": self._note_schema},
                     }
@@ -428,10 +429,17 @@ class NoteGenerator:
                         pass
                 session = self._get_session()
                 # Ensure the response is fully closed even on success to release the socket.
-                with session.post(
-                    f"{endpoint}/chat/completions",
-                    json=payload,
+                with self._llm.post_chat(
+                    [{"role": "user", "content": prompt}],
+                    temperature=self.temperature,
+                    max_tokens=call_max_tokens,
+                    stop=stop,
+                    llm_profile="extract",
+                    endpoint_override=endpoint,
+                    response_format=response_format,
+                    extra_body=extra_body,
                     timeout=(self._connect_timeout_sec, self._read_timeout_sec),
+                    session=session,
                 ) as response:
                     response.raise_for_status()
                     data = response.json()

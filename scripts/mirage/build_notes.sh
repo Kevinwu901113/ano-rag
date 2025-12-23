@@ -4,15 +4,20 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT_DIR"
 
+# Proxy required for the initial model download.
+export http_proxy="http://192.168.192.246:7890"
+export https_proxy="http://192.168.192.246:7890"
+
 DATASET="${DATASET:-mirage}"
 DATA_DIR="${DATA_DIR:-data/${DATASET}_sample}"
-VLLM_MODEL="${VLLM_MODEL:-qwen2.5-7b-instruct}"
-VLLM_HOST="${VLLM_HOST:-127.0.0.1}"
-VLLM_PORT="${VLLM_PORT:-8001}"
+VLLM_MODEL="Qwen/Qwen3-30B-A3B"
+VLLM_SERVED_MODEL="qwen3-30b-a3b"
+VLLM_HOST="127.0.0.1"
+VLLM_PORT="8000"
 GPU0="${GPU0:-0}"
 GPU1="${GPU1:-1}"
 DTYPE="${DTYPE:-float16}"
-MAX_MODEL_LEN="${MAX_MODEL_LEN:-10000}"
+MAX_MODEL_LEN="${MAX_MODEL_LEN:-8192}"
 RESULT_ROOT="${RESULT_ROOT:-result_relrag}"
 WORKDIR="${WORKDIR:-}"
 RUN_ID="${RUN_ID:-}"
@@ -22,7 +27,7 @@ VLLM_GUIDED_BACKEND="${VLLM_GUIDED_BACKEND:-xgrammar}"
 # Single-process build by default
 SHARD_CNT=${SHARD_CNT:-1}
 VLLM_BIN="${VLLM_BIN:-python -m vllm.entrypoints.openai.api_server}"
-VLLM_DOWNLOAD_DIR="${VLLM_DOWNLOAD_DIR:-${HOME:-/root}/.cache/huggingface}"
+VLLM_DOWNLOAD_DIR="${HOME:-/root}/.cache/huggingface"
 VLLM_GPU_MEMORY_UTIL="${VLLM_GPU_MEMORY_UTIL:-0.7}"
 VLLM_EXTRA_ARGS="${VLLM_EXTRA_ARGS:-}"
 STARTED_VLLM=0
@@ -249,6 +254,7 @@ start_vllm_tp() {
 
   CUDA_VISIBLE_DEVICES="${cuda_devices}" nohup ${VLLM_BIN} \
     --model "${VLLM_MODEL_RESOLVED}" \
+    --served-model-name "${VLLM_SERVED_MODEL}" \
     --host 0.0.0.0 --port "${VLLM_PORT}" \
     --tensor-parallel-size "${tp_size}" \
     --dtype "${DTYPE}" \
@@ -281,7 +287,7 @@ build_notes_single() {
     --out "${OUT_MERGED}" \
     --indexes_dir "${IDX_DIR}" \
     --vllm_endpoint "http://${VLLM_HOST}:${VLLM_PORT}/v1" \
-    --vllm_model "${VLLM_MODEL}" \
+    --vllm_model "${VLLM_SERVED_MODEL}" \
     --shard-cnt 1 \
     --progress-path "${PROG_SINGLE}" \
     > "$BUILD_LOG" 2>&1 & echo $! > "$BUILD_PID"
@@ -344,7 +350,7 @@ usage() {
 Usage:
   $(basename "$0") [--new] [--workdir <path>]
 
-Environment overrides: DATA_DIR, DATASET, RESULT_ROOT, WORKDIR, RUN_ID, VLLM_MODEL, ...
+Environment overrides: DATA_DIR, DATASET, RESULT_ROOT, WORKDIR, RUN_ID, GPU0, GPU1, DTYPE, MAX_MODEL_LEN, SHARD_CNT, USE_GUIDED_JSON, JSON_SCHEMA_NAME, VLLM_GUIDED_BACKEND, VLLM_BIN, VLLM_GPU_MEMORY_UTIL, VLLM_EXTRA_ARGS
 USAGE
 }
 

@@ -5,11 +5,11 @@ set -euo pipefail
 #   bash scripts/check_vllm_ready.sh [BASE_URL] [RETRIES] [SLEEP_SEC]
 #
 # BASE_URL can be:
-#   - http://127.0.0.1:8001
-#   - http://127.0.0.1:8001/v1
-#   - http://127.0.0.1:8001/v1/models
+#   - http://127.0.0.1:8000
+#   - http://127.0.0.1:8000/v1
+#   - http://127.0.0.1:8000/v1/models
 
-BASE_URL="${1:-http://127.0.0.1:8001}"
+BASE_URL="${1:-http://127.0.0.1:8000}"
 RETRIES="${2:-90}"
 SLEEP_SEC="${3:-2}"
 
@@ -34,4 +34,3 @@ done
 
 echo "vLLM not ready (timeout): ${url}" >&2
 exit 1
-

@@ -3,10 +3,10 @@ from __future__ import annotations
 import json
 from typing import Any, Dict, List
 
-import requests
 from loguru import logger
 
 from utils.text_builders import build_note_text_for_rank
+from utils.llm_client import LLMChatClient
 
 EXTRACT_PROMPT = """You extract relevant evidence for answering a question.
 Question: {question}
@@ -19,9 +19,12 @@ If unsure, set keep to false.
 
 class EvidenceExtractor:
     def __init__(self, endpoint: str, model: str, timeout: int = 15) -> None:
-        self.endpoint = endpoint.rstrip("/")
-        self.model = model
-        self.timeout = timeout
+        self.client = LLMChatClient(
+            endpoint=endpoint,
+            model=model,
+            llm_profile="extract",
+            timeout=timeout,
+        )
 
     def judge_and_compress(self, question: str, notes: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         results: List[Dict[str, Any]] = []
@@ -29,18 +32,13 @@ class EvidenceExtractor:
             text = build_note_text_for_rank(note, max_len=768)
             payload = EXTRACT_PROMPT.format(question=question, note_text=text)
             try:
-                response = requests.post(
-                    f"{self.endpoint}/chat/completions",
-                    json={
-                        "model": self.model,
-                        "messages": [{"role": "user", "content": payload}],
-                        "temperature": 0.0,
-                        "max_tokens": 128,
-                    },
-                    timeout=self.timeout,
+                response = self.client.chat(
+                    [{"role": "user", "content": payload}],
+                    temperature=0.0,
+                    max_tokens=128,
+                    llm_profile="extract",
                 )
-                response.raise_for_status()
-                content = response.json()["choices"][0]["message"]["content"]
+                content = response.content
                 parsed = self._parse_response(content)
             except Exception as exc:  # noqa: PERF203
                 logger.warning("Evidence extractor failed for note {}: {}", note.get("note_id"), exc)

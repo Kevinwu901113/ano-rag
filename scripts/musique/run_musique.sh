@@ -1,15 +1,19 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Proxy required for the initial model download.
+export http_proxy="http://192.168.192.246:7890"
+export https_proxy="http://192.168.192.246:7890"
+
 #
 # Musique single-GPU orchestration script
 # - Start vLLM on GPU0
-# - Run musique pipeline (note generation + LM Studio answering)
+# - Run musique pipeline (note generation + answering via vLLM)
 # - Ensure vLLM is terminated on normal exit or error
 #
 
 # =====================
-# Config (env overridable)
+# Config
 # =====================
 DATASET_NAME="${DATASET_NAME:-musique}"
 DATASET_PATH="${DATASET_PATH:-data/${DATASET_NAME}_sample/${DATASET_NAME}.jsonl}"
@@ -19,20 +23,17 @@ RUN_ID="${RUN_ID:-}"
 TAG="${TAG:-}"     # e.g. dev200-run1
 NEW_RUN=${NEW_RUN:-1}
 
-VLLM_MODEL="${VLLM_MODEL:-qwen2.5-7b-instruct}"
-VLLM_HOST="${VLLM_HOST:-127.0.0.1}"
-VLLM_PORT="${VLLM_PORT:-8001}"
+VLLM_MODEL="Qwen/Qwen3-30B-A3B"
+VLLM_SERVED_MODEL="qwen3-30b-a3b"
+VLLM_HOST="127.0.0.1"
+VLLM_PORT="8000"
 GPU0="${GPU0:-0}"
 DTYPE="${DTYPE:-float16}"
 MAX_MODEL_LEN="${MAX_MODEL_LEN:-8192}"
 VLLM_BIN="${VLLM_BIN:-python -m vllm.entrypoints.openai.api_server}"
-VLLM_DOWNLOAD_DIR="${VLLM_DOWNLOAD_DIR:-}"
+VLLM_DOWNLOAD_DIR="${HOME:-/root}/.cache/huggingface"
 QUANTIZATION="${QUANTIZATION:-}"   # e.g. awq
 GPU_MEMORY_UTILIZATION="${GPU_MEMORY_UTILIZATION:-}"
-
-# LM Studio (optional, if provided answers will be generated)
-LMSTUDIO_ENDPOINT="${LMSTUDIO_ENDPOINT:-}"
-LMSTUDIO_MODEL="${LMSTUDIO_MODEL:-}"
 
 # Pipeline concurrency (producer builds notes, consumer answers)
 PRODUCER_WORKERS="${PRODUCER_WORKERS:-8}"
@@ -98,6 +99,7 @@ start_vllm_single() {
 
   CUDA_VISIBLE_DEVICES="${GPU0}" nohup ${VLLM_BIN} \
     --model "${VLLM_MODEL}" \
+    --served-model-name "${VLLM_SERVED_MODEL}" \
     --host 0.0.0.0 --port "${VLLM_PORT}" \
     --dtype "${DTYPE}" \
     --max-model-len "${MAX_MODEL_LEN}" \
@@ -142,13 +144,11 @@ Usage:
 
 Environment overrides:
   DATASET_NAME, DATASET_PATH, RESULT_ROOT, WORKDIR, RUN_ID, TAG, NEW_RUN
-  VLLM_MODEL, VLLM_HOST, VLLM_PORT, GPU0, DTYPE, MAX_MODEL_LEN, VLLM_BIN, VLLM_DOWNLOAD_DIR, QUANTIZATION
-  LMSTUDIO_ENDPOINT, LMSTUDIO_MODEL, PRODUCER_WORKERS, CONSUMER_CONCURRENCY
+  GPU0, DTYPE, MAX_MODEL_LEN, VLLM_BIN, QUANTIZATION
+  PRODUCER_WORKERS, CONSUMER_CONCURRENCY
 
 Example:
-  VLLM_DOWNLOAD_DIR=/home/user/models VLLM_MODEL="Qwen/Qwen2.5-7B-Instruct-AWQ" \
-  QUANTIZATION=awq bash scripts/musique/run_musique.sh --new --tag dev200-run1 \
-    LMSTUDIO_ENDPOINT=http://127.0.0.1:1234/v1 LMSTUDIO_MODEL=Qwen2.5-7B-Instruct
+  GPU0=0 bash scripts/musique/run_musique.sh --new --tag dev200-run1
 USAGE
 }
 
@@ -187,9 +187,7 @@ python scripts/musique/run.py \
   --new \
   --tag "$TAG" \
   --vllm-endpoint "http://${VLLM_HOST}:${VLLM_PORT}/v1" \
-  --vllm-model "$VLLM_MODEL" \
-  ${LMSTUDIO_ENDPOINT:+--lmstudio-endpoint "$LMSTUDIO_ENDPOINT"} \
-  ${LMSTUDIO_MODEL:+--lmstudio-model "$LMSTUDIO_MODEL"} \
+  --vllm-model "$VLLM_SERVED_MODEL" \
   --producer-workers "$PRODUCER_WORKERS" \
   --consumer-concurrency "$CONSUMER_CONCURRENCY"
 

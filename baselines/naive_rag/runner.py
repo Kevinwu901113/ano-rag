@@ -1,11 +1,9 @@
 from __future__ import annotations
 
 import json
-import time
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
-import requests
 from loguru import logger
 
 from config import config as config_loader
@@ -14,6 +12,7 @@ from utils.embedding_utils import EmbeddingEncoder
 from utils.context_budget import pack_contexts
 from utils.jsonl_utils import write_jsonl
 from utils.output_protocol import build_final_instruction
+from utils.llm_client import LLMChatClient
 from utils.retrieval_logger import log_retrieval
 
 try:
@@ -321,7 +320,7 @@ class NaiveIndex:
 
 
 class LLMClient:
-    """Minimal LM Studio/OpenAI-compatible chat client."""
+    """Minimal vLLM OpenAI-compatible chat client."""
 
     def __init__(
         self,
@@ -334,53 +333,31 @@ class LLMClient:
     ) -> None:
         if not endpoint or not model:
             raise ValueError("Both endpoint and model are required for LLM calls")
-        self._mock = str(endpoint).strip().lower() == "mock"
-        if self._mock:
-            self.endpoint = "mock"
-        else:
-            self.endpoint = endpoint.rstrip("/")
-            if self.endpoint.endswith("/v1"):
-                self.endpoint = self.endpoint[:-3]
-            # Ensure endpoint has scheme
-            if not self.endpoint.startswith("http://") and not self.endpoint.startswith("https://"):
-                self.endpoint = "http://" + self.endpoint
-            
-        self.model = model
+        self.client = LLMChatClient(
+            endpoint=endpoint,
+            model=model,
+            llm_profile="generate",
+            temperature=temperature,
+            max_tokens=max_tokens,
+            stop=stop,
+            retries=retries,
+            timeout=120,
+        )
+        self.model = self.client.model
         self.temperature = temperature
         self.max_tokens = max_tokens
         # Default: do not set stop tokens. For some models a leading newline is common;
         # forcing "\n" as a stop can truncate the answer to empty content.
         self.stop = [] if stop is None else stop
-        self.retries = max(0, retries)
 
     def chat(self, messages: List[Dict[str, str]]) -> str:
-        if self._mock:
-            return "Mock Answer"
-        url = f"{self.endpoint}/v1/chat/completions"
-        headers = {"Content-Type": "application/json"}
-        payload = {
-            "model": self.model,
-            "messages": messages,
-            "temperature": self.temperature,
-            "max_tokens": self.max_tokens,
-            "stream": False,
-        }
-        if self.stop:
-            payload["stop"] = self.stop
-
-        for attempt in range(self.retries + 1):
-            try:
-                resp = requests.post(url, headers=headers, json=payload, timeout=120)
-                resp.raise_for_status()
-                data = resp.json()
-                content = data["choices"][0]["message"]["content"]
-                return str(content)
-            except Exception as e:
-                if attempt == self.retries:
-                    logger.error(f"LLM call failed after {self.retries} retries: {e}")
-                    raise
-                time.sleep(1)
-        return ""
+        response = self.client.chat(
+            messages,
+            temperature=self.temperature,
+            max_tokens=self.max_tokens,
+            llm_profile="generate",
+        )
+        return str(response.content)
 
 
 class NaiveRAGRunner:
@@ -404,7 +381,7 @@ class NaiveRAGRunner:
         self.cfg = config or config_loader.load_config()
         self.topk = max(1, int(topk))
         self.context_budget = int(context_budget or 0)
-        lm_cfg = self.cfg.get("lmstudio", {}) or {}
+        lm_cfg = self.cfg.get("vllm", {}) or {}
         endpoint = lm_endpoint or lm_cfg.get("endpoint")
         model = lm_model or lm_cfg.get("model")
         

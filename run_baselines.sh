@@ -5,15 +5,17 @@ set -e
 DATASET="data/mirage_sample/dataset.json"
 DOC_POOL="data/mirage_sample/doc_pool.json"
 RESULT_ROOT="result"
+LM_ENDPOINT="http://127.0.0.1:8000/v1"
+LM_MODEL="qwen3-30b-a3b"
 
-echo "Using Mock LLM and CPU embeddings."
+echo "Using vLLM endpoint ${LM_ENDPOINT} with model ${LM_MODEL}."
 
 # 1. Vanilla RAG
 echo "Running Vanilla RAG..."
 python scripts/mirage/run_vanilla_rag.py \
   --dataset-path $DATASET \
-  --lmstudio-endpoint mock \
-  --lmstudio-model mock-model \
+  --lm-endpoint $LM_ENDPOINT \
+  --lm-model $LM_MODEL \
   --new
 
 # 2. FiD RAG
@@ -29,8 +31,8 @@ python scripts/mirage/build_fid_index.py \
 python scripts/mirage/run_fid_rag.py \
   --dataset-path $DATASET \
   --index-dir $RESULT_ROOT/mirage_fid_index \
-  --lmstudio-endpoint mock \
-  --lmstudio-model mock-model \
+  --lm-endpoint $LM_ENDPOINT \
+  --lm-model $LM_MODEL \
   --work-dir $RESULT_ROOT/mirage_fid_rag \
   --new
 
@@ -38,8 +40,8 @@ python scripts/mirage/run_fid_rag.py \
 echo "Running Simple Self-RAG..."
 python scripts/mirage/run_simple_selfrag.py \
   --dataset-path $DATASET \
-  --lmstudio-endpoint mock \
-  --lmstudio-model mock-model \
+  --lm-endpoint $LM_ENDPOINT \
+  --lm-model $LM_MODEL \
   --new
 
 # 4. Simple Raptor
@@ -48,15 +50,15 @@ echo "Running Simple Raptor..."
 python scripts/mirage/build_simple_raptor_index.py \
   --doc-pool $DOC_POOL \
   --out-dir $RESULT_ROOT/mirage_raptor_index \
-  --lmstudio-endpoint mock \
-  --lmstudio-model mock-model
+  --lm-endpoint $LM_ENDPOINT \
+  --lm-model $LM_MODEL
 
 # Run QA
 python scripts/mirage/run_simple_raptor.py \
   --dataset-path $DATASET \
   --index-dir $RESULT_ROOT/mirage_raptor_index \
-  --lmstudio-endpoint mock \
-  --lmstudio-model mock-model \
+  --lm-endpoint $LM_ENDPOINT \
+  --lm-model $LM_MODEL \
   --work-dir $RESULT_ROOT/mirage_raptor_run \
   --new
 
@@ -64,8 +66,8 @@ python scripts/mirage/run_simple_raptor.py \
 echo "Running Simple GraphRAG..."
 python scripts/mirage/run_simple_graphrag.py \
   --dataset-path $DATASET \
-  --lmstudio-endpoint mock \
-  --lmstudio-model mock-model \
+  --lm-endpoint $LM_ENDPOINT \
+  --lm-model $LM_MODEL \
   --work-dir $RESULT_ROOT/mirage_graphrag_run \
   --new
 

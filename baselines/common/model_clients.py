@@ -70,42 +70,20 @@ def get_default_embedding_client(config: Optional[Dict[str, Any]] = None):
         **extra_kwargs,
     )
 
-class MockLLMChatClient:
-    """Mock LLM Client that returns dummy responses."""
-    def __init__(self, endpoint: str, model: str, temperature: float = 0.0, stop: Optional[List[str]] = None):
-        self.endpoint = endpoint
-        self.model = model
-        self.temperature = temperature
-        self.stop = stop
-        logger.warning(f"Initialized Mock LLM Client. Endpoint={endpoint}, Model={model}")
-
-    def chat(self, messages: List[Dict[str, str]], max_tokens: int = 1024, temperature: Optional[float] = None, **kwargs) -> str:
-        # Return a dummy response.
-        # Maybe check if last message asks for JSON to return valid JSON?
-        last_msg = messages[-1]["content"] if messages else ""
-        if "json" in last_msg.lower():
-            return '{"thought": "This is a mock thought", "answer": "Mock Answer", "relevance_score": 1.0}'
-        return "This is a mock response from the MockLLMChatClient."
-
-def get_default_llm_client(config: Optional[Dict[str, Any]] = None) -> "LLMChatClient":
-    """
-    Constructs and returns an LLMChatClient instance based on the provided configuration or defaults.
-    Prioritizes 'lmstudio' configuration, falls back to 'vllm'.
-    """
+def get_default_llm_client(
+    config: Optional[Dict[str, Any]] = None,
+    *,
+    llm_profile: str = "generate",
+) -> "LLMChatClient":
+    """Construct a vLLM-only LLMChatClient with the requested profile."""
     if config is None:
         config = global_config.load_config()
-        
-    # Try LM Studio config first (Preferred for current environment)
-    llm_cfg = config.get("lmstudio", {})
-    if not llm_cfg:
-        # Fallback to vLLM
-        llm_cfg = config.get("vllm", {})
-        if llm_cfg:
-            logger.info("Using vLLM configuration for LLM Client")
-        else:
-            logger.warning("No LLM configuration found (checked 'lmstudio' and 'vllm'). Using defaults.")
+
+    llm_cfg = config.get("vllm", {}) or {}
+    if llm_cfg:
+        logger.info("Using vLLM configuration for LLM Client")
     else:
-        logger.info("Using LM Studio configuration for LLM Client")
+        logger.warning("No LLM configuration found; using vLLM defaults.")
 
     endpoint = llm_cfg.get("endpoint")
     model = llm_cfg.get("model")
@@ -113,21 +91,14 @@ def get_default_llm_client(config: Optional[Dict[str, Any]] = None) -> "LLMChatC
     stop = llm_cfg.get("stop")
     
     # Default fallback values if config is empty but client is requested
-    if not endpoint:
-        endpoint = "http://127.0.0.1:1234/v1" # Common default
-    if not model:
-        model = "default-model"
-        
-    if endpoint == "mock":
-        return MockLLMChatClient(endpoint=endpoint, model=model, temperature=temperature, stop=stop)
-
-    logger.info(f"Initializing LLM Client: endpoint={endpoint}, model={model}")
+    logger.info("Initializing LLM Client: endpoint={} model={} profile={}", endpoint, model, llm_profile)
 
     from rag_core.llm_client import LLMChatClient
 
     return LLMChatClient(
         endpoint=endpoint,
         model=model,
+        llm_profile=llm_profile,
         temperature=temperature,
-        stop=stop
+        stop=stop,
     )

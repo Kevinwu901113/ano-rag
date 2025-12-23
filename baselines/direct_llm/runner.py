@@ -1,18 +1,17 @@
 from __future__ import annotations
 
 import json
-import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
-import requests
 from loguru import logger
 
 from config import config as config_loader
 from utils.jsonl_utils import write_jsonl
 from utils.retrieval_logger import log_retrieval
 from utils.output_protocol import build_final_instruction
+from utils.llm_client import LLMChatClient
 
 DEFAULT_SYSTEM_PROMPT = (
     "You are a factual question answering assistant. Use only your own knowledge to answer. "
@@ -50,18 +49,23 @@ class DirectLLMClient:
     ) -> None:
         if not endpoint or not model:
             raise ValueError("Both endpoint and model are required for direct LLM baseline")
-        self._mock = str(endpoint).strip().lower() == "mock"
-        self.endpoint = endpoint.rstrip("/")
-        self.model = model
         self.system_prompt = system_prompt
         self.temperature = temperature
         self.max_tokens = max_tokens
         self.stop = stop
-        self.retries = max(0, retries)
+        self.client = LLMChatClient(
+            endpoint=endpoint,
+            model=model,
+            llm_profile="generate",
+            temperature=temperature,
+            max_tokens=max_tokens,
+            stop=stop,
+            retries=retries,
+            timeout=60,
+        )
+        self.model = self.client.model
 
     def answer(self, question: str) -> str:
-        if self._mock:
-            return "Mock Answer"
         q = (question or "").strip()
         if not q:
             return "Insufficient evidence"
@@ -70,30 +74,17 @@ class DirectLLMClient:
             {"role": "system", "content": self.system_prompt},
             {"role": "user", "content": user_msg},
         ]
-        payload: Dict[str, Any] = {
-            "model": self.model,
-            "temperature": self.temperature,
-            "max_tokens": self.max_tokens,
-            "messages": messages,
-        }
-        if self.stop:
-            payload["stop"] = self.stop
-
-        for attempt in range(self.retries + 1):
-            try:
-                resp = requests.post(f"{self.endpoint}/chat/completions", json=payload, timeout=60)
-                resp.raise_for_status()
-                data = resp.json()
-                content = data["choices"][0]["message"]["content"]
-                return content
-            except requests.RequestException as exc:  # noqa: PERF203
-                if attempt >= self.retries:
-                    logger.error("Direct LLM call failed after {} attempts: {}", attempt + 1, exc)
-                    return "Insufficient evidence"
-                backoff = 2**attempt
-                logger.warning("Direct LLM call failed (attempt {}): {}; retrying in {}s", attempt + 1, exc, backoff)
-                time.sleep(backoff)
-        return "Insufficient evidence"
+        try:
+            resp = self.client.chat(
+                messages,
+                temperature=self.temperature,
+                max_tokens=self.max_tokens,
+                llm_profile="generate",
+            )
+            return resp.content
+        except Exception as exc:  # noqa: PERF203
+            logger.error("Direct LLM call failed: {}", exc)
+            return "Insufficient evidence"
 
 
 class DirectLLMRunner:
@@ -111,7 +102,7 @@ class DirectLLMRunner:
         config: Optional[Dict[str, Any]] = None,
     ) -> None:
         self.cfg = config or config_loader.load_config()
-        lm_cfg = self.cfg.get("lmstudio", {}) or {}
+        lm_cfg = self.cfg.get("vllm", {}) or {}
         endpoint = lm_endpoint or lm_cfg.get("endpoint")
         model = lm_model or lm_cfg.get("model")
         

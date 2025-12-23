@@ -5,8 +5,8 @@ set -e
 DATA_DIR="data/mirage_sample_200"
 DOC_POOL="${DATA_DIR}/doc_pool.json"
 DATASET="${DATA_DIR}/dataset.json"
-LM_ENDPOINT="http://127.0.0.1:1234/v1"
-LM_MODEL="qwen/qwen3-30b-a3b"
+LM_ENDPOINT="http://127.0.0.1:8000/v1"
+LM_MODEL="qwen3-30b-a3b"
 RESULT_ROOT="result"
 
 # Ensure directories exist
@@ -18,8 +18,8 @@ echo "Starting Experiments..."
 echo "Running Direct LLM..."
 python scripts/mirage/run_direct_llm.py \
   --dataset-path "$DATASET" \
-  --lmstudio-endpoint "$LM_ENDPOINT" \
-  --lmstudio-model "$LM_MODEL" \
+  --lm-endpoint "$LM_ENDPOINT" \
+  --lm-model "$LM_MODEL" \
   --new \
   --work-dir "${RESULT_ROOT}/mirage_direct_200"
 
@@ -35,8 +35,8 @@ python scripts/mirage/run_naive_rag.py \
   --dataset-path "$DATASET" \
   --index-dir "${RESULT_ROOT}/mirage_naive_index_200" \
   --topk 5 \
-  --lmstudio-endpoint "$LM_ENDPOINT" \
-  --lmstudio-model "$LM_MODEL" \
+  --lm-endpoint "$LM_ENDPOINT" \
+  --lm-model "$LM_MODEL" \
   --new \
   --work-dir "${RESULT_ROOT}/mirage_naive_rag_200"
 
@@ -44,8 +44,8 @@ python scripts/mirage/run_naive_rag.py \
 echo "Running Vanilla RAG..."
 python scripts/mirage/run_vanilla_rag.py \
   --dataset-path "$DATASET" \
-  --lmstudio-endpoint "$LM_ENDPOINT" \
-  --lmstudio-model "$LM_MODEL" \
+  --lm-endpoint "$LM_ENDPOINT" \
+  --lm-model "$LM_MODEL" \
   --new \
   --work-dir "${RESULT_ROOT}/mirage_vanilla_rag_200"
 
@@ -61,8 +61,8 @@ python scripts/mirage/run_fid_rag.py \
   --dataset-path "$DATASET" \
   --index-dir "${RESULT_ROOT}/mirage_fid_index_200" \
   --topk 5 \
-  --lmstudio-endpoint "$LM_ENDPOINT" \
-  --lmstudio-model "$LM_MODEL" \
+  --lm-endpoint "$LM_ENDPOINT" \
+  --lm-model "$LM_MODEL" \
   --new \
   --work-dir "${RESULT_ROOT}/mirage_fid_rag_200"
 
@@ -70,8 +70,8 @@ python scripts/mirage/run_fid_rag.py \
 echo "Running Simple Self-RAG..."
 python scripts/mirage/run_simple_selfrag.py \
   --dataset-path "$DATASET" \
-  --lmstudio-endpoint "$LM_ENDPOINT" \
-  --lmstudio-model "$LM_MODEL" \
+  --lm-endpoint "$LM_ENDPOINT" \
+  --lm-model "$LM_MODEL" \
   --new \
   --work-dir "${RESULT_ROOT}/mirage_simple_selfrag_200"
 
@@ -81,16 +81,16 @@ echo "Running Simple Raptor..."
 python scripts/mirage/build_simple_raptor_index.py \
   --doc-pool "$DOC_POOL" \
   --out-dir "${RESULT_ROOT}/mirage_raptor_index_200" \
-  --lmstudio-endpoint "$LM_ENDPOINT" \
-  --lmstudio-model "$LM_MODEL"
+  --lm-endpoint "$LM_ENDPOINT" \
+  --lm-model "$LM_MODEL"
 
 # Run QA
 python scripts/mirage/run_simple_raptor.py \
   --dataset-path "$DATASET" \
   --index-dir "${RESULT_ROOT}/mirage_raptor_index_200" \
   --topk 5 \
-  --lmstudio-endpoint "$LM_ENDPOINT" \
-  --lmstudio-model "$LM_MODEL" \
+  --lm-endpoint "$LM_ENDPOINT" \
+  --lm-model "$LM_MODEL" \
   --new \
   --work-dir "${RESULT_ROOT}/mirage_raptor_run_200"
 
@@ -100,8 +100,8 @@ python scripts/mirage/run_simple_graphrag.py \
   --dataset-path "$DATASET" \
   --result-root "$RESULT_ROOT" \
   --index-dir "${RESULT_ROOT}/mirage_simple_graphrag_index_200" \
-  --lmstudio-endpoint "$LM_ENDPOINT" \
-  --lmstudio-model "$LM_MODEL" \
+  --lm-endpoint "$LM_ENDPOINT" \
+  --lm-model "$LM_MODEL" \
   --new \
   --work-dir "${RESULT_ROOT}/mirage_graphrag_run_200"
 
@@ -110,7 +110,7 @@ echo "Running Project Pipeline (Ano-RAG)..."
 # Build Notes
 export DATA_DIR="$DATA_DIR"
 export DATASET="mirage"
-export VLLM_MODEL="qwen2.5-7b-instruct"
+export VLLM_MODEL="Qwen/Qwen3-30B-A3B"
 # Force a new run for notes
 bash scripts/mirage/build_notes.sh --new
 
@@ -123,8 +123,8 @@ python scripts/mirage/query_dataset.py \
   --dataset mirage \
   --dataset-path "$DATASET" \
   --work-dir "$LATEST_RUN" \
-  --lmstudio-endpoint "$LM_ENDPOINT" \
-  --lmstudio-model "$LM_MODEL" \
+  --lm-endpoint "$LM_ENDPOINT" \
+  --lm-model "$LM_MODEL" \
   --out "$LATEST_RUN/answers.json"
 
 # Symlink for evaluation script

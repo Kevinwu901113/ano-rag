@@ -49,8 +49,8 @@ def main():
     parser.add_argument("--workdir", "--work-dir", dest="work_dir", type=str, help="Specific working directory (optional)")
     parser.add_argument("--new", action="store_true", help="Force creating a new workspace")
     parser.add_argument("--limit", type=int, default=0, help="Limit number of queries")
-    parser.add_argument("--lmstudio-endpoint", type=str, help="LM Studio endpoint override")
-    parser.add_argument("--lmstudio-model", type=str, help="LM Studio model name override")
+    parser.add_argument("--lm-endpoint", type=str, help="LLM endpoint override")
+    parser.add_argument("--lm-model", type=str, help="LLM model name override")
     parser.add_argument("--max-new-tokens", type=int, default=None, help="Max new tokens for LLM decoding")
     parser.add_argument("--index-path", type=str, help="Path to FAISS index (optional, default to artifacts/vanilla_rag_index.faiss)")
     parser.add_argument("--chunk-store-path", type=str, help="Path to chunk store (optional, default to artifacts/vanilla_rag_chunk_store.pkl)")
@@ -67,10 +67,10 @@ def main():
     args = parser.parse_args()
 
     # 0. Setup Config Overrides
-    if args.lmstudio_endpoint:
-        global_config.set("lmstudio.endpoint", args.lmstudio_endpoint)
-    if args.lmstudio_model:
-        global_config.set("lmstudio.model", args.lmstudio_model)
+    if args.lm_endpoint:
+        global_config.set("vllm.endpoint", args.lm_endpoint)
+    if args.lm_model:
+        global_config.set("vllm.model", args.lm_model)
 
     # 1. Setup Workspace
     work_dir = resolve_workdir(args.work_dir, result_root=args.result_root, dataset="mirage")
@@ -84,19 +84,22 @@ def main():
     setup_logging(str(work_dir / "run.log"))
     logger.info(f"Starting Vanilla RAG run in {work_dir}")
     cfg_snapshot = global_config.load_config()
+    lm_endpoint = args.lm_endpoint or cfg_snapshot.get("vllm", {}).get("endpoint")
+    lm_model = args.lm_model or cfg_snapshot.get("vllm", {}).get("model")
+    lm_temperature = (cfg_snapshot.get("vllm", {}) or {}).get("temperature", 0.0)
     emb_cfg = cfg_snapshot.get("retriever", {}).get("embedding", {})
     write_config_resolved(
         work_dir,
         build_basic_config(
             dataset="mirage",
-            model=args.lmstudio_model or "unknown",
-            endpoint=args.lmstudio_endpoint or "unknown",
-            temperature=cfg_snapshot.get("lmstudio", {}).get("temperature"),
+            model=lm_model or "unknown",
+            endpoint=lm_endpoint or "unknown",
+            temperature=lm_temperature,
             max_tokens=args.max_new_tokens,
             context_budget=args.context_budget or None,
             topk=args.topk,
             decode={
-                "temperature": cfg_snapshot.get("lmstudio", {}).get("temperature"),
+                "temperature": lm_temperature,
                 "top_p": None,
                 "repetition_penalty": None,
                 "max_tokens": args.max_new_tokens,
@@ -176,7 +179,7 @@ def main():
             chunk_store_path=str(chunk_store_path),
             context_budget=args.context_budget,
         )
-    llm = get_default_llm_client()
+    llm = get_default_llm_client(llm_profile="generate")
 
     bm25_index = None
     bm25_ids: List[str] = []

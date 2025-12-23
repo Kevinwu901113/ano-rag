@@ -5,8 +5,8 @@ include:
 
 exp:
   name: e1_main_qwen
-  goal: "Main QA results under matched token budgets (LLM-A)"
-  llm_profile: llm_a
+  goal: "Main QA results under matched token budgets (Qwen3-30B-A3B)"
+  llm_profile: default
 
 datasets:
   - hotpotqa_distractor_200

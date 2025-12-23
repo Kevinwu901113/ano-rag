@@ -3,10 +3,10 @@ from __future__ import annotations
 import json
 from typing import Any, Dict, List, Optional
 
-import requests
 from loguru import logger
 
 from utils.text_builders import build_note_text_for_rank
+from utils.llm_client import LLMChatClient
 
 
 class LLMReranker:
@@ -27,8 +27,16 @@ Candidates:
         self.model = self.llm_cfg.get("model")
         self.batch = int(self.llm_cfg.get("batch", 8))
         self.timeout = int(self.llm_cfg.get("timeout_s", 10))
+        self.client: Optional[LLMChatClient] = None
         if self.type != "llm" or not self.endpoint or not self.model:
             self.enabled = False
+        else:
+            self.client = LLMChatClient(
+                endpoint=self.endpoint,
+                model=self.model,
+                llm_profile="extract",
+                timeout=self.timeout,
+            )
 
     def score(self, question: str, candidates: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
         if not self.enabled or not candidates:
@@ -38,18 +46,15 @@ Candidates:
             chunk = candidates[start : start + self.batch]
             payload = self._build_payload(question, chunk)
             try:
-                response = requests.post(
-                    f"{self.endpoint.rstrip('/')}/chat/completions",
-                    json={
-                        "model": self.model,
-                        "messages": [{"role": "user", "content": payload}],
-                        "temperature": 0.0,
-                        "max_tokens": 64,
-                    },
-                    timeout=self.timeout,
+                if not self.client:
+                    raise RuntimeError("LLM reranker client not initialized")
+                response = self.client.chat(
+                    [{"role": "user", "content": payload}],
+                    temperature=0.0,
+                    max_tokens=64,
+                    llm_profile="extract",
                 )
-                response.raise_for_status()
-                content = response.json()["choices"][0]["message"]["content"]
+                content = response.content
                 scores = self._parse_scores(content, len(chunk))
             except Exception as exc:  # noqa: PERF203
                 logger.warning("LLM rerank failed, fallback to lexical scores: {}", exc)

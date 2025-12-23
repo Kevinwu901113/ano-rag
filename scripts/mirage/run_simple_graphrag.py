@@ -41,8 +41,8 @@ def main() -> None:
     parser.add_argument("--workdir", "--work-dir", dest="work_dir", default=None, help="Where to write outputs. Default: auto under result_root")
     parser.add_argument("--new", action="store_true", help="Force creating a new workspace")
     parser.add_argument("--limit", type=int, default=0, help="Limit number of questions (0=all)")
-    parser.add_argument("--lmstudio-endpoint", required=True)
-    parser.add_argument("--lmstudio-model", required=True)
+    parser.add_argument("--lm-endpoint", default=None)
+    parser.add_argument("--lm-model", default=None)
     parser.add_argument("--context-budget", type=int, default=0, help="Max context tokens (0 disables)")
     args = parser.parse_args()
 
@@ -50,12 +50,14 @@ def main() -> None:
     from config.config_loader import config as global_config
     # global_config is a ConfigLoader instance, not a dict.
     # It has a .set(key, value) method.
-    global_config.set("lmstudio.endpoint", args.lmstudio_endpoint)
-    global_config.set("lmstudio.model", args.lmstudio_model)
+    if args.lm_endpoint:
+        global_config.set("vllm.endpoint", args.lm_endpoint)
+    if args.lm_model:
+        global_config.set("vllm.model", args.lm_model)
     
-    # Ensure string types for kwargs passed later
-    lm_endpoint_str = str(args.lmstudio_endpoint)
-    lm_model_str = str(args.lmstudio_model)
+    cfg_snapshot = global_config.load_config()
+    lm_endpoint_str = str(args.lm_endpoint or cfg_snapshot.get("vllm", {}).get("endpoint") or "")
+    lm_model_str = str(args.lm_model or cfg_snapshot.get("vllm", {}).get("model") or "")
     
     dataset_path = Path(args.dataset_path)
     if not dataset_path.exists():
@@ -76,8 +78,8 @@ def main() -> None:
         work_dir,
         build_basic_config(
             dataset="mirage",
-            model=args.lmstudio_model,
-            endpoint=args.lmstudio_endpoint,
+            model=lm_model_str or "unknown",
+            endpoint=lm_endpoint_str or "unknown",
             temperature=None,
             max_tokens=None,
             context_budget=args.context_budget or None,

@@ -38,18 +38,18 @@ def main():
     parser.add_argument("--workdir", "--work-dir", dest="work_dir", type=str, help="Specific working directory (optional)")
     parser.add_argument("--new", action="store_true", help="Force creating a new workspace")
     parser.add_argument("--limit", type=int, default=0, help="Limit number of queries")
-    parser.add_argument("--lmstudio-endpoint", type=str, help="LM Studio endpoint override")
-    parser.add_argument("--lmstudio-model", type=str, help="LM Studio model name override")
+    parser.add_argument("--lm-endpoint", type=str, help="LLM endpoint override")
+    parser.add_argument("--lm-model", type=str, help="LLM model name override")
     parser.add_argument("--retrieval-only", action="store_true", help="Skip LLM calls; only run retrieval and log retrieval.jsonl")
     parser.add_argument("--context-budget", type=int, default=0, help="Max context tokens (0 disables)")
     
     args = parser.parse_args()
 
     # Override config if provided
-    if args.lmstudio_endpoint:
-        global_config.set("lmstudio.endpoint", args.lmstudio_endpoint)
-    if args.lmstudio_model:
-        global_config.set("lmstudio.model", args.lmstudio_model)
+    if args.lm_endpoint:
+        global_config.set("vllm.endpoint", args.lm_endpoint)
+    if args.lm_model:
+        global_config.set("vllm.model", args.lm_model)
 
     # Setup workspace
     work_dir = resolve_workdir(args.work_dir, result_root=args.result_root, dataset="mirage")
@@ -61,12 +61,15 @@ def main():
         
     setup_logging(str(work_dir / "run.log"))
     logger.info(f"Writing Simple Self-RAG outputs to {work_dir}")
+    cfg_snapshot = global_config.load_config()
+    lm_endpoint = args.lm_endpoint or cfg_snapshot.get("vllm", {}).get("endpoint")
+    lm_model = args.lm_model or cfg_snapshot.get("vllm", {}).get("model")
     write_config_resolved(
         work_dir,
         build_basic_config(
             dataset="mirage",
-            model=args.lmstudio_model or "unknown",
-            endpoint=args.lmstudio_endpoint or "unknown",
+            model=lm_model or "unknown",
+            endpoint=lm_endpoint or "unknown",
             temperature=None,
             max_tokens=None,
             context_budget=args.context_budget or None,

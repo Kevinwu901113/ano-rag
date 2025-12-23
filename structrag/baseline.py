@@ -78,17 +78,23 @@ class StructRAGBaselineRunner:
     ) -> None:
         self.cfg = config or config_loader.load_config()
         structrag_cfg = self.cfg.get("structrag") or {}
-        lm_cfg = self.cfg.get("lmstudio") or {}
+        lm_cfg = self.cfg.get("vllm") or {}
         self.top_k = int(top_k or structrag_cfg.get("top_k") or 10)
         supported = structrag_cfg.get("supported_types") or ["chunk", "graph"]
         model_name = lm_model or structrag_cfg.get("llm_model") or lm_cfg.get("model")
         endpoint = lm_endpoint or lm_cfg.get("endpoint")
         if not endpoint or not model_name:
-            raise ValueError("LM Studio endpoint/model must be provided for StructRAG baseline")
+            raise ValueError("vLLM endpoint/model must be provided for StructRAG baseline")
 
         self.retriever = NaiveIndex(index_path, chunks_path, config=self.cfg)
         self.doc_store = MirageDocStore(doc_pool_path)
-        self.llm = LLMChatClient(endpoint=endpoint, model=model_name, temperature=float(lm_cfg.get("temperature", 0.0)), max_tokens=int(lm_cfg.get("max_tokens", 128)))
+        self.llm = LLMChatClient(
+            endpoint=endpoint,
+            model=model_name,
+            llm_profile="generate",
+            temperature=float(lm_cfg.get("temperature", 0.0)),
+            max_tokens=int(lm_cfg.get("max_tokens", 128)),
+        )
         self.router = Router(self.llm, supported_types=supported)
         self.structurizer = Structurizer(self.llm)
         self.utilizer = Utilizer(self.llm)

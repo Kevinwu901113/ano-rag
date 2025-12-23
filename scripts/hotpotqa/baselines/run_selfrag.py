@@ -241,8 +241,8 @@ def main():
     parser.add_argument("--result-root", default="result_relrag", help="Root directory for auto workspace creation")
     parser.add_argument("--workdir", "--work-dir", dest="work_dir", default=None, help="Workspace directory (default: auto under result-root)")
     parser.add_argument("--new", action="store_true", help="Force creating a new workspace")
-    parser.add_argument("--lm-endpoint", default="http://localhost:1234/v1")
-    parser.add_argument("--lm-model", default="model-identifier")
+    parser.add_argument("--lm-endpoint", default="http://127.0.0.1:8000/v1")
+    parser.add_argument("--lm-model", default="qwen3-30b-a3b")
     parser.add_argument(
         "--embed-model",
         "--emb-model",

@@ -22,7 +22,12 @@ class Router:
         )
         prompt = ROUTER_PROMPT.format(question=question, documents=documents_block)
         logger.info("Router prompt prepared with {} doc briefs", len(doc_briefs))
-        resp = self.llm.chat([{"role": "user", "content": prompt}], max_tokens=8, temperature=0.0)
+        resp = self.llm.chat(
+            [{"role": "user", "content": prompt}],
+            max_tokens=8,
+            temperature=0.0,
+            llm_profile="extract",
+        )
         raw = (resp.content or "").strip().lower()
         chosen = self._normalize_choice(raw)
         logger.info("Router result: raw='{}' -> {}", raw, chosen)

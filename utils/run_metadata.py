@@ -7,6 +7,8 @@ import time
 from pathlib import Path
 from typing import Any, Dict, Optional
 
+from utils.llm_client import get_all_profile_snapshots
+
 
 def write_config_resolved(work_dir: Path, payload: Dict[str, Any]) -> Path:
     path = Path(work_dir) / "config.resolved.json"
@@ -59,6 +61,7 @@ def build_basic_config(
     budgets: Optional[Dict[str, Any]] = None,
     llm_profile: Optional[str] = None,
     git_commit: Optional[str] = None,
+    llm_profiles: Optional[Dict[str, Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     payload: Dict[str, Any] = {
         "dataset": dataset,
@@ -93,6 +96,10 @@ def build_basic_config(
     payload["embedding"] = dict(embedding or {})
     payload["budgets"] = budgets_payload
     payload["llm_profile"] = llm_profile or os.environ.get("LLM_PROFILE") or "default"
+    payload["llm_profiles"] = llm_profiles or get_all_profile_snapshots(
+        generate_max_tokens=max_tokens,
+        generate_temperature=temperature,
+    )
     payload["git_commit"] = git_commit or _git_commit()
     if extra:
         payload.update(extra)

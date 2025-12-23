@@ -15,7 +15,6 @@ if str(ROOT) not in sys.path:
 
 from baselines.simple_raptor.retriever import SimpleRaptorRetriever
 from baselines.common.model_clients import get_default_llm_client
-from rag_core.llm_client import LLMChatClient
 from utils.context_budget import pack_contexts
 from utils.jsonl_utils import write_jsonl
 from utils.logging_utils import setup_logging
@@ -58,8 +57,8 @@ def main() -> None:
     parser.add_argument("--result-root", default="result_relrag")
     parser.add_argument("--workdir", "--work-dir", dest="work_dir", default=None, help="Where to write outputs. Default: auto under result_root")
     parser.add_argument("--new", action="store_true", help="Force creating a new workspace (do not reuse latest)")
-    parser.add_argument("--lmstudio-endpoint", default=None)
-    parser.add_argument("--lmstudio-model", default=None)
+    parser.add_argument("--lm-endpoint", default=None)
+    parser.add_argument("--lm-model", default=None)
     parser.add_argument("--temperature", type=float, default=None)
     parser.add_argument("--max-new-tokens", type=int, default=None)
     parser.add_argument("--no-debug", action="store_true", help="Skip writing retrieval debug JSONL")
@@ -69,10 +68,10 @@ def main() -> None:
     
     # 1. Setup config for the baseline (it uses global config)
     from config.config_loader import config as global_config
-    if args.lmstudio_endpoint:
-        global_config.set("lmstudio.endpoint", args.lmstudio_endpoint)
-    if args.lmstudio_model:
-        global_config.set("lmstudio.model", args.lmstudio_model)
+    if args.lm_endpoint:
+        global_config.set("vllm.endpoint", args.lm_endpoint)
+    if args.lm_model:
+        global_config.set("vllm.model", args.lm_model)
 
     dataset_path = Path(args.dataset_path)
     if not dataset_path.exists():
@@ -102,13 +101,15 @@ def main() -> None:
     setup_logging(str(work_dir / "run.log"))
     logger.info("Writing outputs to {}", work_dir)
     cfg_snapshot = global_config.load_config()
+    lm_endpoint = args.lm_endpoint or cfg_snapshot.get("vllm", {}).get("endpoint")
+    lm_model = args.lm_model or cfg_snapshot.get("vllm", {}).get("model")
     emb_cfg = cfg_snapshot.get("retriever", {}).get("embedding", {})
     write_config_resolved(
         work_dir,
         build_basic_config(
             dataset="mirage",
-            model=args.lmstudio_model or "unknown",
-            endpoint=args.lmstudio_endpoint or "unknown",
+            model=lm_model or "unknown",
+            endpoint=lm_endpoint or "unknown",
             temperature=args.temperature,
             max_tokens=args.max_new_tokens,
             context_budget=args.context_budget or None,
@@ -137,7 +138,7 @@ def main() -> None:
     # Configure LLM Client explicit overrides if provided
     llm_client = None
     if not args.retrieval_only:
-        llm_client = get_default_llm_client()
+        llm_client = get_default_llm_client(llm_profile="generate")
 
     # Initialize Retriever
     retriever = SimpleRaptorRetriever(

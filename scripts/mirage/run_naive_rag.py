@@ -54,8 +54,8 @@ def main() -> None:
     parser.add_argument("--result-root", default="result_relrag")
     parser.add_argument("--workdir", "--work-dir", dest="work_dir", default=None, help="Where to write outputs. Default: auto under result_root")
     parser.add_argument("--new", action="store_true", help="Force creating a new workspace (do not reuse latest)")
-    parser.add_argument("--lmstudio-endpoint", default=None)
-    parser.add_argument("--lmstudio-model", default=None)
+    parser.add_argument("--lm-endpoint", default=None)
+    parser.add_argument("--lm-model", default=None)
     parser.add_argument("--temperature", type=float, default=None)
     parser.add_argument("--max-new-tokens", type=int, default=None)
     parser.add_argument("--embed-model", default=None, help="Embedding model override for query encoding")
@@ -68,10 +68,10 @@ def main() -> None:
     
     # 1. Setup config for the baseline (it uses global config)
     from config.config_loader import config as global_config
-    if args.lmstudio_endpoint:
-        global_config.set("lmstudio.endpoint", args.lmstudio_endpoint)
-    if args.lmstudio_model:
-        global_config.set("lmstudio.model", args.lmstudio_model)
+    if args.lm_endpoint:
+        global_config.set("vllm.endpoint", args.lm_endpoint)
+    if args.lm_model:
+        global_config.set("vllm.model", args.lm_model)
     if args.embed_model:
         global_config.set("retriever.embedding.model", args.embed_model)
     if args.embed_provider:
@@ -100,12 +100,15 @@ def main() -> None:
     run_name = work_dir.name
     logger.info("Writing outputs to {}", work_dir)
     setup_logging(str(work_dir / "run.log"))
+    cfg_snapshot = global_config.load_config()
+    lm_endpoint = args.lm_endpoint or cfg_snapshot.get("vllm", {}).get("endpoint")
+    lm_model = args.lm_model or cfg_snapshot.get("vllm", {}).get("model")
     write_config_resolved(
         work_dir,
         build_basic_config(
             dataset="mirage",
-            model=args.lmstudio_model or "unknown",
-            endpoint=args.lmstudio_endpoint or "unknown",
+            model=lm_model or "unknown",
+            endpoint=lm_endpoint or "unknown",
             temperature=args.temperature,
             max_tokens=args.max_new_tokens,
             context_budget=args.context_budget or None,
@@ -117,8 +120,8 @@ def main() -> None:
         str(index_path),
         str(chunks_path),
         topk=args.topk,
-        lm_endpoint=args.lmstudio_endpoint,
-        lm_model=args.lmstudio_model,
+        lm_endpoint=args.lm_endpoint,
+        lm_model=args.lm_model,
         temperature=args.temperature,
         max_tokens=args.max_new_tokens,
         context_budget=args.context_budget,

@@ -14,6 +14,10 @@ def log(msg):
     print(f"[Launcher] {msg}", flush=True)
 
 def start_vllm_managed():
+    proxy = "http://192.168.192.246:7890"
+    os.environ.setdefault("http_proxy", proxy)
+    os.environ.setdefault("https_proxy", proxy)
+
     # 1. Detect GPU count
     try:
         n_gpu = torch.cuda.device_count()
@@ -27,9 +31,10 @@ def start_vllm_managed():
     log(f"Detected {n_gpu} GPUs.")
 
     # 2. Configuration
-    model_name = get_env_var("QWEN3_MODEL", "Qwen/Qwen2.5-7B-Instruct")
-    served_name = get_env_var("SERVED_MODEL_NAME", "qwen-served")
-    port = get_env_var("VLLM_PORT", "8001")
+    model_name = "Qwen/Qwen3-30B-A3B"
+    served_name = "qwen3-30b-a3b"
+    port = "8000"
+    download_dir = os.path.expanduser("~/.cache/huggingface")
     
     # Base command
     # Using 'vllm serve' as requested, assuming vllm is in PATH. 
@@ -41,11 +46,11 @@ def start_vllm_managed():
         "--host", "0.0.0.0",
         "--port", port,
         "--uvicorn-log-level", "info",
-        "--download-dir", "/root/.cache/huggingface",
+        "--download-dir", download_dir,
         "--tensor-parallel-size", str(n_gpu),
         "--dtype", "bfloat16",
         "--gpu-memory-utilization", "0.90",
-        "--max-model-len", "4096",
+        "--max-model-len", "8192",
         "--limit-mm-per-prompt.image", "1",
         "--limit-mm-per-prompt.video", "0",
         "--swap-space", "16",

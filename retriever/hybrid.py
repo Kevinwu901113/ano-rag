@@ -42,7 +42,7 @@ class HybridRetriever:
         self.agreement_threshold = int(self.hybrid_cfg.get("agreement_threshold", 2))
         self.embedding_client = EmbeddingClient(self.embed_cfg) if self.embed_cfg.get("enabled") else None
         self.bm25_client = BM25Client(self.bm25_cfg) if self.bm25_cfg.get("enabled") else None
-        self.reranker = LLMReranker(self.rerank_cfg, lm_cfg=self.cfg.get("lmstudio"))
+        self.reranker = LLMReranker(self.rerank_cfg, lm_cfg=self.cfg.get("vllm"))
         self.metrics = MetricsLogger()
 
     def retrieve(

@@ -94,7 +94,12 @@ class GraphBuilder:
         messages = [{"role": "user", "content": prompt}]
         try:
             # Call chat_async instead of chat
-            response = await self.llm_client.chat_async(messages, max_tokens=8192, temperature=0.0)
+            response = await self.llm_client.chat_async(
+                messages,
+                max_tokens=8192,
+                temperature=0.0,
+                llm_profile="extract",
+            )
             content = response.content
             
             # Debug logging to see what the model is actually outputting

@@ -55,15 +55,15 @@ def _strip_reasoning(answer: str) -> str:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Run LM Studio answers for MIRAGE dataset")
+    parser = argparse.ArgumentParser(description="Run vLLM answers for MIRAGE dataset")
     parser.add_argument("--dataset", default="mirage", help="Dataset name (used for workspace naming)")
     parser.add_argument("--dataset-path", default=None, help="Path to dataset.json")
     parser.add_argument("--result-root", default="result_relrag")
     parser.add_argument("--workdir", "--work-dir", dest="work_dir", default=None, help="Explicit workspace path")
     parser.add_argument("--indexes-dir", default=None)
     parser.add_argument("--notes", default=None)
-    parser.add_argument("--lmstudio-endpoint", required=True)
-    parser.add_argument("--lmstudio-model", required=True)
+    parser.add_argument("--lm-endpoint", default=None)
+    parser.add_argument("--lm-model", default=None)
     parser.add_argument("--limit", type=int, default=5)
     parser.add_argument("--out", default=None, help="Output JSON path")
     parser.add_argument("--qa-log", default=None, help="Optional plain text QA log path (question \t answer)")
@@ -74,6 +74,11 @@ def main() -> None:
     parser.add_argument("--temperature", type=float, default=None, help="Override LLM temperature")
     parser.add_argument("--max-new-tokens", type=int, default=None, help="Override LLM max new tokens")
     args = parser.parse_args()
+
+    from config.config_loader import config as global_config_loader
+    cfg_snapshot = global_config_loader.load_config()
+    lm_endpoint = args.lm_endpoint or cfg_snapshot.get("vllm", {}).get("endpoint")
+    lm_model = args.lm_model or cfg_snapshot.get("vllm", {}).get("model")
 
     dataset_name = args.dataset
     dataset_path = Path(args.dataset_path) if args.dataset_path else Path(f"data/{dataset_name}_sample/dataset.json")
@@ -101,8 +106,8 @@ def main() -> None:
 
     if args.direct_llm:
         runner = DirectLLMRunner(
-            lm_endpoint=args.lmstudio_endpoint,
-            lm_model=args.lmstudio_model,
+            lm_endpoint=lm_endpoint,
+            lm_model=lm_model,
             temperature=args.temperature,
             max_tokens=args.max_new_tokens,
         )
@@ -201,10 +206,10 @@ def main() -> None:
 
         # Create custom LLM Client if args provided
         llm_client = None
-        if args.lmstudio_endpoint and args.lmstudio_model:
+        if lm_endpoint and lm_model:
             llm_client = LLMClient(
-                endpoint=args.lmstudio_endpoint,
-                model=args.lmstudio_model,
+                endpoint=lm_endpoint,
+                model=lm_model,
                 temperature=args.temperature if args.temperature is not None else 0.0,
                 max_tokens=args.max_new_tokens or 2048
             )
@@ -266,8 +271,6 @@ def main() -> None:
     qp = QueryProcessor(
         indexes_dir=str(indexes_dir),
         notes_path=str(notes_path),
-        lmstudio_endpoint=args.lmstudio_endpoint,
-        lmstudio_model=args.lmstudio_model,
     )
 
     results = []

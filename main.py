@@ -27,8 +27,6 @@ def main() -> None:
     query.add_argument("question")
     query.add_argument("--indexes-dir", default=None)
     query.add_argument("--notes-path", default=None)
-    query.add_argument("--lmstudio-endpoint", default=None)
-    query.add_argument("--lmstudio-model", default=None)
 
     args = parser.parse_args()
     cfg = config.load_config()
@@ -65,8 +63,6 @@ def main() -> None:
         processor = QueryProcessor(
             indexes_dir=args.indexes_dir,
             notes_path=args.notes_path,
-            lmstudio_endpoint=args.lmstudio_endpoint,
-            lmstudio_model=args.lmstudio_model,
         )
         result = processor.process(args.question)
         print(result)

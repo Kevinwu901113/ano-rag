@@ -20,8 +20,8 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     },
     "chunk": {"n_sent": 3, "overlap": 1, "max_tokens": 768},
     "vllm": {
-        "endpoint": "http://127.0.0.1:8001/v1",
-        "model": "qwen2.5-7b-instruct",
+        "endpoint": "http://127.0.0.1:8000/v1",
+        "model": "qwen3-30b-a3b",
         "temperature": 0.0,
         "max_tokens": 256,
         "max_new_tokens": 256,
@@ -67,17 +67,15 @@ DEFAULT_CONFIG: Dict[str, Any] = {
             "schema_name": "ano-note",
         },
     },
-    "lmstudio": {
-        "endpoint": "http://127.0.0.1:1234/v1",
-        "model": "qwen2.5-7b-instruct",
-        "temperature": 0.2,
-        "max_tokens": 64,
+    "llm_profiles": {
+        "extract": {"temperature": 0.0, "max_tokens": 256, "thinking": False},
+        "generate": {"temperature": 0.2, "max_tokens": 128, "thinking": None},
     },
     "structrag": {
         "router": "llm",
         "supported_types": ["chunk", "graph"],
         "top_k": 10,
-        "llm_model": "qwen2.5-7b-instruct",
+        "llm_model": "qwen3-30b-a3b",
     },
     "routing": {
         "token_budget_hint": 320000,
@@ -138,7 +136,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "reranker": {
         "enabled": True,
         "type": "llm",
-        "llm": {"endpoint": "${lmstudio.endpoint}", "model": "${lmstudio.model}", "batch": 16, "timeout_s": 60},
+        "llm": {"endpoint": "${vllm.endpoint}", "model": "${vllm.model}", "batch": 16, "timeout_s": 60},
         "final_weights": {"pre": 0.3, "rerank": 0.5, "struct": 0.2},
     },
     "notes": {"out_path": "notes/notes.jsonl", "indexes_dir": "indexes/"},

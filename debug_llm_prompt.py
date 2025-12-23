@@ -1,9 +1,9 @@
 import json
-import requests
 
-def debug_llm_response(endpoint="http://127.0.0.1:8001/v1", model="Qwen/Qwen2.5-7B-Instruct"):
-    url = f"{endpoint}/chat/completions"
-    headers = {"Content-Type": "application/json"}
+from utils.llm_client import LLMChatClient
+
+def debug_llm_response(endpoint="http://127.0.0.1:8000/v1", model="qwen3-30b-a3b"):
+    client = LLMChatClient(endpoint=endpoint, model=model, llm_profile="generate", retries=0, timeout=10)
     
     context = """John Dawson Mayne
 
@@ -21,20 +21,16 @@ Answer:"""
 
     prompt = prompt_template.format(context=context, question=question)
 
-    payload = {
-        "model": model,
-        "messages": [{"role": "user", "content": prompt}],
-        "temperature": 0.0,
-        "max_tokens": 100
-    }
-    
     print(f"Sending prompt:\n{prompt}\n")
     
     try:
-        response = requests.post(url, headers=headers, json=payload, timeout=10)
-        response.raise_for_status()
-        data = response.json()
-        content = data['choices'][0]['message']['content']
+        response = client.chat(
+            [{"role": "user", "content": prompt}],
+            temperature=0.0,
+            max_tokens=100,
+        )
+        data = response.raw
+        content = response.content
         print(f"Raw LLM Response: {content!r}")
     except Exception as e:
         print(f"Error: {e}")

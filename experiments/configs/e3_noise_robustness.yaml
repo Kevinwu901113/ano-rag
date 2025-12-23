@@ -9,8 +9,8 @@ exp:
 
 llm_profiles:
   - name: default
-    model: ${LLM_MODEL:-Qwen/Qwen2.5-7B-Instruct}
-    endpoint: ${LLM_ENDPOINT:-http://localhost:8000/v1}
+    model: qwen3-30b-a3b
+    endpoint: http://127.0.0.1:8000/v1
 
 datasets:
   - hotpotqa_distractor_200

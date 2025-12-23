@@ -33,7 +33,12 @@ class Utilizer:
 
     def _decompose(self, question: str) -> List[str]:
         prompt = DECOMPOSITION_PROMPT.format(question=question.replace("{", "{{").replace("}", "}}"))
-        resp = self.llm.chat([{"role": "user", "content": prompt}], max_tokens=196, temperature=0.0)
+        resp = self.llm.chat(
+            [{"role": "user", "content": prompt}],
+            max_tokens=196,
+            temperature=0.0,
+            llm_profile="extract",
+        )
         parsed = self._parse_json_array(resp.content, fallback=[question])
         subqs = [str(item).strip() for item in parsed if str(item).strip()]
         if not subqs:
@@ -70,7 +75,12 @@ class Utilizer:
             subquestions=subq_lines,
             candidates=cand_block,
         )
-        resp = self.llm.chat([{"role": "user", "content": prompt}], max_tokens=256, temperature=0.0)
+        resp = self.llm.chat(
+            [{"role": "user", "content": prompt}],
+            max_tokens=256,
+            temperature=0.0,
+            llm_profile="extract",
+        )
         parsed = self._parse_json_array(resp.content, fallback=[])
         selections: List[Dict] = []
         for item in parsed:
@@ -123,6 +133,7 @@ class Utilizer:
             [{"role": "user", "content": prompt}],
             max_tokens=self.max_tokens_answer,
             temperature=0.2,
+            llm_profile="generate",
         )
         answer = (resp.content or "").strip()
         logger.info("Final answer generated (len={}): {}", len(answer), answer[:120])

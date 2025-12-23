@@ -247,8 +247,8 @@ def main():
     parser.add_argument("--result-root", default="result_relrag", help="Root directory for auto workspace creation")
     parser.add_argument("--workdir", "--work-dir", dest="work_dir", default=None, help="Workspace directory (default: auto under result-root)")
     parser.add_argument("--new", action="store_true", help="Force creating a new workspace")
-    parser.add_argument("--lm-endpoint", default="http://localhost:1234/v1", help="LLM API endpoint")
-    parser.add_argument("--lm-model", default="model-identifier", help="LLM model name")
+    parser.add_argument("--lm-endpoint", default="http://127.0.0.1:8000/v1", help="LLM API endpoint")
+    parser.add_argument("--lm-model", default="qwen3-30b-a3b", help="LLM model name")
     parser.add_argument("--max-new-tokens", type=int, default=None, help="Max new tokens for LLM decoding")
     parser.add_argument(
         "--embed-model",

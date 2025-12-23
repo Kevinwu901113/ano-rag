@@ -26,7 +26,7 @@ Answer:"""
 
 
 class FiDRAGRunner:
-    """FiD-style RAG baseline with NaiveIndex retriever and LM Studio backend."""
+    """FiD-style RAG baseline with NaiveIndex retriever and vLLM backend."""
 
     def __init__(
         self,
@@ -45,7 +45,7 @@ class FiDRAGRunner:
         self.cfg = config or config_loader.load_config()
         self.topk = max(1, int(topk))
         self.context_budget = int(context_budget or 0)
-        lm_cfg = self.cfg.get("lmstudio", {}) or {}
+        lm_cfg = self.cfg.get("vllm", {}) or {}
         endpoint = lm_endpoint or lm_cfg.get("endpoint")
         model = lm_model or lm_cfg.get("model")
         
@@ -64,18 +64,18 @@ class FiDRAGRunner:
             # We need to ensure get_default_llm_client uses these overrides.
             # But get_default_llm_client reads from config dict.
             # So we create a temporary config dict with overrides.
-            # Or just update self.cfg['lmstudio']?
-            # Safer to just rely on global config updates if passed via CLI, 
+            # Or just update self.cfg['vllm']?
+            # Safer to just rely on global config updates if passed via CLI,
             # BUT arguments here are passed explicitly.
-            # Let's just update self.cfg['lmstudio'] locally.
-            if "lmstudio" not in self.cfg:
-                self.cfg["lmstudio"] = {}
+            # Let's just update self.cfg['vllm'] locally.
+            if "vllm" not in self.cfg:
+                self.cfg["vllm"] = {}
             if endpoint:
-                self.cfg["lmstudio"]["endpoint"] = endpoint
+                self.cfg["vllm"]["endpoint"] = endpoint
             if model:
-                self.cfg["lmstudio"]["model"] = model
+                self.cfg["vllm"]["model"] = model
 
-        self.lm = get_default_llm_client(self.cfg)
+        self.lm = get_default_llm_client(self.cfg, llm_profile="generate")
 
     def run_dataset(
         self,
@@ -126,6 +126,8 @@ class FiDRAGRunner:
                 if prompt.strip()
                 else ""
             )
+            if hasattr(raw_output, "content"):
+                raw_output = raw_output.content
             answers.append(
                 {
                     "query_id": qid,

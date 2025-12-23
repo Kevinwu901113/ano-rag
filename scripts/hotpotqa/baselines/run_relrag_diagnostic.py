@@ -5,8 +5,8 @@ Diagnostic runner for the HotpotQA RelRAG baseline.
 Usage (defaults match baseline settings):
     python scripts/hotpotqa/baselines/run_relrag_diagnostic.py \
         --dataset data/hotpotqa/dataset_distractor_200.json \
-        --lm-endpoint http://127.0.0.1:1234/v1 \
-        --lm-model qwen/qwen3-30b-a3b \
+        --lm-endpoint http://127.0.0.1:8000/v1 \
+        --lm-model qwen3-30b-a3b \
         --output-dir analysis/hotpotqa_relrag_case_study_20
 """
 from __future__ import annotations
@@ -484,8 +484,8 @@ def main() -> None:
     parser.add_argument("--threshold", type=float, default=0.7)
     parser.add_argument("--alpha", type=float, default=0.6)
     parser.add_argument("--topk", type=int, default=3)
-    parser.add_argument("--lm-endpoint", default="http://127.0.0.1:1234/v1")
-    parser.add_argument("--lm-model", default="qwen/qwen3-30b-a3b")
+    parser.add_argument("--lm-endpoint", default="http://127.0.0.1:8000/v1")
+    parser.add_argument("--lm-model", default="qwen3-30b-a3b")
     parser.add_argument("--temperature", type=float, default=0.0)
     parser.add_argument("--emb-model", default="Qwen/Qwen3-Embedding-8B")
     parser.add_argument("--emb-device", default=None)

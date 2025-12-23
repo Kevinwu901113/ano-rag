@@ -68,7 +68,7 @@ class SimpleSelfRAGRetriever:
         if llm_client:
             self.llm = llm_client
         else:
-            self.llm = get_default_llm_client(self.config)
+            self.llm = get_default_llm_client(self.config, llm_profile="generate")
             
         self.top_k_first = self.selfrag_config.get("top_k_first", 5)
         self.top_k_second = self.selfrag_config.get("top_k_second", 10)
@@ -133,7 +133,7 @@ class SimpleSelfRAGRetriever:
             {"role": "user", "content": prompt_1}
         ]
         
-        answer_0 = self.llm.chat(messages_1)
+        answer_0 = self.llm.chat(messages_1, llm_profile="generate").content
         logger.info(f"Initial answer: {answer_0[:100]}...")
         
         # Step 2: Critique
@@ -155,7 +155,10 @@ Answer:
 
 Verdict (sufficient / insufficient):"""
 
-        verdict_raw = self.llm.chat([{"role": "user", "content": critique_prompt}])
+        verdict_raw = self.llm.chat(
+            [{"role": "user", "content": critique_prompt}],
+            llm_profile="generate",
+        ).content
         verdict = verdict_raw.strip().lower()
         logger.info(f"Critique verdict: {verdict}")
         
@@ -191,7 +194,7 @@ Improved answer (short phrase):"""
              {"role": "user", "content": prompt_2}
         ]
 
-        answer_1 = self.llm.chat(messages_2)
+        answer_1 = self.llm.chat(messages_2, llm_profile="generate").content
         logger.info(f"Improved answer: {answer_1[:100]}...")
         
         # Keep the contexts used in the final round for logging

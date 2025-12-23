@@ -5,7 +5,7 @@ include:
 
 exp:
   name: e7_cross_llm
-  goal: "Robustness across LLMs (LLM-A vs LLM-B) on key subset"
+  goal: "Single-LLM robustness (vLLM Qwen3-30B-A3B) on key subset"
 
 datasets:
   - hotpotqa_distractor_200
@@ -15,13 +15,9 @@ methods:
   - relrag_full
 
 llm_profiles:
-  - name: llm_a_qwen
-    endpoint: "http://127.0.0.1:1234/v1"
-    model: "qwen/qwen3-30b-a3b"
-  - name: llm_b_gpt4o
-    endpoint: "${OPENAI_BASE_URL:-https://api.openai.com/v1}"
-    model: "gpt-4o"
-    api_key_env: "OPENAI_API_KEY"
+  - name: qwen3_30b_a3b
+    endpoint: "http://127.0.0.1:8000/v1"
+    model: "qwen3-30b-a3b"
 
 report:
   metrics:

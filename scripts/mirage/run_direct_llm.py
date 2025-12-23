@@ -37,8 +37,8 @@ def main() -> None:
     parser.add_argument("--workdir", "--work-dir", dest="work_dir", default=None, help="Where to write outputs. Default: auto under result_root")
     parser.add_argument("--new", action="store_true", help="Force creating a new workspace (do not reuse latest)")
     parser.add_argument("--limit", type=int, default=0, help="Limit number of questions (0=all)")
-    parser.add_argument("--lmstudio-endpoint", default=None)
-    parser.add_argument("--lmstudio-model", default=None)
+    parser.add_argument("--lm-endpoint", default=None)
+    parser.add_argument("--lm-model", default=None)
     parser.add_argument("--temperature", type=float, default=None)
     parser.add_argument("--max-new-tokens", type=int, default=None)
     parser.add_argument("--no-system-prompt", action="store_true", help="Skip the default direct-LLM system prompt")
@@ -49,10 +49,10 @@ def main() -> None:
     from config.config_loader import config as global_config
     # global_config is a ConfigLoader instance, not a dict.
     # It has a .set(key, value) method.
-    if args.lmstudio_endpoint:
-        global_config.set("lmstudio.endpoint", args.lmstudio_endpoint)
-    if args.lmstudio_model:
-        global_config.set("lmstudio.model", args.lmstudio_model)
+    if args.lm_endpoint:
+        global_config.set("vllm.endpoint", args.lm_endpoint)
+    if args.lm_model:
+        global_config.set("vllm.model", args.lm_model)
 
     dataset_path = Path(args.dataset_path)
     if not dataset_path.exists():
@@ -66,12 +66,15 @@ def main() -> None:
     run_name = work_dir.name
     logger.info("Writing direct LLM outputs to {}", work_dir)
     setup_logging(str(work_dir / "run.log"))
+    cfg_snapshot = global_config.load_config()
+    lm_endpoint = args.lm_endpoint or cfg_snapshot.get("vllm", {}).get("endpoint")
+    lm_model = args.lm_model or cfg_snapshot.get("vllm", {}).get("model")
     write_config_resolved(
         work_dir,
         build_basic_config(
             dataset="mirage",
-            model=args.lmstudio_model or "unknown",
-            endpoint=args.lmstudio_endpoint or "unknown",
+            model=lm_model or "unknown",
+            endpoint=lm_endpoint or "unknown",
             temperature=args.temperature,
             max_tokens=args.max_new_tokens,
             context_budget=args.context_budget or None,
@@ -87,8 +90,8 @@ def main() -> None:
     )
 
     runner_kwargs = {
-        "lm_endpoint": args.lmstudio_endpoint,
-        "lm_model": args.lmstudio_model,
+        "lm_endpoint": args.lm_endpoint,
+        "lm_model": args.lm_model,
         "temperature": args.temperature,
         "max_tokens": args.max_new_tokens,
     }

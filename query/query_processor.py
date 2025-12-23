@@ -24,16 +24,11 @@ class QueryProcessor:
         *,
         indexes_dir: Optional[str] = None,
         notes_path: Optional[str] = None,
-        lmstudio_endpoint: Optional[str] = None,
-        lmstudio_model: Optional[str] = None,
     ) -> None:
         self.cfg = config.load_config()
         cfg = self.cfg
         self.indexes_dir = indexes_dir or cfg.get("notes.indexes_dir", "indexes")
         self.notes_path = notes_path or cfg.get("notes.out_path", "notes/notes.jsonl")
-
-        self.lmstudio_endpoint = lmstudio_endpoint or cfg.get("lmstudio.endpoint")
-        self.lmstudio_model = lmstudio_model or cfg.get("lmstudio.model")
 
         if not self.indexes_dir:
             raise ValueError("indexes_dir must be provided")

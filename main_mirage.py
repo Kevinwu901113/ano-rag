@@ -51,8 +51,8 @@ def main() -> None:
     parser.add_argument("--result-root", default="result_relrag")
     parser.add_argument("--workdir", "--work-dir", dest="work_dir", default=None)
     parser.add_argument("--new", action="store_true")
-    parser.add_argument("--lmstudio-endpoint", default=None)
-    parser.add_argument("--lmstudio-model", default=None)
+    parser.add_argument("--lm-endpoint", default=None)
+    parser.add_argument("--lm-model", default=None)
     parser.add_argument("--temperature", type=float, default=None, help="Optional temperature override for naive/direct baselines")
     parser.add_argument("--max-new-tokens", type=int, default=None, help="Optional max tokens override for naive/direct baselines")
     args = parser.parse_args()
@@ -78,8 +78,8 @@ def main() -> None:
     index_path = Path(args.index_path) if args.index_path else index_dir / "index.faiss"
     chunks_path = Path(args.chunks_path) if args.chunks_path else index_dir / "chunks.jsonl"
 
-    lm_endpoint = args.lmstudio_endpoint or cfg.get("lmstudio.endpoint")
-    lm_model = args.lmstudio_model or cfg.get("lmstudio.model")
+    lm_endpoint = args.lm_endpoint or cfg.get("vllm.endpoint")
+    lm_model = args.lm_model or cfg.get("vllm.model")
 
     if args.mode == "structrag_baseline":
         if not index_path.exists():

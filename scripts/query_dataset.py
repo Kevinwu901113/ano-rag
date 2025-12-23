@@ -101,8 +101,8 @@ def main() -> None:
     
     parser.add_argument("--indexes-dir", default=None)
     parser.add_argument("--notes", default=None)
-    parser.add_argument("--lmstudio-endpoint", required=True)
-    parser.add_argument("--lmstudio-model", required=True)
+    parser.add_argument("--lm-endpoint", default=None)
+    parser.add_argument("--lm-model", default=None)
     parser.add_argument("--limit", type=int, default=5)
     parser.add_argument("--out", default=None, help="Output JSON path")
     parser.add_argument("--qa-log", default=None, help="Optional plain text QA log path (question \t answer)")
@@ -112,6 +112,9 @@ def main() -> None:
     parser.add_argument("--temperature", type=float, default=None, help="Override LLM temperature")
     parser.add_argument("--max-new-tokens", type=int, default=None, help="Override LLM max new tokens")
     args = parser.parse_args()
+
+    lm_endpoint = args.lm_endpoint or global_config_loader.get("vllm.endpoint")
+    lm_model = args.lm_model or global_config_loader.get("vllm.model")
 
     # Normalize baseline selection
     if args.direct_llm: args.baseline = "direct"
@@ -150,8 +153,8 @@ def main() -> None:
 
     # Setup LLM Client
     llm_client = LLMClient(
-        endpoint=args.lmstudio_endpoint,
-        model=args.lmstudio_model,
+        endpoint=lm_endpoint,
+        model=lm_model,
         temperature=args.temperature if args.temperature is not None else 0.0,
         max_tokens=args.max_new_tokens or 2048
     )
@@ -204,8 +207,8 @@ Answer with a short phrase. If the answer is not in the context, say "unknown"."
 
         else:
             runner = DirectLLMRunner(
-                lm_endpoint=args.lmstudio_endpoint,
-                lm_model=args.lmstudio_model,
+                lm_endpoint=lm_endpoint,
+                lm_model=lm_model,
                 temperature=args.temperature,
                 max_tokens=args.max_new_tokens,
             )
@@ -309,8 +312,8 @@ Answer with a short phrase. If the answer is not in the context, say "unknown"."
             runner = NaiveRAGRunner(
                 index_path=index_path,
                 chunks_path=chunk_path,
-                lm_endpoint=args.lmstudio_endpoint,
-                lm_model=args.lmstudio_model,
+                lm_endpoint=lm_endpoint,
+                lm_model=lm_model,
             )
             answer_func = runner.answer
             
@@ -362,8 +365,8 @@ Answer with a short phrase. If the answer is not in the context, say "unknown"."
                 # We should probably use VanillaRAGRunner class if available or just set global config.
                 
                 # Set global config for LLM
-                global_config_loader.set("lmstudio.endpoint", args.lmstudio_endpoint)
-                global_config_loader.set("lmstudio.model", args.lmstudio_model)
+                global_config_loader.set("vllm.endpoint", lm_endpoint)
+                global_config_loader.set("vllm.model", lm_model)
                 
                 ans = vanilla_rag_answer(question, index_path=index_path, chunk_store_path=chunk_path)
                 
@@ -385,8 +388,8 @@ Answer with a short phrase. If the answer is not in the context, say "unknown"."
         logger.info(f"Running Self-RAG with index={index_path}")
         
         # Set global config for LLM
-        global_config_loader.set("lmstudio.endpoint", args.lmstudio_endpoint)
-        global_config_loader.set("lmstudio.model", args.lmstudio_model)
+        global_config_loader.set("vllm.endpoint", lm_endpoint)
+        global_config_loader.set("vllm.model", lm_model)
 
         for i, item in enumerate(dataset):
             question = item.get("query") or item.get("question")
@@ -438,8 +441,8 @@ Answer with a short phrase. If the answer is not in the context, say "unknown"."
         chunk_store_path = str(index_dir / "chunk_store.pkl")
         
         # Set global config for LLM
-        global_config_loader.set("lmstudio.endpoint", args.lmstudio_endpoint)
-        global_config_loader.set("lmstudio.model", args.lmstudio_model)
+        global_config_loader.set("vllm.endpoint", lm_endpoint)
+        global_config_loader.set("vllm.model", lm_model)
         
         logger.info(f"Running GraphRAG with graph={graph_path}")
         
@@ -467,8 +470,6 @@ Answer with a short phrase. If the answer is not in the context, say "unknown"."
         qp = QueryProcessor(
             indexes_dir=str(indexes_dir),
             notes_path=str(notes_path),
-            lmstudio_endpoint=args.lmstudio_endpoint,
-            lmstudio_model=args.lmstudio_model,
         )
 
         for item in dataset:

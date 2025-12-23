@@ -38,7 +38,7 @@ class EmbeddingEncoder:
                 self._model_instance = None
         elif provider == "vllm":
             # OpenAI-compatible vLLM embedding client
-            self.endpoint = kwargs.get("endpoint", "http://127.0.0.1:8001/v1").rstrip("/")
+            self.endpoint = kwargs.get("endpoint", "http://127.0.0.1:8000/v1").rstrip("/")
             self.api_key = kwargs.get("api_key", "EMPTY")
             self.model_name = model
             logger.info(f"Using vLLM embedding provider at {self.endpoint} with model {self.model_name}")

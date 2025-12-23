@@ -1,11 +1,9 @@
-import time
-
 from typing import Any, Dict, List, Optional
 
-import requests
 from loguru import logger
 
 from generator.extractor import judge_and_compress
+from utils.llm_client import LLMChatClient
 from utils.output_protocol import build_final_instruction
 
 
@@ -28,7 +26,7 @@ Answer:
 """
 
 
-def call_lmstudio(
+def call_llm(
     endpoint: str,
     model: str,
     question: str,
@@ -57,28 +55,23 @@ def call_lmstudio(
         final_instruction=build_final_instruction(),
     )
 
-    for attempt in range(retries + 1):
-        try:
-            response = requests.post(
-                f"{endpoint.rstrip('/')}/chat/completions",
-                json={
-                    "model": model,
-                    "temperature": temperature,
-                    "max_tokens": max_tokens,
-                    "messages": [{"role": "user", "content": prompt}],
-                },
-                timeout=60,
-            )
-            response.raise_for_status()
-            data = response.json()
-            raw_answer = data["choices"][0]["message"]["content"].strip()
-            return raw_answer
-        except requests.RequestException as exc:  # noqa: PERF203
-            if attempt == retries:
-                raise
-            wait = 2 ** attempt
-            logger.warning("Answerer call failed (attempt={}): {}", attempt + 1, exc)
-            time.sleep(wait)
+    client = LLMChatClient(
+        endpoint=endpoint,
+        model=model,
+        llm_profile="generate",
+        retries=retries,
+        timeout=60,
+    )
+    try:
+        response = client.chat(
+            [{"role": "user", "content": prompt}],
+            temperature=temperature,
+            max_tokens=max_tokens,
+        )
+        return response.content.strip()
+    except Exception as exc:  # noqa: PERF203
+        logger.warning("Answerer call failed: {}", exc)
+        raise
 
 
 def _compress_evidence(question: str, evidences: list, endpoint: str, model: str) -> list:

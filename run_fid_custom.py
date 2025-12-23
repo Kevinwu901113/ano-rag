@@ -49,8 +49,8 @@ def main() -> None:
     parser.add_argument("--result-root", default="result")
     parser.add_argument("--work-dir", default=None)
     parser.add_argument("--new", action="store_true")
-    parser.add_argument("--lmstudio-endpoint", default=None)
-    parser.add_argument("--lmstudio-model", default=None)
+    parser.add_argument("--lm-endpoint", default=None)
+    parser.add_argument("--lm-model", default=None)
     parser.add_argument("--temperature", type=float, default=None)
     parser.add_argument("--max-new-tokens", type=int, default=8192)
     parser.add_argument("--gpu-device", type=str, default="1", help="CUDA_VISIBLE_DEVICES value")
@@ -89,8 +89,8 @@ def main() -> None:
     if not chunks_path.exists():
         raise FileNotFoundError(f"chunks.jsonl not found: {chunks_path}")
 
-    lm_endpoint = args.lmstudio_endpoint or cfg.get("lmstudio.endpoint")
-    lm_model = args.lmstudio_model or cfg.get("lmstudio.model")
+    lm_endpoint = args.lm_endpoint or cfg.get("vllm.endpoint")
+    lm_model = args.lm_model or cfg.get("vllm.model")
 
     runner = FiDRAGRunner(
         str(index_path),

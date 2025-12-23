@@ -23,8 +23,8 @@ def main() -> None:
     parser.add_argument("--result-root", default="result_relrag", help="Root directory for auto workspace creation")
     parser.add_argument("--workdir", "--work-dir", dest="work_dir", default=None, help="Workspace directory (default: auto under result-root)")
     parser.add_argument("--cluster-size", type=int, default=16, help="K-means cluster size")
-    parser.add_argument("--lmstudio-endpoint", default=None)
-    parser.add_argument("--lmstudio-model", default=None)
+    parser.add_argument("--lm-endpoint", default=None)
+    parser.add_argument("--lm-model", default=None)
     parser.add_argument("--temperature", type=float, default=None)
     args = parser.parse_args()
 
@@ -68,10 +68,10 @@ def main() -> None:
     # 2. Configure config overrides
     from config.config_loader import config as global_config
     
-    if args.lmstudio_endpoint:
-        global_config.set("lmstudio.endpoint", args.lmstudio_endpoint)
-    if args.lmstudio_model:
-        global_config.set("lmstudio.model", args.lmstudio_model)
+    if args.lm_endpoint:
+        global_config.set("vllm.endpoint", args.lm_endpoint)
+    if args.lm_model:
+        global_config.set("vllm.model", args.lm_model)
 
     # Initialize Indexer
     # We rely on global config for embedding client (via EmbeddingClient inside Indexer)
@@ -80,10 +80,10 @@ def main() -> None:
     from baselines.common.model_clients import get_default_llm_client
     
     llm_client = None
-    if args.lmstudio_endpoint or args.lmstudio_model:
+    if args.lm_endpoint or args.lm_model:
         # Since we updated global_config above, we can just call get_default_llm_client
         # which reads from global_config.
-        llm_client = get_default_llm_client()
+        llm_client = get_default_llm_client(llm_profile="extract")
         
     indexer = SimpleRaptorIndexer(llm_client=llm_client)
     

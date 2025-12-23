@@ -107,7 +107,12 @@ class GraphRetriever:
         """
         messages = [{"role": "user", "content": prompt}]
         try:
-            response = self.llm_client.chat(messages, max_tokens=8192, temperature=0.0)
+            response = self.llm_client.chat(
+                messages,
+                max_tokens=8192,
+                temperature=0.0,
+                llm_profile="generate",
+            )
             # response might be object or string depending on client implementation
             # LLMChatClient.chat returns string if configured properly, but let's handle both
             content = response if isinstance(response, str) else response.content
@@ -217,7 +222,12 @@ class GraphRetriever:
         ]
         
         try:
-            response = self.llm_client.chat(messages, max_tokens=8192, temperature=0.0)
+            response = self.llm_client.chat(
+                messages,
+                max_tokens=8192,
+                temperature=0.0,
+                llm_profile="extract",
+            )
             content = response if isinstance(response, str) else response.content
             return content
                 
