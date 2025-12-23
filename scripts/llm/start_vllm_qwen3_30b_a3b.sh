@@ -5,12 +5,13 @@ set -euo pipefail
 export http_proxy="http://192.168.192.246:7890"
 export https_proxy="http://192.168.192.246:7890"
 
-MODEL_ID="Qwen/Qwen3-30B-A3B"
+MODEL_ID="Qwen/Qwen3-30B-A3B-GPTQ-Int4"
 SERVED_MODEL_NAME="qwen3-30b-a3b"
 DOWNLOAD_DIR="${HOME}/.cache/huggingface"
 HOST="${VLLM_HOST:-0.0.0.0}"
 PORT="8000"
-MAX_MODEL_LEN="${VLLM_MAX_MODEL_LEN:-8192}"
+MAX_MODEL_LEN="${VLLM_MAX_MODEL_LEN:-4096}"
+GPU_MEMORY_UTILIZATION="${VLLM_GPU_MEMORY_UTILIZATION:-0.75}"
 DTYPE="${VLLM_DTYPE:-float16}"
 VLLM_BIN="${VLLM_BIN:-python -m vllm.entrypoints.openai.api_server}"
 
@@ -41,4 +42,6 @@ exec ${VLLM_BIN} \
   --tensor-parallel-size "${TP_SIZE}" \
   --max-model-len "${MAX_MODEL_LEN}" \
   --dtype "${DTYPE}" \
+  --quantization gptq \
+  --gpu-memory-utilization "${GPU_MEMORY_UTILIZATION}" \
   --enforce-eager
