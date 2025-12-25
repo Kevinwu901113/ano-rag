@@ -19,7 +19,7 @@ HF_MODEL_ID = "Qwen/Qwen3-30B-A3B-GPTQ-Int4"
 
 _DEFAULT_PROFILES = {
     "extract": {"temperature": 0.0, "max_tokens": 256, "thinking": False},
-    "generate": {"temperature": 0.2, "max_tokens": 128, "thinking": None},
+    "generate": {"temperature": 0.2, "max_tokens": 128, "thinking": False},
 }
 
 
@@ -257,6 +257,17 @@ class LLMChatClient:
                 data = resp.json()
                 content = self._extract_content(data)
                 return LLMResponse(content=content, raw=data)
+            except requests.HTTPError as exc:
+                last_exc = exc
+                if exc.response.status_code == 400:
+                    logger.error("LLM 400 Bad Request:\nResponse: {}\nPayload: {}", exc.response.text, json.dumps({
+                        "model": payload.get("model"),
+                        "messages_sample": payload.get("messages", [])[:1],
+                        "max_tokens": payload.get("max_tokens"),
+                        "temperature": payload.get("temperature"),
+                        "has_chat_template_kwargs": "chat_template_kwargs" in payload
+                    }, indent=2))
+                logger.warning("LLM HTTP error (attempt {}): {}", attempt + 1, exc)
             except requests.Timeout as exc:
                 last_exc = exc
                 logger.warning("LLM call timed out after {}s (attempt {})", req_timeout, attempt + 1)
@@ -339,6 +350,17 @@ class LLMChatClient:
                         data = await resp.json()
                         content = self._extract_content(data)
                         return LLMResponse(content=content, raw=data)
+            except aiohttp.ClientResponseError as exc:
+                last_exc = exc
+                if exc.status == 400:
+                    logger.error("LLM Async 400 Bad Request:\nPayload: {}", json.dumps({
+                        "model": payload.get("model"),
+                        "messages_sample": payload.get("messages", [])[:1],
+                        "max_tokens": payload.get("max_tokens"),
+                        "temperature": payload.get("temperature"),
+                        "has_chat_template_kwargs": "chat_template_kwargs" in payload
+                    }, indent=2))
+                logger.warning("LLM async HTTP error (attempt {}): {}", attempt + 1, exc)
             except asyncio.TimeoutError as exc:
                 last_exc = exc
                 logger.warning("LLM async call timed out (attempt {})", attempt + 1)

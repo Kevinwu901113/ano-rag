@@ -396,6 +396,8 @@ def main() -> None:
     parser.add_argument("--max-jobs", type=int, default=0, help="Stop after N jobs (0 = no limit)")
     parser.add_argument("--continue-on-error", action="store_true", help="Continue after job failures")
     parser.add_argument("--force", action="store_true", help="Ignore resume and re-run jobs")
+    parser.add_argument("--run-dir", help="Resume into existing run directory")
+    parser.add_argument("--resume", action="store_true", help="Force enable resume")
     args = parser.parse_args()
 
     cfg_path = Path(args.config)
@@ -408,7 +410,10 @@ def main() -> None:
     exp_name = exp.get("name", cfg_path.stem)
 
     result_root = cfg.get("meta", {}).get("result_root", "result_relrag")
-    run_root = Path(result_root) / exp_name / f"run_{_timestamp()}"
+    if args.run_dir:
+        run_root = Path(args.run_dir)
+    else:
+        run_root = Path(result_root) / exp_name / f"run_{_timestamp()}"
     run_root.mkdir(parents=True, exist_ok=True)
 
     llm_default = cfg.get("llm", {})
@@ -422,6 +427,8 @@ def main() -> None:
             llm_profiles = filtered
 
     runtime = cfg.get("runtime", {})
+    if args.resume:
+        runtime["resume"] = True
     embedding = cfg.get("embedding", {})
     topk = cfg.get("topk", {})
     decode = cfg.get("decode", {})

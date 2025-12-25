@@ -26,3 +26,9 @@ report:
     retrieval: [Recall@1, Recall@3, Recall@5, Recall@10, Hit@1, Hit@3, Hit@5, Hit@10]
   budgets:
     token_budgets: [4096, 8192, 16384]
+
+runtime:
+  limit: 5
+
+meta:
+  result_root: result_relrag/e1_smoke

@@ -16,7 +16,7 @@ llm:
   no_proxy: true
 
 embedding:
-  model: "sentence-transformers/all-MiniLM-L6-v2"
+  model: "/home/wjk/models/qwen3-emb"
   device: "cpu"
   batch_size: 4
   max_length: 512

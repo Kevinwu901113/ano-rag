@@ -6,6 +6,6 @@ FINAL_TAG = "FINAL:"
 
 def build_final_instruction() -> str:
     return (
-        "Respond with exactly one line in the form: FINAL: <answer>. "
-        "Do not include any other text. Otherwise the result is invalid."
+        "Your output MUST end with exactly one line that starts with FINAL: followed by the answer. "
+        "Do NOT put the final answer inside <think>."
     )
