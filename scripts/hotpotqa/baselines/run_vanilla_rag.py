@@ -50,9 +50,11 @@ def _slugify(text: str) -> str:
 
 def _infer_dataset_id(dataset_path: Path) -> str:
     stem = dataset_path.stem
+    parent = dataset_path.parent.name
     if stem in {"dataset", "data"}:
-        parent = dataset_path.parent.name
         return parent or stem
+    if stem.startswith("dataset_") and parent:
+        return f"{parent}_{stem[len('dataset_'):]}"
     return stem
 
 
