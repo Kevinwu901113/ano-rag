@@ -1,8 +1,11 @@
 import argparse
+import hashlib
 import json
 import os
+import re
 import sys
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import numpy as np
 from pathlib import Path
@@ -32,6 +35,65 @@ from utils.retrieval_logger import log_retrieval
 from utils.run_layout import ensure_workdir_layout, resolve_workdir
 from utils.run_metadata import build_basic_config, write_config_resolved
 from config.config_loader import DEFAULT_EMBED_MODEL, DEFAULT_EMBED_DEVICE
+
+_CACHE_KEY_SAFE = re.compile(r"[^A-Za-z0-9._-]+")
+
+
+def _sha256_file(path: Path) -> str:
+    data = path.read_bytes()
+    return hashlib.sha256(data).hexdigest()
+
+
+def _slugify(text: str) -> str:
+    return _CACHE_KEY_SAFE.sub("_", text or "").strip("_") or "unknown"
+
+
+def _infer_dataset_id(dataset_path: Path) -> str:
+    stem = dataset_path.stem
+    if stem in {"dataset", "data"}:
+        parent = dataset_path.parent.name
+        return parent or stem
+    return stem
+
+
+def _build_cache_key(dataset_path: Path, args) -> Tuple[str, Dict[str, Any]]:
+    dataset_id = _infer_dataset_id(dataset_path)
+    dataset_hash = _sha256_file(dataset_path)
+    model = str(args.embed_model or DEFAULT_EMBED_MODEL)
+    device = str(args.embed_device or DEFAULT_EMBED_DEVICE)
+    max_len = int(args.embed_max_length or 0)
+    normalize = bool(args.embed_normalize)
+    dtype = args.emb_dtype or "auto"
+    batch_size = int(args.embed_batch_size or 0)
+    max_context = int(args.max_context or 0)
+    index_kind = "in_memory_cosine"
+    key = "__".join(
+        [
+            _slugify(dataset_id),
+            _slugify(model),
+            _slugify(device),
+            f"len{max_len}",
+            f"norm{1 if normalize else 0}",
+            f"dtype{_slugify(str(dtype))}",
+            f"batch{batch_size}",
+            f"maxctx{max_context}",
+            f"index{index_kind}",
+            f"data{dataset_hash[:12]}",
+        ]
+    )
+    meta = {
+        "dataset_id": dataset_id,
+        "dataset_hash": dataset_hash,
+        "embed_model": model,
+        "embed_device": device,
+        "embed_max_length": max_len,
+        "embed_normalize": normalize,
+        "embed_dtype": dtype,
+        "embed_batch_size": batch_size,
+        "max_context": max_context,
+        "index_kind": index_kind,
+    }
+    return key, meta
 
 def load_dataset(path: str) -> List[Dict[str, Any]]:
     with open(path, "r", encoding="utf-8") as f:
@@ -73,6 +135,27 @@ class InMemoryVanillaRetriever:
         # Normalize for cosine similarity
         norm = np.linalg.norm(self.vectors, axis=1, keepdims=True)
         self.vectors = self.vectors / (norm + 1e-10)
+
+    def load_cached_index(
+        self,
+        entries: List[Dict[str, Any]],
+        vectors: Optional[np.ndarray],
+        *,
+        embed_device_used: Optional[str] = None,
+        fallback_reason: Optional[str] = None,
+    ) -> None:
+        """
+        Load precomputed (already normalized) vectors for the current question.
+        """
+        self.entries = entries
+        self.passages = [entry["text"] for entry in entries]
+        if vectors is None or getattr(vectors, "size", 0) == 0:
+            self.vectors = None
+            return
+        self.vectors = vectors
+        self.dim = int(vectors.shape[1])
+        self.embed_device_used_build = embed_device_used
+        self.fallback_reason_build = fallback_reason
 
     def score(self, query: str) -> np.ndarray:
         if self.vectors is None or len(self.passages) == 0:
@@ -126,7 +209,12 @@ def process_example(item: Dict[str, Any],
                     dataset_name: str,
                     log_dir: Path,
                     embed_meta: Dict[str, Any],
-                    embed_meta_lock: threading.Lock) -> Tuple[str, str, str, List[List[Any]], List[Dict[str, Any]], int]:
+                    embed_meta_lock: threading.Lock,
+                    cache_embeddings: Optional[np.ndarray] = None,
+                    cache_offsets: Optional[Dict[str, Tuple[int, int]]] = None,
+                    cache_embed_device: Optional[str] = None,
+                    cache_fallback_reason: Optional[str] = None,
+                    ) -> Tuple[str, str, str, List[List[Any]], List[Dict[str, Any]], int]:
     """
     Process a single HotpotQA example.
     """
@@ -141,7 +229,23 @@ def process_example(item: Dict[str, Any],
         retriever = InMemoryVanillaRetriever(embedder, embed_device=args.embed_device)
 
         # 1. Build small index for this question
-        retriever.build_index_for_question(passage_entries)
+        cached_vectors = None
+        if cache_embeddings is not None and cache_offsets is not None:
+            qid_key = str(qid)
+            offset = cache_offsets.get(qid_key)
+            if offset:
+                start, count = offset
+                if count > 0:
+                    cached_vectors = cache_embeddings[start : start + count]
+        if cached_vectors is not None:
+            retriever.load_cached_index(
+                passage_entries,
+                cached_vectors,
+                embed_device_used=cache_embed_device,
+                fallback_reason=cache_fallback_reason,
+            )
+        else:
+            retriever.build_index_for_question(passage_entries)
 
         # 2. Dense scores
         dense_scores = retriever.score(question)
@@ -311,6 +415,30 @@ def main():
     qa_path = Path(args.qa_path) if args.qa_path else preds_dir / "qa.tsv"
     logger.info(f"Writing outputs to workspace {work_dir}")
     setup_logging(str(work_dir / "run.log"))
+    cache_key: Optional[str] = None
+    cache_path: Optional[str] = None
+    cache_hit: Optional[bool] = None
+    cache_meta: Dict[str, Any] = {}
+    cache_embeddings: Optional[np.ndarray] = None
+    cache_offsets: Optional[Dict[str, Tuple[int, int]]] = None
+    cache_embed_device: Optional[str] = None
+    cache_fallback_reason: Optional[str] = None
+    cache_paths: Dict[str, Path] = {}
+    cache_enabled = args.retriever in ("dense", "hybrid")
+    cache_dir: Optional[Path] = None
+    if cache_enabled:
+        dataset_path = Path(args.dataset)
+        cache_key, cache_meta = _build_cache_key(dataset_path, args)
+        cache_dir = Path(args.result_root) / "cache" / cache_key
+        cache_path = str(cache_dir)
+        cache_paths = {
+            "embeddings": cache_dir / "embeddings.npy",
+            "offsets": cache_dir / "offsets.json",
+            "metadata": cache_dir / "metadata.json",
+            "build_log": cache_dir / "build.log",
+            "index": cache_dir / "faiss.index",
+        }
+        cache_hit = all(path.exists() for path in cache_paths.values())
     write_config_resolved(
         work_dir,
         build_basic_config(
@@ -343,6 +471,9 @@ def main():
                 "max_context": args.max_context,
                 "embed_model": args.embed_model,
                 "retriever": args.retriever,
+                "cache_key": cache_key,
+                "cache_path": cache_path,
+                "cache_hit": cache_hit,
             },
         ),
     )
@@ -381,6 +512,97 @@ def main():
         logger.info("BM25 retrieval selected; skipping embedding model init.")
     embed_meta: Dict[str, Any] = {"used_devices": set(), "fallback_reasons": [], "dim": None}
     embed_meta_lock = threading.Lock()
+
+    if cache_enabled and cache_dir is not None and cache_paths:
+        if cache_hit:
+            logger.info("Embedding cache hit: {} -> {}", cache_key, cache_path)
+            cache_embeddings = np.load(cache_paths["embeddings"])
+            offsets_payload = json.loads(cache_paths["offsets"].read_text(encoding="utf-8"))
+            cache_offsets = {str(k): (int(v[0]), int(v[1])) for k, v in offsets_payload.items()}
+            cache_meta_loaded = json.loads(cache_paths["metadata"].read_text(encoding="utf-8"))
+            cache_embed_device = cache_meta_loaded.get("embed_device_used")
+            cache_fallback_reason = cache_meta_loaded.get("fallback_reason")
+            if cache_meta_loaded.get("vector_dim") and embed_meta.get("dim") is None:
+                embed_meta["dim"] = int(cache_meta_loaded.get("vector_dim") or 0)
+        else:
+            logger.info("Embedding cache miss: {} -> {}", cache_key, cache_path)
+            if embedder is None:
+                raise RuntimeError("Embedding model required to build cache.")
+            build_started = time.time()
+            cache_dir.mkdir(parents=True, exist_ok=True)
+            all_vectors: List[np.ndarray] = []
+            offsets: Dict[str, Tuple[int, int]] = {}
+            used_devices: List[str] = []
+            fallback_reasons: List[str] = []
+            dim: Optional[int] = None
+            cursor = 0
+            for item in data:
+                qid = item.get("_id") or item.get("id")
+                if not qid:
+                    continue
+                passage_entries = build_passage_entries(item["context"], max_passages=args.max_context)
+                texts = [entry["text"] for entry in passage_entries]
+                key = str(qid)
+                if not texts:
+                    offsets[key] = (cursor, 0)
+                    continue
+                vectors, used_device, fallback_reason = run_with_fallback(
+                    lambda device: embedder.encode(texts, device=device),
+                    prefer=args.embed_device,
+                )
+                used_devices.append(str(used_device))
+                if fallback_reason:
+                    fallback_reasons.append(str(fallback_reason))
+                if vectors is None or getattr(vectors, "size", 0) == 0:
+                    offsets[key] = (cursor, 0)
+                    continue
+                norm = np.linalg.norm(vectors, axis=1, keepdims=True)
+                vectors = vectors / (norm + 1e-10)
+                if dim is None:
+                    dim = int(vectors.shape[1])
+                all_vectors.append(vectors)
+                count = int(vectors.shape[0])
+                offsets[key] = (cursor, count)
+                cursor += count
+            if all_vectors:
+                cache_embeddings = np.vstack(all_vectors).astype("float32")
+            else:
+                cache_embeddings = np.zeros((0, 0), dtype="float32")
+            cache_offsets = offsets
+            np.save(cache_paths["embeddings"], cache_embeddings)
+            cache_paths["offsets"].write_text(
+                json.dumps({k: [v[0], v[1]] for k, v in offsets.items()}, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            cache_embed_device = sorted(set(used_devices))[0] if used_devices else None
+            cache_fallback_reason = fallback_reasons[0] if fallback_reasons else None
+            meta_payload = {
+                **cache_meta,
+                "cache_key": cache_key,
+                "cache_path": cache_path,
+                "dataset_path": str(Path(args.dataset)),
+                "samples": len(offsets),
+                "total_vectors": int(cache_embeddings.shape[0]),
+                "vector_dim": int(dim or 0),
+                "embed_device_used": cache_embed_device,
+                "fallback_reason": cache_fallback_reason,
+                "built_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+            }
+            cache_paths["metadata"].write_text(
+                json.dumps(meta_payload, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            cache_paths["index"].write_text("in_memory_cosine\n", encoding="utf-8")
+            duration_s = time.time() - build_started
+            cache_paths["build_log"].write_text(
+                f"cache_key={cache_key}\n"
+                f"dataset_path={args.dataset}\n"
+                f"samples={len(offsets)}\n"
+                f"vectors={cache_embeddings.shape[0]}\n"
+                f"dim={int(dim or 0)}\n"
+                f"duration_s={duration_s:.2f}\n",
+                encoding="utf-8",
+            )
     
     predictions = {"answer": {}, "sp": {}}
     qa_rows: List[Tuple[str, str]] = []
@@ -402,6 +624,10 @@ def main():
                 log_dir=artifacts_dir,
                 embed_meta=embed_meta,
                 embed_meta_lock=embed_meta_lock,
+                cache_embeddings=cache_embeddings,
+                cache_offsets=cache_offsets,
+                cache_embed_device=cache_embed_device,
+                cache_fallback_reason=cache_fallback_reason,
             )
             for item in data
         ]

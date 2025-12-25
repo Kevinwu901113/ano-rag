@@ -1,11 +1,13 @@
 import argparse
+import hashlib
 import json
 import os
 import pickle
+import re
 import time
 import sys
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional, Tuple
 
 from loguru import logger
 
@@ -31,6 +33,106 @@ from utils.output_protocol import build_final_instruction
 from utils.retrieval_logger import log_retrieval
 from utils.run_layout import ensure_workdir_layout, resolve_workdir
 from utils.run_metadata import build_basic_config, write_config_resolved
+
+_CACHE_KEY_SAFE = re.compile(r"[^A-Za-z0-9._-]+")
+
+
+def _sha256_file(path: Path) -> str:
+    data = path.read_bytes()
+    return hashlib.sha256(data).hexdigest()
+
+
+def _slugify(text: str) -> str:
+    return _CACHE_KEY_SAFE.sub("_", text or "").strip("_") or "unknown"
+
+
+def _infer_dataset_id(dataset_path: Path) -> str:
+    stem = dataset_path.stem
+    if stem in {"dataset", "data"}:
+        parent = dataset_path.parent.name
+        return parent or stem
+    return stem
+
+
+def _resolve_embed_model(embed_cfg: Dict[str, Any]) -> str:
+    override = embed_cfg.get("model_path_override")
+    base = embed_cfg.get("model", DEFAULT_EMBED_MODEL)
+    candidate = str(override or base).strip()
+    return candidate or DEFAULT_EMBED_MODEL
+
+
+def _resolve_embed_device(embed_cfg: Dict[str, Any], cfg_snapshot: Dict[str, Any]) -> str:
+    device = embed_cfg.get("device")
+    if device:
+        return str(device)
+    system_cfg = cfg_snapshot.get("system") or {}
+    return str(system_cfg.get("device") or "cpu")
+
+
+def _build_cache_key(
+    dataset_id: str,
+    doc_pool_hash: str,
+    embed_cfg: Dict[str, Any],
+    cfg_snapshot: Dict[str, Any],
+) -> Tuple[str, Dict[str, Any]]:
+    chunk_cfg = {"target_tokens": 512, "max_tokens": 600, "overlap_tokens": 50}
+    model = _resolve_embed_model(embed_cfg)
+    device = _resolve_embed_device(embed_cfg, cfg_snapshot)
+    max_len = int(embed_cfg.get("max_len_note", 512))
+    normalize = bool(embed_cfg.get("normalize", True))
+    dtype = embed_cfg.get("dtype") or "auto"
+    provider = embed_cfg.get("provider", "qwen3")
+    faiss_kind = "FlatIP"
+
+    key = "__".join(
+        [
+            _slugify(dataset_id),
+            _slugify(model),
+            _slugify(device),
+            f"len{max_len}",
+            f"norm{1 if normalize else 0}",
+            f"dtype{_slugify(str(dtype))}",
+            f"prov{_slugify(str(provider))}",
+            f"chunk{chunk_cfg['target_tokens']}x{chunk_cfg['max_tokens']}x{chunk_cfg['overlap_tokens']}",
+            f"faiss{faiss_kind}",
+            f"doc{doc_pool_hash[:12]}",
+        ]
+    )
+    meta = {
+        "dataset_id": dataset_id,
+        "doc_pool_hash": doc_pool_hash,
+        "embed_model": model,
+        "embed_device": device,
+        "embed_max_length": max_len,
+        "embed_normalize": normalize,
+        "embed_dtype": dtype,
+        "embed_provider": provider,
+        "chunking": chunk_cfg,
+        "faiss_kind": faiss_kind,
+    }
+    return key, meta
+
+
+def _load_doc_pool(doc_pool_path: Path) -> Dict[str, str]:
+    docs: Dict[str, str] = {}
+    with open(doc_pool_path, "r", encoding="utf-8") as f:
+        raw_data = json.load(f)
+        if isinstance(raw_data, list):
+            for i, item in enumerate(raw_data):
+                base_id = item.get("doc_id") or item.get("mapped_id") or str(i)
+                doc_id = f"{base_id}::{i}"
+                text = item.get("doc_chunk") or item.get("text") or item.get("content") or ""
+                title = item.get("doc_name", "")
+                if title:
+                    text = f"{title}\n{text}"
+                docs[doc_id] = text
+        elif isinstance(raw_data, dict):
+            for k, v in raw_data.items():
+                if isinstance(v, str):
+                    docs[k] = v
+                elif isinstance(v, dict):
+                    docs[k] = v.get("text") or v.get("content") or ""
+    return docs
 
 def _select_workspace(root: Path, prefix: str, force_new: bool) -> Path:
     root.mkdir(parents=True, exist_ok=True)
@@ -88,6 +190,34 @@ def main():
     lm_model = args.lm_model or cfg_snapshot.get("vllm", {}).get("model")
     lm_temperature = (cfg_snapshot.get("vllm", {}) or {}).get("temperature", 0.0)
     emb_cfg = cfg_snapshot.get("retriever", {}).get("embedding", {})
+    dataset_path = Path(args.dataset_path)
+    doc_pool_path = dataset_path.parent / "doc_pool.json"
+
+    cache_key: Optional[str] = None
+    cache_path: Optional[str] = None
+    cache_hit: Optional[bool] = None
+    cache_meta: Dict[str, Any] = {}
+    cache_enabled = args.index_path is None and args.chunk_store_path is None
+    if cache_enabled:
+        dataset_id = _infer_dataset_id(dataset_path)
+        doc_pool_hash = _sha256_file(doc_pool_path) if doc_pool_path.exists() else "missing"
+        cache_key, cache_meta = _build_cache_key(dataset_id, doc_pool_hash, emb_cfg, cfg_snapshot)
+        cache_dir = Path(args.result_root) / "cache" / cache_key
+        cache_index_path = cache_dir / "faiss.index"
+        cache_chunk_store_path = cache_dir / "chunk_store.pkl"
+        cache_embeddings_path = cache_dir / "embeddings.npy"
+        cache_meta_path = cache_dir / "metadata.json"
+        cache_build_log = cache_dir / "build.log"
+        cache_required = [
+            cache_index_path,
+            cache_chunk_store_path,
+            cache_embeddings_path,
+            cache_meta_path,
+            cache_build_log,
+            cache_index_path.with_name(cache_index_path.name + ".meta.pkl"),
+        ]
+        cache_hit = all(path.exists() for path in cache_required)
+        cache_path = str(cache_dir)
     write_config_resolved(
         work_dir,
         build_basic_config(
@@ -116,62 +246,100 @@ def main():
                 "context_budget_tokens": args.context_budget or None,
                 "topk": args.topk,
             },
-            extra={"retriever": args.retriever},
+            extra={
+                "retriever": args.retriever,
+                "cache_key": cache_key,
+                "cache_path": cache_path,
+                "cache_hit": cache_hit,
+            },
         ),
     )
 
     # 2. Determine Index Paths
-    index_path = Path(args.index_path) if args.index_path else artifacts_dir / "vanilla_rag_index.faiss"
-    chunk_store_path = Path(args.chunk_store_path) if args.chunk_store_path else artifacts_dir / "vanilla_rag_chunk_store.pkl"
+    if cache_enabled:
+        index_path = cache_index_path
+        chunk_store_path = cache_chunk_store_path
+    else:
+        index_path = Path(args.index_path) if args.index_path else artifacts_dir / "vanilla_rag_index.faiss"
+        chunk_store_path = Path(args.chunk_store_path) if args.chunk_store_path else artifacts_dir / "vanilla_rag_chunk_store.pkl"
 
     # 3. Check/Build Index
-    if not index_path.exists() or not chunk_store_path.exists():
-        logger.info(f"Index not found at {index_path}. Attempting to build...")
-        
-        # Try to find doc_pool
-        dataset_path = Path(args.dataset_path)
-        doc_pool_path = dataset_path.parent / "doc_pool.json"
-        
-        if not doc_pool_path.exists():
-             # Fallback to checking if dataset itself has documents or another location
-             logger.error(f"Cannot build index: doc_pool.json not found at {doc_pool_path}")
-             return
+    if cache_enabled:
+        if cache_hit:
+            logger.info("Embedding cache hit: {} -> {}", cache_key, cache_path)
+        else:
+            logger.info("Embedding cache miss: {} -> {}", cache_key, cache_path)
+            if not doc_pool_path.exists():
+                logger.error(f"Cannot build index: doc_pool.json not found at {doc_pool_path}")
+                return
+            logger.info(f"Building index from {doc_pool_path}...")
+            try:
+                docs = _load_doc_pool(doc_pool_path)
+            except Exception as e:
+                logger.error(f"Failed to load doc pool: {e}")
+                return
 
-        logger.info(f"Building index from {doc_pool_path}...")
-        
-        # Load docs
-        docs = {}
-        try:
-            with open(doc_pool_path, "r", encoding="utf-8") as f:
-                raw_data = json.load(f)
-                if isinstance(raw_data, list):
-                    for i, item in enumerate(raw_data):
-                         # MIRAGE doc pool format
-                         base_id = item.get("doc_id") or item.get("mapped_id") or str(i)
-                         doc_id = f"{base_id}::{i}"
-                         text = item.get("doc_chunk") or item.get("text") or item.get("content") or ""
-                         title = item.get("doc_name", "")
-                         if title:
-                             text = f"{title}\n{text}"
-                         docs[doc_id] = text
-                elif isinstance(raw_data, dict):
-                    for k, v in raw_data.items():
-                        if isinstance(v, str):
-                            docs[k] = v
-                        elif isinstance(v, dict):
-                             docs[k] = v.get("text") or v.get("content") or ""
-        except Exception as e:
-            logger.error(f"Failed to load doc pool: {e}")
-            return
-            
-        if not docs:
-             logger.error("No documents found to index.")
-             return
+            if not docs:
+                logger.error("No documents found to index.")
+                return
 
-        # Build
-        indexer = VanillaRAGIndexer()
-        indexer.build(docs, str(index_path), str(chunk_store_path))
-        logger.info("Index built successfully.")
+            build_started = time.time()
+            indexer = VanillaRAGIndexer(cfg_snapshot)
+            build_info = indexer.build(
+                docs,
+                str(cache_index_path),
+                str(cache_chunk_store_path),
+                output_embeddings_path=str(cache_embeddings_path),
+            )
+            cache_dir.mkdir(parents=True, exist_ok=True)
+            meta_payload = {
+                **cache_meta,
+                "cache_key": cache_key,
+                "cache_path": cache_path,
+                "dataset_path": str(dataset_path),
+                "doc_pool_path": str(doc_pool_path),
+                "doc_pool_hash": cache_meta.get("doc_pool_hash"),
+                "build": build_info,
+                "built_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+            }
+            cache_meta_path.write_text(
+                json.dumps(meta_payload, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            duration_s = time.time() - build_started
+            cache_build_log.write_text(
+                f"cache_key={cache_key}\n"
+                f"dataset_path={dataset_path}\n"
+                f"doc_pool_path={doc_pool_path}\n"
+                f"chunks={build_info.get('chunk_count')}\n"
+                f"vectors={build_info.get('vector_count')}\n"
+                f"dim={build_info.get('vector_dim')}\n"
+                f"duration_s={duration_s:.2f}\n",
+                encoding="utf-8",
+            )
+            logger.info("Index built successfully and cached.")
+    else:
+        if not index_path.exists() or not chunk_store_path.exists():
+            logger.info(f"Index not found at {index_path}. Attempting to build...")
+
+            if not doc_pool_path.exists():
+                logger.error(f"Cannot build index: doc_pool.json not found at {doc_pool_path}")
+                return
+
+            logger.info(f"Building index from {doc_pool_path}...")
+            try:
+                docs = _load_doc_pool(doc_pool_path)
+            except Exception as e:
+                logger.error(f"Failed to load doc pool: {e}")
+                return
+
+            if not docs:
+                logger.error("No documents found to index.")
+                return
+
+            indexer = VanillaRAGIndexer(cfg_snapshot)
+            indexer.build(docs, str(index_path), str(chunk_store_path))
+            logger.info("Index built successfully.")
     retriever = None
     if args.retriever in ("dense", "hybrid"):
         retriever = get_retriever(

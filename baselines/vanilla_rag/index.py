@@ -113,8 +113,10 @@ class VanillaRAGIndexer:
         self,
         docs: Dict[str, str],
         output_index_path: str,
-        output_chunks_path: str
-    ) -> None:
+        output_chunks_path: str,
+        *,
+        output_embeddings_path: Optional[str] = None,
+    ) -> Dict[str, Any]:
         chunker = VanillaChunker(
             target_tokens=512,
             max_tokens=600,
@@ -144,11 +146,12 @@ class VanillaRAGIndexer:
 
         if bool(self.embed_cfg.get("normalize", True)):
             faiss.normalize_L2(vectors)
+        vectors_f32 = vectors.astype("float32")
 
         # Build Index
         dim = vectors.shape[1]
         index = faiss.IndexFlatIP(dim)
-        index.add(vectors.astype("float32"))
+        index.add(vectors_f32)
         
         # Assign vector IDs
         for i, chunk in enumerate(all_chunks):
@@ -159,6 +162,12 @@ class VanillaRAGIndexer:
         index_dir.mkdir(parents=True, exist_ok=True)
         faiss.write_index(index, output_index_path)
         logger.info(f"Saved vector index to {output_index_path}")
+
+        if output_embeddings_path:
+            emb_path = Path(output_embeddings_path)
+            emb_path.parent.mkdir(parents=True, exist_ok=True)
+            np.save(emb_path, vectors_f32)
+            logger.info(f"Saved embeddings to {output_embeddings_path}")
 
         # Save Chunk Store (Map chunk_id -> text)
         chunk_store = {c.chunk_id: c.text for c in all_chunks}
@@ -175,6 +184,13 @@ class VanillaRAGIndexer:
         with open(meta_path, "wb") as f:
             pickle.dump(chunk_ids, f)
         logger.info(f"Saved index metadata to {meta_path}")
+
+        return {
+            "chunk_count": len(all_chunks),
+            "vector_count": int(vectors_f32.shape[0]),
+            "vector_dim": int(vectors_f32.shape[1]) if vectors_f32.size else 0,
+            "embeddings_path": output_embeddings_path,
+        }
 
     def _init_encoder(self) -> EmbeddingEncoder:
         provider = self.embed_cfg.get("provider", "qwen3")
