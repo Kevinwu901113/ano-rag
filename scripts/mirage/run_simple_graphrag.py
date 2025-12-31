@@ -74,6 +74,7 @@ def main() -> None:
     
     setup_logging(str(work_dir / "run.log"))
     logger.info("Writing Simple GraphRAG outputs to {}", work_dir)
+    emb_cfg = cfg_snapshot.get("retriever", {}).get("embedding", {})
     write_config_resolved(
         work_dir,
         build_basic_config(
@@ -83,6 +84,15 @@ def main() -> None:
             temperature=None,
             max_tokens=None,
             context_budget=args.context_budget or None,
+            embedding={
+                "model": emb_cfg.get("model") or "sentence-transformers/all-MiniLM-L6-v2",
+                "device": emb_cfg.get("device") or "cpu",
+            },
+            extra={
+                "embedding_model_name": emb_cfg.get("model") or "sentence-transformers/all-MiniLM-L6-v2",
+                "expand_hop": 1,
+                "n_expand": 5, # Implicit in logic if not configurable
+            }
         ),
     )
 
@@ -91,42 +101,45 @@ def main() -> None:
     Path(index_dir).mkdir(parents=True, exist_ok=True)
     logger.info(f"Using graph index from: {index_dir}")
 
-    # Check if index exists, if not, build it
+    # Paths for Graph and Dense Index
     graph_pkl = Path(index_dir) / "simple_graphrag_graph.pkl"
     chunk_store_pkl = Path(index_dir) / "simple_graphrag_chunk_store.pkl"
     
-    if not graph_pkl.exists() or not chunk_store_pkl.exists():
-        logger.info(f"Graph index not found in {index_dir}. Building graph...")
+    dense_index_dir = artifacts_dir / "dense_index"
+    dense_index_dir.mkdir(parents=True, exist_ok=True)
+    dense_index_path = dense_index_dir / "faiss.index"
+    dense_chunk_store_path = dense_index_dir / "chunk_store.pkl"
+    
+    # Check what is missing
+    missing_graph = not graph_pkl.exists() or not chunk_store_pkl.exists()
+    missing_dense = not dense_index_path.exists() or not dense_chunk_store_path.exists()
+    
+    docs = {}
+    if missing_graph or missing_dense:
+        logger.info(f"Artifacts missing (Graph: {missing_graph}, Dense: {missing_dense}). Loading docs...")
         
         # Collect documents from dataset
-        docs = {}
-        
         # First check if there is a separate doc_pool.json
         doc_pool_path = dataset_path.parent / "doc_pool.json"
         if doc_pool_path.exists():
             logger.info(f"Loading documents from {doc_pool_path}")
             with doc_pool_path.open("r", encoding="utf-8") as handle:
                 doc_pool = json.load(handle)
-                for item in doc_pool:
-                    # In doc_pool, documents are associated with queries via mapped_id
-                    # But we want to build a graph of knowledge. 
-                    # doc_pool items have "doc_chunk" or "text"
-                    # We can use a combination of doc_name and index as ID, or just iterate
-                    
-                    # Ideally we want unique documents. 
-                    # Let's use a hash of content or just sequential ID if no stable ID
+                for idx, item in enumerate(doc_pool):
                     text = item.get("doc_chunk") or item.get("text") or item.get("content") or ""
                     doc_name = item.get("doc_name") or "unknown"
             
                     if text:
-                        # Create a deterministic ID based on content hash to avoid duplicates
-                        import hashlib
-                        doc_hash = hashlib.md5(text.encode("utf-8")).hexdigest()
-                        # Include index to ensure absolute uniqueness if needed, but hash should be enough for identical content
-                        # To be safe against hash collisions (unlikely) or identical content from different sources, let's append index
-                        # Wait, enumerate index is not available in this loop context directly (it's 'item' in 'doc_pool').
-                        # Let's just use hash. If content is identical, it's fine to treat as same node.
-                        doc_id = f"{doc_name}_{doc_hash[:8]}"
+                        # Use mapped_id if available to satisfy Canonical ID requirement
+                        base_id = item.get("mapped_id") or item.get("doc_id")
+                        if base_id:
+                            doc_id = f"{base_id}::{idx}"
+                        else:
+                            # Fallback to hash if no ID
+                            import hashlib
+                            doc_hash = hashlib.md5(text.encode("utf-8")).hexdigest()
+                            doc_id = f"{doc_name}_{doc_hash[:8]}"
+                            
                         docs[doc_id] = text
         else:
             # Fallback to dataset items
@@ -136,9 +149,11 @@ def main() -> None:
                 if doc_id and text:
                     docs[str(doc_id)] = text
         
-        logger.info(f"Collected {len(docs)} documents for graph construction")
-        
-        # Build graph
+        logger.info(f"Collected {len(docs)} documents")
+
+    # Build Graph if missing
+    if missing_graph:
+        logger.info(f"Graph index not found in {index_dir}. Building graph...")
         import asyncio
         from baselines.simple_graphrag.build_graph import GraphBuilder
         from baselines.common.model_clients import get_default_llm_client
@@ -150,6 +165,16 @@ def main() -> None:
         builder.save(str(graph_pkl), str(chunk_store_pkl))
         logger.info(f"Graph built and saved to {index_dir}")
 
+    # Build Dense Index if missing
+    if missing_dense:
+        logger.info("Dense index not found. Building for LightRAG seeds...")
+        from baselines.vanilla_rag.index import VanillaRAGIndexer
+        if docs:
+            indexer = VanillaRAGIndexer(cfg_snapshot)
+            indexer.build(docs, str(dense_index_path), str(dense_chunk_store_path))
+        else:
+            logger.warning("No docs found to build dense index!")
+
     # 2. Run inference
     if args.limit > 0:
         dataset = dataset[:args.limit]
@@ -158,7 +183,7 @@ def main() -> None:
     qa_lines = []
     pred_raw_records: List[Dict[str, Any]] = []
     
-    retriever = get_retriever(index_dir=index_dir, context_budget=args.context_budget)
+    retriever = get_retriever(index_dir=index_dir, context_budget=args.context_budget, dense_index_path=str(dense_index_path))
     
     for i, item in enumerate(dataset):
         question = item.get("query") or item.get("question")

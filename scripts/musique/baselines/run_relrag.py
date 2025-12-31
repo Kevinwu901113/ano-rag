@@ -37,11 +37,11 @@ def _get_qid(item: Dict[str, Any]) -> str:
 def _load_resume_state(
     output_path: Path,
     qa_path: Path,
-) -> Tuple[List[Dict[str, Any]], List[Tuple[str, str]], set[str]]:
+    pred_raw_path: Path,
+) -> Tuple[List[Dict[str, Any]], List[Tuple[str, str]], set[str], List[Dict[str, Any]]]:
     results: List[Dict[str, Any]] = []
     qa_rows: List[Tuple[str, str]] = []
     pred_raw_records: List[Dict[str, Any]] = []
-    pred_raw_path = preds_dir / "pred_raw.jsonl"
     if pred_raw_path.exists():
         try:
             for line in pred_raw_path.read_text(encoding="utf-8").splitlines():
@@ -80,7 +80,7 @@ def _load_resume_state(
         except Exception as exc:
             logger.warning("Failed to load existing QA log from {}: {}", qa_path, exc)
 
-    return results, qa_rows, completed
+    return results, qa_rows, completed, pred_raw_records
 
 class MiniRelRAG:
     def __init__(self, encoder: Callable[[List[str]], np.ndarray]):
@@ -218,6 +218,7 @@ def main() -> None:
     dataset_name = "musique"
     output_path = Path(args.output) if args.output else preds_dir / "musique_results.jsonl"
     qa_path = Path(args.qa_path) if args.qa_path else preds_dir / "qa.tsv"
+    pred_raw_path = preds_dir / "pred_raw.jsonl"
     logger.info(f"Writing outputs to workspace {work_dir}")
     setup_logging(str(work_dir / "run.log"))
     write_config_resolved(
@@ -265,10 +266,16 @@ def main() -> None:
     results: List[Dict[str, Any]] = []
     qa_rows: List[Tuple[str, str]] = []
     completed: set[str] = set()
+    pred_raw_records: List[Dict[str, Any]] = []
     if args.resume:
-        results, qa_rows, completed = _load_resume_state(output_path, qa_path)
-        if completed:
-            logger.info("Resuming with {} existing predictions", len(completed))
+        try:
+            results, qa_rows, completed, pred_raw_records = _load_resume_state(
+                output_path, qa_path, pred_raw_path
+            )
+            if completed:
+                logger.info("Resuming with {} existing predictions", len(completed))
+        except Exception as exc:
+            logger.warning("Resume state load failed; starting fresh: {}", exc)
 
     num_workers = max(1, args.num_workers)
     work_items: List[Dict[str, Any]] = []

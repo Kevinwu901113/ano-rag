@@ -274,6 +274,12 @@ class ConfigLoader:
             else:
                 user_config = {}
             self._config = _deep_merge(DEFAULT_CONFIG, user_config)
+
+            # RAG_EMBED_MODEL overrides retriever.embedding.model
+            env_embed_model = os.environ.get("RAG_EMBED_MODEL")
+            if env_embed_model:
+                self._config.setdefault("retriever", {}).setdefault("embedding", {})["model"] = env_embed_model
+
             _apply_env_overrides(self._config)
             _finalize_config(self._config)
             self._config = _resolve_placeholders(self._config)

@@ -18,6 +18,7 @@ ROOT = Path(__file__).resolve().parents[3]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from config.config_loader import DEFAULT_EMBED_MODEL, DEFAULT_EMBED_DEVICE
 from scripts.hotpotqa.baselines.baseline_utils import (
     build_passage_entries,
     save_predictions_and_qa,

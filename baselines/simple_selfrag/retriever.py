@@ -109,7 +109,7 @@ class SimpleSelfRAGRetriever:
                 
         return results
 
-    def answer(self, question: str) -> str:
+    def answer(self, question: str, log_callback=None) -> str:
         """
         Self-RAG answer generation process:
         1. Retrieve & Answer
@@ -119,6 +119,9 @@ class SimpleSelfRAGRetriever:
         # Step 1: First Retrieval
         logger.info(f"First retrieval for: {question}")
         contexts_1 = self.retrieve(question, self.top_k_first)
+        if log_callback:
+            log_callback(step=1, hits=contexts_1)
+
         annotated_1 = [{**c, "text": f"[{i+1}] {c['text']}"} for i, c in enumerate(contexts_1)]
         context_block_1, _, _ = pack_contexts(annotated_1, self.context_budget)
         
@@ -171,6 +174,8 @@ Verdict (sufficient / insufficient):"""
         
         # Retrieve more documents
         contexts_2 = self.retrieve(question, self.top_k_second)
+        if log_callback:
+            log_callback(step=2, hits=contexts_2)
         
         # Merge contexts (simple concatenation here, could be deduplicated)
         # We use the new contexts primarily

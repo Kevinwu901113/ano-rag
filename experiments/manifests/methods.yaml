@@ -39,6 +39,7 @@ raptor:
   entry_hotpotqa: scripts/hotpotqa/baselines/run_raptor.py
   entry_musique: scripts/musique/baselines/run_raptor.py
   entry_mirage: scripts/mirage/run_simple_raptor.py
+  build_index_mirage: scripts/mirage/build_simple_raptor_index.py
 
 relrag_full:
   kind: qa
@@ -46,4 +47,4 @@ relrag_full:
   requires_topk: true
   entry_hotpotqa: scripts/hotpotqa/baselines/run_relrag.py
   entry_musique: scripts/musique/baselines/run_relrag.py
-  entry_mirage: null
+  entry_mirage: scripts/mirage/run_relrag.py

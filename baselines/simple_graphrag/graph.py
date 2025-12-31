@@ -56,6 +56,18 @@ class SimpleGraph:
     def get_neighbors(self, node_id: str) -> List[Edge]:
         return self.adjacency.get(node_id, [])
 
+    def build_chunk_map(self) -> Dict[str, Set[str]]:
+        """
+        Builds a reverse mapping from chunk_id to set of node_ids.
+        """
+        chunk_map: Dict[str, Set[str]] = {}
+        for node_id, node in self.nodes.items():
+            for cid in node.chunk_ids:
+                if cid not in chunk_map:
+                    chunk_map[cid] = set()
+                chunk_map[cid].add(node_id)
+        return chunk_map
+
     def save(self, path: str):
         with open(path, 'wb') as f:
             pickle.dump(self, f)

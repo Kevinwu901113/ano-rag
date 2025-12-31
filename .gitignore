@@ -68,6 +68,7 @@ result/
 result_200/
 result_relrag/
 result_hotpot/
+result_fix_verify/
 logs/
 ans/
 models/
@@ -92,3 +93,10 @@ vector_db/
 config.override.yaml
 config.override*.yaml
 config.local.yaml
+
+# Generated reports / summaries
+results_overview.md
+results_overview.json
+doc/results_overview.md
+metric_audit_report.md
+review_report.md

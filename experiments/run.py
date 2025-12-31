@@ -465,6 +465,15 @@ def main() -> None:
     if runtime.get("seed") is not None:
         env["PYTHONHASHSEED"] = str(runtime.get("seed"))
 
+    # CPU Thread Control
+    cpu_threads = runtime.get("cpu_threads")
+    if cpu_threads is not None:
+        cpu_threads_str = str(cpu_threads)
+        env["OMP_NUM_THREADS"] = cpu_threads_str
+        env["MKL_NUM_THREADS"] = cpu_threads_str
+        env["NUMEXPR_NUM_THREADS"] = cpu_threads_str
+        env["TOKENIZERS_PARALLELISM"] = "true"
+
     supported_cache: Dict[str, set] = {}
     hash_cache: Dict[str, str] = {}
     built_indexes: set = set()
@@ -759,6 +768,7 @@ def main() -> None:
                                             "embedding": embedding,
                                             "runtime": {
                                                 "workers": runtime.get("workers"),
+                                                "cpu_threads": runtime.get("cpu_threads"),
                                                 "resume": runtime.get("resume"),
                                                 "seed": runtime.get("seed"),
                                                 "save_every": runtime.get("save_every"),
@@ -840,9 +850,10 @@ def main() -> None:
                                             "llm": llm,
                                             "embedding": embedding,
                                             "runtime": {
-                                                "workers": runtime.get("workers"),
-                                                "resume": runtime.get("resume"),
-                                                "seed": runtime.get("seed"),
+                                        "workers": runtime.get("workers"),
+                                        "cpu_threads": runtime.get("cpu_threads"),
+                                        "resume": runtime.get("resume"),
+                                        "seed": runtime.get("seed"),
                                                 "save_every": runtime.get("save_every"),
                                                 "limit": runtime.get("limit"),
                                             },
@@ -929,6 +940,7 @@ def main() -> None:
                                     "embedding": embedding,
                                     "runtime": {
                                         "workers": runtime.get("workers"),
+                                        "cpu_threads": runtime.get("cpu_threads"),
                                         "resume": runtime.get("resume"),
                                         "seed": runtime.get("seed"),
                                         "save_every": runtime.get("save_every"),

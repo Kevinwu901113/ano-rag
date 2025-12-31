@@ -85,6 +85,13 @@ def get_profile_config(profile: Optional[str] = None, config: Optional[Dict[str,
         thinking = defaults.get("thinking")
     if resolved_profile == "extract":
         thinking = False
+
+    # Respect global forbid_think_tags
+    if thinking is not False:
+        answer_format = cfg.get("answer_format", {})
+        if answer_format.get("forbid_think_tags"):
+            thinking = False
+
     return LLMProfileConfig(
         name=resolved_profile,
         temperature=temperature,

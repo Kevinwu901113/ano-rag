@@ -64,6 +64,7 @@ def main():
     cfg_snapshot = global_config.load_config()
     lm_endpoint = args.lm_endpoint or cfg_snapshot.get("vllm", {}).get("endpoint")
     lm_model = args.lm_model or cfg_snapshot.get("vllm", {}).get("model")
+    embedding_config = global_config.get("retriever", {}).get("simple_selfrag", {}).get("embedding") or global_config.get("retriever", {}).get("embedding")
     write_config_resolved(
         work_dir,
         build_basic_config(
@@ -73,6 +74,14 @@ def main():
             temperature=None,
             max_tokens=None,
             context_budget=args.context_budget or None,
+            embedding={
+                "model": embedding_config.get("model") if embedding_config else "sentence-transformers/all-MiniLM-L6-v2",
+                "device": embedding_config.get("device") if embedding_config else "cpu",
+            },
+            extra={
+                "embedding_model_name": embedding_config.get("model") if embedding_config else "sentence-transformers/all-MiniLM-L6-v2",
+                "max_rounds": 2, # Hardcoded in logic as 1st retrieval + optional 2nd
+            }
         ),
     )
 
@@ -178,12 +187,29 @@ def main():
             continue
             
         try:
+            # Callback for logging intermediate retrieval steps
+            def retrieval_callback(step, hits):
+                round_dir = artifacts_dir / f"round_{step}"
+                round_dir.mkdir(parents=True, exist_ok=True)
+                try:
+                    log_retrieval(
+                        sample_id=qid,
+                        dataset=dataset_name,
+                        run_name=run_name,
+                        retrieved=[{**hit, "rank": i + 1} for i, hit in enumerate(hits)],
+                        topk=len(hits),
+                        log_dir=round_dir,
+                    )
+                except Exception as log_exc:
+                    logger.error(f"retrieval logging failed for {qid} round {step}: {log_exc}")
+
             # Use the local retriever instance instead of the global singleton
             if args.retrieval_only:
                 hits = retriever.retrieve(question, top_k=5)
+                retrieval_callback(1, hits)
                 ans_text = ""
             else:
-                ans_text = retriever.answer(question)
+                ans_text = retriever.answer(question, log_callback=retrieval_callback)
                 hits = getattr(retriever, "last_hits", [])
 
             final_ans = ans_text.strip()

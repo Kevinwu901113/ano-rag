@@ -10,7 +10,7 @@ from baselines.common.model_clients import get_default_llm_client
 # Global retriever instance
 _retriever: Optional[GraphRetriever] = None
 
-def get_retriever(index_dir: Optional[str] = None, *, context_budget: Optional[int] = None) -> GraphRetriever:
+def get_retriever(index_dir: Optional[str] = None, *, context_budget: Optional[int] = None, dense_index_path: Optional[str] = None) -> GraphRetriever:
     global _retriever
     if _retriever is None:
         # Load config
@@ -24,7 +24,7 @@ def get_retriever(index_dir: Optional[str] = None, *, context_budget: Optional[i
         if not os.path.exists(graph_path) or not os.path.exists(chunk_store_path):
             raise FileNotFoundError(f"Graph files not found in {base_dir}. Run build_graph first.")
             
-        _retriever = GraphRetriever(graph_path, chunk_store_path, llm_client, context_budget=context_budget)
+        _retriever = GraphRetriever(graph_path, chunk_store_path, llm_client, context_budget=context_budget, dense_index_path=dense_index_path)
         
     return _retriever
 

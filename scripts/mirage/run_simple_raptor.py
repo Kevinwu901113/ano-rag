@@ -5,7 +5,7 @@ import argparse
 import json
 import sys
 from pathlib import Path
-from typing import List
+from typing import Dict, List
 
 from loguru import logger
 
@@ -13,6 +13,7 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from baselines.simple_raptor.index import SimpleRaptorIndexer
 from baselines.simple_raptor.retriever import SimpleRaptorRetriever
 from baselines.common.model_clients import get_default_llm_client
 from utils.context_budget import pack_contexts
@@ -45,9 +46,31 @@ def _select_workspace(root: Path, dataset: str, new: bool) -> Path:
         return target
     return candidates[-1][1]
 
+def _load_doc_pool(doc_pool_path: Path) -> Dict[str, str]:
+    with doc_pool_path.open("r", encoding="utf-8") as handle:
+        raw_data = json.load(handle)
+    docs: Dict[str, str] = {}
+    if isinstance(raw_data, list):
+        for i, item in enumerate(raw_data):
+            base_id = item.get("doc_id") or item.get("mapped_id") or str(i)
+            doc_id = f"{base_id}::{i}"
+            title = item.get("title") or item.get("doc_name") or ""
+            paragraphs = item.get("paragraphs")
+            if paragraphs:
+                text = title + "\n" + "\n".join(str(p) for p in paragraphs if p)
+            else:
+                text = title + "\n" + (item.get("doc_chunk") or "")
+            text = text.strip()
+            if text:
+                docs[doc_id] = text
+    elif isinstance(raw_data, dict):
+        docs = {k: str(v) for k, v in raw_data.items()}
+    return docs
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run Simple Raptor baseline on MIRAGE dataset.json")
     parser.add_argument("--dataset-path", default="data/mirage_sample/dataset.json")
+    parser.add_argument("--doc-pool", default=None, help="Path to doc_pool.json (auto from dataset dir if omitted)")
     parser.add_argument("--index-dir", default=None, help="Directory containing Raptor index files")
     parser.add_argument("--index-path", default=None, help="Optional explicit FAISS index path")
     parser.add_argument("--nodes-path", default=None, help="Optional explicit nodes.pkl path")
@@ -83,23 +106,30 @@ def main() -> None:
     paths = ensure_workdir_layout(work_dir)
     artifacts_dir = paths["artifacts"]
     preds_dir = paths["preds"]
+    setup_logging(str(work_dir / "run.log"))
+    logger.info("Writing outputs to {}", work_dir)
 
     index_dir = Path(args.index_dir) if args.index_dir else artifacts_dir / "simple_raptor"
     index_path = Path(args.index_path) if args.index_path else index_dir / "simple_raptor_index.faiss"
     nodes_path = Path(args.nodes_path) if args.nodes_path else index_dir / "simple_raptor_nodes.pkl"
     chunk_store_path = Path(args.chunk_store_path) if args.chunk_store_path else index_dir / "simple_raptor_chunk_store.pkl"
-    
-    if not index_path.exists():
-        raise FileNotFoundError(f"Index missing: {index_path}")
-    if not nodes_path.exists():
-        raise FileNotFoundError(f"Nodes missing: {nodes_path}")
-    if not chunk_store_path.exists():
-        raise FileNotFoundError(f"Chunk store missing: {chunk_store_path}")
+
+    doc_pool_path = Path(args.doc_pool) if args.doc_pool else dataset_path.parent / "doc_pool.json"
+    if not index_path.exists() or not nodes_path.exists() or not chunk_store_path.exists():
+        if not doc_pool_path.exists():
+            raise FileNotFoundError(f"Doc pool not found: {doc_pool_path}")
+        logger.info("Index artifacts missing; building Simple Raptor index at {}", index_dir)
+        docs = _load_doc_pool(doc_pool_path)
+        if not docs:
+            raise RuntimeError(f"No documents found in doc pool: {doc_pool_path}")
+        indexer = SimpleRaptorIndexer()
+        stats = indexer.build(docs, cluster_size=16)
+        logger.info("Raptor index built: {}", stats)
+        index_dir.mkdir(parents=True, exist_ok=True)
+        indexer.save(str(index_path), str(nodes_path), str(chunk_store_path))
 
     run_name = work_dir.name
     dataset_name = "mirage"
-    setup_logging(str(work_dir / "run.log"))
-    logger.info("Writing outputs to {}", work_dir)
     cfg_snapshot = global_config.load_config()
     lm_endpoint = args.lm_endpoint or cfg_snapshot.get("vllm", {}).get("endpoint")
     lm_model = args.lm_model or cfg_snapshot.get("vllm", {}).get("model")
@@ -132,6 +162,10 @@ def main() -> None:
                 "context_budget_tokens": args.context_budget or None,
                 "topk": args.topk,
             },
+            extra={
+                "embedding_model_name": emb_cfg.get("model") or "sentence-transformers/all-MiniLM-L6-v2",
+                "depth": "auto (recursive)", # Raptor logic
+            }
         ),
     )
     

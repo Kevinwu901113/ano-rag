@@ -10,6 +10,13 @@ def find_latest_run_dir(base_path):
         return None
     return max(runs, key=os.path.getmtime)
 
+def count_lines(path: Path) -> int:
+    try:
+        with path.open("r", encoding="utf-8") as f:
+            return sum(1 for line in f if line.strip())
+    except Exception:
+        return 0
+
 def verify_job(job_dir, run_root):
     required_files = [
         "preds/pred_raw.jsonl",
@@ -28,6 +35,35 @@ def verify_job(job_dir, run_root):
     if missing_files:
         return {"status": "pending", "reason": f"Missing files: {missing_files}", "dir": str(job_dir)}
         
+    # Count check
+    pred_path = job_dir / "preds/pred_raw.jsonl"
+    actual_count = count_lines(pred_path)
+    
+    # Heuristic for expected count
+    expected_count = None
+    dataset_name = ""
+    try:
+        config_data = json.loads((job_dir / "config.resolved.json").read_text())
+        # Try to infer dataset name from path or config
+        rel_path = job_dir.relative_to(run_root)
+        dataset_name = rel_path.parts[0]
+    except:
+        pass
+        
+    if "200" in dataset_name:
+        expected_count = 200
+    elif "musique" in dataset_name and "sample" in dataset_name:
+        # Assuming musique_sample is around 200-500, but let's just log it if we can't be sure
+        pass
+        
+    if expected_count is not None and actual_count != expected_count:
+        return {
+            "status": "failed", 
+            "reason": f"Count mismatch: expected {expected_count}, got {actual_count}", 
+            "dir": str(job_dir),
+            "no_final_tag_rate": 0.0 # Placeholder
+        }
+
     # Quality checks
     try:
         format_metrics = json.loads((job_dir / "metrics/format_metrics.json").read_text())
@@ -71,7 +107,8 @@ def verify_job(job_dir, run_root):
             "status": "failed", 
             "reason": "; ".join(failures), 
             "dir": str(job_dir),
-            "no_final_tag_rate": no_final_tag_rate
+            "no_final_tag_rate": no_final_tag_rate,
+            "count": actual_count
         }
     
     # Extract metadata from path
@@ -97,7 +134,8 @@ def verify_job(job_dir, run_root):
         "em": qa_metrics.get("em", qa_metrics.get("EM", 0.0)),
         "f1": qa_metrics.get("f1", qa_metrics.get("AnswerF1", qa_metrics.get("F1", 0.0))),
         "no_final_tag_rate": no_final_tag_rate,
-        "job_id": job_dir.name
+        "job_id": job_dir.name,
+        "count": actual_count
     }
 
 def main():
@@ -139,8 +177,8 @@ def main():
     lines.append("- **Output Protocol**: FINAL-tag enforced")
     lines.append("")
     lines.append("## 2. 结果汇总表")
-    lines.append("| Job ID | Dataset | Method | Budget | EM | F1 | no_final_tag_rate |")
-    lines.append("|---|---|---|---|---|---|---|")
+    lines.append("| Job ID | Dataset | Method | Budget | Count | EM | F1 | no_final_tag_rate |")
+    lines.append("|---|---|---|---|---|---|---|---|")
     
     sorted_results = sorted(results, key=lambda x: (x.get("dataset", ""), x.get("method", ""), str(x.get("budget", ""))))
     
@@ -150,7 +188,7 @@ def main():
             if isinstance(budget, list):
                 budget = str(budget)
             rel_path = os.path.relpath(r["dir"], latest_run)
-            lines.append(f"| {rel_path} | {r.get('dataset')} | {r.get('method')} | {budget} | {r.get('em'):.4f} | {r.get('f1'):.4f} | {r.get('no_final_tag_rate'):.4f} |")
+            lines.append(f"| {rel_path} | {r.get('dataset')} | {r.get('method')} | {budget} | {r.get('count')} | {r.get('em'):.4f} | {r.get('f1'):.4f} | {r.get('no_final_tag_rate'):.4f} |")
             
     lines.append("")
     lines.append("## 3. 异常说明")

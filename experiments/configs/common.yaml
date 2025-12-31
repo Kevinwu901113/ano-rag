@@ -18,7 +18,7 @@ llm:
 embedding:
   model: "/home/wjk/models/qwen3-emb"
   device: "cpu"
-  batch_size: 4
+  batch_size: 16
   max_length: 512
   normalize: true
   dtype: null

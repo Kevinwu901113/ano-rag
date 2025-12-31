@@ -29,6 +29,10 @@ If the answer is not contained in the context, say "unknown".
 
 from config.config_loader import config as global_config
 
+import faiss
+import numpy as np
+from baselines.common.model_clients import get_default_embedding_client
+
 class GraphRetriever:
     def __init__(
         self,
@@ -37,8 +41,10 @@ class GraphRetriever:
         llm_client: LLMChatClient,
         *,
         context_budget: int | None = None,
+        dense_index_path: str | None = None,
     ):
         self.graph = SimpleGraph.load(graph_path)
+        self.chunk_to_nodes = self.graph.build_chunk_map()
         with open(chunk_store_path, 'rb') as f:
             self.chunk_store = pickle.load(f)
         self.llm_client = llm_client
@@ -49,21 +55,45 @@ class GraphRetriever:
         self.relrag_cfg = cfg.get("relrag", {})
         self.top_k = int(self.relrag_cfg.get("top_k", 15))
         self.context_budget = int(context_budget or 0)
-        # max_context_tokens usage is implicit via chunk limit, 
-        # but we can use it to limit chunk count dynamically if we had a tokenizer.
-        # For now, we'll just use top_k as chunk limit.
+        
+        # Initialize Dense Index if provided
+        self.dense_index = None
+        self.dense_encoder = None
+        self.chunk_ids_map = None # Needs to map index ID to chunk ID
+        
+        if dense_index_path:
+            logger.info(f"Loading dense index from {dense_index_path}")
+            self.dense_index = faiss.read_index(str(dense_index_path))
+            self.dense_encoder = get_default_embedding_client(cfg)
+            
+            # Load meta for mapping index ID to chunk ID
+            meta_path = str(dense_index_path) + ".meta.pkl"
+            try:
+                with open(meta_path, "rb") as f:
+                    self.chunk_ids_map = pickle.load(f)
+            except Exception as e:
+                logger.warning(f"Failed to load dense index meta from {meta_path}: {e}")
+                self.dense_index = None # Disable if meta missing
 
     def answer(self, question: str) -> str:
-        # 1. Extract entities from query
-        entities = self._extract_query_entities(question)
-        logger.info(f"Extracted entities: {entities}")
+        relevant_chunk_ids = set()
         
-        # 2. Match nodes in graph
-        matched_node_ids = self._match_nodes(entities)
-        logger.info(f"Matched nodes: {matched_node_ids}")
-        
-        # 3. Expand graph (hop 1-2)
-        relevant_chunk_ids = self._expand_graph(matched_node_ids, hops=2)
+        if self.dense_index and self.chunk_ids_map:
+            logger.info("Using Dense -> Graph Expansion strategy")
+            relevant_chunk_ids = self._retrieve_dense_expand(question)
+        else:
+            logger.info("Using Entity Linking -> Graph Expansion strategy")
+            # 1. Extract entities from query
+            entities = self._extract_query_entities(question)
+            logger.info(f"Extracted entities: {entities}")
+            
+            # 2. Match nodes in graph
+            matched_node_ids = self._match_nodes(entities)
+            logger.info(f"Matched nodes: {matched_node_ids}")
+            
+            # 3. Expand graph (hop 1-2)
+            relevant_chunk_ids = self._expand_graph(matched_node_ids, hops=1) # Standard LightRAG: 1 hop
+
         logger.info(f"Collected {len(relevant_chunk_ids)} relevant chunks")
         
         # 4. Retrieve chunks
@@ -95,6 +125,38 @@ class GraphRetriever:
         
         # 5. Generate answer
         return self._generate_answer(question, context_str)
+
+    def _retrieve_dense_expand(self, question: str, top_k_seeds: int = 5, hops: int = 1) -> Set[str]:
+        # 1. Embed Question
+        q_vec = self.dense_encoder.encode([question], normalize_embeddings=True)
+        
+        # 2. Dense Retrieve Seeds
+        scores, indices = self.dense_index.search(q_vec, top_k_seeds)
+        
+        seed_chunk_ids = []
+        for idx in indices[0]:
+            if idx >= 0 and idx < len(self.chunk_ids_map):
+                seed_chunk_ids.append(self.chunk_ids_map[idx])
+        
+        logger.info(f"Dense retrieved seeds: {len(seed_chunk_ids)}")
+        
+        # 3. Map Seeds to Nodes
+        seed_node_ids = set()
+        for cid in seed_chunk_ids:
+            # chunk_to_nodes maps chunk_id -> set of node_ids
+            if cid in self.chunk_to_nodes:
+                seed_node_ids.update(self.chunk_to_nodes[cid])
+                
+        logger.info(f"Mapped to {len(seed_node_ids)} seed nodes")
+        
+        # 4. Expand Graph
+        # Use existing expand logic
+        expanded_chunk_ids = self._expand_graph(list(seed_node_ids), hops=hops)
+        
+        # 5. Union with seeds
+        expanded_chunk_ids.update(seed_chunk_ids)
+        
+        return expanded_chunk_ids
 
     def _extract_query_entities(self, question: str) -> List[str]:
         prompt = f"""

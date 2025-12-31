@@ -16,11 +16,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 # Now we can import from project modules
-try:
-    from config.config_loader import config as global_config
-except ImportError:
-    logger.warning("Could not import config.config_loader; ensure PYTHONPATH is set correctly.")
-    pass
+from config.config_loader import config as global_config, DEFAULT_EMBED_MODEL
 
 from baselines.common.model_clients import get_default_llm_client
 from baselines.vanilla_rag import get_retriever
@@ -253,6 +249,8 @@ def main():
                 "cache_key": cache_key,
                 "cache_path": cache_path,
                 "cache_hit": cache_hit,
+                "embedding_model_name": emb_cfg.get("model") or "sentence-transformers/all-MiniLM-L6-v2",
+                "fusion_strategy": f"rrf_k{args.hybrid_rrf_k}" if args.retriever == "hybrid" else None,
             },
         ),
     )
@@ -388,7 +386,7 @@ def main():
     results = []
     pred_raw_records: List[Dict[str, Any]] = []
 
-    def _bm25_hit(idx: int, score: float) -> Dict[str, Any]:
+    def _bm25_hit(idx: int, score: float, source: str = "bm25") -> Dict[str, Any]:
         cid = bm25_ids[idx]
         text = bm25_texts[idx]
         doc_id = cid.split("::", 1)[0] if "::" in cid else None
@@ -398,6 +396,7 @@ def main():
             "doc_id": doc_id,
             "sent_ids": None,
             "passage_id": cid,
+            "source": source,
         }
     
     # 5. Run Inference
@@ -412,12 +411,13 @@ def main():
                 if retriever is None:
                     raise RuntimeError("Dense retriever unavailable.")
                 hits = retriever.retrieve(question, top_k=args.topk)
+                for h in hits: h["source"] = "dense"
             elif args.retriever == "bm25":
                 if bm25_index is None:
                     raise RuntimeError("BM25 index unavailable.")
                 scores = bm25_index.get_scores(question)
                 indices = sorted(range(len(scores)), key=lambda i: scores[i], reverse=True)[: args.topk]
-                hits = [_bm25_hit(idx, scores[idx]) for idx in indices]
+                hits = [_bm25_hit(idx, scores[idx], "bm25") for idx in indices]
             else:
                 if retriever is None or bm25_index is None:
                     raise RuntimeError("Hybrid retriever unavailable.")
@@ -431,7 +431,28 @@ def main():
                 ]
                 fused = rrf_fuse([dense_rank, bm25_rank], k=int(getattr(args, "hybrid_rrf_k", 60)))
                 indices = sorted(fused, key=fused.get, reverse=True)[: args.topk]
-                hits = [_bm25_hit(idx, fused.get(idx, 0.0)) for idx in indices]
+                
+                dense_set = set(dense_rank)
+                bm25_set = set(bm25_rank[:len(dense_rank)*2]) # Approximate top-k for bm25 check, or check all?
+                # Actually bm25_rank is ALL docs sorted. Checking if idx is in top-K of BM25 is better.
+                # But here we just want to know if it came from bm25 list passed to RRF.
+                # RRF takes `bm25_rank`. If I pass the whole list, then everything is in bm25.
+                # But typically we only take top-N for RRF.
+                # The code passes `bm25_rank` which is ALL indices.
+                # So technically every doc is from BM25.
+                # But practically, we want to know if it was in the top retrieval results of either.
+                # Let's say top-100.
+                
+                bm25_top_set = set(bm25_rank[:100])
+                dense_top_set = set(dense_rank) # dense_hits is top-k (usually 10 or 100)
+                
+                hits = []
+                for idx in indices:
+                    src = []
+                    if idx in bm25_top_set: src.append("bm25")
+                    if idx in dense_top_set: src.append("dense")
+                    if not src: src.append("bm25_tail") # It was in BM25 but not top 100
+                    hits.append(_bm25_hit(idx, fused.get(idx, 0.0), "+".join(src)))
 
             annotated_hits = []
             for idx, hit in enumerate(hits):
@@ -451,13 +472,13 @@ Answer:"""
                 [{"role": "user", "content": prompt}],
                 max_tokens=args.max_new_tokens if args.max_new_tokens is not None else 1024,
             )
-            final_ans = ans
+            final_ans = ans.content if hasattr(ans, "content") else str(ans)
             
             results.append({
                 "query_id": qid,
                 "question": question,
                 "answer": final_ans,
-                "raw_answer": ans
+                "raw_answer": final_ans
             })
             try:
                 log_retrieval(
@@ -479,7 +500,7 @@ Answer:"""
                 {
                     "id": str(qid),
                     "question": question,
-                    "pred_raw": ans,
+                    "pred_raw": final_ans,
                     "contexts_used": contexts_used,
                     "context_tokens_used": context_tokens,
                     "context_budget_tokens": int(args.context_budget or 0) or None,
