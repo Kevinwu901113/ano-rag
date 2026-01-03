@@ -57,11 +57,14 @@ def _build_entries(doc_pool: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
         if not text:
             continue
         doc_name = str(item.get("doc_name") or item.get("title") or "").strip()
-        doc_id = doc_name or str(item.get("doc_id") or item.get("mapped_id") or f"doc_{idx:06d}")
+        # MIRAGE canonical id must be UUID (mapped_id/query_id). DO NOT use title as doc_id.
+        canonical_id = item.get("mapped_id") or item.get("doc_id")
+        doc_id = str(canonical_id or doc_name or f"doc_{idx:06d}")
         full_text = f"Title: {doc_name}\nContent: {text}" if doc_name else text
         entries.append(
             {
                 "text": full_text,
+                "title": doc_name,
                 "doc_id": doc_id,
                 "sent_ids": None,
                 "passage_id": f"{doc_id}::{idx}",
@@ -213,6 +216,7 @@ class RelRAGIndex:
             hits.append(
                 {
                     "text": entry.get("text"),
+                    "title": entry.get("title"),
                     "score": float(final_scores[int(idx)]),
                     "initial_score": float(initial_scores[int(idx)]),
                     "neighbor_score": float(neighbor_scores[int(idx)]) if neighbor_scores is not None else 0.0,
