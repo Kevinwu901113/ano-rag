@@ -1,0 +1,39 @@
+{
+  "run_dir": "result_relrag/e1_main_qwen/run_20251225_063718/mirage_sample_200/dense_rag/llm_default/budget_8192/full",
+  "qa_norm": {
+    "EM": 0.0,
+    "F1": 0.1405228749399879,
+    "count": 200
+  },
+  "qa_final": {
+    "EM": 0.325,
+    "F1": 0.5804813936063938,
+    "count": 200
+  },
+  "format_metrics": {
+    "invalid_rate": 0.0,
+    "no_final_tag_rate": 0.01,
+    "count": 200,
+    "budget_violation_rate": 0.0
+  },
+  "retrieval_metrics": {
+    "Recall@1": 0.0,
+    "Hit@1": 0.0,
+    "MultiHop@1": 0.0,
+    "Recall@3": 0.0,
+    "Hit@3": 0.0,
+    "MultiHop@3": 0.0,
+    "Recall@5": 0.0,
+    "Hit@5": 0.0,
+    "MultiHop@5": 0.0,
+    "Recall@10": 0.0,
+    "Hit@10": 0.0,
+    "MultiHop@10": 0.0
+  },
+  "eval_entry": "scripts/evaluate_relrag.py",
+  "pred_source": "result_relrag/e1_main_qwen/run_20251225_063718/mirage_sample_200/dense_rag/llm_default/budget_8192/full/preds/pred_raw.jsonl",
+  "git_commit": "53e3cadc0221797cee1a85cb305338a0dae39219",
+  "pred_raw": "result_relrag/e1_main_qwen/run_20251225_063718/mirage_sample_200/dense_rag/llm_default/budget_8192/full/preds/pred_raw.jsonl",
+  "pred_norm": "result_relrag/e1_main_qwen/run_20251225_063718/mirage_sample_200/dense_rag/llm_default/budget_8192/full/preds/pred_norm.jsonl",
+  "pred_final": "result_relrag/e1_main_qwen/run_20251225_063718/mirage_sample_200/dense_rag/llm_default/budget_8192/full/preds/pred_final.jsonl"
+}

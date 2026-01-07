@@ -1,0 +1,41 @@
+[
+  {
+    "run_dir": "/home/wjk/workplace/nq/ano-rag/result_relrag/e1_main_qwen/run_20251225_063718/hotpotqa_distractor_200/hybrid_rag/llm_default/budget_4096/full",
+    "qa_norm": {
+      "EM": 0.01,
+      "F1": 0.15066870800215912,
+      "count": 200
+    },
+    "qa_final": {
+      "EM": 0.5,
+      "F1": 0.6601087567403358,
+      "count": 200
+    },
+    "format_metrics": {
+      "invalid_rate": 0.0,
+      "no_final_tag_rate": 0.01,
+      "count": 200,
+      "budget_violation_rate": 0.0
+    },
+    "retrieval_metrics": {
+      "Recall@1": 0.2625,
+      "Hit@1": 0.525,
+      "MultiHop@1": 0.0,
+      "Recall@3": 0.555,
+      "Hit@3": 0.87,
+      "MultiHop@3": 0.24,
+      "Recall@5": 0.79,
+      "Hit@5": 0.985,
+      "MultiHop@5": 0.595,
+      "Recall@10": 1.0,
+      "Hit@10": 1.0,
+      "MultiHop@10": 1.0
+    },
+    "eval_entry": "scripts/evaluate_relrag.py",
+    "pred_source": "/home/wjk/workplace/nq/ano-rag/result_relrag/e1_main_qwen/run_20251225_063718/hotpotqa_distractor_200/hybrid_rag/llm_default/budget_4096/full/preds/pred_raw.jsonl",
+    "git_commit": "ee7a998f99cd59080aa3703ed90c8f234f203a69",
+    "pred_raw": "/home/wjk/workplace/nq/ano-rag/result_relrag/e1_main_qwen/run_20251225_063718/hotpotqa_distractor_200/hybrid_rag/llm_default/budget_4096/full/preds/pred_raw.jsonl",
+    "pred_norm": "/home/wjk/workplace/nq/ano-rag/result_relrag/e1_main_qwen/run_20251225_063718/hotpotqa_distractor_200/hybrid_rag/llm_default/budget_4096/full/preds/pred_norm.jsonl",
+    "pred_final": "/home/wjk/workplace/nq/ano-rag/result_relrag/e1_main_qwen/run_20251225_063718/hotpotqa_distractor_200/hybrid_rag/llm_default/budget_4096/full/preds/pred_final.jsonl"
+  }
+]

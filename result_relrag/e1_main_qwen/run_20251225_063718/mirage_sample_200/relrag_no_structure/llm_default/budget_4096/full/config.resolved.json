@@ -1,0 +1,49 @@
+{
+  "dataset": "mirage",
+  "model": "qwen3-30b-a3b",
+  "endpoint": "http://127.0.0.1:8000/v1",
+  "temperature": 0.0,
+  "max_tokens": 128,
+  "context_budget_tokens": 4096,
+  "topk": 10,
+  "decode": {
+    "temperature": 0.0,
+    "top_p": null,
+    "repetition_penalty": null,
+    "max_tokens": 128
+  },
+  "embedding": {
+    "model": "/home/wjk/models/qwen3-emb",
+    "device": "cuda",
+    "batch_size": 32,
+    "max_length": 512,
+    "normalize": true,
+    "dtype": null
+  },
+  "budgets": {
+    "context_budget_tokens": 4096,
+    "topk": 10
+  },
+  "llm_profile": "default",
+  "llm_profiles": {
+    "extract": {
+      "endpoint": "http://127.0.0.1:8000/v1",
+      "model": "qwen3-30b-a3b",
+      "temperature": 0.0,
+      "max_tokens": 256,
+      "thinking": false
+    },
+    "generate": {
+      "endpoint": "http://127.0.0.1:8000/v1",
+      "model": "qwen3-30b-a3b",
+      "temperature": 0.0,
+      "max_tokens": 128,
+      "thinking": false
+    }
+  },
+  "git_commit": "ee7a998f99cd59080aa3703ed90c8f234f203a69",
+  "sim_threshold": 0.7,
+  "graph_hop": 1,
+  "scheduler_enabled": false,
+  "alpha": 0.6
+}

@@ -1,0 +1,41 @@
+[
+  {
+    "run_dir": "result_relrag/e1_main_qwen/run_20251225_063718/hotpotqa_distractor_200/relrag_full/llm_default/budget_4096/full",
+    "qa_norm": {
+      "EM": 0.0,
+      "F1": 0.13013872101435175,
+      "count": 200
+    },
+    "qa_final": {
+      "EM": 0.515,
+      "F1": 0.6813230757337903,
+      "count": 200
+    },
+    "format_metrics": {
+      "invalid_rate": 0.0,
+      "no_final_tag_rate": 0.025,
+      "count": 200,
+      "budget_violation_rate": 0.0
+    },
+    "retrieval_metrics": {
+      "Recall@1": 0.0825,
+      "Hit@1": 0.165,
+      "MultiHop@1": 0.0,
+      "Recall@3": 0.3175,
+      "Hit@3": 0.54,
+      "MultiHop@3": 0.095,
+      "Recall@5": 0.5225,
+      "Hit@5": 0.77,
+      "MultiHop@5": 0.275,
+      "Recall@10": 1.0,
+      "Hit@10": 1.0,
+      "MultiHop@10": 1.0
+    },
+    "eval_entry": "scripts/evaluate_relrag.py",
+    "pred_source": "result_relrag/e1_main_qwen/run_20251225_063718/hotpotqa_distractor_200/relrag_full/llm_default/budget_4096/full/preds/pred_raw.jsonl",
+    "git_commit": "53e3cadc0221797cee1a85cb305338a0dae39219",
+    "pred_raw": "result_relrag/e1_main_qwen/run_20251225_063718/hotpotqa_distractor_200/relrag_full/llm_default/budget_4096/full/preds/pred_raw.jsonl",
+    "pred_norm": "result_relrag/e1_main_qwen/run_20251225_063718/hotpotqa_distractor_200/relrag_full/llm_default/budget_4096/full/preds/pred_norm.jsonl",
+    "pred_final": "result_relrag/e1_main_qwen/run_20251225_063718/hotpotqa_distractor_200/relrag_full/llm_default/budget_4096/full/preds/pred_final.jsonl"
+  }
+]

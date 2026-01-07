@@ -1,0 +1,17 @@
+{
+  "Hit@1": 0.0,
+  "Precision@1": 0.0,
+  "Recall@1": 0.0,
+  "Hit@3": 0.0,
+  "Precision@3": 0.0,
+  "Recall@3": 0.0,
+  "Hit@5": 0.0,
+  "Precision@5": 0.0,
+  "Recall@5": 0.0,
+  "Hit@10": 0.0,
+  "Precision@10": 0.0,
+  "Recall@10": 0.0,
+  "MRR": 0.0,
+  "MAP": 0.0,
+  "count": 200
+}

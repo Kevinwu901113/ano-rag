@@ -1,0 +1,17 @@
+| dataset | method | budget | status | reason | workdir |
+| --- | --- | --- | --- | --- | --- |
+| hotpotqa_distractor_200 | bm25_rag | 4096 | PASS | - | result_relrag/e1_main_qwen/run_20251225_063718/hotpotqa_distractor_200/bm25_rag/llm_default/budget_4096/full |
+| hotpotqa_distractor_200 | dense_rag | 4096 | PASS | - | result_relrag/e1_main_qwen/run_20251225_063718/hotpotqa_distractor_200/dense_rag/llm_default/budget_4096/full |
+| hotpotqa_distractor_200 | hybrid_rag | 4096 | PASS | - | result_relrag/e1_main_qwen/run_20251225_063718/hotpotqa_distractor_200/hybrid_rag/llm_default/budget_4096/full |
+| hotpotqa_distractor_200 | raptor | 4096 | PASS | - | result_relrag/e1_main_qwen/run_20251225_063718/hotpotqa_distractor_200/raptor/llm_default/budget_4096/full |
+| hotpotqa_distractor_200 | relrag_full | 4096 | PASS | - | result_relrag/e1_main_qwen/run_20251225_063718/hotpotqa_distractor_200/relrag_full/llm_default/budget_4096/full |
+| mirage_sample_200 | bm25_rag | 4096 | PASS | - | result_relrag/e1_main_qwen/run_20251225_063718/mirage_sample_200/bm25_rag/llm_default/budget_4096/full |
+| mirage_sample_200 | dense_rag | 4096 | PASS | - | result_relrag/e1_main_qwen/run_20251225_063718/mirage_sample_200/dense_rag/llm_default/budget_4096/full |
+| mirage_sample_200 | hybrid_rag | 4096 | PASS | - | result_relrag/e1_main_qwen/run_20251225_063718/mirage_sample_200/hybrid_rag/llm_default/budget_4096/full |
+| mirage_sample_200 | raptor | 4096 | PASS | - | result_relrag/e1_main_qwen/run_20251225_063718/mirage_sample_200/raptor/llm_default/budget_4096/full |
+| mirage_sample_200 | relrag_full | 4096 | PASS | - | result_relrag/e1_main_qwen/run_20251225_063718/mirage_sample_200/relrag_full/llm_default/budget_4096/full |
+| musique_sample | bm25_rag | 4096 | PASS | - | result_relrag/e1_main_qwen/run_20251225_063718/musique_sample/bm25_rag/llm_default/budget_4096/full |
+| musique_sample | dense_rag | 4096 | PASS | - | result_relrag/e1_main_qwen/run_20251225_063718/musique_sample/dense_rag/llm_default/budget_4096/full |
+| musique_sample | hybrid_rag | 4096 | PASS | - | result_relrag/e1_main_qwen/run_20251225_063718/musique_sample/hybrid_rag/llm_default/budget_4096/full |
+| musique_sample | raptor | 4096 | PASS | - | result_relrag/e1_main_qwen/run_20251225_063718/musique_sample/raptor/llm_default/budget_4096/full |
+| musique_sample | relrag_full | 4096 | PASS | - | result_relrag/e1_main_qwen/run_20251225_063718/musique_sample/relrag_full/llm_default/budget_4096/full |

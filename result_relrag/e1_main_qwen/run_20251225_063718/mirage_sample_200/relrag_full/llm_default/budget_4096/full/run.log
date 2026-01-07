@@ -1,0 +1,8 @@
+2025-12-30 05:29:39.806 | INFO     | __main__:main:286 - Loaded 200 examples from /home/wjk/workplace/nq/ano-rag/data/mirage_sample_200/dataset.json
+2025-12-30 05:29:39.824 | INFO     | __main__:main:292 - Loaded 1000 doc pool entries from /home/wjk/workplace/nq/ano-rag/data/mirage_sample_200/doc_pool.json
+2025-12-30 05:29:39.840 | INFO     | __main__:main:304 - Writing outputs to result_relrag/e1_main_qwen/run_20251225_063718/mirage_sample_200/relrag_full/llm_default/budget_4096/full
+Loading embedding model: /home/wjk/models/qwen3-emb on cpu (dtype=auto)...
+Loading checkpoint shards:   0%|          | 0/4 [00:00<?, ?it/s]Loading checkpoint shards:  25%|██▌       | 1/4 [00:00<00:01,  1.54it/s]Loading checkpoint shards:  50%|█████     | 2/4 [00:01<00:01,  1.53it/s]Loading checkpoint shards:  75%|███████▌  | 3/4 [00:03<00:01,  1.21s/it]Loading checkpoint shards: 100%|██████████| 4/4 [00:03<00:00,  1.25it/s]Loading checkpoint shards: 100%|██████████| 4/4 [00:03<00:00,  1.20it/s]
+2025-12-30 06:13:25.647 | INFO     | __main__:main:382 - Resuming with 200 existing predictions
+2025-12-30 06:13:25.679 | INFO     | __main__:main:466 - Finished. Results saved to result_relrag/e1_main_qwen/run_20251225_063718/mirage_sample_200/relrag_full/llm_default/budget_4096/full
+2025-12-30 06:13:25.679 | INFO     | __main__:main:466 - Finished. Results saved to result_relrag/e1_main_qwen/run_20251225_063718/mirage_sample_200/relrag_full/llm_default/budget_4096/full

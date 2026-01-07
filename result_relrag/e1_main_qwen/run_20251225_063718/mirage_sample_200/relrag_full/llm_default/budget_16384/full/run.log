@@ -1,0 +1,12 @@
+2025-12-30 06:57:29.399 | INFO     | __main__:main:286 - Loaded 200 examples from /home/wjk/workplace/nq/ano-rag/data/mirage_sample_200/dataset.json
+2025-12-30 06:57:29.411 | INFO     | __main__:main:292 - Loaded 1000 doc pool entries from /home/wjk/workplace/nq/ano-rag/data/mirage_sample_200/doc_pool.json
+2025-12-30 06:57:29.420 | INFO     | __main__:main:304 - Writing outputs to result_relrag/e1_main_qwen/run_20251225_063718/mirage_sample_200/relrag_full/llm_default/budget_16384/full
+Loading embedding model: /home/wjk/models/qwen3-emb on cpu (dtype=auto)...
+Loading checkpoint shards:   0%|          | 0/4 [00:00<?, ?it/s]Loading checkpoint shards:  25%|██▌       | 1/4 [00:00<00:02,  1.16it/s]Loading checkpoint shards:  50%|█████     | 2/4 [00:01<00:01,  1.11it/s]Loading checkpoint shards:  75%|███████▌  | 3/4 [00:02<00:00,  1.14it/s]Loading checkpoint shards: 100%|██████████| 4/4 [00:02<00:00,  1.48it/s]
+2025-12-30 07:43:22.248 | INFO     | __main__:main:382 - Resuming with 196 existing predictions
+2025-12-30 07:43:22.248 | INFO     | __main__:main:393 - Processing Q11: What is Fairfax M. Cone's occupation?
+2025-12-30 07:43:26.417 | INFO     | __main__:main:393 - Processing Q179: In what city was Charles Joseph Bonaparte born?
+2025-12-30 07:43:28.704 | INFO     | __main__:main:393 - Processing Q187: In what city was Fernand Cornez born?
+2025-12-30 07:43:31.407 | INFO     | __main__:main:393 - Processing Q190: In what city was James M. Bingham born?
+2025-12-30 07:43:34.581 | INFO     | __main__:main:466 - Finished. Results saved to result_relrag/e1_main_qwen/run_20251225_063718/mirage_sample_200/relrag_full/llm_default/budget_16384/full
+2025-12-30 07:43:34.581 | INFO     | __main__:main:466 - Finished. Results saved to result_relrag/e1_main_qwen/run_20251225_063718/mirage_sample_200/relrag_full/llm_default/budget_16384/full

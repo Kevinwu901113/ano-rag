@@ -1,8 +1,0 @@
-[
-  "occupation", "spouse", "born_in", "born_on", "died_in", "died_on",
-  "educated_at", "position_held", "member_of", "award_received", "works_for",
-  "authored_by", "founded", "founded_by", "parent", "child_of",
-  "nationality", "residence", "performed_by", "directed_by", "acted_in",
-  "label", "headquartered_in", "located_in", "same_as", "alias_of", "type",
-  "category", "title", "released_in", "produced_by", "part_of"
-]

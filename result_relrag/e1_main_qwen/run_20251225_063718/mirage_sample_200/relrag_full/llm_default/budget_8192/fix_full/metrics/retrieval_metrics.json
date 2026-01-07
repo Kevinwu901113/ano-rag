@@ -1,0 +1,14 @@
+{
+  "Recall@1": 0.42,
+  "Hit@1": 0.42,
+  "MultiHop@1": 0.42,
+  "Recall@3": 0.46,
+  "Hit@3": 0.46,
+  "MultiHop@3": 0.46,
+  "Recall@5": 0.48,
+  "Hit@5": 0.48,
+  "MultiHop@5": 0.48,
+  "Recall@10": 0.49,
+  "Hit@10": 0.49,
+  "MultiHop@10": 0.49
+}

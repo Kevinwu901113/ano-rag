@@ -1,0 +1,814 @@
+2025-12-30 05:24:24.639 | INFO     | __main__:main:110 - Writing outputs to result_relrag/e1_main_qwen/run_20251225_063718/mirage_sample_200/raptor/llm_default/budget_16384/full
+2025-12-30 05:24:24.642 | INFO     | baselines.common.model_clients:get_default_llm_client:84 - Using vLLM configuration for LLM Client
+2025-12-30 05:24:24.642 | INFO     | baselines.common.model_clients:get_default_llm_client:94 - Initializing LLM Client: endpoint=http://127.0.0.1:8000/v1 model=qwen3-30b-a3b profile=generate
+2025-12-30 05:24:24.642 | INFO     | baselines.simple_raptor.retriever:__init__:53 - Loading index from result_relrag/e1_main_qwen/run_20251225_063718/mirage_sample_200/raptor/llm_default/budget_16384/full/artifacts/simple_raptor/simple_raptor_index.faiss
+2025-12-30 05:24:24.643 | INFO     | baselines.simple_raptor.retriever:__init__:57 - Loading nodes from result_relrag/e1_main_qwen/run_20251225_063718/mirage_sample_200/raptor/llm_default/budget_16384/full/artifacts/simple_raptor/simple_raptor_nodes.pkl
+2025-12-30 05:24:24.647 | INFO     | baselines.simple_raptor.retriever:__init__:64 - Loading node_ids map from result_relrag/e1_main_qwen/run_20251225_063718/mirage_sample_200/raptor/llm_default/budget_16384/full/artifacts/simple_raptor/simple_raptor_index.faiss.node_ids.pkl
+2025-12-30 05:24:24.647 | INFO     | baselines.simple_raptor.retriever:__init__:69 - Loading chunk store from result_relrag/e1_main_qwen/run_20251225_063718/mirage_sample_200/raptor/llm_default/budget_16384/full/artifacts/simple_raptor/simple_raptor_chunk_store.pkl
+2025-12-30 05:24:24.649 | INFO     | baselines.common.model_clients:get_default_embedding_client:64 - Initializing Embedding Client (rag_core): provider=st, model=sentence-transformers/all-MiniLM-L6-v2, device=cpu
+2025-12-30 05:24:24.649 | INFO     | rag_core.embedding_client:__init__:14 - Initializing EmbeddingEncoder: st / sentence-transformers/all-MiniLM-L6-v2 on cpu
+/home/wjk/miniconda3/envs/anorag/lib/python3.12/site-packages/transformers/utils/hub.py:110: FutureWarning: Using `TRANSFORMERS_CACHE` is deprecated and will be removed in v5 of Transformers. Use `HF_HOME` instead.
+  warnings.warn(
+2025-12-30 05:24:53.542 | INFO     | __main__:main:189 - Running Raptor baseline on 200 questions...
+2025-12-30 05:24:53.543 | INFO     | __main__:main:196 - Processing Q0: What is John Mayne's occupation?
+2025-12-30 05:24:53.543 | INFO     | baselines.simple_raptor.retriever:answer:195 - Retrieving nodes for: What is John Mayne's occupation?
+2025-12-30 05:24:53.543 | INFO     | rag_core.embedding_client:encode:58 - [EMB] encoding 1 texts, first=What is John Mayne's occupation?...
+2025-12-30 05:24:53.591 | INFO     | baselines.simple_raptor.retriever:answer:281 - [RAPTOR] answering qid=What is John Mayne's occupation?..., ctx_len=17234
+2025-12-30 05:24:55.193 | INFO     | __main__:main:196 - Processing Q1: What is Kathy Saltzman's occupation?
+2025-12-30 05:24:55.193 | INFO     | baselines.simple_raptor.retriever:answer:195 - Retrieving nodes for: What is Kathy Saltzman's occupation?
+2025-12-30 05:24:55.193 | INFO     | rag_core.embedding_client:encode:58 - [EMB] encoding 1 texts, first=What is Kathy Saltzman's occupation?...
+2025-12-30 05:24:55.202 | INFO     | baselines.simple_raptor.retriever:answer:281 - [RAPTOR] answering qid=What is Kathy Saltzman's occupation?..., ctx_len=4852
+2025-12-30 05:24:56.846 | INFO     | __main__:main:196 - Processing Q2: What is Eleanor Davis's occupation?
+2025-12-30 05:24:56.846 | INFO     | baselines.simple_raptor.retriever:answer:195 - Retrieving nodes for: What is Eleanor Davis's occupation?
+2025-12-30 05:24:56.846 | INFO     | rag_core.embedding_client:encode:58 - [EMB] encoding 1 texts, first=What is Eleanor Davis's occupation?...
+2025-12-30 05:24:56.854 | INFO     | baselines.simple_raptor.retriever:answer:281 - [RAPTOR] answering qid=What is Eleanor Davis's occupation?..., ctx_len=21202
+2025-12-30 05:24:58.227 | INFO     | __main__:main:196 - Processing Q3: What is William Murray, 1st Earl of Mansfield's occupation?
+2025-12-30 05:24:58.228 | INFO     | baselines.simple_raptor.retriever:answer:195 - Retrieving nodes for: What is William Murray, 1st Earl of Mansfield's occupation?
+2025-12-30 05:24:58.228 | INFO     | rag_core.embedding_client:encode:58 - [EMB] encoding 1 texts, first=What is William Murray, 1st Earl of Mansfield's oc...
+2025-12-30 05:24:58.238 | INFO     | baselines.simple_raptor.retriever:answer:281 - [RAPTOR] answering qid=What is William Murray, 1st Earl of Mansfield's oc..., ctx_len=21094
+2025-12-30 05:25:00.420 | INFO     | __main__:main:196 - Processing Q4: What is Þorsteinn Bachmann's occupation?
+2025-12-30 05:25:00.421 | INFO     | baselines.simple_raptor.retriever:answer:195 - Retrieving nodes for: What is Þorsteinn Bachmann's occupation?
+2025-12-30 05:25:00.421 | INFO     | rag_core.embedding_client:encode:58 - [EMB] encoding 1 texts, first=What is Þorsteinn Bachmann's occupation?...
+2025-12-30 05:25:00.431 | INFO     | baselines.simple_raptor.retriever:answer:281 - [RAPTOR] answering qid=What is Þorsteinn Bachmann's occupation?..., ctx_len=7402
+2025-12-30 05:25:00.814 | INFO     | __main__:main:196 - Processing Q5: What is Jacob Kraemer's occupation?
+2025-12-30 05:25:00.814 | INFO     | baselines.simple_raptor.retriever:answer:195 - Retrieving nodes for: What is Jacob Kraemer's occupation?
+2025-12-30 05:25:00.814 | INFO     | rag_core.embedding_client:encode:58 - [EMB] encoding 1 texts, first=What is Jacob Kraemer's occupation?...
+2025-12-30 05:25:00.823 | INFO     | baselines.simple_raptor.retriever:answer:281 - [RAPTOR] answering qid=What is Jacob Kraemer's occupation?..., ctx_len=17004
+2025-12-30 05:25:02.315 | INFO     | __main__:main:196 - Processing Q6: What is Bae Geu-rin's occupation?
+2025-12-30 05:25:02.315 | INFO     | baselines.simple_raptor.retriever:answer:195 - Retrieving nodes for: What is Bae Geu-rin's occupation?
+2025-12-30 05:25:02.315 | INFO     | rag_core.embedding_client:encode:58 - [EMB] encoding 1 texts, first=What is Bae Geu-rin's occupation?...
+2025-12-30 05:25:02.330 | INFO     | baselines.simple_raptor.retriever:answer:281 - [RAPTOR] answering qid=What is Bae Geu-rin's occupation?..., ctx_len=10786
+2025-12-30 05:25:02.765 | INFO     | __main__:main:196 - Processing Q7: What is John Floyd's occupation?
+2025-12-30 05:25:02.765 | INFO     | baselines.simple_raptor.retriever:answer:195 - Retrieving nodes for: What is John Floyd's occupation?
+2025-12-30 05:25:02.766 | INFO     | rag_core.embedding_client:encode:58 - [EMB] encoding 1 texts, first=What is John Floyd's occupation?...
+2025-12-30 05:25:02.780 | INFO     | baselines.simple_raptor.retriever:answer:281 - [RAPTOR] answering qid=What is John Floyd's occupation?..., ctx_len=20925
+2025-12-30 05:25:04.615 | INFO     | __main__:main:196 - Processing Q8: What is Sachiko Kokubu's occupation?
+2025-12-30 05:25:04.615 | INFO     | baselines.simple_raptor.retriever:answer:195 - Retrieving nodes for: What is Sachiko Kokubu's occupation?
+2025-12-30 05:25:04.615 | INFO     | rag_core.embedding_client:encode:58 - [EMB] encoding 1 texts, first=What is Sachiko Kokubu's occupation?...
+2025-12-30 05:25:04.631 | INFO     | baselines.simple_raptor.retriever:answer:281 - [RAPTOR] answering qid=What is Sachiko Kokubu's occupation?..., ctx_len=10579
+2025-12-30 05:25:05.992 | INFO     | __main__:main:196 - Processing Q9: What is Akari Hayami's occupation?
+2025-12-30 05:25:05.992 | INFO     | baselines.simple_raptor.retriever:answer:195 - Retrieving nodes for: What is Akari Hayami's occupation?
+2025-12-30 05:25:05.992 | INFO     | rag_core.embedding_client:encode:58 - [EMB] encoding 1 texts, first=What is Akari Hayami's occupation?...
+2025-12-30 05:25:06.005 | INFO     | baselines.simple_raptor.retriever:answer:281 - [RAPTOR] answering qid=What is Akari Hayami's occupation?..., ctx_len=8158
+2025-12-30 05:25:06.765 | INFO     | __main__:main:196 - Processing Q10: What is Paris's occupation?
+2025-12-30 05:25:06.765 | INFO     | baselines.simple_raptor.retriever:answer:195 - Retrieving nodes for: What is Paris's occupation?
+2025-12-30 05:25:06.765 | INFO     | rag_core.embedding_client:encode:58 - [EMB] encoding 1 texts, first=What is Paris's occupation?...
+2025-12-30 05:25:06.783 | INFO     | baselines.simple_raptor.retriever:answer:281 - [RAPTOR] answering qid=What is Paris's occupation?..., ctx_len=19651
+2025-12-30 05:25:10.980 | INFO     | __main__:main:196 - Processing Q11: What is Fairfax M. Cone's occupation?
+2025-12-30 05:25:10.980 | INFO     | baselines.simple_raptor.retriever:answer:195 - Retrieving nodes for: What is Fairfax M. Cone's occupation?
+2025-12-30 05:25:10.981 | INFO     | rag_core.embedding_client:encode:58 - [EMB] encoding 1 texts, first=What is Fairfax M. Cone's occupation?...
+2025-12-30 05:25:10.998 | INFO     | baselines.simple_raptor.retriever:answer:281 - [RAPTOR] answering qid=What is Fairfax M. Cone's occupation?..., ctx_len=17344
+2025-12-30 05:25:13.693 | INFO     | __main__:main:196 - Processing Q12: What is Albert Bates's occupation?
+2025-12-30 05:25:13.693 | INFO     | baselines.simple_raptor.retriever:answer:195 - Retrieving nodes for: What is Albert Bates's occupation?
+2025-12-30 05:25:13.693 | INFO     | rag_core.embedding_client:encode:58 - [EMB] encoding 1 texts, first=What is Albert Bates's occupation?...
+2025-12-30 05:25:13.714 | INFO     | baselines.simple_raptor.retriever:answer:281 - [RAPTOR] answering qid=What is Albert Bates's occupation?..., ctx_len=21005
+2025-12-30 05:25:15.928 | INFO     | __main__:main:196 - Processing Q13: What is Heath's occupation?
+2025-12-30 05:25:15.929 | INFO     | baselines.simple_raptor.retriever:answer:195 - Retrieving nodes for: What is Heath's occupation?
+2025-12-30 05:25:15.929 | INFO     | rag_core.embedding_client:encode:58 - [EMB] encoding 1 texts, first=What is Heath's occupation?...
+2025-12-30 05:25:15.947 | INFO     | baselines.simple_raptor.retriever:answer:281 - [RAPTOR] answering qid=What is Heath's occupation?..., ctx_len=19477
+2025-12-30 05:25:16.549 | INFO     | __main__:main:196 - Processing Q14: What is Yoshiki Tonogai's occupation?
+2025-12-30 05:25:16.550 | INFO     | baselines.simple_raptor.retriever:answer:195 - Retrieving nodes for: What is Yoshiki Tonogai's occupation?
+2025-12-30 05:25:16.550 | INFO     | rag_core.embedding_client:encode:58 - [EMB] encoding 1 texts, first=What is Yoshiki Tonogai's occupation?...
+2025-12-30 05:25:16.569 | INFO     | baselines.simple_raptor.retriever:answer:281 - [RAPTOR] answering qid=What is Yoshiki Tonogai's occupation?..., ctx_len=12311
+2025-12-30 05:25:17.862 | INFO     | __main__:main:196 - Processing Q15: What is Thomas R. Whitney's occupation?
+2025-12-30 05:25:17.863 | INFO     | baselines.simple_raptor.retriever:answer:195 - Retrieving nodes for: What is Thomas R. Whitney's occupation?
+2025-12-30 05:25:17.863 | INFO     | rag_core.embedding_client:encode:58 - [EMB] encoding 1 texts, first=What is Thomas R. Whitney's occupation?...
+2025-12-30 05:25:17.882 | INFO     | baselines.simple_raptor.retriever:answer:281 - [RAPTOR] answering qid=What is Thomas R. Whitney's occupation?..., ctx_len=17564
+2025-12-30 05:25:19.562 | INFO     | __main__:main:196 - Processing Q16: What is Edwin Wallock's occupation?
+2025-12-30 05:25:19.563 | INFO     | baselines.simple_raptor.retriever:answer:195 - Retrieving nodes for: What is Edwin Wallock's occupation?
+2025-12-30 05:25:19.563 | INFO     | rag_core.embedding_client:encode:58 - [EMB] encoding 1 texts, first=What is Edwin Wallock's occupation?...
+2025-12-30 05:25:19.582 | INFO     | baselines.simple_raptor.retriever:answer:281 - [RAPTOR] answering qid=What is Edwin Wallock's occupation?..., ctx_len=17685
+2025-12-30 05:25:20.229 | INFO     | __main__:main:196 - Processing Q17: What is Tsutomu Seki's occupation?
+2025-12-30 05:25:20.230 | INFO     | baselines.simple_raptor.retriever:answer:195 - Retrieving nodes for: What is Tsutomu Seki's occupation?
+2025-12-30 05:25:20.230 | INFO     | rag_core.embedding_client:encode:58 - [EMB] encoding 1 texts, first=What is Tsutomu Seki's occupation?...
+2025-12-30 05:25:20.249 | INFO     | baselines.simple_raptor.retriever:answer:281 - [RAPTOR] answering qid=What is Tsutomu Seki's occupation?..., ctx_len=9552
+2025-12-30 05:25:23.675 | INFO     | __main__:main:196 - Processing Q18: What is Matthew McKay's occupation?
+2025-12-30 05:25:23.676 | INFO     | baselines.simple_raptor.retriever:answer:195 - Retrieving nodes for: What is Matthew McKay's occupation?
+2025-12-30 05:25:23.676 | INFO     | rag_core.embedding_client:encode:58 - [EMB] encoding 1 texts, first=What is Matthew McKay's occupation?...
+2025-12-30 05:25:23.696 | INFO     | baselines.simple_raptor.retriever:answer:281 - [RAPTOR] answering qid=What is Matthew McKay's occupation?..., ctx_len=19331
+2025-12-30 05:25:25.406 | INFO     | __main__:main:196 - Processing Q19: What is Dominick Bellizzi's occupation?
+2025-12-30 05:25:25.407 | INFO     | baselines.simple_raptor.retriever:answer:195 - Retrieving nodes for: What is Dominick Bellizzi's occupation?
+2025-12-30 05:25:25.407 | INFO     | rag_core.embedding_client:encode:58 - [EMB] encoding 1 texts, first=What is Dominick Bellizzi's occupation?...
+2025-12-30 05:25:25.429 | INFO     | baselines.simple_raptor.retriever:answer:281 - [RAPTOR] answering qid=What is Dominick Bellizzi's occupation?..., ctx_len=18131
+2025-12-30 05:25:26.088 | INFO     | __main__:main:196 - Processing Q20: What is Brendan Canty's occupation?
+2025-12-30 05:25:26.088 | INFO     | baselines.simple_raptor.retriever:answer:195 - Retrieving nodes for: What is Brendan Canty's occupation?
+2025-12-30 05:25:26.089 | INFO     | rag_core.embedding_client:encode:58 - [EMB] encoding 1 texts, first=What is Brendan Canty's occupation?...
+2025-12-30 05:25:26.108 | INFO     | baselines.simple_raptor.retriever:answer:281 - [RAPTOR] answering qid=What is Brendan Canty's occupation?..., ctx_len=8955
+2025-12-30 05:25:27.931 | INFO     | __main__:main:196 - Processing Q21: What is María Elena Marqués's occupation?
+2025-12-30 05:25:27.931 | INFO     | baselines.simple_raptor.retriever:answer:195 - Retrieving nodes for: What is María Elena Marqués's occupation?
+2025-12-30 05:25:27.931 | INFO     | rag_core.embedding_client:encode:58 - [EMB] encoding 1 texts, first=What is María Elena Marqués's occupation?...
+2025-12-30 05:25:27.942 | INFO     | baselines.simple_raptor.retriever:answer:281 - [RAPTOR] answering qid=What is María Elena Marqués's occupation?..., ctx_len=17645
+2025-12-30 05:25:28.647 | INFO     | __main__:main:196 - Processing Q22: What is Patrick O'Brien Demsey's occupation?
+2025-12-30 05:25:28.647 | INFO     | baselines.simple_raptor.retriever:answer:195 - Retrieving nodes for: What is Patrick O'Brien Demsey's occupation?
+2025-12-30 05:25:28.648 | INFO     | rag_core.embedding_client:encode:58 - [EMB] encoding 1 texts, first=What is Patrick O'Brien Demsey's occupation?...
+2025-12-30 05:25:28.667 | INFO     | baselines.simple_raptor.retriever:answer:281 - [RAPTOR] answering qid=What is Patrick O'Brien Demsey's occupation?..., ctx_len=18893
+2025-12-30 05:25:29.784 | INFO     | __main__:main:196 - Processing Q23: What is Boutheina Jabnoun's occupation?
+2025-12-30 05:25:29.785 | INFO     | baselines.simple_raptor.retriever:answer:195 - Retrieving nodes for: What is Boutheina Jabnoun's occupation?
+2025-12-30 05:25:29.785 | INFO     | rag_core.embedding_client:encode:58 - [EMB] encoding 1 texts, first=What is Boutheina Jabnoun's occupation?...
+2025-12-30 05:25:29.798 | INFO     | baselines.simple_raptor.retriever:answer:281 - [RAPTOR] answering qid=What is Boutheina Jabnoun's occupation?..., ctx_len=15064
+2025-12-30 05:25:30.507 | INFO     | __main__:main:196 - Processing Q24: What is Modou Dia's occupation?
+2025-12-30 05:25:30.507 | INFO     | baselines.simple_raptor.retriever:answer:195 - Retrieving nodes for: What is Modou Dia's occupation?
+2025-12-30 05:25:30.508 | INFO     | rag_core.embedding_client:encode:58 - [EMB] encoding 1 texts, first=What is Modou Dia's occupation?...
+2025-12-30 05:25:30.523 | INFO     | baselines.simple_raptor.retriever:answer:281 - [RAPTOR] answering qid=What is Modou Dia's occupation?..., ctx_len=15204
+2025-12-30 05:25:32.074 | INFO     | __main__:main:196 - Processing Q25: What is Glenn Albrecht's occupation?
+2025-12-30 05:25:32.074 | INFO     | baselines.simple_raptor.retriever:answer:195 - Retrieving nodes for: What is Glenn Albrecht's occupation?
+2025-12-30 05:25:32.074 | INFO     | rag_core.embedding_client:encode:58 - [EMB] encoding 1 texts, first=What is Glenn Albrecht's occupation?...
+2025-12-30 05:25:32.092 | INFO     | baselines.simple_raptor.retriever:answer:281 - [RAPTOR] answering qid=What is Glenn Albrecht's occupation?..., ctx_len=19652
+2025-12-30 05:25:34.481 | INFO     | __main__:main:196 - Processing Q26: What is Tobias Lindholm's occupation?
+2025-12-30 05:25:34.481 | INFO     | baselines.simple_raptor.retriever:answer:195 - Retrieving nodes for: What is Tobias Lindholm's occupation?
+2025-12-30 05:25:34.481 | INFO     | rag_core.embedding_client:encode:58 - [EMB] encoding 1 texts, first=What is Tobias Lindholm's occupation?...
+2025-12-30 05:25:34.501 | INFO     | baselines.simple_raptor.retriever:answer:281 - [RAPTOR] answering qid=What is Tobias Lindholm's occupation?..., ctx_len=16873
+2025-12-30 05:25:36.073 | INFO     | __main__:main:196 - Processing Q27: What is Ingrid Martinez's occupation?
+2025-12-30 05:25:36.074 | INFO     | baselines.simple_raptor.retriever:answer:195 - Retrieving nodes for: What is Ingrid Martinez's occupation?
+2025-12-30 05:25:36.074 | INFO     | rag_core.embedding_client:encode:58 - [EMB] encoding 1 texts, first=What is Ingrid Martinez's occupation?...
+2025-12-30 05:25:36.092 | INFO     | baselines.simple_raptor.retriever:answer:281 - [RAPTOR] answering qid=What is Ingrid Martinez's occupation?..., ctx_len=18609
+2025-12-30 05:25:38.910 | INFO     | __main__:main:196 - Processing Q28: What is Tolis Voskopoulos's occupation?
+2025-12-30 05:25:38.910 | INFO     | baselines.simple_raptor.retriever:answer:195 - Retrieving nodes for: What is Tolis Voskopoulos's occupation?
+2025-12-30 05:25:38.910 | INFO     | rag_core.embedding_client:encode:58 - [EMB] encoding 1 texts, first=What is Tolis Voskopoulos's occupation?...
+2025-12-30 05:25:38.928 | INFO     | baselines.simple_raptor.retriever:answer:281 - [RAPTOR] answering qid=What is Tolis Voskopoulos's occupation?..., ctx_len=12497
+2025-12-30 05:25:40.403 | INFO     | __main__:main:196 - Processing Q29: What is Marco Ameglio's occupation?
+2025-12-30 05:25:40.403 | INFO     | baselines.simple_raptor.retriever:answer:195 - Retrieving nodes for: What is Marco Ameglio's occupation?
+2025-12-30 05:25:40.403 | INFO     | rag_core.embedding_client:encode:58 - [EMB] encoding 1 texts, first=What is Marco Ameglio's occupation?...
+2025-12-30 05:25:40.429 | INFO     | baselines.simple_raptor.retriever:answer:281 - [RAPTOR] answering qid=What is Marco Ameglio's occupation?..., ctx_len=14504
+2025-12-30 05:25:41.841 | INFO     | __main__:main:196 - Processing Q30: What is Mohd Sharkar Shamsudin's occupation?
+2025-12-30 05:25:41.841 | INFO     | baselines.simple_raptor.retriever:answer:195 - Retrieving nodes for: What is Mohd Sharkar Shamsudin's occupation?
+2025-12-30 05:25:41.841 | INFO     | rag_core.embedding_client:encode:58 - [EMB] encoding 1 texts, first=What is Mohd Sharkar Shamsudin's occupation?...
+2025-12-30 05:25:41.859 | INFO     | baselines.simple_raptor.retriever:answer:281 - [RAPTOR] answering qid=What is Mohd Sharkar Shamsudin's occupation?..., ctx_len=16570
+2025-12-30 05:25:43.299 | INFO     | __main__:main:196 - Processing Q31: What is Anthony Sharp's occupation?
+2025-12-30 05:25:43.299 | INFO     | baselines.simple_raptor.retriever:answer:195 - Retrieving nodes for: What is Anthony Sharp's occupation?
+2025-12-30 05:25:43.300 | INFO     | rag_core.embedding_client:encode:58 - [EMB] encoding 1 texts, first=What is Anthony Sharp's occupation?...
+2025-12-30 05:25:43.318 | INFO     | baselines.simple_raptor.retriever:answer:281 - [RAPTOR] answering qid=What is Anthony Sharp's occupation?..., ctx_len=16683
+2025-12-30 05:25:44.885 | INFO     | __main__:main:196 - Processing Q32: What is Claire Berlinski's occupation?
+2025-12-30 05:25:44.886 | INFO     | baselines.simple_raptor.retriever:answer:195 - Retrieving nodes for: What is Claire Berlinski's occupation?
+2025-12-30 05:25:44.886 | INFO     | rag_core.embedding_client:encode:58 - [EMB] encoding 1 texts, first=What is Claire Berlinski's occupation?...
+2025-12-30 05:25:44.906 | INFO     | baselines.simple_raptor.retriever:answer:281 - [RAPTOR] answering qid=What is Claire Berlinski's occupation?..., ctx_len=18438
+2025-12-30 05:25:45.607 | INFO     | __main__:main:196 - Processing Q33: What is Russell Stokes's occupation?
+2025-12-30 05:25:45.608 | INFO     | baselines.simple_raptor.retriever:answer:195 - Retrieving nodes for: What is Russell Stokes's occupation?
+2025-12-30 05:25:45.608 | INFO     | rag_core.embedding_client:encode:58 - [EMB] encoding 1 texts, first=What is Russell Stokes's occupation?...
+2025-12-30 05:25:45.631 | INFO     | baselines.simple_raptor.retriever:answer:281 - [RAPTOR] answering qid=What is Russell Stokes's occupation?..., ctx_len=17848
+2025-12-30 05:25:47.042 | INFO     | __main__:main:196 - Processing Q34: What is C. E. Webber's occupation?
+2025-12-30 05:25:47.042 | INFO     | baselines.simple_raptor.retriever:answer:195 - Retrieving nodes for: What is C. E. Webber's occupation?
+2025-12-30 05:25:47.043 | INFO     | rag_core.embedding_client:encode:58 - [EMB] encoding 1 texts, first=What is C. E. Webber's occupation?...
+2025-12-30 05:25:47.064 | INFO     | baselines.simple_raptor.retriever:answer:281 - [RAPTOR] answering qid=What is C. E. Webber's occupation?..., ctx_len=20175
+2025-12-30 05:25:48.688 | INFO     | __main__:main:196 - Processing Q35: What is Muhammad Ali Luqman's occupation?
+2025-12-30 05:25:48.688 | INFO     | baselines.simple_raptor.retriever:answer:195 - Retrieving nodes for: What is Muhammad Ali Luqman's occupation?
+2025-12-30 05:25:48.688 | INFO     | rag_core.embedding_client:encode:58 - [EMB] encoding 1 texts, first=What is Muhammad Ali Luqman's occupation?...
+2025-12-30 05:25:48.723 | INFO     | baselines.simple_raptor.retriever:answer:281 - [RAPTOR] answering qid=What is Muhammad Ali Luqman's occupation?..., ctx_len=19408
+2025-12-30 05:25:50.524 | INFO     | __main__:main:196 - Processing Q36: What is Ivo Perilli's occupation?
+2025-12-30 05:25:50.524 | INFO     | baselines.simple_raptor.retriever:answer:195 - Retrieving nodes for: What is Ivo Perilli's occupation?
+2025-12-30 05:25:50.524 | INFO     | rag_core.embedding_client:encode:58 - [EMB] encoding 1 texts, first=What is Ivo Perilli's occupation?...
+2025-12-30 05:25:50.540 | INFO     | baselines.simple_raptor.retriever:answer:281 - [RAPTOR] answering qid=What is Ivo Perilli's occupation?..., ctx_len=16354
+2025-12-30 05:25:51.668 | INFO     | __main__:main:196 - Processing Q37: What is Joseph Weydemeyer's occupation?
+2025-12-30 05:25:51.669 | INFO     | baselines.simple_raptor.retriever:answer:195 - Retrieving nodes for: What is Joseph Weydemeyer's occupation?
+2025-12-30 05:25:51.669 | INFO     | rag_core.embedding_client:encode:58 - [EMB] encoding 1 texts, first=What is Joseph Weydemeyer's occupation?...
+2025-12-30 05:25:51.687 | INFO     | baselines.simple_raptor.retriever:answer:281 - [RAPTOR] answering qid=What is Joseph Weydemeyer's occupation?..., ctx_len=21674
+2025-12-30 05:25:54.989 | INFO     | __main__:main:196 - Processing Q38: What is Ai's occupation?
+2025-12-30 05:25:54.990 | INFO     | baselines.simple_raptor.retriever:answer:195 - Retrieving nodes for: What is Ai's occupation?
+2025-12-30 05:25:54.990 | INFO     | rag_core.embedding_client:encode:58 - [EMB] encoding 1 texts, first=What is Ai's occupation?...
+2025-12-30 05:25:54.999 | INFO     | baselines.simple_raptor.retriever:answer:281 - [RAPTOR] answering qid=What is Ai's occupation?..., ctx_len=19795
+2025-12-30 05:25:55.633 | INFO     | __main__:main:196 - Processing Q39: What is Rinaldo del Mel's occupation?
+2025-12-30 05:25:55.634 | INFO     | baselines.simple_raptor.retriever:answer:195 - Retrieving nodes for: What is Rinaldo del Mel's occupation?
+2025-12-30 05:25:55.634 | INFO     | rag_core.embedding_client:encode:58 - [EMB] encoding 1 texts, first=What is Rinaldo del Mel's occupation?...
+2025-12-30 05:25:55.649 | INFO     | baselines.simple_raptor.retriever:answer:281 - [RAPTOR] answering qid=What is Rinaldo del Mel's occupation?..., ctx_len=17299
+2025-12-30 05:25:57.003 | INFO     | __main__:main:196 - Processing Q40: What is Annie Beustes's occupation?
+2025-12-30 05:25:57.004 | INFO     | baselines.simple_raptor.retriever:answer:195 - Retrieving nodes for: What is Annie Beustes's occupation?
+2025-12-30 05:25:57.004 | INFO     | rag_core.embedding_client:encode:58 - [EMB] encoding 1 texts, first=What is Annie Beustes's occupation?...
+2025-12-30 05:25:57.036 | INFO     | baselines.simple_raptor.retriever:answer:281 - [RAPTOR] answering qid=What is Annie Beustes's occupation?..., ctx_len=20679
+2025-12-30 05:25:58.757 | INFO     | __main__:main:196 - Processing Q41: What is Elisa Bridges's occupation?
+2025-12-30 05:25:58.757 | INFO     | baselines.simple_raptor.retriever:answer:195 - Retrieving nodes for: What is Elisa Bridges's occupation?
+2025-12-30 05:25:58.758 | INFO     | rag_core.embedding_client:encode:58 - [EMB] encoding 1 texts, first=What is Elisa Bridges's occupation?...
+2025-12-30 05:25:58.779 | INFO     | baselines.simple_raptor.retriever:answer:281 - [RAPTOR] answering qid=What is Elisa Bridges's occupation?..., ctx_len=20507
+2025-12-30 05:25:59.510 | INFO     | __main__:main:196 - Processing Q42: What is Domingo Eyzaguirre's occupation?
+2025-12-30 05:25:59.510 | INFO     | baselines.simple_raptor.retriever:answer:195 - Retrieving nodes for: What is Domingo Eyzaguirre's occupation?
+2025-12-30 05:25:59.510 | INFO     | rag_core.embedding_client:encode:58 - [EMB] encoding 1 texts, first=What is Domingo Eyzaguirre's occupation?...
+2025-12-30 05:25:59.530 | INFO     | baselines.simple_raptor.retriever:answer:281 - [RAPTOR] answering qid=What is Domingo Eyzaguirre's occupation?..., ctx_len=16335
+2025-12-30 05:26:01.447 | INFO     | __main__:main:196 - Processing Q43: What is Suzanne Lilar's occupation?
+2025-12-30 05:26:01.448 | INFO     | baselines.simple_raptor.retriever:answer:195 - Retrieving nodes for: What is Suzanne Lilar's occupation?
+2025-12-30 05:26:01.448 | INFO     | rag_core.embedding_client:encode:58 - [EMB] encoding 1 texts, first=What is Suzanne Lilar's occupation?...
+2025-12-30 05:26:01.467 | INFO     | baselines.simple_raptor.retriever:answer:281 - [RAPTOR] answering qid=What is Suzanne Lilar's occupation?..., ctx_len=22062
+2025-12-30 05:26:03.256 | INFO     | __main__:main:196 - Processing Q44: What is Karen Redman's occupation?
+2025-12-30 05:26:03.257 | INFO     | baselines.simple_raptor.retriever:answer:195 - Retrieving nodes for: What is Karen Redman's occupation?
+2025-12-30 05:26:03.257 | INFO     | rag_core.embedding_client:encode:58 - [EMB] encoding 1 texts, first=What is Karen Redman's occupation?...
+2025-12-30 05:26:03.277 | INFO     | baselines.simple_raptor.retriever:answer:281 - [RAPTOR] answering qid=What is Karen Redman's occupation?..., ctx_len=20730
+2025-12-30 05:26:04.518 | INFO     | __main__:main:196 - Processing Q45: What is Eduard Looijenga's occupation?
+2025-12-30 05:26:04.518 | INFO     | baselines.simple_raptor.retriever:answer:195 - Retrieving nodes for: What is Eduard Looijenga's occupation?
+2025-12-30 05:26:04.519 | INFO     | rag_core.embedding_client:encode:58 - [EMB] encoding 1 texts, first=What is Eduard Looijenga's occupation?...
+2025-12-30 05:26:04.542 | INFO     | baselines.simple_raptor.retriever:answer:281 - [RAPTOR] answering qid=What is Eduard Looijenga's occupation?..., ctx_len=21407
+2025-12-30 05:26:06.009 | INFO     | __main__:main:196 - Processing Q46: What is Petrus Camper's occupation?
+2025-12-30 05:26:06.010 | INFO     | baselines.simple_raptor.retriever:answer:195 - Retrieving nodes for: What is Petrus Camper's occupation?
+2025-12-30 05:26:06.010 | INFO     | rag_core.embedding_client:encode:58 - [EMB] encoding 1 texts, first=What is Petrus Camper's occupation?...
+2025-12-30 05:26:06.029 | INFO     | baselines.simple_raptor.retriever:answer:281 - [RAPTOR] answering qid=What is Petrus Camper's occupation?..., ctx_len=9900
+2025-12-30 05:26:09.474 | INFO     | __main__:main:196 - Processing Q47: What is Jacopo Melani's occupation?
+2025-12-30 05:26:09.474 | INFO     | baselines.simple_raptor.retriever:answer:195 - Retrieving nodes for: What is Jacopo Melani's occupation?
+2025-12-30 05:26:09.475 | INFO     | rag_core.embedding_client:encode:58 - [EMB] encoding 1 texts, first=What is Jacopo Melani's occupation?...
+2025-12-30 05:26:09.492 | INFO     | baselines.simple_raptor.retriever:answer:281 - [RAPTOR] answering qid=What is Jacopo Melani's occupation?..., ctx_len=17299
+2025-12-30 05:26:10.275 | INFO     | __main__:main:196 - Processing Q48: What is Charlotte von Hagn's occupation?
+2025-12-30 05:26:10.275 | INFO     | baselines.simple_raptor.retriever:answer:195 - Retrieving nodes for: What is Charlotte von Hagn's occupation?
+2025-12-30 05:26:10.276 | INFO     | rag_core.embedding_client:encode:58 - [EMB] encoding 1 texts, first=What is Charlotte von Hagn's occupation?...
+2025-12-30 05:26:10.298 | INFO     | baselines.simple_raptor.retriever:answer:281 - [RAPTOR] answering qid=What is Charlotte von Hagn's occupation?..., ctx_len=17811
+2025-12-30 05:26:10.943 | INFO     | __main__:main:196 - Processing Q49: What is Michael Hutchings's occupation?
+2025-12-30 05:26:10.943 | INFO     | baselines.simple_raptor.retriever:answer:195 - Retrieving nodes for: What is Michael Hutchings's occupation?
+2025-12-30 05:26:10.944 | INFO     | rag_core.embedding_client:encode:58 - [EMB] encoding 1 texts, first=What is Michael Hutchings's occupation?...
+2025-12-30 05:26:10.965 | INFO     | baselines.simple_raptor.retriever:answer:281 - [RAPTOR] answering qid=What is Michael Hutchings's occupation?..., ctx_len=15973
+2025-12-30 05:26:17.541 | INFO     | __main__:main:196 - Processing Q50: What is James Alex Msekela's occupation?
+2025-12-30 05:26:17.541 | INFO     | baselines.simple_raptor.retriever:answer:195 - Retrieving nodes for: What is James Alex Msekela's occupation?
+2025-12-30 05:26:17.541 | INFO     | rag_core.embedding_client:encode:58 - [EMB] encoding 1 texts, first=What is James Alex Msekela's occupation?...
+2025-12-30 05:26:17.554 | INFO     | baselines.simple_raptor.retriever:answer:281 - [RAPTOR] answering qid=What is James Alex Msekela's occupation?..., ctx_len=16689
+2025-12-30 05:26:19.007 | INFO     | __main__:main:196 - Processing Q51: What is Hiroyuki Arai's occupation?
+2025-12-30 05:26:19.008 | INFO     | baselines.simple_raptor.retriever:answer:195 - Retrieving nodes for: What is Hiroyuki Arai's occupation?
+2025-12-30 05:26:19.008 | INFO     | rag_core.embedding_client:encode:58 - [EMB] encoding 1 texts, first=What is Hiroyuki Arai's occupation?...
+2025-12-30 05:26:19.024 | INFO     | baselines.simple_raptor.retriever:answer:281 - [RAPTOR] answering qid=What is Hiroyuki Arai's occupation?..., ctx_len=10103
+2025-12-30 05:26:20.104 | INFO     | __main__:main:196 - Processing Q52: What is Melinda Mullins's occupation?
+2025-12-30 05:26:20.104 | INFO     | baselines.simple_raptor.retriever:answer:195 - Retrieving nodes for: What is Melinda Mullins's occupation?
+2025-12-30 05:26:20.104 | INFO     | rag_core.embedding_client:encode:58 - [EMB] encoding 1 texts, first=What is Melinda Mullins's occupation?...
+2025-12-30 05:26:20.124 | INFO     | baselines.simple_raptor.retriever:answer:281 - [RAPTOR] answering qid=What is Melinda Mullins's occupation?..., ctx_len=22881
+2025-12-30 05:26:21.413 | INFO     | __main__:main:196 - Processing Q53: What is Meyer Lutz's occupation?
+2025-12-30 05:26:21.413 | INFO     | baselines.simple_raptor.retriever:answer:195 - Retrieving nodes for: What is Meyer Lutz's occupation?
+2025-12-30 05:26:21.413 | INFO     | rag_core.embedding_client:encode:58 - [EMB] encoding 1 texts, first=What is Meyer Lutz's occupation?...
+2025-12-30 05:26:21.433 | INFO     | baselines.simple_raptor.retriever:answer:281 - [RAPTOR] answering qid=What is Meyer Lutz's occupation?..., ctx_len=16935
+2025-12-30 05:26:22.726 | INFO     | __main__:main:196 - Processing Q54: What is Ludwig Lichtschein's occupation?
+2025-12-30 05:26:22.726 | INFO     | baselines.simple_raptor.retriever:answer:195 - Retrieving nodes for: What is Ludwig Lichtschein's occupation?
+2025-12-30 05:26:22.726 | INFO     | rag_core.embedding_client:encode:58 - [EMB] encoding 1 texts, first=What is Ludwig Lichtschein's occupation?...
+2025-12-30 05:26:22.746 | INFO     | baselines.simple_raptor.retriever:answer:281 - [RAPTOR] answering qid=What is Ludwig Lichtschein's occupation?..., ctx_len=20454
+2025-12-30 05:26:24.125 | INFO     | __main__:main:196 - Processing Q55: What is Władysław Sławny's occupation?
+2025-12-30 05:26:24.125 | INFO     | baselines.simple_raptor.retriever:answer:195 - Retrieving nodes for: What is Władysław Sławny's occupation?
+2025-12-30 05:26:24.125 | INFO     | rag_core.embedding_client:encode:58 - [EMB] encoding 1 texts, first=What is Władysław Sławny's occupation?...
+2025-12-30 05:26:24.135 | INFO     | baselines.simple_raptor.retriever:answer:281 - [RAPTOR] answering qid=What is Władysław Sławny's occupation?..., ctx_len=14791
+2025-12-30 05:26:24.659 | INFO     | __main__:main:196 - Processing Q56: What is Johnson's occupation?
+2025-12-30 05:26:24.660 | INFO     | baselines.simple_raptor.retriever:answer:195 - Retrieving nodes for: What is Johnson's occupation?
+2025-12-30 05:26:24.660 | INFO     | rag_core.embedding_client:encode:58 - [EMB] encoding 1 texts, first=What is Johnson's occupation?...
+2025-12-30 05:26:24.668 | INFO     | baselines.simple_raptor.retriever:answer:281 - [RAPTOR] answering qid=What is Johnson's occupation?..., ctx_len=10824
+2025-12-30 05:26:25.652 | INFO     | __main__:main:196 - Processing Q57: What is Walter Köbel's occupation?
+2025-12-30 05:26:25.652 | INFO     | baselines.simple_raptor.retriever:answer:195 - Retrieving nodes for: What is Walter Köbel's occupation?
+2025-12-30 05:26:25.652 | INFO     | rag_core.embedding_client:encode:58 - [EMB] encoding 1 texts, first=What is Walter Köbel's occupation?...
+2025-12-30 05:26:25.662 | INFO     | baselines.simple_raptor.retriever:answer:281 - [RAPTOR] answering qid=What is Walter Köbel's occupation?..., ctx_len=16399
+2025-12-30 05:26:26.811 | INFO     | __main__:main:196 - Processing Q58: What is Debbie Johnson's occupation?
+2025-12-30 05:26:26.812 | INFO     | baselines.simple_raptor.retriever:answer:195 - Retrieving nodes for: What is Debbie Johnson's occupation?
+2025-12-30 05:26:26.812 | INFO     | rag_core.embedding_client:encode:58 - [EMB] encoding 1 texts, first=What is Debbie Johnson's occupation?...
+2025-12-30 05:26:26.822 | INFO     | baselines.simple_raptor.retriever:answer:281 - [RAPTOR] answering qid=What is Debbie Johnson's occupation?..., ctx_len=21358
+2025-12-30 05:26:27.972 | INFO     | __main__:main:196 - Processing Q59: What is Kekko Fornarelli's occupation?
+2025-12-30 05:26:27.972 | INFO     | baselines.simple_raptor.retriever:answer:195 - Retrieving nodes for: What is Kekko Fornarelli's occupation?
+2025-12-30 05:26:27.972 | INFO     | rag_core.embedding_client:encode:58 - [EMB] encoding 1 texts, first=What is Kekko Fornarelli's occupation?...
+2025-12-30 05:26:27.982 | INFO     | baselines.simple_raptor.retriever:answer:281 - [RAPTOR] answering qid=What is Kekko Fornarelli's occupation?..., ctx_len=17597
+2025-12-30 05:26:29.616 | INFO     | __main__:main:196 - Processing Q60: What is Adil Shamoo's occupation?
+2025-12-30 05:26:29.616 | INFO     | baselines.simple_raptor.retriever:answer:195 - Retrieving nodes for: What is Adil Shamoo's occupation?
+2025-12-30 05:26:29.616 | INFO     | rag_core.embedding_client:encode:58 - [EMB] encoding 1 texts, first=What is Adil Shamoo's occupation?...
+2025-12-30 05:26:29.625 | INFO     | baselines.simple_raptor.retriever:answer:281 - [RAPTOR] answering qid=What is Adil Shamoo's occupation?..., ctx_len=16110
+2025-12-30 05:26:31.788 | INFO     | __main__:main:196 - Processing Q61: What is Patrick Mulvany's occupation?
+2025-12-30 05:26:31.789 | INFO     | baselines.simple_raptor.retriever:answer:195 - Retrieving nodes for: What is Patrick Mulvany's occupation?
+2025-12-30 05:26:31.789 | INFO     | rag_core.embedding_client:encode:58 - [EMB] encoding 1 texts, first=What is Patrick Mulvany's occupation?...
+2025-12-30 05:26:31.807 | INFO     | baselines.simple_raptor.retriever:answer:281 - [RAPTOR] answering qid=What is Patrick Mulvany's occupation?..., ctx_len=17948
+2025-12-30 05:26:33.274 | INFO     | __main__:main:196 - Processing Q62: What is Gerard Kennedy's occupation?
+2025-12-30 05:26:33.274 | INFO     | baselines.simple_raptor.retriever:answer:195 - Retrieving nodes for: What is Gerard Kennedy's occupation?
+2025-12-30 05:26:33.274 | INFO     | rag_core.embedding_client:encode:58 - [EMB] encoding 1 texts, first=What is Gerard Kennedy's occupation?...
+2025-12-30 05:26:33.286 | INFO     | baselines.simple_raptor.retriever:answer:281 - [RAPTOR] answering qid=What is Gerard Kennedy's occupation?..., ctx_len=16980
+2025-12-30 05:26:34.401 | INFO     | __main__:main:196 - Processing Q63: What is Giora Godik's occupation?
+2025-12-30 05:26:34.401 | INFO     | baselines.simple_raptor.retriever:answer:195 - Retrieving nodes for: What is Giora Godik's occupation?
+2025-12-30 05:26:34.401 | INFO     | rag_core.embedding_client:encode:58 - [EMB] encoding 1 texts, first=What is Giora Godik's occupation?...
+2025-12-30 05:26:34.415 | INFO     | baselines.simple_raptor.retriever:answer:281 - [RAPTOR] answering qid=What is Giora Godik's occupation?..., ctx_len=11905
+2025-12-30 05:26:35.841 | INFO     | __main__:main:196 - Processing Q64: What is Lillian Lawrence's occupation?
+2025-12-30 05:26:35.841 | INFO     | baselines.simple_raptor.retriever:answer:195 - Retrieving nodes for: What is Lillian Lawrence's occupation?
+2025-12-30 05:26:35.841 | INFO     | rag_core.embedding_client:encode:58 - [EMB] encoding 1 texts, first=What is Lillian Lawrence's occupation?...
+2025-12-30 05:26:35.856 | INFO     | baselines.simple_raptor.retriever:answer:281 - [RAPTOR] answering qid=What is Lillian Lawrence's occupation?..., ctx_len=13120
+2025-12-30 05:26:37.079 | INFO     | __main__:main:196 - Processing Q65: What is Philip Rosenberg's occupation?
+2025-12-30 05:26:37.080 | INFO     | baselines.simple_raptor.retriever:answer:195 - Retrieving nodes for: What is Philip Rosenberg's occupation?
+2025-12-30 05:26:37.080 | INFO     | rag_core.embedding_client:encode:58 - [EMB] encoding 1 texts, first=What is Philip Rosenberg's occupation?...
+2025-12-30 05:26:37.089 | INFO     | baselines.simple_raptor.retriever:answer:281 - [RAPTOR] answering qid=What is Philip Rosenberg's occupation?..., ctx_len=16972
+2025-12-30 05:26:37.911 | INFO     | __main__:main:196 - Processing Q66: What is Mariana Vicente's occupation?
+2025-12-30 05:26:37.911 | INFO     | baselines.simple_raptor.retriever:answer:195 - Retrieving nodes for: What is Mariana Vicente's occupation?
+2025-12-30 05:26:37.911 | INFO     | rag_core.embedding_client:encode:58 - [EMB] encoding 1 texts, first=What is Mariana Vicente's occupation?...
+2025-12-30 05:26:37.923 | INFO     | baselines.simple_raptor.retriever:answer:281 - [RAPTOR] answering qid=What is Mariana Vicente's occupation?..., ctx_len=16324
+2025-12-30 05:26:40.118 | INFO     | __main__:main:196 - Processing Q67: What is Huntington Wilson's occupation?
+2025-12-30 05:26:40.119 | INFO     | baselines.simple_raptor.retriever:answer:195 - Retrieving nodes for: What is Huntington Wilson's occupation?
+2025-12-30 05:26:40.119 | INFO     | rag_core.embedding_client:encode:58 - [EMB] encoding 1 texts, first=What is Huntington Wilson's occupation?...
+2025-12-30 05:26:40.134 | INFO     | baselines.simple_raptor.retriever:answer:281 - [RAPTOR] answering qid=What is Huntington Wilson's occupation?..., ctx_len=11860
+2025-12-30 05:26:40.706 | INFO     | __main__:main:196 - Processing Q68: What is Bala's occupation?
+2025-12-30 05:26:40.706 | INFO     | baselines.simple_raptor.retriever:answer:195 - Retrieving nodes for: What is Bala's occupation?
+2025-12-30 05:26:40.706 | INFO     | rag_core.embedding_client:encode:58 - [EMB] encoding 1 texts, first=What is Bala's occupation?...
+2025-12-30 05:26:40.726 | INFO     | baselines.simple_raptor.retriever:answer:281 - [RAPTOR] answering qid=What is Bala's occupation?..., ctx_len=18231
+2025-12-30 05:26:42.518 | INFO     | __main__:main:196 - Processing Q69: What is Steve Tom's occupation?
+2025-12-30 05:26:42.518 | INFO     | baselines.simple_raptor.retriever:answer:195 - Retrieving nodes for: What is Steve Tom's occupation?
+2025-12-30 05:26:42.519 | INFO     | rag_core.embedding_client:encode:58 - [EMB] encoding 1 texts, first=What is Steve Tom's occupation?...
+2025-12-30 05:26:42.539 | INFO     | baselines.simple_raptor.retriever:answer:281 - [RAPTOR] answering qid=What is Steve Tom's occupation?..., ctx_len=18078
+2025-12-30 05:26:43.134 | INFO     | __main__:main:196 - Processing Q70: What is Ilja Rosendahl's occupation?
+2025-12-30 05:26:43.135 | INFO     | baselines.simple_raptor.retriever:answer:195 - Retrieving nodes for: What is Ilja Rosendahl's occupation?
+2025-12-30 05:26:43.135 | INFO     | rag_core.embedding_client:encode:58 - [EMB] encoding 1 texts, first=What is Ilja Rosendahl's occupation?...
+2025-12-30 05:26:43.158 | INFO     | baselines.simple_raptor.retriever:answer:281 - [RAPTOR] answering qid=What is Ilja Rosendahl's occupation?..., ctx_len=20532
+2025-12-30 05:26:46.078 | INFO     | __main__:main:196 - Processing Q71: What is Thanasis Pafilis's occupation?
+2025-12-30 05:26:46.079 | INFO     | baselines.simple_raptor.retriever:answer:195 - Retrieving nodes for: What is Thanasis Pafilis's occupation?
+2025-12-30 05:26:46.079 | INFO     | rag_core.embedding_client:encode:58 - [EMB] encoding 1 texts, first=What is Thanasis Pafilis's occupation?...
+2025-12-30 05:26:46.099 | INFO     | baselines.simple_raptor.retriever:answer:281 - [RAPTOR] answering qid=What is Thanasis Pafilis's occupation?..., ctx_len=14253
+2025-12-30 05:26:46.719 | INFO     | __main__:main:196 - Processing Q72: What is Christopher Butson's occupation?
+2025-12-30 05:26:46.719 | INFO     | baselines.simple_raptor.retriever:answer:195 - Retrieving nodes for: What is Christopher Butson's occupation?
+2025-12-30 05:26:46.719 | INFO     | rag_core.embedding_client:encode:58 - [EMB] encoding 1 texts, first=What is Christopher Butson's occupation?...
+2025-12-30 05:26:46.739 | INFO     | baselines.simple_raptor.retriever:answer:281 - [RAPTOR] answering qid=What is Christopher Butson's occupation?..., ctx_len=5438
+2025-12-30 05:26:47.683 | INFO     | __main__:main:196 - Processing Q73: What is Hate Man's occupation?
+2025-12-30 05:26:47.683 | INFO     | baselines.simple_raptor.retriever:answer:195 - Retrieving nodes for: What is Hate Man's occupation?
+2025-12-30 05:26:47.683 | INFO     | rag_core.embedding_client:encode:58 - [EMB] encoding 1 texts, first=What is Hate Man's occupation?...
+2025-12-30 05:26:47.705 | INFO     | baselines.simple_raptor.retriever:answer:281 - [RAPTOR] answering qid=What is Hate Man's occupation?..., ctx_len=18956
+2025-12-30 05:26:50.059 | INFO     | __main__:main:196 - Processing Q74: What is Rich Brightman's occupation?
+2025-12-30 05:26:50.059 | INFO     | baselines.simple_raptor.retriever:answer:195 - Retrieving nodes for: What is Rich Brightman's occupation?
+2025-12-30 05:26:50.059 | INFO     | rag_core.embedding_client:encode:58 - [EMB] encoding 1 texts, first=What is Rich Brightman's occupation?...
+2025-12-30 05:26:50.072 | INFO     | baselines.simple_raptor.retriever:answer:281 - [RAPTOR] answering qid=What is Rich Brightman's occupation?..., ctx_len=15943
+2025-12-30 05:26:50.769 | INFO     | __main__:main:196 - Processing Q75: What is Edward Norton's occupation?
+2025-12-30 05:26:50.769 | INFO     | baselines.simple_raptor.retriever:answer:195 - Retrieving nodes for: What is Edward Norton's occupation?
+2025-12-30 05:26:50.770 | INFO     | rag_core.embedding_client:encode:58 - [EMB] encoding 1 texts, first=What is Edward Norton's occupation?...
+2025-12-30 05:26:50.789 | INFO     | baselines.simple_raptor.retriever:answer:281 - [RAPTOR] answering qid=What is Edward Norton's occupation?..., ctx_len=18890
+2025-12-30 05:26:52.072 | INFO     | __main__:main:196 - Processing Q76: What is Jonathan Le Billon's occupation?
+2025-12-30 05:26:52.072 | INFO     | baselines.simple_raptor.retriever:answer:195 - Retrieving nodes for: What is Jonathan Le Billon's occupation?
+2025-12-30 05:26:52.072 | INFO     | rag_core.embedding_client:encode:58 - [EMB] encoding 1 texts, first=What is Jonathan Le Billon's occupation?...
+2025-12-30 05:26:52.097 | INFO     | baselines.simple_raptor.retriever:answer:281 - [RAPTOR] answering qid=What is Jonathan Le Billon's occupation?..., ctx_len=21414
+2025-12-30 05:26:53.226 | INFO     | __main__:main:196 - Processing Q77: What is Eliza Lawrence's occupation?
+2025-12-30 05:26:53.226 | INFO     | baselines.simple_raptor.retriever:answer:195 - Retrieving nodes for: What is Eliza Lawrence's occupation?
+2025-12-30 05:26:53.227 | INFO     | rag_core.embedding_client:encode:58 - [EMB] encoding 1 texts, first=What is Eliza Lawrence's occupation?...
+2025-12-30 05:26:53.244 | INFO     | baselines.simple_raptor.retriever:answer:281 - [RAPTOR] answering qid=What is Eliza Lawrence's occupation?..., ctx_len=18370
+2025-12-30 05:26:54.001 | INFO     | __main__:main:196 - Processing Q78: What is Charles Combe's occupation?
+2025-12-30 05:26:54.002 | INFO     | baselines.simple_raptor.retriever:answer:195 - Retrieving nodes for: What is Charles Combe's occupation?
+2025-12-30 05:26:54.002 | INFO     | rag_core.embedding_client:encode:58 - [EMB] encoding 1 texts, first=What is Charles Combe's occupation?...
+2025-12-30 05:26:54.023 | INFO     | baselines.simple_raptor.retriever:answer:281 - [RAPTOR] answering qid=What is Charles Combe's occupation?..., ctx_len=19709
+2025-12-30 05:26:55.683 | INFO     | __main__:main:196 - Processing Q79: What is GQ's occupation?
+2025-12-30 05:26:55.684 | INFO     | baselines.simple_raptor.retriever:answer:195 - Retrieving nodes for: What is GQ's occupation?
+2025-12-30 05:26:55.684 | INFO     | rag_core.embedding_client:encode:58 - [EMB] encoding 1 texts, first=What is GQ's occupation?...
+2025-12-30 05:26:55.704 | INFO     | baselines.simple_raptor.retriever:answer:281 - [RAPTOR] answering qid=What is GQ's occupation?..., ctx_len=17177
+2025-12-30 05:26:59.322 | INFO     | __main__:main:196 - Processing Q80: What is John D. Maurice's occupation?
+2025-12-30 05:26:59.322 | INFO     | baselines.simple_raptor.retriever:answer:195 - Retrieving nodes for: What is John D. Maurice's occupation?
+2025-12-30 05:26:59.322 | INFO     | rag_core.embedding_client:encode:58 - [EMB] encoding 1 texts, first=What is John D. Maurice's occupation?...
+2025-12-30 05:26:59.342 | INFO     | baselines.simple_raptor.retriever:answer:281 - [RAPTOR] answering qid=What is John D. Maurice's occupation?..., ctx_len=18859
+2025-12-30 05:26:59.994 | INFO     | __main__:main:196 - Processing Q81: What is Harvey Benge's occupation?
+2025-12-30 05:26:59.995 | INFO     | baselines.simple_raptor.retriever:answer:195 - Retrieving nodes for: What is Harvey Benge's occupation?
+2025-12-30 05:26:59.995 | INFO     | rag_core.embedding_client:encode:58 - [EMB] encoding 1 texts, first=What is Harvey Benge's occupation?...
+2025-12-30 05:27:00.015 | INFO     | baselines.simple_raptor.retriever:answer:281 - [RAPTOR] answering qid=What is Harvey Benge's occupation?..., ctx_len=20015
+2025-12-30 05:27:01.192 | INFO     | __main__:main:196 - Processing Q82: What is Alan Huckle's occupation?
+2025-12-30 05:27:01.192 | INFO     | baselines.simple_raptor.retriever:answer:195 - Retrieving nodes for: What is Alan Huckle's occupation?
+2025-12-30 05:27:01.193 | INFO     | rag_core.embedding_client:encode:58 - [EMB] encoding 1 texts, first=What is Alan Huckle's occupation?...
+2025-12-30 05:27:01.217 | INFO     | baselines.simple_raptor.retriever:answer:281 - [RAPTOR] answering qid=What is Alan Huckle's occupation?..., ctx_len=18326
+2025-12-30 05:27:02.711 | INFO     | __main__:main:196 - Processing Q83: What is Sylwester Braun's occupation?
+2025-12-30 05:27:02.711 | INFO     | baselines.simple_raptor.retriever:answer:195 - Retrieving nodes for: What is Sylwester Braun's occupation?
+2025-12-30 05:27:02.711 | INFO     | rag_core.embedding_client:encode:58 - [EMB] encoding 1 texts, first=What is Sylwester Braun's occupation?...
+2025-12-30 05:27:02.732 | INFO     | baselines.simple_raptor.retriever:answer:281 - [RAPTOR] answering qid=What is Sylwester Braun's occupation?..., ctx_len=15977
+2025-12-30 05:27:04.260 | INFO     | __main__:main:196 - Processing Q84: What is Jack Mackenzie's occupation?
+2025-12-30 05:27:04.261 | INFO     | baselines.simple_raptor.retriever:answer:195 - Retrieving nodes for: What is Jack Mackenzie's occupation?
+2025-12-30 05:27:04.261 | INFO     | rag_core.embedding_client:encode:58 - [EMB] encoding 1 texts, first=What is Jack Mackenzie's occupation?...
+2025-12-30 05:27:04.284 | INFO     | baselines.simple_raptor.retriever:answer:281 - [RAPTOR] answering qid=What is Jack Mackenzie's occupation?..., ctx_len=16475
+2025-12-30 05:27:04.873 | INFO     | __main__:main:196 - Processing Q85: What is Ernst Theodor Echtermeyer's occupation?
+2025-12-30 05:27:04.873 | INFO     | baselines.simple_raptor.retriever:answer:195 - Retrieving nodes for: What is Ernst Theodor Echtermeyer's occupation?
+2025-12-30 05:27:04.873 | INFO     | rag_core.embedding_client:encode:58 - [EMB] encoding 1 texts, first=What is Ernst Theodor Echtermeyer's occupation?...
+2025-12-30 05:27:04.898 | INFO     | baselines.simple_raptor.retriever:answer:281 - [RAPTOR] answering qid=What is Ernst Theodor Echtermeyer's occupation?..., ctx_len=19152
+2025-12-30 05:27:05.628 | INFO     | __main__:main:196 - Processing Q86: What is Felicia Chateloin's occupation?
+2025-12-30 05:27:05.628 | INFO     | baselines.simple_raptor.retriever:answer:195 - Retrieving nodes for: What is Felicia Chateloin's occupation?
+2025-12-30 05:27:05.628 | INFO     | rag_core.embedding_client:encode:58 - [EMB] encoding 1 texts, first=What is Felicia Chateloin's occupation?...
+2025-12-30 05:27:05.650 | INFO     | baselines.simple_raptor.retriever:answer:281 - [RAPTOR] answering qid=What is Felicia Chateloin's occupation?..., ctx_len=17589
+2025-12-30 05:27:09.784 | INFO     | __main__:main:196 - Processing Q87: What is Bedřich Feigl's occupation?
+2025-12-30 05:27:09.784 | INFO     | baselines.simple_raptor.retriever:answer:195 - Retrieving nodes for: What is Bedřich Feigl's occupation?
+2025-12-30 05:27:09.784 | INFO     | rag_core.embedding_client:encode:58 - [EMB] encoding 1 texts, first=What is Bedřich Feigl's occupation?...
+2025-12-30 05:27:09.805 | INFO     | baselines.simple_raptor.retriever:answer:281 - [RAPTOR] answering qid=What is Bedřich Feigl's occupation?..., ctx_len=15034
+2025-12-30 05:27:10.613 | INFO     | __main__:main:196 - Processing Q88: What is Björn Böhning's occupation?
+2025-12-30 05:27:10.613 | INFO     | baselines.simple_raptor.retriever:answer:195 - Retrieving nodes for: What is Björn Böhning's occupation?
+2025-12-30 05:27:10.613 | INFO     | rag_core.embedding_client:encode:58 - [EMB] encoding 1 texts, first=What is Björn Böhning's occupation?...
+2025-12-30 05:27:10.637 | INFO     | baselines.simple_raptor.retriever:answer:281 - [RAPTOR] answering qid=What is Björn Böhning's occupation?..., ctx_len=16152
+2025-12-30 05:27:12.819 | INFO     | __main__:main:196 - Processing Q89: What is Stanley Peiris's occupation?
+2025-12-30 05:27:12.820 | INFO     | baselines.simple_raptor.retriever:answer:195 - Retrieving nodes for: What is Stanley Peiris's occupation?
+2025-12-30 05:27:12.820 | INFO     | rag_core.embedding_client:encode:58 - [EMB] encoding 1 texts, first=What is Stanley Peiris's occupation?...
+2025-12-30 05:27:12.844 | INFO     | baselines.simple_raptor.retriever:answer:281 - [RAPTOR] answering qid=What is Stanley Peiris's occupation?..., ctx_len=17255
+2025-12-30 05:27:13.578 | INFO     | __main__:main:196 - Processing Q90: What is J. Da Silva's occupation?
+2025-12-30 05:27:13.578 | INFO     | baselines.simple_raptor.retriever:answer:195 - Retrieving nodes for: What is J. Da Silva's occupation?
+2025-12-30 05:27:13.579 | INFO     | rag_core.embedding_client:encode:58 - [EMB] encoding 1 texts, first=What is J. Da Silva's occupation?...
+2025-12-30 05:27:13.597 | INFO     | baselines.simple_raptor.retriever:answer:281 - [RAPTOR] answering qid=What is J. Da Silva's occupation?..., ctx_len=16765
+2025-12-30 05:27:14.877 | INFO     | __main__:main:196 - Processing Q91: What is Carsten Carlsen's occupation?
+2025-12-30 05:27:14.877 | INFO     | baselines.simple_raptor.retriever:answer:195 - Retrieving nodes for: What is Carsten Carlsen's occupation?
+2025-12-30 05:27:14.878 | INFO     | rag_core.embedding_client:encode:58 - [EMB] encoding 1 texts, first=What is Carsten Carlsen's occupation?...
+2025-12-30 05:27:14.896 | INFO     | baselines.simple_raptor.retriever:answer:281 - [RAPTOR] answering qid=What is Carsten Carlsen's occupation?..., ctx_len=15779
+2025-12-30 05:27:16.306 | INFO     | __main__:main:196 - Processing Q92: What is Shiva Nageswara Rao's occupation?
+2025-12-30 05:27:16.307 | INFO     | baselines.simple_raptor.retriever:answer:195 - Retrieving nodes for: What is Shiva Nageswara Rao's occupation?
+2025-12-30 05:27:16.307 | INFO     | rag_core.embedding_client:encode:58 - [EMB] encoding 1 texts, first=What is Shiva Nageswara Rao's occupation?...
+2025-12-30 05:27:16.327 | INFO     | baselines.simple_raptor.retriever:answer:281 - [RAPTOR] answering qid=What is Shiva Nageswara Rao's occupation?..., ctx_len=15118
+2025-12-30 05:27:17.136 | INFO     | __main__:main:196 - Processing Q93: What is Fritz Goos's occupation?
+2025-12-30 05:27:17.137 | INFO     | baselines.simple_raptor.retriever:answer:195 - Retrieving nodes for: What is Fritz Goos's occupation?
+2025-12-30 05:27:17.137 | INFO     | rag_core.embedding_client:encode:58 - [EMB] encoding 1 texts, first=What is Fritz Goos's occupation?...
+2025-12-30 05:27:17.159 | INFO     | baselines.simple_raptor.retriever:answer:281 - [RAPTOR] answering qid=What is Fritz Goos's occupation?..., ctx_len=15653
+2025-12-30 05:27:17.960 | INFO     | __main__:main:196 - Processing Q94: What is Alexander Gadolin's occupation?
+2025-12-30 05:27:17.961 | INFO     | baselines.simple_raptor.retriever:answer:195 - Retrieving nodes for: What is Alexander Gadolin's occupation?
+2025-12-30 05:27:17.961 | INFO     | rag_core.embedding_client:encode:58 - [EMB] encoding 1 texts, first=What is Alexander Gadolin's occupation?...
+2025-12-30 05:27:17.982 | INFO     | baselines.simple_raptor.retriever:answer:281 - [RAPTOR] answering qid=What is Alexander Gadolin's occupation?..., ctx_len=17143
+2025-12-30 05:27:18.718 | INFO     | __main__:main:196 - Processing Q95: What is Kamya Panjabi's occupation?
+2025-12-30 05:27:18.719 | INFO     | baselines.simple_raptor.retriever:answer:195 - Retrieving nodes for: What is Kamya Panjabi's occupation?
+2025-12-30 05:27:18.719 | INFO     | rag_core.embedding_client:encode:58 - [EMB] encoding 1 texts, first=What is Kamya Panjabi's occupation?...
+2025-12-30 05:27:18.737 | INFO     | baselines.simple_raptor.retriever:answer:281 - [RAPTOR] answering qid=What is Kamya Panjabi's occupation?..., ctx_len=16199
+2025-12-30 05:27:20.217 | INFO     | __main__:main:196 - Processing Q96: What is John Strange's occupation?
+2025-12-30 05:27:20.217 | INFO     | baselines.simple_raptor.retriever:answer:195 - Retrieving nodes for: What is John Strange's occupation?
+2025-12-30 05:27:20.217 | INFO     | rag_core.embedding_client:encode:58 - [EMB] encoding 1 texts, first=What is John Strange's occupation?...
+2025-12-30 05:27:20.242 | INFO     | baselines.simple_raptor.retriever:answer:281 - [RAPTOR] answering qid=What is John Strange's occupation?..., ctx_len=9070
+2025-12-30 05:27:21.253 | INFO     | __main__:main:196 - Processing Q97: What is Everley Gregg's occupation?
+2025-12-30 05:27:21.253 | INFO     | baselines.simple_raptor.retriever:answer:195 - Retrieving nodes for: What is Everley Gregg's occupation?
+2025-12-30 05:27:21.254 | INFO     | rag_core.embedding_client:encode:58 - [EMB] encoding 1 texts, first=What is Everley Gregg's occupation?...
+2025-12-30 05:27:21.274 | INFO     | baselines.simple_raptor.retriever:answer:281 - [RAPTOR] answering qid=What is Everley Gregg's occupation?..., ctx_len=15707
+2025-12-30 05:27:22.364 | INFO     | __main__:main:196 - Processing Q98: What is Meg McCall's occupation?
+2025-12-30 05:27:22.365 | INFO     | baselines.simple_raptor.retriever:answer:195 - Retrieving nodes for: What is Meg McCall's occupation?
+2025-12-30 05:27:22.365 | INFO     | rag_core.embedding_client:encode:58 - [EMB] encoding 1 texts, first=What is Meg McCall's occupation?...
+2025-12-30 05:27:22.378 | INFO     | baselines.simple_raptor.retriever:answer:281 - [RAPTOR] answering qid=What is Meg McCall's occupation?..., ctx_len=16309
+2025-12-30 05:27:22.956 | INFO     | __main__:main:196 - Processing Q99: What is Todd Verow's occupation?
+2025-12-30 05:27:22.957 | INFO     | baselines.simple_raptor.retriever:answer:195 - Retrieving nodes for: What is Todd Verow's occupation?
+2025-12-30 05:27:22.957 | INFO     | rag_core.embedding_client:encode:58 - [EMB] encoding 1 texts, first=What is Todd Verow's occupation?...
+2025-12-30 05:27:22.970 | INFO     | baselines.simple_raptor.retriever:answer:281 - [RAPTOR] answering qid=What is Todd Verow's occupation?..., ctx_len=12797
+2025-12-30 05:27:23.512 | INFO     | __main__:main:196 - Processing Q100: What is Kyaw Swe's occupation?
+2025-12-30 05:27:23.512 | INFO     | baselines.simple_raptor.retriever:answer:195 - Retrieving nodes for: What is Kyaw Swe's occupation?
+2025-12-30 05:27:23.512 | INFO     | rag_core.embedding_client:encode:58 - [EMB] encoding 1 texts, first=What is Kyaw Swe's occupation?...
+2025-12-30 05:27:23.525 | INFO     | baselines.simple_raptor.retriever:answer:281 - [RAPTOR] answering qid=What is Kyaw Swe's occupation?..., ctx_len=14480
+2025-12-30 05:27:24.931 | INFO     | __main__:main:196 - Processing Q101: What is Edwin H. Knopf's occupation?
+2025-12-30 05:27:24.931 | INFO     | baselines.simple_raptor.retriever:answer:195 - Retrieving nodes for: What is Edwin H. Knopf's occupation?
+2025-12-30 05:27:24.931 | INFO     | rag_core.embedding_client:encode:58 - [EMB] encoding 1 texts, first=What is Edwin H. Knopf's occupation?...
+2025-12-30 05:27:24.945 | INFO     | baselines.simple_raptor.retriever:answer:281 - [RAPTOR] answering qid=What is Edwin H. Knopf's occupation?..., ctx_len=19810
+2025-12-30 05:27:25.855 | INFO     | __main__:main:196 - Processing Q102: What is Tatiana Doronina's occupation?
+2025-12-30 05:27:25.855 | INFO     | baselines.simple_raptor.retriever:answer:195 - Retrieving nodes for: What is Tatiana Doronina's occupation?
+2025-12-30 05:27:25.855 | INFO     | rag_core.embedding_client:encode:58 - [EMB] encoding 1 texts, first=What is Tatiana Doronina's occupation?...
+2025-12-30 05:27:25.865 | INFO     | baselines.simple_raptor.retriever:answer:281 - [RAPTOR] answering qid=What is Tatiana Doronina's occupation?..., ctx_len=14182
+2025-12-30 05:27:26.971 | INFO     | __main__:main:196 - Processing Q103: What is Marina Baker's occupation?
+2025-12-30 05:27:26.971 | INFO     | baselines.simple_raptor.retriever:answer:195 - Retrieving nodes for: What is Marina Baker's occupation?
+2025-12-30 05:27:26.971 | INFO     | rag_core.embedding_client:encode:58 - [EMB] encoding 1 texts, first=What is Marina Baker's occupation?...
+2025-12-30 05:27:26.989 | INFO     | baselines.simple_raptor.retriever:answer:281 - [RAPTOR] answering qid=What is Marina Baker's occupation?..., ctx_len=16885
+2025-12-30 05:27:29.891 | INFO     | __main__:main:196 - Processing Q104: What is Giuseppe Demachi's occupation?
+2025-12-30 05:27:29.892 | INFO     | baselines.simple_raptor.retriever:answer:195 - Retrieving nodes for: What is Giuseppe Demachi's occupation?
+2025-12-30 05:27:29.892 | INFO     | rag_core.embedding_client:encode:58 - [EMB] encoding 1 texts, first=What is Giuseppe Demachi's occupation?...
+2025-12-30 05:27:29.925 | INFO     | baselines.simple_raptor.retriever:answer:281 - [RAPTOR] answering qid=What is Giuseppe Demachi's occupation?..., ctx_len=5794
+2025-12-30 05:27:31.142 | INFO     | __main__:main:196 - Processing Q105: What is Atsushi Kaneko's occupation?
+2025-12-30 05:27:31.143 | INFO     | baselines.simple_raptor.retriever:answer:195 - Retrieving nodes for: What is Atsushi Kaneko's occupation?
+2025-12-30 05:27:31.143 | INFO     | rag_core.embedding_client:encode:58 - [EMB] encoding 1 texts, first=What is Atsushi Kaneko's occupation?...
+2025-12-30 05:27:31.161 | INFO     | baselines.simple_raptor.retriever:answer:281 - [RAPTOR] answering qid=What is Atsushi Kaneko's occupation?..., ctx_len=4982
+2025-12-30 05:27:32.181 | INFO     | __main__:main:196 - Processing Q106: What is Richard Faith's occupation?
+2025-12-30 05:27:32.182 | INFO     | baselines.simple_raptor.retriever:answer:195 - Retrieving nodes for: What is Richard Faith's occupation?
+2025-12-30 05:27:32.182 | INFO     | rag_core.embedding_client:encode:58 - [EMB] encoding 1 texts, first=What is Richard Faith's occupation?...
+2025-12-30 05:27:32.200 | INFO     | baselines.simple_raptor.retriever:answer:281 - [RAPTOR] answering qid=What is Richard Faith's occupation?..., ctx_len=12551
+2025-12-30 05:27:34.876 | INFO     | __main__:main:196 - Processing Q107: What is E. David Redwine's occupation?
+2025-12-30 05:27:34.876 | INFO     | baselines.simple_raptor.retriever:answer:195 - Retrieving nodes for: What is E. David Redwine's occupation?
+2025-12-30 05:27:34.876 | INFO     | rag_core.embedding_client:encode:58 - [EMB] encoding 1 texts, first=What is E. David Redwine's occupation?...
+2025-12-30 05:27:34.903 | INFO     | baselines.simple_raptor.retriever:answer:281 - [RAPTOR] answering qid=What is E. David Redwine's occupation?..., ctx_len=13679
+2025-12-30 05:27:36.237 | INFO     | __main__:main:196 - Processing Q108: What is Chiara Zanni's occupation?
+2025-12-30 05:27:36.238 | INFO     | baselines.simple_raptor.retriever:answer:195 - Retrieving nodes for: What is Chiara Zanni's occupation?
+2025-12-30 05:27:36.238 | INFO     | rag_core.embedding_client:encode:58 - [EMB] encoding 1 texts, first=What is Chiara Zanni's occupation?...
+2025-12-30 05:27:36.258 | INFO     | baselines.simple_raptor.retriever:answer:281 - [RAPTOR] answering qid=What is Chiara Zanni's occupation?..., ctx_len=17233
+2025-12-30 05:27:37.665 | INFO     | __main__:main:196 - Processing Q109: What is P. J. Moloney's occupation?
+2025-12-30 05:27:37.665 | INFO     | baselines.simple_raptor.retriever:answer:195 - Retrieving nodes for: What is P. J. Moloney's occupation?
+2025-12-30 05:27:37.665 | INFO     | rag_core.embedding_client:encode:58 - [EMB] encoding 1 texts, first=What is P. J. Moloney's occupation?...
+2025-12-30 05:27:37.683 | INFO     | baselines.simple_raptor.retriever:answer:281 - [RAPTOR] answering qid=What is P. J. Moloney's occupation?..., ctx_len=17012
+2025-12-30 05:27:39.807 | INFO     | __main__:main:196 - Processing Q110: What is Andreas Rüdiger's occupation?
+2025-12-30 05:27:39.807 | INFO     | baselines.simple_raptor.retriever:answer:195 - Retrieving nodes for: What is Andreas Rüdiger's occupation?
+2025-12-30 05:27:39.807 | INFO     | rag_core.embedding_client:encode:58 - [EMB] encoding 1 texts, first=What is Andreas Rüdiger's occupation?...
+2025-12-30 05:27:39.826 | INFO     | baselines.simple_raptor.retriever:answer:281 - [RAPTOR] answering qid=What is Andreas Rüdiger's occupation?..., ctx_len=16251
+2025-12-30 05:27:40.540 | INFO     | __main__:main:196 - Processing Q111: What is Guillem Ramon de Gironella's occupation?
+2025-12-30 05:27:40.541 | INFO     | baselines.simple_raptor.retriever:answer:195 - Retrieving nodes for: What is Guillem Ramon de Gironella's occupation?
+2025-12-30 05:27:40.541 | INFO     | rag_core.embedding_client:encode:58 - [EMB] encoding 1 texts, first=What is Guillem Ramon de Gironella's occupation?...
+2025-12-30 05:27:40.577 | INFO     | baselines.simple_raptor.retriever:answer:281 - [RAPTOR] answering qid=What is Guillem Ramon de Gironella's occupation?..., ctx_len=11102
+2025-12-30 05:27:41.026 | INFO     | __main__:main:196 - Processing Q112: What is Dima Grigoriev's occupation?
+2025-12-30 05:27:41.026 | INFO     | baselines.simple_raptor.retriever:answer:195 - Retrieving nodes for: What is Dima Grigoriev's occupation?
+2025-12-30 05:27:41.026 | INFO     | rag_core.embedding_client:encode:58 - [EMB] encoding 1 texts, first=What is Dima Grigoriev's occupation?...
+2025-12-30 05:27:41.043 | INFO     | baselines.simple_raptor.retriever:answer:281 - [RAPTOR] answering qid=What is Dima Grigoriev's occupation?..., ctx_len=16203
+2025-12-30 05:27:41.687 | INFO     | __main__:main:196 - Processing Q113: What is Paddy Mullins's occupation?
+2025-12-30 05:27:41.688 | INFO     | baselines.simple_raptor.retriever:answer:195 - Retrieving nodes for: What is Paddy Mullins's occupation?
+2025-12-30 05:27:41.688 | INFO     | rag_core.embedding_client:encode:58 - [EMB] encoding 1 texts, first=What is Paddy Mullins's occupation?...
+2025-12-30 05:27:41.709 | INFO     | baselines.simple_raptor.retriever:answer:281 - [RAPTOR] answering qid=What is Paddy Mullins's occupation?..., ctx_len=19133
+2025-12-30 05:27:42.438 | INFO     | __main__:main:196 - Processing Q114: What is Alan Mauritz Swanson's occupation?
+2025-12-30 05:27:42.438 | INFO     | baselines.simple_raptor.retriever:answer:195 - Retrieving nodes for: What is Alan Mauritz Swanson's occupation?
+2025-12-30 05:27:42.439 | INFO     | rag_core.embedding_client:encode:58 - [EMB] encoding 1 texts, first=What is Alan Mauritz Swanson's occupation?...
+2025-12-30 05:27:42.456 | INFO     | baselines.simple_raptor.retriever:answer:281 - [RAPTOR] answering qid=What is Alan Mauritz Swanson's occupation?..., ctx_len=13960
+2025-12-30 05:27:43.060 | INFO     | __main__:main:196 - Processing Q115: What is Harvey William Burk's occupation?
+2025-12-30 05:27:43.061 | INFO     | baselines.simple_raptor.retriever:answer:195 - Retrieving nodes for: What is Harvey William Burk's occupation?
+2025-12-30 05:27:43.061 | INFO     | rag_core.embedding_client:encode:58 - [EMB] encoding 1 texts, first=What is Harvey William Burk's occupation?...
+2025-12-30 05:27:43.122 | INFO     | baselines.simple_raptor.retriever:answer:281 - [RAPTOR] answering qid=What is Harvey William Burk's occupation?..., ctx_len=21288
+2025-12-30 05:27:44.489 | INFO     | __main__:main:196 - Processing Q116: What is Richard Sandrak's occupation?
+2025-12-30 05:27:44.489 | INFO     | baselines.simple_raptor.retriever:answer:195 - Retrieving nodes for: What is Richard Sandrak's occupation?
+2025-12-30 05:27:44.489 | INFO     | rag_core.embedding_client:encode:58 - [EMB] encoding 1 texts, first=What is Richard Sandrak's occupation?...
+2025-12-30 05:27:44.497 | INFO     | baselines.simple_raptor.retriever:answer:281 - [RAPTOR] answering qid=What is Richard Sandrak's occupation?..., ctx_len=15948
+2025-12-30 05:27:46.335 | INFO     | __main__:main:196 - Processing Q117: What is Jim Boyd's occupation?
+2025-12-30 05:27:46.335 | INFO     | baselines.simple_raptor.retriever:answer:195 - Retrieving nodes for: What is Jim Boyd's occupation?
+2025-12-30 05:27:46.335 | INFO     | rag_core.embedding_client:encode:58 - [EMB] encoding 1 texts, first=What is Jim Boyd's occupation?...
+2025-12-30 05:27:46.354 | INFO     | baselines.simple_raptor.retriever:answer:281 - [RAPTOR] answering qid=What is Jim Boyd's occupation?..., ctx_len=17222
+2025-12-30 05:27:47.787 | INFO     | __main__:main:196 - Processing Q118: What is Nosrat Karimi's occupation?
+2025-12-30 05:27:47.787 | INFO     | baselines.simple_raptor.retriever:answer:195 - Retrieving nodes for: What is Nosrat Karimi's occupation?
+2025-12-30 05:27:47.787 | INFO     | rag_core.embedding_client:encode:58 - [EMB] encoding 1 texts, first=What is Nosrat Karimi's occupation?...
+2025-12-30 05:27:47.803 | INFO     | baselines.simple_raptor.retriever:answer:281 - [RAPTOR] answering qid=What is Nosrat Karimi's occupation?..., ctx_len=11328
+2025-12-30 05:27:49.009 | INFO     | __main__:main:196 - Processing Q119: What is Jörg A. Eggers's occupation?
+2025-12-30 05:27:49.009 | INFO     | baselines.simple_raptor.retriever:answer:195 - Retrieving nodes for: What is Jörg A. Eggers's occupation?
+2025-12-30 05:27:49.009 | INFO     | rag_core.embedding_client:encode:58 - [EMB] encoding 1 texts, first=What is Jörg A. Eggers's occupation?...
+2025-12-30 05:27:49.032 | INFO     | baselines.simple_raptor.retriever:answer:281 - [RAPTOR] answering qid=What is Jörg A. Eggers's occupation?..., ctx_len=15831
+2025-12-30 05:27:49.776 | INFO     | __main__:main:196 - Processing Q120: What is Duilio Forte's occupation?
+2025-12-30 05:27:49.777 | INFO     | baselines.simple_raptor.retriever:answer:195 - Retrieving nodes for: What is Duilio Forte's occupation?
+2025-12-30 05:27:49.777 | INFO     | rag_core.embedding_client:encode:58 - [EMB] encoding 1 texts, first=What is Duilio Forte's occupation?...
+2025-12-30 05:27:49.785 | INFO     | baselines.simple_raptor.retriever:answer:281 - [RAPTOR] answering qid=What is Duilio Forte's occupation?..., ctx_len=17415
+2025-12-30 05:27:50.506 | INFO     | __main__:main:196 - Processing Q121: What is Giovanni Grasso's occupation?
+2025-12-30 05:27:50.506 | INFO     | baselines.simple_raptor.retriever:answer:195 - Retrieving nodes for: What is Giovanni Grasso's occupation?
+2025-12-30 05:27:50.506 | INFO     | rag_core.embedding_client:encode:58 - [EMB] encoding 1 texts, first=What is Giovanni Grasso's occupation?...
+2025-12-30 05:27:50.522 | INFO     | baselines.simple_raptor.retriever:answer:281 - [RAPTOR] answering qid=What is Giovanni Grasso's occupation?..., ctx_len=7288
+2025-12-30 05:27:51.064 | INFO     | __main__:main:196 - Processing Q122: What is Adam Darr's occupation?
+2025-12-30 05:27:51.064 | INFO     | baselines.simple_raptor.retriever:answer:195 - Retrieving nodes for: What is Adam Darr's occupation?
+2025-12-30 05:27:51.064 | INFO     | rag_core.embedding_client:encode:58 - [EMB] encoding 1 texts, first=What is Adam Darr's occupation?...
+2025-12-30 05:27:51.074 | INFO     | baselines.simple_raptor.retriever:answer:281 - [RAPTOR] answering qid=What is Adam Darr's occupation?..., ctx_len=17531
+2025-12-30 05:27:53.208 | INFO     | __main__:main:196 - Processing Q123: What is Paul Lieber's occupation?
+2025-12-30 05:27:53.208 | INFO     | baselines.simple_raptor.retriever:answer:195 - Retrieving nodes for: What is Paul Lieber's occupation?
+2025-12-30 05:27:53.208 | INFO     | rag_core.embedding_client:encode:58 - [EMB] encoding 1 texts, first=What is Paul Lieber's occupation?...
+2025-12-30 05:27:53.226 | INFO     | baselines.simple_raptor.retriever:answer:281 - [RAPTOR] answering qid=What is Paul Lieber's occupation?..., ctx_len=15895
+2025-12-30 05:27:54.260 | INFO     | __main__:main:196 - Processing Q124: What is Keiko Aizawa's occupation?
+2025-12-30 05:27:54.260 | INFO     | baselines.simple_raptor.retriever:answer:195 - Retrieving nodes for: What is Keiko Aizawa's occupation?
+2025-12-30 05:27:54.261 | INFO     | rag_core.embedding_client:encode:58 - [EMB] encoding 1 texts, first=What is Keiko Aizawa's occupation?...
+2025-12-30 05:27:54.275 | INFO     | baselines.simple_raptor.retriever:answer:281 - [RAPTOR] answering qid=What is Keiko Aizawa's occupation?..., ctx_len=10666
+2025-12-30 05:27:54.905 | INFO     | __main__:main:196 - Processing Q125: What is Petros Efthymiou's occupation?
+2025-12-30 05:27:54.905 | INFO     | baselines.simple_raptor.retriever:answer:195 - Retrieving nodes for: What is Petros Efthymiou's occupation?
+2025-12-30 05:27:54.905 | INFO     | rag_core.embedding_client:encode:58 - [EMB] encoding 1 texts, first=What is Petros Efthymiou's occupation?...
+2025-12-30 05:27:54.920 | INFO     | baselines.simple_raptor.retriever:answer:281 - [RAPTOR] answering qid=What is Petros Efthymiou's occupation?..., ctx_len=15126
+2025-12-30 05:27:57.372 | INFO     | __main__:main:196 - Processing Q126: What is Isobel Pravda's occupation?
+2025-12-30 05:27:57.372 | INFO     | baselines.simple_raptor.retriever:answer:195 - Retrieving nodes for: What is Isobel Pravda's occupation?
+2025-12-30 05:27:57.372 | INFO     | rag_core.embedding_client:encode:58 - [EMB] encoding 1 texts, first=What is Isobel Pravda's occupation?...
+2025-12-30 05:27:57.391 | INFO     | baselines.simple_raptor.retriever:answer:281 - [RAPTOR] answering qid=What is Isobel Pravda's occupation?..., ctx_len=19435
+2025-12-30 05:27:58.050 | INFO     | __main__:main:196 - Processing Q127: What is Seungri's occupation?
+2025-12-30 05:27:58.050 | INFO     | baselines.simple_raptor.retriever:answer:195 - Retrieving nodes for: What is Seungri's occupation?
+2025-12-30 05:27:58.050 | INFO     | rag_core.embedding_client:encode:58 - [EMB] encoding 1 texts, first=What is Seungri's occupation?...
+2025-12-30 05:27:58.077 | INFO     | baselines.simple_raptor.retriever:answer:281 - [RAPTOR] answering qid=What is Seungri's occupation?..., ctx_len=13705
+2025-12-30 05:28:00.353 | INFO     | __main__:main:196 - Processing Q128: What is DM Sevilla's occupation?
+2025-12-30 05:28:00.354 | INFO     | baselines.simple_raptor.retriever:answer:195 - Retrieving nodes for: What is DM Sevilla's occupation?
+2025-12-30 05:28:00.354 | INFO     | rag_core.embedding_client:encode:58 - [EMB] encoding 1 texts, first=What is DM Sevilla's occupation?...
+2025-12-30 05:28:00.370 | INFO     | baselines.simple_raptor.retriever:answer:281 - [RAPTOR] answering qid=What is DM Sevilla's occupation?..., ctx_len=7957
+2025-12-30 05:28:00.890 | INFO     | __main__:main:196 - Processing Q129: What is Carlo Giustini's occupation?
+2025-12-30 05:28:00.890 | INFO     | baselines.simple_raptor.retriever:answer:195 - Retrieving nodes for: What is Carlo Giustini's occupation?
+2025-12-30 05:28:00.890 | INFO     | rag_core.embedding_client:encode:58 - [EMB] encoding 1 texts, first=What is Carlo Giustini's occupation?...
+2025-12-30 05:28:00.908 | INFO     | baselines.simple_raptor.retriever:answer:281 - [RAPTOR] answering qid=What is Carlo Giustini's occupation?..., ctx_len=14799
+2025-12-30 05:28:01.489 | INFO     | __main__:main:196 - Processing Q130: What is Hugo Becker's occupation?
+2025-12-30 05:28:01.489 | INFO     | baselines.simple_raptor.retriever:answer:195 - Retrieving nodes for: What is Hugo Becker's occupation?
+2025-12-30 05:28:01.490 | INFO     | rag_core.embedding_client:encode:58 - [EMB] encoding 1 texts, first=What is Hugo Becker's occupation?...
+2025-12-30 05:28:01.507 | INFO     | baselines.simple_raptor.retriever:answer:281 - [RAPTOR] answering qid=What is Hugo Becker's occupation?..., ctx_len=19409
+2025-12-30 05:28:03.450 | INFO     | __main__:main:196 - Processing Q131: What is Per Risvik's occupation?
+2025-12-30 05:28:03.450 | INFO     | baselines.simple_raptor.retriever:answer:195 - Retrieving nodes for: What is Per Risvik's occupation?
+2025-12-30 05:28:03.451 | INFO     | rag_core.embedding_client:encode:58 - [EMB] encoding 1 texts, first=What is Per Risvik's occupation?...
+2025-12-30 05:28:03.470 | INFO     | baselines.simple_raptor.retriever:answer:281 - [RAPTOR] answering qid=What is Per Risvik's occupation?..., ctx_len=17665
+2025-12-30 05:28:04.099 | INFO     | __main__:main:196 - Processing Q132: What is Eleanor Yule's occupation?
+2025-12-30 05:28:04.099 | INFO     | baselines.simple_raptor.retriever:answer:195 - Retrieving nodes for: What is Eleanor Yule's occupation?
+2025-12-30 05:28:04.099 | INFO     | rag_core.embedding_client:encode:58 - [EMB] encoding 1 texts, first=What is Eleanor Yule's occupation?...
+2025-12-30 05:28:04.117 | INFO     | baselines.simple_raptor.retriever:answer:281 - [RAPTOR] answering qid=What is Eleanor Yule's occupation?..., ctx_len=20593
+2025-12-30 05:28:05.384 | INFO     | __main__:main:196 - Processing Q133: What is Claire Adams's occupation?
+2025-12-30 05:28:05.384 | INFO     | baselines.simple_raptor.retriever:answer:195 - Retrieving nodes for: What is Claire Adams's occupation?
+2025-12-30 05:28:05.385 | INFO     | rag_core.embedding_client:encode:58 - [EMB] encoding 1 texts, first=What is Claire Adams's occupation?...
+2025-12-30 05:28:05.403 | INFO     | baselines.simple_raptor.retriever:answer:281 - [RAPTOR] answering qid=What is Claire Adams's occupation?..., ctx_len=19849
+2025-12-30 05:28:06.982 | INFO     | __main__:main:196 - Processing Q134: What is Lothrop Stoddard's occupation?
+2025-12-30 05:28:06.983 | INFO     | baselines.simple_raptor.retriever:answer:195 - Retrieving nodes for: What is Lothrop Stoddard's occupation?
+2025-12-30 05:28:06.983 | INFO     | rag_core.embedding_client:encode:58 - [EMB] encoding 1 texts, first=What is Lothrop Stoddard's occupation?...
+2025-12-30 05:28:07.003 | INFO     | baselines.simple_raptor.retriever:answer:281 - [RAPTOR] answering qid=What is Lothrop Stoddard's occupation?..., ctx_len=11826
+2025-12-30 05:28:09.550 | INFO     | __main__:main:196 - Processing Q135: What is Chris Lang's occupation?
+2025-12-30 05:28:09.550 | INFO     | baselines.simple_raptor.retriever:answer:195 - Retrieving nodes for: What is Chris Lang's occupation?
+2025-12-30 05:28:09.551 | INFO     | rag_core.embedding_client:encode:58 - [EMB] encoding 1 texts, first=What is Chris Lang's occupation?...
+2025-12-30 05:28:09.566 | INFO     | baselines.simple_raptor.retriever:answer:281 - [RAPTOR] answering qid=What is Chris Lang's occupation?..., ctx_len=18622
+2025-12-30 05:28:11.339 | INFO     | __main__:main:196 - Processing Q136: What is Pamela Winslow's occupation?
+2025-12-30 05:28:11.340 | INFO     | baselines.simple_raptor.retriever:answer:195 - Retrieving nodes for: What is Pamela Winslow's occupation?
+2025-12-30 05:28:11.340 | INFO     | rag_core.embedding_client:encode:58 - [EMB] encoding 1 texts, first=What is Pamela Winslow's occupation?...
+2025-12-30 05:28:11.362 | INFO     | baselines.simple_raptor.retriever:answer:281 - [RAPTOR] answering qid=What is Pamela Winslow's occupation?..., ctx_len=17863
+2025-12-30 05:28:12.087 | INFO     | __main__:main:196 - Processing Q137: What is Zoran Rankić's occupation?
+2025-12-30 05:28:12.087 | INFO     | baselines.simple_raptor.retriever:answer:195 - Retrieving nodes for: What is Zoran Rankić's occupation?
+2025-12-30 05:28:12.087 | INFO     | rag_core.embedding_client:encode:58 - [EMB] encoding 1 texts, first=What is Zoran Rankić's occupation?...
+2025-12-30 05:28:12.107 | INFO     | baselines.simple_raptor.retriever:answer:281 - [RAPTOR] answering qid=What is Zoran Rankić's occupation?..., ctx_len=12046
+2025-12-30 05:28:12.726 | INFO     | __main__:main:196 - Processing Q138: What is George Minor's occupation?
+2025-12-30 05:28:12.726 | INFO     | baselines.simple_raptor.retriever:answer:195 - Retrieving nodes for: What is George Minor's occupation?
+2025-12-30 05:28:12.727 | INFO     | rag_core.embedding_client:encode:58 - [EMB] encoding 1 texts, first=What is George Minor's occupation?...
+2025-12-30 05:28:12.746 | INFO     | baselines.simple_raptor.retriever:answer:281 - [RAPTOR] answering qid=What is George Minor's occupation?..., ctx_len=13748
+2025-12-30 05:28:13.737 | INFO     | __main__:main:196 - Processing Q139: What is Anjali Sudhakar's occupation?
+2025-12-30 05:28:13.737 | INFO     | baselines.simple_raptor.retriever:answer:195 - Retrieving nodes for: What is Anjali Sudhakar's occupation?
+2025-12-30 05:28:13.737 | INFO     | rag_core.embedding_client:encode:58 - [EMB] encoding 1 texts, first=What is Anjali Sudhakar's occupation?...
+2025-12-30 05:28:13.755 | INFO     | baselines.simple_raptor.retriever:answer:281 - [RAPTOR] answering qid=What is Anjali Sudhakar's occupation?..., ctx_len=16782
+2025-12-30 05:28:14.403 | INFO     | __main__:main:196 - Processing Q140: What is Jean Gabriel Marie's occupation?
+2025-12-30 05:28:14.403 | INFO     | baselines.simple_raptor.retriever:answer:195 - Retrieving nodes for: What is Jean Gabriel Marie's occupation?
+2025-12-30 05:28:14.404 | INFO     | rag_core.embedding_client:encode:58 - [EMB] encoding 1 texts, first=What is Jean Gabriel Marie's occupation?...
+2025-12-30 05:28:14.422 | INFO     | baselines.simple_raptor.retriever:answer:281 - [RAPTOR] answering qid=What is Jean Gabriel Marie's occupation?..., ctx_len=16811
+2025-12-30 05:28:15.560 | INFO     | __main__:main:196 - Processing Q141: What is George Birnie Esslemont's occupation?
+2025-12-30 05:28:15.560 | INFO     | baselines.simple_raptor.retriever:answer:195 - Retrieving nodes for: What is George Birnie Esslemont's occupation?
+2025-12-30 05:28:15.560 | INFO     | rag_core.embedding_client:encode:58 - [EMB] encoding 1 texts, first=What is George Birnie Esslemont's occupation?...
+2025-12-30 05:28:15.576 | INFO     | baselines.simple_raptor.retriever:answer:281 - [RAPTOR] answering qid=What is George Birnie Esslemont's occupation?..., ctx_len=16955
+2025-12-30 05:28:16.886 | INFO     | __main__:main:196 - Processing Q142: What is Ajay Kumar Parida's occupation?
+2025-12-30 05:28:16.886 | INFO     | baselines.simple_raptor.retriever:answer:195 - Retrieving nodes for: What is Ajay Kumar Parida's occupation?
+2025-12-30 05:28:16.887 | INFO     | rag_core.embedding_client:encode:58 - [EMB] encoding 1 texts, first=What is Ajay Kumar Parida's occupation?...
+2025-12-30 05:28:16.906 | INFO     | baselines.simple_raptor.retriever:answer:281 - [RAPTOR] answering qid=What is Ajay Kumar Parida's occupation?..., ctx_len=7617
+2025-12-30 05:28:17.275 | INFO     | __main__:main:196 - Processing Q143: What is A. Lawrence Kocher's occupation?
+2025-12-30 05:28:17.275 | INFO     | baselines.simple_raptor.retriever:answer:195 - Retrieving nodes for: What is A. Lawrence Kocher's occupation?
+2025-12-30 05:28:17.275 | INFO     | rag_core.embedding_client:encode:58 - [EMB] encoding 1 texts, first=What is A. Lawrence Kocher's occupation?...
+2025-12-30 05:28:17.296 | INFO     | baselines.simple_raptor.retriever:answer:281 - [RAPTOR] answering qid=What is A. Lawrence Kocher's occupation?..., ctx_len=16029
+2025-12-30 05:28:18.972 | INFO     | __main__:main:196 - Processing Q144: What is John Andrew Martin's occupation?
+2025-12-30 05:28:18.973 | INFO     | baselines.simple_raptor.retriever:answer:195 - Retrieving nodes for: What is John Andrew Martin's occupation?
+2025-12-30 05:28:18.973 | INFO     | rag_core.embedding_client:encode:58 - [EMB] encoding 1 texts, first=What is John Andrew Martin's occupation?...
+2025-12-30 05:28:18.993 | INFO     | baselines.simple_raptor.retriever:answer:281 - [RAPTOR] answering qid=What is John Andrew Martin's occupation?..., ctx_len=10299
+2025-12-30 05:28:21.950 | INFO     | __main__:main:196 - Processing Q145: What is Maurice Le Boucher's occupation?
+2025-12-30 05:28:21.950 | INFO     | baselines.simple_raptor.retriever:answer:195 - Retrieving nodes for: What is Maurice Le Boucher's occupation?
+2025-12-30 05:28:21.950 | INFO     | rag_core.embedding_client:encode:58 - [EMB] encoding 1 texts, first=What is Maurice Le Boucher's occupation?...
+2025-12-30 05:28:21.971 | INFO     | baselines.simple_raptor.retriever:answer:281 - [RAPTOR] answering qid=What is Maurice Le Boucher's occupation?..., ctx_len=22721
+2025-12-30 05:28:23.905 | INFO     | __main__:main:196 - Processing Q146: What is Martin Shapiro's occupation?
+2025-12-30 05:28:23.906 | INFO     | baselines.simple_raptor.retriever:answer:195 - Retrieving nodes for: What is Martin Shapiro's occupation?
+2025-12-30 05:28:23.906 | INFO     | rag_core.embedding_client:encode:58 - [EMB] encoding 1 texts, first=What is Martin Shapiro's occupation?...
+2025-12-30 05:28:23.928 | INFO     | baselines.simple_raptor.retriever:answer:281 - [RAPTOR] answering qid=What is Martin Shapiro's occupation?..., ctx_len=20131
+2025-12-30 05:28:25.483 | INFO     | __main__:main:196 - Processing Q147: What is Lewis J. Rachmil's occupation?
+2025-12-30 05:28:25.484 | INFO     | baselines.simple_raptor.retriever:answer:195 - Retrieving nodes for: What is Lewis J. Rachmil's occupation?
+2025-12-30 05:28:25.484 | INFO     | rag_core.embedding_client:encode:58 - [EMB] encoding 1 texts, first=What is Lewis J. Rachmil's occupation?...
+2025-12-30 05:28:25.507 | INFO     | baselines.simple_raptor.retriever:answer:281 - [RAPTOR] answering qid=What is Lewis J. Rachmil's occupation?..., ctx_len=21373
+2025-12-30 05:28:27.171 | INFO     | __main__:main:196 - Processing Q148: What is René Bégin's occupation?
+2025-12-30 05:28:27.171 | INFO     | baselines.simple_raptor.retriever:answer:195 - Retrieving nodes for: What is René Bégin's occupation?
+2025-12-30 05:28:27.171 | INFO     | rag_core.embedding_client:encode:58 - [EMB] encoding 1 texts, first=What is René Bégin's occupation?...
+2025-12-30 05:28:27.191 | INFO     | baselines.simple_raptor.retriever:answer:281 - [RAPTOR] answering qid=What is René Bégin's occupation?..., ctx_len=22574
+2025-12-30 05:28:28.749 | INFO     | __main__:main:196 - Processing Q149: What is Louis O'Dea's occupation?
+2025-12-30 05:28:28.749 | INFO     | baselines.simple_raptor.retriever:answer:195 - Retrieving nodes for: What is Louis O'Dea's occupation?
+2025-12-30 05:28:28.749 | INFO     | rag_core.embedding_client:encode:58 - [EMB] encoding 1 texts, first=What is Louis O'Dea's occupation?...
+2025-12-30 05:28:28.773 | INFO     | baselines.simple_raptor.retriever:answer:281 - [RAPTOR] answering qid=What is Louis O'Dea's occupation?..., ctx_len=20011
+2025-12-30 05:28:30.174 | INFO     | __main__:main:196 - Processing Q150: What is Guo Gengmao's occupation?
+2025-12-30 05:28:30.174 | INFO     | baselines.simple_raptor.retriever:answer:195 - Retrieving nodes for: What is Guo Gengmao's occupation?
+2025-12-30 05:28:30.174 | INFO     | rag_core.embedding_client:encode:58 - [EMB] encoding 1 texts, first=What is Guo Gengmao's occupation?...
+2025-12-30 05:28:30.202 | INFO     | baselines.simple_raptor.retriever:answer:281 - [RAPTOR] answering qid=What is Guo Gengmao's occupation?..., ctx_len=17387
+2025-12-30 05:28:30.811 | INFO     | __main__:main:196 - Processing Q151: What is Jacques Monasch's occupation?
+2025-12-30 05:28:30.811 | INFO     | baselines.simple_raptor.retriever:answer:195 - Retrieving nodes for: What is Jacques Monasch's occupation?
+2025-12-30 05:28:30.811 | INFO     | rag_core.embedding_client:encode:58 - [EMB] encoding 1 texts, first=What is Jacques Monasch's occupation?...
+2025-12-30 05:28:30.838 | INFO     | baselines.simple_raptor.retriever:answer:281 - [RAPTOR] answering qid=What is Jacques Monasch's occupation?..., ctx_len=22330
+2025-12-30 05:28:33.436 | INFO     | __main__:main:196 - Processing Q152: What is Robert Antoine's occupation?
+2025-12-30 05:28:33.436 | INFO     | baselines.simple_raptor.retriever:answer:195 - Retrieving nodes for: What is Robert Antoine's occupation?
+2025-12-30 05:28:33.436 | INFO     | rag_core.embedding_client:encode:58 - [EMB] encoding 1 texts, first=What is Robert Antoine's occupation?...
+2025-12-30 05:28:33.447 | INFO     | baselines.simple_raptor.retriever:answer:281 - [RAPTOR] answering qid=What is Robert Antoine's occupation?..., ctx_len=21842
+2025-12-30 05:28:36.062 | INFO     | __main__:main:196 - Processing Q153: What is Howard Fowles's occupation?
+2025-12-30 05:28:36.062 | INFO     | baselines.simple_raptor.retriever:answer:195 - Retrieving nodes for: What is Howard Fowles's occupation?
+2025-12-30 05:28:36.062 | INFO     | rag_core.embedding_client:encode:58 - [EMB] encoding 1 texts, first=What is Howard Fowles's occupation?...
+2025-12-30 05:28:36.074 | INFO     | baselines.simple_raptor.retriever:answer:281 - [RAPTOR] answering qid=What is Howard Fowles's occupation?..., ctx_len=17347
+2025-12-30 05:28:37.248 | INFO     | __main__:main:196 - Processing Q154: What is Đurđa Ivezić's occupation?
+2025-12-30 05:28:37.248 | INFO     | baselines.simple_raptor.retriever:answer:195 - Retrieving nodes for: What is Đurđa Ivezić's occupation?
+2025-12-30 05:28:37.248 | INFO     | rag_core.embedding_client:encode:58 - [EMB] encoding 1 texts, first=What is Đurđa Ivezić's occupation?...
+2025-12-30 05:28:37.262 | INFO     | baselines.simple_raptor.retriever:answer:281 - [RAPTOR] answering qid=What is Đurđa Ivezić's occupation?..., ctx_len=6793
+2025-12-30 05:28:37.716 | INFO     | __main__:main:196 - Processing Q155: What is Jeet Ganguly's occupation?
+2025-12-30 05:28:37.716 | INFO     | baselines.simple_raptor.retriever:answer:195 - Retrieving nodes for: What is Jeet Ganguly's occupation?
+2025-12-30 05:28:37.716 | INFO     | rag_core.embedding_client:encode:58 - [EMB] encoding 1 texts, first=What is Jeet Ganguly's occupation?...
+2025-12-30 05:28:37.729 | INFO     | baselines.simple_raptor.retriever:answer:281 - [RAPTOR] answering qid=What is Jeet Ganguly's occupation?..., ctx_len=18119
+2025-12-30 05:28:39.694 | INFO     | __main__:main:196 - Processing Q156: What is Akimasa Nakamura's occupation?
+2025-12-30 05:28:39.694 | INFO     | baselines.simple_raptor.retriever:answer:195 - Retrieving nodes for: What is Akimasa Nakamura's occupation?
+2025-12-30 05:28:39.694 | INFO     | rag_core.embedding_client:encode:58 - [EMB] encoding 1 texts, first=What is Akimasa Nakamura's occupation?...
+2025-12-30 05:28:39.705 | INFO     | baselines.simple_raptor.retriever:answer:281 - [RAPTOR] answering qid=What is Akimasa Nakamura's occupation?..., ctx_len=11589
+2025-12-30 05:28:40.966 | INFO     | __main__:main:196 - Processing Q157: What is Jean-Marie-Victor Viel's occupation?
+2025-12-30 05:28:40.966 | INFO     | baselines.simple_raptor.retriever:answer:195 - Retrieving nodes for: What is Jean-Marie-Victor Viel's occupation?
+2025-12-30 05:28:40.966 | INFO     | rag_core.embedding_client:encode:58 - [EMB] encoding 1 texts, first=What is Jean-Marie-Victor Viel's occupation?...
+2025-12-30 05:28:40.978 | INFO     | baselines.simple_raptor.retriever:answer:281 - [RAPTOR] answering qid=What is Jean-Marie-Victor Viel's occupation?..., ctx_len=20263
+2025-12-30 05:28:41.683 | INFO     | __main__:main:196 - Processing Q158: What is Eckart von Hirschhausen's occupation?
+2025-12-30 05:28:41.683 | INFO     | baselines.simple_raptor.retriever:answer:195 - Retrieving nodes for: What is Eckart von Hirschhausen's occupation?
+2025-12-30 05:28:41.683 | INFO     | rag_core.embedding_client:encode:58 - [EMB] encoding 1 texts, first=What is Eckart von Hirschhausen's occupation?...
+2025-12-30 05:28:41.700 | INFO     | baselines.simple_raptor.retriever:answer:281 - [RAPTOR] answering qid=What is Eckart von Hirschhausen's occupation?..., ctx_len=20413
+2025-12-30 05:28:43.617 | INFO     | __main__:main:196 - Processing Q159: What is Val McLane's occupation?
+2025-12-30 05:28:43.617 | INFO     | baselines.simple_raptor.retriever:answer:195 - Retrieving nodes for: What is Val McLane's occupation?
+2025-12-30 05:28:43.617 | INFO     | rag_core.embedding_client:encode:58 - [EMB] encoding 1 texts, first=What is Val McLane's occupation?...
+2025-12-30 05:28:43.639 | INFO     | baselines.simple_raptor.retriever:answer:281 - [RAPTOR] answering qid=What is Val McLane's occupation?..., ctx_len=15871
+2025-12-30 05:28:46.075 | INFO     | __main__:main:196 - Processing Q160: What is Edwin N. Hubbell's occupation?
+2025-12-30 05:28:46.075 | INFO     | baselines.simple_raptor.retriever:answer:195 - Retrieving nodes for: What is Edwin N. Hubbell's occupation?
+2025-12-30 05:28:46.075 | INFO     | rag_core.embedding_client:encode:58 - [EMB] encoding 1 texts, first=What is Edwin N. Hubbell's occupation?...
+2025-12-30 05:28:46.090 | INFO     | baselines.simple_raptor.retriever:answer:281 - [RAPTOR] answering qid=What is Edwin N. Hubbell's occupation?..., ctx_len=17460
+2025-12-30 05:28:47.398 | INFO     | __main__:main:196 - Processing Q161: What is Mariví Bilbao's occupation?
+2025-12-30 05:28:47.398 | INFO     | baselines.simple_raptor.retriever:answer:195 - Retrieving nodes for: What is Mariví Bilbao's occupation?
+2025-12-30 05:28:47.399 | INFO     | rag_core.embedding_client:encode:58 - [EMB] encoding 1 texts, first=What is Mariví Bilbao's occupation?...
+2025-12-30 05:28:47.418 | INFO     | baselines.simple_raptor.retriever:answer:281 - [RAPTOR] answering qid=What is Mariví Bilbao's occupation?..., ctx_len=16784
+2025-12-30 05:28:48.507 | INFO     | __main__:main:196 - Processing Q162: What is Dick Rude's occupation?
+2025-12-30 05:28:48.508 | INFO     | baselines.simple_raptor.retriever:answer:195 - Retrieving nodes for: What is Dick Rude's occupation?
+2025-12-30 05:28:48.508 | INFO     | rag_core.embedding_client:encode:58 - [EMB] encoding 1 texts, first=What is Dick Rude's occupation?...
+2025-12-30 05:28:48.524 | INFO     | baselines.simple_raptor.retriever:answer:281 - [RAPTOR] answering qid=What is Dick Rude's occupation?..., ctx_len=8421
+2025-12-30 05:28:49.158 | INFO     | __main__:main:196 - Processing Q163: What is Harding of Bristol's occupation?
+2025-12-30 05:28:49.159 | INFO     | baselines.simple_raptor.retriever:answer:195 - Retrieving nodes for: What is Harding of Bristol's occupation?
+2025-12-30 05:28:49.159 | INFO     | rag_core.embedding_client:encode:58 - [EMB] encoding 1 texts, first=What is Harding of Bristol's occupation?...
+2025-12-30 05:28:49.177 | INFO     | baselines.simple_raptor.retriever:answer:281 - [RAPTOR] answering qid=What is Harding of Bristol's occupation?..., ctx_len=21534
+2025-12-30 05:28:50.000 | INFO     | __main__:main:196 - Processing Q164: What is Gina Krog's occupation?
+2025-12-30 05:28:50.001 | INFO     | baselines.simple_raptor.retriever:answer:195 - Retrieving nodes for: What is Gina Krog's occupation?
+2025-12-30 05:28:50.001 | INFO     | rag_core.embedding_client:encode:58 - [EMB] encoding 1 texts, first=What is Gina Krog's occupation?...
+2025-12-30 05:28:50.021 | INFO     | baselines.simple_raptor.retriever:answer:281 - [RAPTOR] answering qid=What is Gina Krog's occupation?..., ctx_len=9643
+2025-12-30 05:28:52.125 | INFO     | __main__:main:196 - Processing Q165: What is Petr Mlsna's occupation?
+2025-12-30 05:28:52.125 | INFO     | baselines.simple_raptor.retriever:answer:195 - Retrieving nodes for: What is Petr Mlsna's occupation?
+2025-12-30 05:28:52.126 | INFO     | rag_core.embedding_client:encode:58 - [EMB] encoding 1 texts, first=What is Petr Mlsna's occupation?...
+2025-12-30 05:28:52.143 | INFO     | baselines.simple_raptor.retriever:answer:281 - [RAPTOR] answering qid=What is Petr Mlsna's occupation?..., ctx_len=11011
+2025-12-30 05:28:54.071 | INFO     | __main__:main:196 - Processing Q166: What is Neville Ashenheim's occupation?
+2025-12-30 05:28:54.071 | INFO     | baselines.simple_raptor.retriever:answer:195 - Retrieving nodes for: What is Neville Ashenheim's occupation?
+2025-12-30 05:28:54.071 | INFO     | rag_core.embedding_client:encode:58 - [EMB] encoding 1 texts, first=What is Neville Ashenheim's occupation?...
+2025-12-30 05:28:54.092 | INFO     | baselines.simple_raptor.retriever:answer:281 - [RAPTOR] answering qid=What is Neville Ashenheim's occupation?..., ctx_len=20509
+2025-12-30 05:28:56.621 | INFO     | __main__:main:196 - Processing Q167: What is Lorena Corona Valdés's occupation?
+2025-12-30 05:28:56.621 | INFO     | baselines.simple_raptor.retriever:answer:195 - Retrieving nodes for: What is Lorena Corona Valdés's occupation?
+2025-12-30 05:28:56.621 | INFO     | rag_core.embedding_client:encode:58 - [EMB] encoding 1 texts, first=What is Lorena Corona Valdés's occupation?...
+2025-12-30 05:28:56.633 | INFO     | baselines.simple_raptor.retriever:answer:281 - [RAPTOR] answering qid=What is Lorena Corona Valdés's occupation?..., ctx_len=16348
+2025-12-30 05:28:57.256 | INFO     | __main__:main:196 - Processing Q168: What is Honor Harger's occupation?
+2025-12-30 05:28:57.256 | INFO     | baselines.simple_raptor.retriever:answer:195 - Retrieving nodes for: What is Honor Harger's occupation?
+2025-12-30 05:28:57.256 | INFO     | rag_core.embedding_client:encode:58 - [EMB] encoding 1 texts, first=What is Honor Harger's occupation?...
+2025-12-30 05:28:57.270 | INFO     | baselines.simple_raptor.retriever:answer:281 - [RAPTOR] answering qid=What is Honor Harger's occupation?..., ctx_len=17134
+2025-12-30 05:28:59.222 | INFO     | __main__:main:196 - Processing Q169: What is Clement Baker's occupation?
+2025-12-30 05:28:59.222 | INFO     | baselines.simple_raptor.retriever:answer:195 - Retrieving nodes for: What is Clement Baker's occupation?
+2025-12-30 05:28:59.222 | INFO     | rag_core.embedding_client:encode:58 - [EMB] encoding 1 texts, first=What is Clement Baker's occupation?...
+2025-12-30 05:28:59.236 | INFO     | baselines.simple_raptor.retriever:answer:281 - [RAPTOR] answering qid=What is Clement Baker's occupation?..., ctx_len=21418
+2025-12-30 05:28:59.920 | INFO     | __main__:main:196 - Processing Q170: What is Alleppey Vincent's occupation?
+2025-12-30 05:28:59.920 | INFO     | baselines.simple_raptor.retriever:answer:195 - Retrieving nodes for: What is Alleppey Vincent's occupation?
+2025-12-30 05:28:59.920 | INFO     | rag_core.embedding_client:encode:58 - [EMB] encoding 1 texts, first=What is Alleppey Vincent's occupation?...
+2025-12-30 05:28:59.940 | INFO     | baselines.simple_raptor.retriever:answer:281 - [RAPTOR] answering qid=What is Alleppey Vincent's occupation?..., ctx_len=16147
+2025-12-30 05:29:00.617 | INFO     | __main__:main:196 - Processing Q171: In what city was Belarmino Mario Chipongue born?
+2025-12-30 05:29:00.617 | INFO     | baselines.simple_raptor.retriever:answer:195 - Retrieving nodes for: In what city was Belarmino Mario Chipongue born?
+2025-12-30 05:29:00.618 | INFO     | rag_core.embedding_client:encode:58 - [EMB] encoding 1 texts, first=In what city was Belarmino Mario Chipongue born?...
+2025-12-30 05:29:00.634 | INFO     | baselines.simple_raptor.retriever:answer:281 - [RAPTOR] answering qid=In what city was Belarmino Mario Chipongue born?..., ctx_len=13637
+2025-12-30 05:29:01.171 | INFO     | __main__:main:196 - Processing Q172: In what city was Raju Kaji Shakya born?
+2025-12-30 05:29:01.172 | INFO     | baselines.simple_raptor.retriever:answer:195 - Retrieving nodes for: In what city was Raju Kaji Shakya born?
+2025-12-30 05:29:01.172 | INFO     | rag_core.embedding_client:encode:58 - [EMB] encoding 1 texts, first=In what city was Raju Kaji Shakya born?...
+2025-12-30 05:29:01.188 | INFO     | baselines.simple_raptor.retriever:answer:281 - [RAPTOR] answering qid=In what city was Raju Kaji Shakya born?..., ctx_len=11772
+2025-12-30 05:29:01.742 | INFO     | __main__:main:196 - Processing Q173: In what city was Alastair Heathcote born?
+2025-12-30 05:29:01.743 | INFO     | baselines.simple_raptor.retriever:answer:195 - Retrieving nodes for: In what city was Alastair Heathcote born?
+2025-12-30 05:29:01.743 | INFO     | rag_core.embedding_client:encode:58 - [EMB] encoding 1 texts, first=In what city was Alastair Heathcote born?...
+2025-12-30 05:29:01.760 | INFO     | baselines.simple_raptor.retriever:answer:281 - [RAPTOR] answering qid=In what city was Alastair Heathcote born?..., ctx_len=11602
+2025-12-30 05:29:02.293 | INFO     | __main__:main:196 - Processing Q174: In what city was William Marshall Craig born?
+2025-12-30 05:29:02.293 | INFO     | baselines.simple_raptor.retriever:answer:195 - Retrieving nodes for: In what city was William Marshall Craig born?
+2025-12-30 05:29:02.293 | INFO     | rag_core.embedding_client:encode:58 - [EMB] encoding 1 texts, first=In what city was William Marshall Craig born?...
+2025-12-30 05:29:02.315 | INFO     | baselines.simple_raptor.retriever:answer:281 - [RAPTOR] answering qid=In what city was William Marshall Craig born?..., ctx_len=16498
+2025-12-30 05:29:03.672 | INFO     | __main__:main:196 - Processing Q175: In what city was Philipp Crone born?
+2025-12-30 05:29:03.672 | INFO     | baselines.simple_raptor.retriever:answer:195 - Retrieving nodes for: In what city was Philipp Crone born?
+2025-12-30 05:29:03.673 | INFO     | rag_core.embedding_client:encode:58 - [EMB] encoding 1 texts, first=In what city was Philipp Crone born?...
+2025-12-30 05:29:03.691 | INFO     | baselines.simple_raptor.retriever:answer:281 - [RAPTOR] answering qid=In what city was Philipp Crone born?..., ctx_len=16341
+2025-12-30 05:29:04.296 | INFO     | __main__:main:196 - Processing Q176: In what city was Danie Mellor born?
+2025-12-30 05:29:04.297 | INFO     | baselines.simple_raptor.retriever:answer:195 - Retrieving nodes for: In what city was Danie Mellor born?
+2025-12-30 05:29:04.297 | INFO     | rag_core.embedding_client:encode:58 - [EMB] encoding 1 texts, first=In what city was Danie Mellor born?...
+2025-12-30 05:29:04.317 | INFO     | baselines.simple_raptor.retriever:answer:281 - [RAPTOR] answering qid=In what city was Danie Mellor born?..., ctx_len=18865
+2025-12-30 05:29:05.733 | INFO     | __main__:main:196 - Processing Q177: In what city was Endre Bálint born?
+2025-12-30 05:29:05.733 | INFO     | baselines.simple_raptor.retriever:answer:195 - Retrieving nodes for: In what city was Endre Bálint born?
+2025-12-30 05:29:05.733 | INFO     | rag_core.embedding_client:encode:58 - [EMB] encoding 1 texts, first=In what city was Endre Bálint born?...
+2025-12-30 05:29:05.751 | INFO     | baselines.simple_raptor.retriever:answer:281 - [RAPTOR] answering qid=In what city was Endre Bálint born?..., ctx_len=15693
+2025-12-30 05:29:07.305 | INFO     | __main__:main:196 - Processing Q178: In what city was Aleksandr Nekrasov born?
+2025-12-30 05:29:07.306 | INFO     | baselines.simple_raptor.retriever:answer:195 - Retrieving nodes for: In what city was Aleksandr Nekrasov born?
+2025-12-30 05:29:07.306 | INFO     | rag_core.embedding_client:encode:58 - [EMB] encoding 1 texts, first=In what city was Aleksandr Nekrasov born?...
+2025-12-30 05:29:07.325 | INFO     | baselines.simple_raptor.retriever:answer:281 - [RAPTOR] answering qid=In what city was Aleksandr Nekrasov born?..., ctx_len=17307
+2025-12-30 05:29:09.264 | INFO     | __main__:main:196 - Processing Q179: In what city was Charles Joseph Bonaparte born?
+2025-12-30 05:29:09.264 | INFO     | baselines.simple_raptor.retriever:answer:195 - Retrieving nodes for: In what city was Charles Joseph Bonaparte born?
+2025-12-30 05:29:09.264 | INFO     | rag_core.embedding_client:encode:58 - [EMB] encoding 1 texts, first=In what city was Charles Joseph Bonaparte born?...
+2025-12-30 05:29:09.285 | INFO     | baselines.simple_raptor.retriever:answer:281 - [RAPTOR] answering qid=In what city was Charles Joseph Bonaparte born?..., ctx_len=23143
+2025-12-30 05:29:10.045 | INFO     | __main__:main:196 - Processing Q180: In what city was Louis François Antoine Arbogast born?
+2025-12-30 05:29:10.045 | INFO     | baselines.simple_raptor.retriever:answer:195 - Retrieving nodes for: In what city was Louis François Antoine Arbogast born?
+2025-12-30 05:29:10.045 | INFO     | rag_core.embedding_client:encode:58 - [EMB] encoding 1 texts, first=In what city was Louis François Antoine Arbogast b...
+2025-12-30 05:29:10.065 | INFO     | baselines.simple_raptor.retriever:answer:281 - [RAPTOR] answering qid=In what city was Louis François Antoine Arbogast b..., ctx_len=21771
+2025-12-30 05:29:11.713 | INFO     | __main__:main:196 - Processing Q181: In what city was Austin Cuvillier born?
+2025-12-30 05:29:11.713 | INFO     | baselines.simple_raptor.retriever:answer:195 - Retrieving nodes for: In what city was Austin Cuvillier born?
+2025-12-30 05:29:11.713 | INFO     | rag_core.embedding_client:encode:58 - [EMB] encoding 1 texts, first=In what city was Austin Cuvillier born?...
+2025-12-30 05:29:11.732 | INFO     | baselines.simple_raptor.retriever:answer:281 - [RAPTOR] answering qid=In what city was Austin Cuvillier born?..., ctx_len=13397
+2025-12-30 05:29:12.277 | INFO     | __main__:main:196 - Processing Q182: In what city was Bert Myers born?
+2025-12-30 05:29:12.277 | INFO     | baselines.simple_raptor.retriever:answer:195 - Retrieving nodes for: In what city was Bert Myers born?
+2025-12-30 05:29:12.278 | INFO     | rag_core.embedding_client:encode:58 - [EMB] encoding 1 texts, first=In what city was Bert Myers born?...
+2025-12-30 05:29:12.296 | INFO     | baselines.simple_raptor.retriever:answer:281 - [RAPTOR] answering qid=In what city was Bert Myers born?..., ctx_len=16439
+2025-12-30 05:29:13.019 | INFO     | __main__:main:196 - Processing Q183: In what city was Scott Fraser born?
+2025-12-30 05:29:13.020 | INFO     | baselines.simple_raptor.retriever:answer:195 - Retrieving nodes for: In what city was Scott Fraser born?
+2025-12-30 05:29:13.020 | INFO     | rag_core.embedding_client:encode:58 - [EMB] encoding 1 texts, first=In what city was Scott Fraser born?...
+2025-12-30 05:29:13.039 | INFO     | baselines.simple_raptor.retriever:answer:281 - [RAPTOR] answering qid=In what city was Scott Fraser born?..., ctx_len=19603
+2025-12-30 05:29:14.139 | INFO     | __main__:main:196 - Processing Q184: In what city was Giuseppe Castelli born?
+2025-12-30 05:29:14.140 | INFO     | baselines.simple_raptor.retriever:answer:195 - Retrieving nodes for: In what city was Giuseppe Castelli born?
+2025-12-30 05:29:14.140 | INFO     | rag_core.embedding_client:encode:58 - [EMB] encoding 1 texts, first=In what city was Giuseppe Castelli born?...
+2025-12-30 05:29:14.159 | INFO     | baselines.simple_raptor.retriever:answer:281 - [RAPTOR] answering qid=In what city was Giuseppe Castelli born?..., ctx_len=16513
+2025-12-30 05:29:15.192 | INFO     | __main__:main:196 - Processing Q185: In what city was Jacob Duck born?
+2025-12-30 05:29:15.193 | INFO     | baselines.simple_raptor.retriever:answer:195 - Retrieving nodes for: In what city was Jacob Duck born?
+2025-12-30 05:29:15.193 | INFO     | rag_core.embedding_client:encode:58 - [EMB] encoding 1 texts, first=In what city was Jacob Duck born?...
+2025-12-30 05:29:15.201 | INFO     | baselines.simple_raptor.retriever:answer:281 - [RAPTOR] answering qid=In what city was Jacob Duck born?..., ctx_len=9526
+2025-12-30 05:29:15.677 | INFO     | __main__:main:196 - Processing Q186: In what city was Parnelli Jones born?
+2025-12-30 05:29:15.677 | INFO     | baselines.simple_raptor.retriever:answer:195 - Retrieving nodes for: In what city was Parnelli Jones born?
+2025-12-30 05:29:15.677 | INFO     | rag_core.embedding_client:encode:58 - [EMB] encoding 1 texts, first=In what city was Parnelli Jones born?...
+2025-12-30 05:29:15.688 | INFO     | baselines.simple_raptor.retriever:answer:281 - [RAPTOR] answering qid=In what city was Parnelli Jones born?..., ctx_len=17018
+2025-12-30 05:29:17.234 | INFO     | __main__:main:196 - Processing Q187: In what city was Fernand Cornez born?
+2025-12-30 05:29:17.234 | INFO     | baselines.simple_raptor.retriever:answer:195 - Retrieving nodes for: In what city was Fernand Cornez born?
+2025-12-30 05:29:17.234 | INFO     | rag_core.embedding_client:encode:58 - [EMB] encoding 1 texts, first=In what city was Fernand Cornez born?...
+2025-12-30 05:29:17.251 | INFO     | baselines.simple_raptor.retriever:answer:281 - [RAPTOR] answering qid=In what city was Fernand Cornez born?..., ctx_len=10931
+2025-12-30 05:29:17.703 | INFO     | __main__:main:196 - Processing Q188: In what city was Yinka Ayenuwa born?
+2025-12-30 05:29:17.703 | INFO     | baselines.simple_raptor.retriever:answer:195 - Retrieving nodes for: In what city was Yinka Ayenuwa born?
+2025-12-30 05:29:17.703 | INFO     | rag_core.embedding_client:encode:58 - [EMB] encoding 1 texts, first=In what city was Yinka Ayenuwa born?...
+2025-12-30 05:29:17.715 | INFO     | baselines.simple_raptor.retriever:answer:281 - [RAPTOR] answering qid=In what city was Yinka Ayenuwa born?..., ctx_len=9790
+2025-12-30 05:29:18.214 | INFO     | __main__:main:196 - Processing Q189: In what city was Phil Williams born?
+2025-12-30 05:29:18.214 | INFO     | baselines.simple_raptor.retriever:answer:195 - Retrieving nodes for: In what city was Phil Williams born?
+2025-12-30 05:29:18.214 | INFO     | rag_core.embedding_client:encode:58 - [EMB] encoding 1 texts, first=In what city was Phil Williams born?...
+2025-12-30 05:29:18.232 | INFO     | baselines.simple_raptor.retriever:answer:281 - [RAPTOR] answering qid=In what city was Phil Williams born?..., ctx_len=14325
+2025-12-30 05:29:18.855 | INFO     | __main__:main:196 - Processing Q190: In what city was James M. Bingham born?
+2025-12-30 05:29:18.856 | INFO     | baselines.simple_raptor.retriever:answer:195 - Retrieving nodes for: In what city was James M. Bingham born?
+2025-12-30 05:29:18.856 | INFO     | rag_core.embedding_client:encode:58 - [EMB] encoding 1 texts, first=In what city was James M. Bingham born?...
+2025-12-30 05:29:18.868 | INFO     | baselines.simple_raptor.retriever:answer:281 - [RAPTOR] answering qid=In what city was James M. Bingham born?..., ctx_len=17248
+2025-12-30 05:29:20.251 | INFO     | __main__:main:196 - Processing Q191: In what city was Jack Kachkar born?
+2025-12-30 05:29:20.251 | INFO     | baselines.simple_raptor.retriever:answer:195 - Retrieving nodes for: In what city was Jack Kachkar born?
+2025-12-30 05:29:20.251 | INFO     | rag_core.embedding_client:encode:58 - [EMB] encoding 1 texts, first=In what city was Jack Kachkar born?...
+2025-12-30 05:29:20.265 | INFO     | baselines.simple_raptor.retriever:answer:281 - [RAPTOR] answering qid=In what city was Jack Kachkar born?..., ctx_len=18546
+2025-12-30 05:29:20.980 | INFO     | __main__:main:196 - Processing Q192: In what city was Gustavo Grondona born?
+2025-12-30 05:29:20.980 | INFO     | baselines.simple_raptor.retriever:answer:195 - Retrieving nodes for: In what city was Gustavo Grondona born?
+2025-12-30 05:29:20.980 | INFO     | rag_core.embedding_client:encode:58 - [EMB] encoding 1 texts, first=In what city was Gustavo Grondona born?...
+2025-12-30 05:29:20.995 | INFO     | baselines.simple_raptor.retriever:answer:281 - [RAPTOR] answering qid=In what city was Gustavo Grondona born?..., ctx_len=10036
+2025-12-30 05:29:22.041 | INFO     | __main__:main:196 - Processing Q193: In what city was Bastien Lecouffe-Deharme born?
+2025-12-30 05:29:22.041 | INFO     | baselines.simple_raptor.retriever:answer:195 - Retrieving nodes for: In what city was Bastien Lecouffe-Deharme born?
+2025-12-30 05:29:22.041 | INFO     | rag_core.embedding_client:encode:58 - [EMB] encoding 1 texts, first=In what city was Bastien Lecouffe-Deharme born?...
+2025-12-30 05:29:22.056 | INFO     | baselines.simple_raptor.retriever:answer:281 - [RAPTOR] answering qid=In what city was Bastien Lecouffe-Deharme born?..., ctx_len=21250
+2025-12-30 05:29:23.609 | INFO     | __main__:main:196 - Processing Q194: In what city was Betty Francisco born?
+2025-12-30 05:29:23.609 | INFO     | baselines.simple_raptor.retriever:answer:195 - Retrieving nodes for: In what city was Betty Francisco born?
+2025-12-30 05:29:23.610 | INFO     | rag_core.embedding_client:encode:58 - [EMB] encoding 1 texts, first=In what city was Betty Francisco born?...
+2025-12-30 05:29:23.628 | INFO     | baselines.simple_raptor.retriever:answer:281 - [RAPTOR] answering qid=In what city was Betty Francisco born?..., ctx_len=10450
+2025-12-30 05:29:24.201 | INFO     | __main__:main:196 - Processing Q195: In what city was Hans-Jörg Voigt born?
+2025-12-30 05:29:24.201 | INFO     | baselines.simple_raptor.retriever:answer:195 - Retrieving nodes for: In what city was Hans-Jörg Voigt born?
+2025-12-30 05:29:24.201 | INFO     | rag_core.embedding_client:encode:58 - [EMB] encoding 1 texts, first=In what city was Hans-Jörg Voigt born?...
+2025-12-30 05:29:24.219 | INFO     | baselines.simple_raptor.retriever:answer:281 - [RAPTOR] answering qid=In what city was Hans-Jörg Voigt born?..., ctx_len=16874
+2025-12-30 05:29:24.834 | INFO     | __main__:main:196 - Processing Q196: In what city was Charlie Davis born?
+2025-12-30 05:29:24.834 | INFO     | baselines.simple_raptor.retriever:answer:195 - Retrieving nodes for: In what city was Charlie Davis born?
+2025-12-30 05:29:24.835 | INFO     | rag_core.embedding_client:encode:58 - [EMB] encoding 1 texts, first=In what city was Charlie Davis born?...
+2025-12-30 05:29:24.853 | INFO     | baselines.simple_raptor.retriever:answer:281 - [RAPTOR] answering qid=In what city was Charlie Davis born?..., ctx_len=16695
+2025-12-30 05:29:27.048 | INFO     | __main__:main:196 - Processing Q197: In what city was Marnus Labuschagne born?
+2025-12-30 05:29:27.048 | INFO     | baselines.simple_raptor.retriever:answer:195 - Retrieving nodes for: In what city was Marnus Labuschagne born?
+2025-12-30 05:29:27.048 | INFO     | rag_core.embedding_client:encode:58 - [EMB] encoding 1 texts, first=In what city was Marnus Labuschagne born?...
+2025-12-30 05:29:27.068 | INFO     | baselines.simple_raptor.retriever:answer:281 - [RAPTOR] answering qid=In what city was Marnus Labuschagne born?..., ctx_len=16732
+2025-12-30 05:29:27.879 | INFO     | __main__:main:196 - Processing Q198: In what city was Leslie Douglas Jackson born?
+2025-12-30 05:29:27.880 | INFO     | baselines.simple_raptor.retriever:answer:195 - Retrieving nodes for: In what city was Leslie Douglas Jackson born?
+2025-12-30 05:29:27.880 | INFO     | rag_core.embedding_client:encode:58 - [EMB] encoding 1 texts, first=In what city was Leslie Douglas Jackson born?...
+2025-12-30 05:29:27.902 | INFO     | baselines.simple_raptor.retriever:answer:281 - [RAPTOR] answering qid=In what city was Leslie Douglas Jackson born?..., ctx_len=16610
+2025-12-30 05:29:28.434 | INFO     | __main__:main:196 - Processing Q199: In what city was Ricardo Maliandi born?
+2025-12-30 05:29:28.435 | INFO     | baselines.simple_raptor.retriever:answer:195 - Retrieving nodes for: In what city was Ricardo Maliandi born?
+2025-12-30 05:29:28.435 | INFO     | rag_core.embedding_client:encode:58 - [EMB] encoding 1 texts, first=In what city was Ricardo Maliandi born?...
+2025-12-30 05:29:28.456 | INFO     | baselines.simple_raptor.retriever:answer:281 - [RAPTOR] answering qid=In what city was Ricardo Maliandi born?..., ctx_len=11688
+2025-12-30 05:29:29.092 | INFO     | __main__:main:278 - Raptor baseline complete. qa.tsv: result_relrag/e1_main_qwen/run_20251225_063718/mirage_sample_200/raptor/llm_default/budget_16384/full/preds/qa.tsv
+2025-12-30 05:29:29.092 | INFO     | __main__:main:278 - Raptor baseline complete. qa.tsv: result_relrag/e1_main_qwen/run_20251225_063718/mirage_sample_200/raptor/llm_default/budget_16384/full/preds/qa.tsv

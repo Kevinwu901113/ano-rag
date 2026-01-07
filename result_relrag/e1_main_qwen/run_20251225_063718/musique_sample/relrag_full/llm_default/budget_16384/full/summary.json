@@ -1,0 +1,39 @@
+{
+  "run_dir": "result_relrag/e1_main_qwen/run_20251225_063718/musique_sample/relrag_full/llm_default/budget_16384/full",
+  "qa_norm": {
+    "EM": 0.0,
+    "F1": 0.06248657894672673,
+    "count": 199
+  },
+  "qa_final": {
+    "EM": 0.16080402010050251,
+    "F1": 0.2421587833046796,
+    "count": 199
+  },
+  "format_metrics": {
+    "invalid_rate": 0.0,
+    "no_final_tag_rate": 0.010050251256281407,
+    "count": 199,
+    "budget_violation_rate": 0.0
+  },
+  "retrieval_metrics": {
+    "Recall@1": 0.12571428571428572,
+    "Hit@1": 0.26857142857142857,
+    "MultiHop@1": 0.022857142857142857,
+    "Recall@3": 0.2847619047619046,
+    "Hit@3": 0.49714285714285716,
+    "MultiHop@3": 0.09142857142857143,
+    "Recall@5": 0.4347619047619046,
+    "Hit@5": 0.6628571428571428,
+    "MultiHop@5": 0.2057142857142857,
+    "Recall@10": 0.6966666666666665,
+    "Hit@10": 0.8742857142857143,
+    "MultiHop@10": 0.5085714285714286
+  },
+  "eval_entry": "scripts/evaluate_relrag.py",
+  "pred_source": "result_relrag/e1_main_qwen/run_20251225_063718/musique_sample/relrag_full/llm_default/budget_16384/full/preds/pred_raw.jsonl",
+  "git_commit": "53e3cadc0221797cee1a85cb305338a0dae39219",
+  "pred_raw": "result_relrag/e1_main_qwen/run_20251225_063718/musique_sample/relrag_full/llm_default/budget_16384/full/preds/pred_raw.jsonl",
+  "pred_norm": "result_relrag/e1_main_qwen/run_20251225_063718/musique_sample/relrag_full/llm_default/budget_16384/full/preds/pred_norm.jsonl",
+  "pred_final": "result_relrag/e1_main_qwen/run_20251225_063718/musique_sample/relrag_full/llm_default/budget_16384/full/preds/pred_final.jsonl"
+}

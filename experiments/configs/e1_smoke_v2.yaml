@@ -1,8 +1,0 @@
-include:
-  - e1_main_qwen.yaml
-
-meta:
-  result_root: result_relrag/e1_smoke_v2
-
-runtime:
-  limit: 20

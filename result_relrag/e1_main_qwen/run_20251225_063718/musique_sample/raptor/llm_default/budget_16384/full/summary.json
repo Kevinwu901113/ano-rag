@@ -1,0 +1,39 @@
+{
+  "run_dir": "result_relrag/e1_main_qwen/run_20251225_063718/musique_sample/raptor/llm_default/budget_16384/full",
+  "qa_norm": {
+    "EM": 0.0,
+    "F1": 0.05674186473895082,
+    "count": 199
+  },
+  "qa_final": {
+    "EM": 0.1658291457286432,
+    "F1": 0.2520619431992366,
+    "count": 199
+  },
+  "format_metrics": {
+    "invalid_rate": 0.0,
+    "no_final_tag_rate": 0.01507537688442211,
+    "count": 199,
+    "budget_violation_rate": 0.0
+  },
+  "retrieval_metrics": {
+    "Recall@1": 0.11333333333333334,
+    "Hit@1": 0.25142857142857145,
+    "MultiHop@1": 0.017142857142857144,
+    "Recall@3": 0.2914285714285714,
+    "Hit@3": 0.5085714285714286,
+    "MultiHop@3": 0.08571428571428572,
+    "Recall@5": 0.43428571428571444,
+    "Hit@5": 0.6514285714285715,
+    "MultiHop@5": 0.21142857142857144,
+    "Recall@10": 0.6595238095238096,
+    "Hit@10": 0.8571428571428571,
+    "MultiHop@10": 0.46285714285714286
+  },
+  "eval_entry": "scripts/evaluate_relrag.py",
+  "pred_source": "result_relrag/e1_main_qwen/run_20251225_063718/musique_sample/raptor/llm_default/budget_16384/full/preds/pred_raw.jsonl",
+  "git_commit": "53e3cadc0221797cee1a85cb305338a0dae39219",
+  "pred_raw": "result_relrag/e1_main_qwen/run_20251225_063718/musique_sample/raptor/llm_default/budget_16384/full/preds/pred_raw.jsonl",
+  "pred_norm": "result_relrag/e1_main_qwen/run_20251225_063718/musique_sample/raptor/llm_default/budget_16384/full/preds/pred_norm.jsonl",
+  "pred_final": "result_relrag/e1_main_qwen/run_20251225_063718/musique_sample/raptor/llm_default/budget_16384/full/preds/pred_final.jsonl"
+}

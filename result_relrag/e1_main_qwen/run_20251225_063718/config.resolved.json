@@ -1,0 +1,202 @@
+{
+  "config": {
+    "meta": {
+      "project": "relrag",
+      "result_root": "result_relrag",
+      "timezone": "Asia/Singapore"
+    },
+    "runtime": {
+      "workers": 1,
+      "resume": false,
+      "save_every": 20,
+      "run_eval": true,
+      "seed": 42
+    },
+    "llm": {
+      "endpoint": "http://127.0.0.1:8000/v1",
+      "model": "qwen3-30b-a3b",
+      "no_proxy": true
+    },
+    "embedding": {
+      "model": "/home/wjk/models/qwen3-emb",
+      "device": "cpu",
+      "batch_size": 16,
+      "max_length": 512,
+      "normalize": true,
+      "dtype": null
+    },
+    "budgets": {
+      "token_budgets": [
+        4096,
+        8192,
+        16384
+      ]
+    },
+    "fairness": {
+      "enforce_budget": true,
+      "enforce_topk": true,
+      "require_prompt_hash": false
+    },
+    "decode": {
+      "temperature": 0.0,
+      "top_p": null,
+      "repetition_penalty": null,
+      "max_tokens": 128
+    },
+    "topk": {
+      "retrieve_k": [
+        1,
+        3,
+        5,
+        10
+      ],
+      "gen_k": 10
+    },
+    "answer_format": {
+      "mode": "short_answer",
+      "forbid_think_tags": true,
+      "min_answer_chars": 1
+    },
+    "hotpotqa_distractor_200": {
+      "type": "hotpotqa",
+      "path": "data/hotpotqa/dataset_distractor_200.json"
+    },
+    "mirage_sample_200": {
+      "type": "mirage",
+      "dataset": "data/mirage_sample_200/dataset.json",
+      "doc_pool": "data/mirage_sample_200/doc_pool.json"
+    },
+    "musique_sample": {
+      "type": "musique",
+      "path": "data/musique_sample/musique.jsonl"
+    },
+    "direct_llm": {
+      "kind": "qa",
+      "desc": "No retrieval",
+      "requires_topk": false,
+      "entry_hotpotqa": "scripts/hotpotqa/baselines/run_direct.py",
+      "entry_musique": "scripts/musique/baselines/run_direct.py",
+      "entry_mirage": "scripts/mirage/run_direct_llm.py"
+    },
+    "bm25_rag": {
+      "kind": "qa",
+      "desc": "Sparse BM25 RAG",
+      "requires_topk": true,
+      "entry_hotpotqa": "scripts/hotpotqa/baselines/run_vanilla_rag.py",
+      "entry_musique": "scripts/musique/baselines/run_vanilla_rag.py",
+      "entry_mirage": "scripts/mirage/run_vanilla_rag.py",
+      "cli_args": [
+        "--retriever",
+        "bm25"
+      ]
+    },
+    "dense_rag": {
+      "kind": "qa",
+      "desc": "Dense embedding RAG",
+      "requires_topk": true,
+      "entry_hotpotqa": "scripts/hotpotqa/baselines/run_vanilla_rag.py",
+      "entry_musique": "scripts/musique/baselines/run_vanilla_rag.py",
+      "entry_mirage": "scripts/mirage/run_vanilla_rag.py"
+    },
+    "hybrid_rag": {
+      "kind": "qa",
+      "desc": "BM25 + dense hybrid",
+      "requires_topk": true,
+      "entry_hotpotqa": "scripts/hotpotqa/baselines/run_vanilla_rag.py",
+      "entry_musique": "scripts/musique/baselines/run_vanilla_rag.py",
+      "entry_mirage": "scripts/mirage/run_vanilla_rag.py",
+      "cli_args": [
+        "--retriever",
+        "hybrid"
+      ]
+    },
+    "raptor": {
+      "kind": "qa",
+      "desc": "RAPTOR-style hierarchical retrieval",
+      "requires_topk": true,
+      "entry_hotpotqa": "scripts/hotpotqa/baselines/run_raptor.py",
+      "entry_musique": "scripts/musique/baselines/run_raptor.py",
+      "entry_mirage": "scripts/mirage/run_simple_raptor.py",
+      "build_index_mirage": "scripts/mirage/build_simple_raptor_index.py"
+    },
+    "relrag_full": {
+      "kind": "qa",
+      "desc": "RelRAG full pipeline",
+      "requires_topk": true,
+      "entry_hotpotqa": "scripts/hotpotqa/baselines/run_relrag.py",
+      "entry_musique": "scripts/musique/baselines/run_relrag.py",
+      "entry_mirage": "scripts/mirage/run_relrag.py"
+    },
+    "exp": {
+      "name": "e1_main_qwen",
+      "goal": "Main QA results under matched token budgets (Qwen3-30B-A3B)",
+      "llm_profile": "default"
+    },
+    "datasets": [
+      "hotpotqa_distractor_200",
+      "mirage_sample_200",
+      "musique_sample"
+    ],
+    "methods": [
+      "bm25_rag",
+      "dense_rag",
+      "hybrid_rag",
+      "raptor",
+      "relrag_full"
+    ],
+    "report": {
+      "metrics": {
+        "qa": [
+          "EM",
+          "AnswerF1"
+        ],
+        "retrieval": [
+          "Recall@1",
+          "Recall@3",
+          "Recall@5",
+          "Recall@10",
+          "Hit@1",
+          "Hit@3",
+          "Hit@5",
+          "Hit@10"
+        ]
+      },
+      "budgets": {
+        "token_budgets": [
+          4096,
+          8192,
+          16384
+        ]
+      }
+    }
+  },
+  "exp_name": "e1_main_qwen",
+  "run_root": "/home/wjk/workplace/nq/ano-rag/result_relrag/e1_main_qwen/run_20251225_063718",
+  "git_commit": "ee7a998f99cd59080aa3703ed90c8f234f203a69",
+  "generated_at": "2026-01-03T16:41:13",
+  "argv": [
+    "experiments/run.py",
+    "--config",
+    "/home/wjk/workplace/nq/ano-rag/experiments/configs/e1_main_qwen.yaml",
+    "--run-dir",
+    "/home/wjk/workplace/nq/ano-rag/result_relrag/e1_main_qwen/run_20251225_063718",
+    "--only",
+    "hotpotqa_distractor_200:dense_rag:default:4096:full"
+  ],
+  "llm_profiles_resolved": {
+    "extract": {
+      "endpoint": "http://127.0.0.1:8000/v1",
+      "model": "qwen3-30b-a3b",
+      "temperature": 0.0,
+      "max_tokens": 256,
+      "thinking": false
+    },
+    "generate": {
+      "endpoint": "http://127.0.0.1:8000/v1",
+      "model": "qwen3-30b-a3b",
+      "temperature": 0.0,
+      "max_tokens": 128,
+      "thinking": false
+    }
+  }
+}
