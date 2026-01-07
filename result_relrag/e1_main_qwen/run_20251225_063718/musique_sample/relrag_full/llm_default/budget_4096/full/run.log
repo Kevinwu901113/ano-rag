@@ -1,8 +1,0 @@
-2025-12-30 07:43:49.715 | INFO     | __main__:main:211 - Loaded 200 examples from /home/wjk/workplace/nq/ano-rag/data/musique_sample/musique.jsonl
-2025-12-30 07:43:49.715 | INFO     | __main__:main:222 - Writing outputs to workspace result_relrag/e1_main_qwen/run_20251225_063718/musique_sample/relrag_full/llm_default/budget_4096/full
-2025-12-30 07:43:49.738 | INFO     | __main__:main:264 - Embedding model /home/wjk/models/qwen3-emb on cpu (dtype=auto)
-2025-12-30 07:43:49.761 | INFO     | __main__:main:276 - Resuming with 199 existing predictions
-2025-12-30 07:43:49.761 | INFO     | __main__:main:290 - Skipping 200 already completed examples
-2025-12-30 07:43:49.762 | INFO     | __main__:main:292 - No new items to process; keeping existing outputs.
-ed examples
-2025-12-30 07:43:49.762 | INFO     | __main__:main:292 - No new items to process; keeping existing outputs.

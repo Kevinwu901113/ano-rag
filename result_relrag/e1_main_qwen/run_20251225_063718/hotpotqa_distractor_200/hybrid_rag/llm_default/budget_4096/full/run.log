@@ -1,6 +1,0 @@
-2026-01-06 07:31:19.115 | INFO     | __main__:main:504 - Embedding model /home/wjk/models/qwen3-emb (prefer=cpu, batch_size=16, max_length=512, normalize=True, dtype=auto)
-2026-01-06 07:31:19.116 | INFO     | __main__:main:520 - Embedding cache hit: hotpotqa_distractor_200__home_wjk_models_qwen3-emb__cpu__len512__norm1__dtypeauto__batch16__maxctx10__indexin_memory_cosine__data8b74681d6856 -> result_relrag/cache/hotpotqa_distractor_200__home_wjk_models_qwen3-emb__cpu__len512__norm1__dtypeauto__batch16__maxctx10__indexin_memory_cosine__data8b74681d6856
-2026-01-06 07:31:19.148 | INFO     | __main__:main:614 - Running Vanilla RAG on 200 examples with 1 workers...
-2026-01-06 07:40:36.009 | INFO     | __main__:main:658 - Predictions generated for 200 examples
-2026-01-06 07:40:36.054 | INFO     | __main__:main:668 - Saved predictions to /home/wjk/workplace/nq/ano-rag/result_relrag/e1_main_qwen/run_20251225_063718/hotpotqa_distractor_200/hybrid_rag/llm_default/budget_4096/full/preds/pred.json
-2026-01-06 07:40:36.054 | INFO     | __main__:main:669 - Saved QA log to /home/wjk/workplace/nq/ano-rag/result_relrag/e1_main_qwen/run_20251225_063718/hotpotqa_distractor_200/hybrid_rag/llm_default/budget_4096/full/preds/qa.tsv

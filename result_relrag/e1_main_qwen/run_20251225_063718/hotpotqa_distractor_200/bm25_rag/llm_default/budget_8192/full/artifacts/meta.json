@@ -1,7 +1,0 @@
-{
-  "embed_model": "/home/wjk/models/qwen3-emb",
-  "embed_device_used": "cpu",
-  "fallback_reason": null,
-  "normalize": true,
-  "dim": 0
-}
