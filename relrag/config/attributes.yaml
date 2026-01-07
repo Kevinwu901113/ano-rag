@@ -1,0 +1,109 @@
+attributes:
+  occupation:
+    description: >
+      Occupation/职业类问题，仅接受定义型（is/was）或同位语型证据。值必须是职业名词，且来源可追溯到
+      定义句（非叙事活动）。
+    definition_patterns:
+      - "\\b(?:is|was|has been|serves as|served as|worked as|is best known as)\\b\\s+(?:an?|the)?\\s*[A-Za-z][^.,;]+"
+    appositive_patterns:
+      - ",\\s*(?:an?|the)\\s+[A-Za-z][^,]+,"
+    negative_verbs:
+      - wrote
+      - performed
+      - toured
+      - joined
+      - won
+      - founded
+      - appeared
+      - was scouted
+      - signed with
+      - played
+      - recorded
+      - published
+    value_lexicon:
+      - actor
+      - actress
+      - actors
+      - actresses
+      - astronomer
+      - businessperson
+      - business man
+      - business woman
+      - businesswoman
+      - business man
+      - businesswoman
+      - cartoonist
+      - graphic artist
+      - illustrator
+      - lawyer
+      - attorney
+      - barrister
+      - journalist
+      - journo
+      - journalists
+      - mangaka
+      - manga artist
+      - model
+      - fashion model
+      - politician
+      - political leader
+      - political figure
+      - pol
+      - polit.
+      - songwriter
+      - song writer
+      - dentist
+      - dental surgeon
+      - jockey
+    value_aliases:
+      actress: actor
+      actresses: actor
+      actors: actor
+      business man: businessperson
+      business woman: businessperson
+      businesswoman: businessperson
+      business man: businessperson
+      businesswoman: businessperson
+      businessperson: businessperson
+      attorney: lawyer
+      barrister: lawyer
+      solicitors: lawyer
+      journo: journalist
+      journalists: journalist
+      graphic artist: cartoonist
+      illustrator: cartoonist
+      manga artist: mangaka
+      song writer: songwriter
+      polit.: politician
+      pol: politician
+    value_blacklist:
+      - ministry of
+      - committee
+      - career
+      - expert
+      - prospector
+      - know nothing
+      - motion actor
+      - player
+      - tour performer
+      - communications director
+      - ministry
+    selection_priority:
+      - songwriter
+      - lawyer
+      - politician
+      - journalist
+      - actor
+      - cartoonist
+      - businessperson
+      - mangaka
+      - astronomer
+      - dentist
+      - jockey
+    examples:
+      good:
+        - "Kathy L. Saltzman is a Minnesota politician and former member of the Minnesota Senate."
+        - "Heath is best known as the songwriter and bassist of the band X Japan."
+      bad:
+        - "Akari Hayami was scouted near her graduation from elementary school."
+        - "Geu signed with Lusitânia EXPERT of the Liga Portuguesa de Basquetebol."
