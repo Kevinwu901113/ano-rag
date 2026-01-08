@@ -3,3 +3,7 @@ __pycache__/
 relrag_out/
 smoke_test_out/
 result_relrag/
+data/
+data_full/
+result/
+sample/

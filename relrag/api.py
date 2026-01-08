@@ -1,4 +1,5 @@
 from typing import List, Dict, Any, Optional
+from copy import deepcopy
 from pathlib import Path
 
 from relrag.pipeline.structured_builder import StructuredBuilder
@@ -14,7 +15,7 @@ def build_index(
     llm_endpoint: str,
     llm_model: str,
     temperature: float = 0.0,
-    max_tokens: int = 700,
+    max_tokens: Optional[int] = None,
 ) -> Dict[str, int]:
     """
     Build index from documents.
@@ -24,6 +25,7 @@ def build_index(
         output_dir: Output directory for indexes and notes.
         llm_endpoint: vLLM endpoint URL.
         llm_model: Model name.
+        max_tokens: Override note-generation max tokens (defaults to config if None).
     """
     builder = StructuredBuilder(
         endpoint=llm_endpoint,
@@ -47,6 +49,7 @@ def retrieve(
     index_dir: str,
     notes_path: str,
     top_k: int = 10,
+    cfg: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """
     Retrieve evidences for a question.
@@ -56,7 +59,7 @@ def retrieve(
     note_store = NoteStore(notes_path)
     
     # Pass top_k via config override
-    cfg_override = global_config.load_config()
+    cfg_override = deepcopy(cfg if cfg is not None else global_config.load_config())
     if "retriever" not in cfg_override:
         cfg_override["retriever"] = {}
     if "structured" not in cfg_override["retriever"]:

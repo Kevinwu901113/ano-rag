@@ -52,14 +52,14 @@ class EmbeddingIndexBuilder:
         device = self._resolve_device()
         dtype = self.embed_cfg.get("dtype")
         try:
-            from relrag.utils.embedding_utils import EmbeddingEncoder
+            from relrag.utils.embedding_utils import get_shared_encoder
         except Exception as exc:  # pragma: no cover - optional dependency
             logger.warning("Embedding encoder unavailable: {}. Skip FAISS build.", exc)
             return
-        encoder = EmbeddingEncoder(
+        encoder = get_shared_encoder(
             provider,
             model,
-            int(self.embed_cfg.get("max_len_note", 256)),
+            max_length=int(self.embed_cfg.get("max_len_note", 256)),
             cache_dir=cache_dir,
             device=device,
             dtype=dtype,

@@ -11,23 +11,25 @@ vllm:
   endpoint: "http://127.0.0.1:8000/v1"
   model: "qwen3-30b-a3b"
   temperature: 0.0
-  max_new_tokens: 256
+  max_new_tokens: 32768
+  max_context_tokens: 32768
+  context_safety_margin: 256
   concurrency:
-    max_workers: 16
-    connect_timeout_sec: 3.05
-    read_timeout_sec: 20.0
-    retry_max_attempts: 2
-    retry_total_cap_sec: 30.0
+    max_workers: 8
+    connect_timeout_sec: 10.0
+    read_timeout_sec: 300.0
+    retry_max_attempts: 4
+    retry_total_cap_sec: 300.0
     retry_backoff_base: 1.0
     retry_backoff_max_sec: 6.0
     retry_jitter_frac: 0.5
     pause_on_timeout_rate: 0.3
     pause_sec: 7.0
     buckets:
-      "0_256": { workers: 8 }
-      "256_512": { workers: 6 }
-      "512_1024": { workers: 4 }
-      "1024_plus": { workers: 2 }
+      "0_256": { workers: 4 }
+      "256_512": { workers: 2 }
+      "512_1024": { workers: 1 }
+      "1024_plus": { workers: 1 }
     refill_factor: 1.5
   adaptive:
     enabled: false
@@ -90,7 +92,7 @@ retriever:
     model_path_override: null
     cache_dir: "/home/wjk/models/hf-cache"
     download_dir: null
-    device: "cpu"
+    device: "cuda:1"
     dtype: "float32"
     auto_build: true
     offline_index_path: "indexes/faiss/notes.faiss"
@@ -146,7 +148,7 @@ parsing:
   enable_bare_key_fix: true
   enable_loose_extractor: true
   loose_split_key: "subj"
-  max_tokens: 768
+  max_tokens: 32768
   parse_retry: 1
   stop:
     - "]\n"

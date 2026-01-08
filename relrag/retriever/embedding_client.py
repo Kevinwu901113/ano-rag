@@ -56,7 +56,7 @@ class EmbeddingClient:
     def load_encoder(self) -> None:
         """Explicitly load the embedding encoder based on config."""
         try:
-            from relrag.utils.embedding_utils import EmbeddingEncoder
+            from relrag.utils.embedding_utils import get_shared_encoder
         except Exception as exc:  # pragma: no cover - optional dependency
             logger.warning("Embedding encoder unavailable: {}. Disabling embedding.", exc)
             self.enabled = False
@@ -67,7 +67,14 @@ class EmbeddingClient:
         cache_dir = self._clean_path(self.cfg.get("cache_dir"))
         device = self._resolve_device()
         dtype = self.cfg.get("dtype")
-        self._encoder = EmbeddingEncoder(provider, model, max_len, cache_dir=cache_dir, device=device, dtype=dtype)
+        self._encoder = get_shared_encoder(
+            provider,
+            model,
+            max_length=max_len,
+            cache_dir=cache_dir,
+            device=device,
+            dtype=dtype,
+        )
 
     def search(self, question: str, topn: int) -> List[Dict[str, Any]]:
         if not self.enabled or not question.strip():

@@ -2,10 +2,15 @@ from __future__ import annotations
 
 from pathlib import Path
 import hashlib
-from typing import Optional, Sequence
+import threading
+from typing import Dict, Optional, Sequence
 
 import numpy as np
 from loguru import logger
+
+
+_ENCODER_CACHE: Dict[tuple, "EmbeddingEncoder"] = {}
+_ENCODER_LOCK = threading.Lock()
 
 
 class EmbeddingEncoder:
@@ -37,8 +42,27 @@ class EmbeddingEncoder:
         self._model_uses_device_map = False
         self._model = None
         self._tokenizer = None
+        self._encode_lock = threading.Lock()
 
     def encode(
+        self,
+        texts: Sequence[str],
+        *,
+        device: Optional[str] = None,
+        batch_size: Optional[int] = None,
+        max_length: Optional[int] = None,
+        normalize: Optional[bool] = None,
+    ) -> np.ndarray:
+        with self._encode_lock:
+            return self._encode_impl(
+                texts,
+                device=device,
+                batch_size=batch_size,
+                max_length=max_length,
+                normalize=normalize,
+            )
+
+    def _encode_impl(
         self,
         texts: Sequence[str],
         *,
@@ -414,3 +438,34 @@ class EmbeddingEncoder:
         if device.startswith("cuda"):
             return {"": device}
         return None
+
+
+def get_shared_encoder(
+    provider: str,
+    model_name: str,
+    max_length: int = 256,
+    cache_dir: Optional[str] = None,
+    device: Optional[str] = None,
+    dtype: Optional[str] = None,
+) -> EmbeddingEncoder:
+    key = (
+        str(provider or "").strip().lower(),
+        str(model_name or "").strip(),
+        int(max_length),
+        str(cache_dir or ""),
+        str(device or ""),
+        str(dtype or ""),
+    )
+    with _ENCODER_LOCK:
+        cached = _ENCODER_CACHE.get(key)
+        if cached is None:
+            cached = EmbeddingEncoder(
+                provider,
+                model_name,
+                max_length=max_length,
+                cache_dir=cache_dir,
+                device=device,
+                dtype=dtype,
+            )
+            _ENCODER_CACHE[key] = cached
+        return cached

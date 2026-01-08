@@ -404,9 +404,27 @@ class NoteGenerator:
         attempts = max(1, self._retry_max_attempts)
         last_exc: Exception | None = None
         total_wait: float = 0.0
-        call_max_tokens = int(max_tokens or min(self.max_tokens, 2000))
+        call_max_tokens = int(max_tokens or self.max_tokens)
         call_max_tokens = max(1, call_max_tokens)
-        req_tokens = max(1, TextUtils.rough_token_len(prompt) + call_max_tokens)
+        prompt_tokens = max(1, TextUtils.rough_token_len(prompt))
+        vllm_cfg = global_config.get("vllm", {}) or {}
+        max_context = (
+            vllm_cfg.get("max_context_tokens")
+            or vllm_cfg.get("max_model_len")
+            or vllm_cfg.get("max_seq_len")
+        )
+        try:
+            max_context_val = int(max_context) if max_context is not None else None
+        except (TypeError, ValueError):
+            max_context_val = None
+        safety_margin = int(vllm_cfg.get("context_safety_margin", 256) or 256)
+        if max_context_val:
+            available = max_context_val - prompt_tokens - safety_margin
+            if available < 1:
+                available = 1
+            if call_max_tokens > available:
+                call_max_tokens = available
+        req_tokens = max(1, prompt_tokens + call_max_tokens)
         for attempt in range(attempts):
             endpoint = self._choose_endpoint(req_tokens)
             self._inflight_tokens[endpoint] = self._inflight_tokens.get(endpoint, 0) + req_tokens

@@ -1,0 +1,17 @@
+label=llm
+model_id=Qwen/Qwen3-30B-A3B-Instruct-2507-FP8
+cached=True
+cmd=/home/wjk/miniconda3/envs/anorag/bin/python -m vllm.entrypoints.openai.api_server --host 127.0.0.1 --port 8000 --model Qwen/Qwen3-30B-A3B-Instruct-2507-FP8 --gpu-memory-utilization 0.65 --served-model-name qwen3-30b-a3b --trust-remote-code --max-model-len 8192 --max-num-seqs 1 --max-num-batched-tokens 2048 --swap-space 8 --kv-cache-dtype fp8
+env={}
+  CUDA_VISIBLE_DEVICES=0
+  HF_HOME=/home/wjk/.cache/hf
+  HF_HUB_CACHE=/home/wjk/.cache/hf
+  TRANSFORMERS_CACHE=/home/wjk/.cache/hf
+  HF_ENDPOINT=https://huggingface.co
+  HF_HUB_ENDPOINT=https://huggingface.co
+  HF_HUB_DISABLE_TELEMETRY=1
+  HF_HUB_OFFLINE=1
+  TRANSFORMERS_OFFLINE=1
+  http_proxy=None
+  https_proxy=None
+  PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
