@@ -92,6 +92,18 @@ class EmbeddingClient:
             request_timeout_s=timeout_s,
         )
 
+    def _uses_l2_distance(self, index: Any, faiss_cfg: Dict[str, Any]) -> bool:
+        kind = str(faiss_cfg.get("kind", "")).upper()
+        if kind.startswith("HNSW"):
+            return True
+        metric_type = getattr(index, "metric_type", None)
+        if metric_type is None or faiss is None:
+            return False
+        try:
+            return int(metric_type) == int(faiss.METRIC_L2)
+        except Exception:
+            return False
+
     def search(self, question: str, topn: int) -> List[Dict[str, Any]]:
         if not self.enabled or not question.strip():
             return []
@@ -115,6 +127,7 @@ class EmbeddingClient:
         if limit <= 0:
             return []
         distances, indices = index.search(query_vec.astype("float32"), limit)
+        use_l2 = self._uses_l2_distance(index, faiss_cfg)
         ranked: List[Dict[str, Any]] = []
         for rank, (score, vec_id) in enumerate(zip(distances[0], indices[0]), start=1):
             if vec_id < 0:
@@ -122,13 +135,18 @@ class EmbeddingClient:
             meta = self._meta_by_id.get(int(vec_id))
             if not meta:
                 continue
+            raw_score = float(score)
+            sim = 1.0 / (1.0 + max(raw_score, 0.0)) if use_l2 else raw_score
+            payload = {
+                "note_id": meta.get("note_id"),
+                "score": sim,
+                "rank": rank,
+                "source": "emb",
+            }
+            if use_l2:
+                payload["raw_distance"] = raw_score
             ranked.append(
-                {
-                    "note_id": meta.get("note_id"),
-                    "score": float(score),
-                    "rank": rank,
-                    "source": "emb",
-                }
+                payload
             )
         return ranked
 

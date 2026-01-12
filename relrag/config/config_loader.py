@@ -111,6 +111,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
             "normalize": True,
         },
         "hybrid": {
+            "enabled": True,
             "agreement_threshold": 2,
             "weights": {
                 "bm25": 1.0,

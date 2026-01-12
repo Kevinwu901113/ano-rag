@@ -55,6 +55,7 @@ class HybridRetriever:
         alias_lookup: Optional[Dict[str, str]] = None,
     ) -> Optional[Dict[str, Any]]:
         alias_lookup = alias_lookup or {}
+        structured_candidates = sorted(structured_candidates or [], key=lambda c: c.score, reverse=True)
         recall_channels = {}
         timings: Dict[str, float] = {}
         struct_score_map: Dict[str, float] = {}

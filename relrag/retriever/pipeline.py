@@ -92,6 +92,7 @@ def retrieve_answer(
 
     retr_cfg = cfg.get("retriever") or {}
     structured_cfg = retr_cfg.get("structured") or {}
+    structured_enabled = bool(structured_cfg.get("enabled", True))
     entity_match_threshold = float(structured_cfg.get("entity_match_threshold", 0.5))
     path_consistency_threshold = float(structured_cfg.get("path_consistency_threshold", 0.9))
     vector_fallback_enabled = bool(structured_cfg.get("vector_fallback_enabled", True))
@@ -126,7 +127,7 @@ def retrieve_answer(
         logger.info("seed_candidates={}", len(seed_entities))
     except Exception:
         pass
-    if not seed_entities:
+    if not seed_entities and structured_enabled:
         try:
             logger.info("no seed entities bound; trigger fallback (doc_hint={})", normalized_doc_hint)
         except Exception:
@@ -143,33 +144,9 @@ def retrieve_answer(
     normalized_doc_hint = _normalize_doc_hint(doc_hint)
     seed_texts = [seed.text for seed in ir.seeds if seed.text]
     alias_lookup = _build_seed_alias_lookup(indexes, seed_entities, seed_texts, doc_name)
-    candidates = _walk_chain(
-        seed_entities,
-        ir,
-        indexes,
-        note_store,
-        doc_name,
-        attribute=intent.attribute,
-        seed_texts=seed_texts,
-        alias_lookup=alias_lookup,
-        entity_match_threshold=entity_match_threshold,
-        path_match_threshold=path_consistency_threshold if ir.pred_chain else -1.0,
-    )
-    pre_doc_candidates = len(candidates or [])
-    candidates = _filter_candidates_by_doc(candidates, normalized_doc_hint)
-    try:
-        if pre_doc_candidates and not candidates:
-            logger.info("all {} structured candidates dropped by doc_hint filter", pre_doc_candidates)
-        elif pre_doc_candidates != len(candidates or []):
-            logger.info("structured candidates filtered by doc_hint: {} -> {}", pre_doc_candidates, len(candidates or []))
-    except Exception:
-        pass
-    if not candidates and ir.pred_chain:
-        try:
-            logger.info("no structured path; retrying with relaxed thresholds")
-        except Exception:
-            pass
-        relaxed_candidates = _walk_chain(
+    candidates: List[Candidate] = []
+    if structured_enabled:
+        candidates = _walk_chain(
             seed_entities,
             ir,
             indexes,
@@ -178,25 +155,51 @@ def retrieve_answer(
             attribute=intent.attribute,
             seed_texts=seed_texts,
             alias_lookup=alias_lookup,
-            entity_match_threshold=max(0.25, entity_match_threshold * 0.6),
-            path_match_threshold=0.25,
+            entity_match_threshold=entity_match_threshold,
+            path_match_threshold=path_consistency_threshold if ir.pred_chain else -1.0,
         )
-        relaxed_candidates = _filter_candidates_by_doc(relaxed_candidates, normalized_doc_hint)
-        if relaxed_candidates:
-            candidates = relaxed_candidates
-            relaxed_path_used = True
+        pre_doc_candidates = len(candidates or [])
+        candidates = _filter_candidates_by_doc(candidates, normalized_doc_hint)
+        try:
+            if pre_doc_candidates and not candidates:
+                logger.info("all {} structured candidates dropped by doc_hint filter", pre_doc_candidates)
+            elif pre_doc_candidates != len(candidates or []):
+                logger.info("structured candidates filtered by doc_hint: {} -> {}", pre_doc_candidates, len(candidates or []))
+        except Exception:
+            pass
+        if not candidates and ir.pred_chain:
             try:
-                logger.info("relaxed retry yielded {} candidates", len(relaxed_candidates))
+                logger.info("no structured path; retrying with relaxed thresholds")
             except Exception:
                 pass
-    try:
-        logger.info(
-            "paths_found={}  notes_collected={}",
-            len(candidates or []),
-            sum(len(c.note_ids or []) for c in (candidates or [])),
-        )
-    except Exception:
-        pass
+            relaxed_candidates = _walk_chain(
+                seed_entities,
+                ir,
+                indexes,
+                note_store,
+                doc_name,
+                attribute=intent.attribute,
+                seed_texts=seed_texts,
+                alias_lookup=alias_lookup,
+                entity_match_threshold=max(0.25, entity_match_threshold * 0.6),
+                path_match_threshold=0.25,
+            )
+            relaxed_candidates = _filter_candidates_by_doc(relaxed_candidates, normalized_doc_hint)
+            if relaxed_candidates:
+                candidates = relaxed_candidates
+                relaxed_path_used = True
+                try:
+                    logger.info("relaxed retry yielded {} candidates", len(relaxed_candidates))
+                except Exception:
+                    pass
+        try:
+            logger.info(
+                "paths_found={}  notes_collected={}",
+                len(candidates or []),
+                sum(len(c.note_ids or []) for c in (candidates or [])),
+            )
+        except Exception:
+            pass
     # Hybrid retrieval path (structured + embedding + BM25)
     hybrid_result = _maybe_run_hybrid(
         question,
@@ -217,7 +220,11 @@ def retrieve_answer(
 
     if not candidates:
         # 结构化兜底：在绑定实体范围内做向量-only检索补全
-        structured = _structured_fallback(seed_entities, intent, indexes, note_store, doc_hint=normalized_doc_hint) if vector_fallback_enabled else None
+        structured = (
+            _structured_fallback(seed_entities, intent, indexes, note_store, doc_hint=normalized_doc_hint)
+            if structured_enabled and vector_fallback_enabled
+            else None
+        )
         if structured:
             structured.setdefault("meta", {})["relaxed_path_retry"] = relaxed_path_used
             return structured
@@ -993,10 +1000,8 @@ def _maybe_run_hybrid(
 ):
     cfg_obj = cfg or getattr(hybrid, "cfg", None) or config_loader.load_config()
     retr_cfg = cfg_obj.get("retriever") or {}
-    embedding_on = bool((retr_cfg.get("embedding") or {}).get("enabled"))
-    bm25_on = bool((retr_cfg.get("bm25") or {}).get("enabled"))
-    rerank_on = bool((cfg_obj.get("reranker") or {}).get("enabled"))
-    if not (embedding_on or bm25_on or rerank_on):
+    hybrid_cfg = retr_cfg.get("hybrid") or {}
+    if not bool(hybrid_cfg.get("enabled", True)):
         return None
     hybrid_inst = hybrid
     if hybrid_inst is None:
@@ -1006,6 +1011,11 @@ def _maybe_run_hybrid(
             logger.error("Hybrid retriever unavailable: {}", exc)
             return None
         hybrid_inst = HybridRetriever(cfg_obj)
+    embedding_on = bool(getattr(hybrid_inst.embedding_client, "enabled", False))
+    bm25_on = bool(getattr(hybrid_inst.bm25_client, "enabled", False))
+    rerank_on = bool(getattr(hybrid_inst.reranker, "enabled", False))
+    if not (embedding_on or bm25_on or rerank_on):
+        return None
     return hybrid_inst.retrieve(question, ir, intent, candidates, note_store, alias_lookup=alias_lookup)
 
 
