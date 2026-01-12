@@ -1,17 +1,27 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Sequence, Tuple
 from loguru import logger
 
 from relrag.schema.note_schema_v1 import PRED_SYNONYM_SETS
 from relrag.schema.vocabulary import normalize_slot_value
 from relrag.config.attributes_loader import get_selection_priority, allowed_values
-from relrag.telemetry.metrics import record_binding_strength, record_anchor_usage, record_weak_ratio
+from relrag.telemetry.metrics import (
+    record_binding_strength,
+    record_anchor_usage,
+    record_weak_ratio,
+    record_retrieval_total,
+    record_retrieval_no_path,
+    record_retrieval_empty_context,
+    export_metrics,
+)
 
 from .ir import PredicateStep, QueryIR, Seed
 from .intent_detector import AnswerIntent, AnswerIntentDetector
 from .note_store import NoteStore
+from .chunk_store import ChunkStore
 from .operators import BIND, EXPAND_from, Indexes
 from relrag.utils.vector_search import VectorSearcher
 from .parser import parse_question
@@ -98,6 +108,28 @@ def retrieve_answer(
     vector_fallback_enabled = bool(structured_cfg.get("vector_fallback_enabled", True))
     normalized_doc_hint = _normalize_doc_hint(doc_hint)
     relaxed_path_used = False
+
+    def _finalize_result(
+        result: Dict[str, Any],
+        *,
+        ir_override: Optional[QueryIR] = None,
+        intent_override: Optional[AnswerIntent] = None,
+    ) -> Dict[str, Any]:
+        active_ir = ir_override if ir_override is not None else ir
+        active_intent = intent_override if intent_override is not None else intent
+        if normalized_doc_hint:
+            _apply_doc_filter_to_result(result, note_store, normalized_doc_hint)
+        result = _apply_chunk_fallback(
+            result,
+            question=question,
+            ir=active_ir,
+            intent=active_intent,
+            note_store=note_store,
+            doc_hint=normalized_doc_hint,
+            cfg=cfg,
+        )
+        _record_retrieval_metrics(result)
+        return result
     # 逐层诊断日志（定位常见失败点）
     try:
         logger.info("Q: {}", question)
@@ -111,7 +143,7 @@ def retrieve_answer(
     if ir is None or not ir.is_valid:
         result = _fallback_lookup(intent, indexes, note_store, None, "parse_failed", normalized_doc_hint)
         result.setdefault("meta", {})["relaxed_path_retry"] = False
-        return result
+        return _finalize_result(result, ir_override=ir, intent_override=intent)
 
     seed_entities = _bind_seeds(ir.seeds, indexes, ir.fanout)
     # 注入 doc_name 别名约束：若检测到实体名称，作为强别名参与绑定
@@ -135,7 +167,7 @@ def retrieve_answer(
         # 结构化优先兜底：尝试限制在别名索引范围内的弱信号补全（向量-only）
         result = _fallback_lookup(intent, indexes, note_store, ir, "no_seed_match", normalized_doc_hint)
         result.setdefault("meta", {})["relaxed_path_retry"] = False
-        return result
+        return _finalize_result(result, ir_override=ir, intent_override=intent)
 
     # 传递 doc_name 用于路径别名加权
     if attribute_hint:
@@ -214,9 +246,7 @@ def retrieve_answer(
     if hybrid_result is not None:
         hybrid_result.setdefault("meta", {"path_consistency": 0.0, "entity_consistency": 0.0})
         hybrid_result["meta"]["relaxed_path_retry"] = relaxed_path_used
-        if normalized_doc_hint:
-            _apply_doc_filter_to_result(hybrid_result, note_store, normalized_doc_hint)
-        return hybrid_result
+        return _finalize_result(hybrid_result, ir_override=ir, intent_override=intent)
 
     if not candidates:
         # 结构化兜底：在绑定实体范围内做向量-only检索补全
@@ -227,10 +257,10 @@ def retrieve_answer(
         )
         if structured:
             structured.setdefault("meta", {})["relaxed_path_retry"] = relaxed_path_used
-            return structured
+            return _finalize_result(structured, ir_override=ir, intent_override=intent)
         result = _fallback_lookup(intent, indexes, note_store, ir, "no_path", normalized_doc_hint)
         result.setdefault("meta", {})["relaxed_path_retry"] = relaxed_path_used
-        return result
+        return _finalize_result(result, ir_override=ir, intent_override=intent)
 
     candidates.sort(key=lambda c: c.score, reverse=True)
     top_candidates = candidates[: ir.fanout]
@@ -284,11 +314,9 @@ def retrieve_answer(
         },
         "intent": intent.to_dict(),
     }
-    if normalized_doc_hint:
-        _apply_doc_filter_to_result(result, note_store, normalized_doc_hint)
     _attach_meta(result, top_candidates[0].path_metrics if top_candidates else None)
     result.setdefault("meta", {})["relaxed_path_retry"] = relaxed_path_used
-    return result
+    return _finalize_result(result, ir_override=ir, intent_override=intent)
 
 
 def _bind_seeds(seeds: Sequence[Seed], indexes: Indexes, limit: int) -> List[str]:
@@ -906,6 +934,8 @@ def _score_note(note: Dict[str, Any], attribute: str) -> float:
     ev = (note.get("evidence") or "")
     if isinstance(anchor, str) and anchor and anchor in ev:
         score += 0.05
+    if meta.get("weak"):
+        score *= 0.6
     return round(score, 4)
 
 
@@ -1229,6 +1259,125 @@ def _apply_doc_filter_to_result(result: Dict[str, Any], note_store: NoteStore, d
             best_meta.pop("consensus_agreement", None)
         hybrid["best"] = best_meta
         result["hybrid"] = hybrid
+
+
+_CHUNK_STORE_CACHE: Dict[str, ChunkStore] = {}
+
+
+def _resolve_chunks_path(note_store: NoteStore) -> Optional[str]:
+    notes_path = getattr(note_store, "notes_path", None)
+    if not notes_path:
+        return None
+    base = Path(notes_path)
+    candidate = base.parent / "chunks.jsonl"
+    return str(candidate) if candidate.exists() else None
+
+
+def _get_chunk_store(path: str) -> ChunkStore:
+    store = _CHUNK_STORE_CACHE.get(path)
+    if store is None:
+        store = ChunkStore(path)
+        _CHUNK_STORE_CACHE[path] = store
+    return store
+
+
+def _should_chunk_fallback(result: Dict[str, Any], intent: AnswerIntent, ir: Optional[QueryIR]) -> bool:
+    evidence = result.get("evidence") or []
+    reason = result.get("reason")
+    fallback = result.get("fallback") or {}
+    status = fallback.get("status")
+    if not evidence:
+        return True
+    if reason in {"no_path", "attribute_not_detected", "parse_failed"}:
+        return True
+    if status in {"no_path", "attribute_not_detected", "no_attribute_match"}:
+        return True
+    if intent.attribute is None and ir and not ir.pred_chain:
+        return True
+    if all(ev.get("weak") or ev.get("discount") for ev in evidence):
+        return True
+    qualities = [
+        float(ev.get("quality"))
+        for ev in evidence
+        if isinstance(ev.get("quality"), (int, float))
+    ]
+    if qualities and max(qualities) < 0.2:
+        return True
+    return False
+
+
+def _apply_chunk_fallback(
+    result: Dict[str, Any],
+    *,
+    question: str,
+    ir: Optional[QueryIR],
+    intent: AnswerIntent,
+    note_store: NoteStore,
+    doc_hint: Optional[str],
+    cfg: Optional[Dict[str, Any]],
+) -> Dict[str, Any]:
+    if not _should_chunk_fallback(result, intent, ir):
+        return result
+    chunks_path = _resolve_chunks_path(note_store)
+    if not chunks_path:
+        return result
+    retr_cfg = (cfg or {}).get("retriever") or {}
+    chunk_cfg = retr_cfg.get("chunk_fallback") or {}
+    top_k = int(chunk_cfg.get("top_k", 6))
+    seeds: List[str] = []
+    if ir:
+        seeds.extend(seed.text for seed in ir.seeds if seed.text)
+    if intent.entity and intent.entity not in seeds:
+        seeds.append(intent.entity)
+    chunk_store = _get_chunk_store(chunks_path)
+    chunk_evs = chunk_store.search(question, seeds=seeds, top_k=top_k, doc_hint=doc_hint)
+    if not chunk_evs:
+        result.setdefault("chunk_fallback", {})["used"] = False
+        return result
+
+    existing = result.get("evidence") or []
+    merged: List[Dict[str, Any]] = []
+    seen = set()
+    for ev in existing:
+        key = (ev.get("note_id"), ev.get("evidence"))
+        seen.add(key)
+        merged.append(ev)
+    for ev in chunk_evs:
+        key = (ev.get("note_id"), ev.get("evidence"))
+        if key in seen:
+            continue
+        merged.append(ev)
+        seen.add(key)
+    if merged:
+        result["evidence"] = merged[: max(len(existing), top_k)]
+        result.setdefault("chunk_fallback", {})["used"] = True
+        result["chunk_fallback"]["hits"] = len(chunk_evs)
+        if not existing:
+            result["reason"] = None
+    return result
+
+
+def _record_retrieval_metrics(result: Dict[str, Any]) -> None:
+    record_retrieval_total()
+    reason = result.get("reason")
+    status = (result.get("fallback") or {}).get("status")
+    if reason == "no_path" or status == "no_path":
+        record_retrieval_no_path()
+    evidences = result.get("evidence") or []
+    if not evidences:
+        record_retrieval_empty_context()
+
+    metrics = export_metrics()
+    total = max(1, metrics.get("retrieval.total", 0))
+    no_path = metrics.get("retrieval.no_path", 0)
+    empty_ctx = metrics.get("retrieval.empty_context", 0)
+    if total == 1 or total % 20 == 0 or not evidences or reason == "no_path":
+        logger.info(
+            "retrieval_rates no_path={:.2%} empty_context={:.2%} total={}",
+            no_path / total,
+            empty_ctx / total,
+            total,
+        )
 
 
 def _candidate_label(candidate: Candidate, attribute: str) -> str:

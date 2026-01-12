@@ -1,4 +1,5 @@
 import json
+import re
 from pathlib import Path
 
 PROFILE_SCHEMA = {
@@ -234,6 +235,7 @@ ALLOWED_PREDICATES = [
     "located_in",
     "member_of",
     "works_for",
+    "affiliated_with",
     "acted_in",
     "produced_by",
     "released_in",
@@ -252,6 +254,8 @@ ALLOWED_PREDICATES = [
     "alias_of",
     "same_as",
     "type",
+    "has_member_count",
+    "has_species_count",
 ]
 
 # 尝试从配置文件加载替换
@@ -293,8 +297,26 @@ PRED2ATTR = {
     "employed by": "works_for",
     "employed_by": "works_for",
     "employer": "works_for",
-    "professor at": "works_for",
-    "teaches at": "works_for",
+    "affiliated_with": "affiliated_with",
+    "affiliated with": "affiliated_with",
+    "professor at": "affiliated_with",
+    "served as professor at": "affiliated_with",
+    "taught at": "affiliated_with",
+    "teaches at": "affiliated_with",
+    "faculty at": "affiliated_with",
+    "worked at": "affiliated_with",
+    "works at": "affiliated_with",
+    "member count": "has_member_count",
+    "number of members": "has_member_count",
+    "members": "has_member_count",
+    "has members": "has_member_count",
+    "contains members": "has_member_count",
+    "member total": "has_member_count",
+    "species": "has_species_count",
+    "species count": "has_species_count",
+    "number of species": "has_species_count",
+    "has species": "has_species_count",
+    "contains species": "has_species_count",
 }
 
 PRED_SYNONYM_SETS = {
@@ -310,12 +332,42 @@ PRED_SYNONYM_SETS = {
     "released_in": {"released_in"},
     "label": {"label"},
     "member_of": {"member_of"},
-    "works_for": {"works_for", "worked_for", "employed_by", "works at", "worked at", "professor at", "teaches at", "faculty at"},
+    "works_for": {"works_for", "worked_for", "employed_by", "works for", "worked for", "employed by", "employer"},
+    "affiliated_with": {
+        "affiliated_with",
+        "affiliated with",
+        "professor at",
+        "served as professor at",
+        "taught at",
+        "teaches at",
+        "faculty at",
+        "worked at",
+        "works at",
+    },
     "founded_by": {"founded_by"},
     "founded_on": {"founded_on", "founded", "founded_in", "founded_on", "established", "established_in", "established_on"},
     "headquartered_in": {"headquartered_in"},
     "winner_of": {"winner_of"},
     "part_of": {"part_of"},
+    "has_member_count": {
+        "has_member_count",
+        "member count",
+        "number of members",
+        "members",
+        "has members",
+        "contains members",
+        "consists of members",
+        "member total",
+    },
+    "has_species_count": {
+        "has_species_count",
+        "species count",
+        "number of species",
+        "species",
+        "has species",
+        "contains species",
+        "genus of species",
+    },
     # 强制归一：职业相关同义词全部归并到 "occupation"
     "occupation": {
         "occupation",
@@ -339,5 +391,33 @@ PRED_SYNONYM_SETS = {
     "same_as": {"same_as", "identical_to"},
     "type": {"type", "entity_type", "category_type"},
 }
-import json
-from pathlib import Path
+
+CANONICAL_PREDICATES = set(ALLOWED_PREDICATES)
+
+
+def canonicalize_predicate(raw_pred: str | None, raw_text: str | None = None) -> str | None:
+    """Map surface predicate strings to canonical predicates."""
+    raw = (raw_pred or "").strip().lower()
+    raw_text = (raw_text or "").strip().lower()
+    if not raw and not raw_text:
+        return None
+    if raw_text:
+        if re.search(r"\b(professor|taught at|teaches at|faculty at|affiliated with)\b", raw_text):
+            return "affiliated_with"
+    candidates = {raw} if raw else set()
+    if raw:
+        candidates.add(raw.replace("_", " "))
+        candidates.add(raw.replace(" ", "_"))
+    for candidate in candidates:
+        for canon, synonyms in PRED_SYNONYM_SETS.items():
+            if candidate == canon or candidate in synonyms:
+                return canon
+        mapped = PRED2ATTR.get(candidate)
+        if mapped:
+            return mapped
+    if raw_text:
+        if "species" in raw_text and re.search(r"\b\d+\b|\b(one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)\b", raw_text):
+            return "has_species_count"
+        if "member" in raw_text and re.search(r"\b\d+\b|\b(one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)\b", raw_text):
+            return "has_member_count"
+    return raw or None

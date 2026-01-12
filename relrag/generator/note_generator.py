@@ -19,6 +19,7 @@ from relrag.schema.note_schema_v1 import NOTE_GEN_JSON_SCHEMA, NOTE_JSON_SCHEMA
 from relrag.validators.note_validator import validate_and_normalize
 from relrag.utils import TextUtils
 from relrag.doc import split_into_entity_aware_spans
+from relrag.extractors.count_facts import extract_count_notes
 from relrag.utils.adaptive_concurrency import AdaptiveConcurrencyController, AdaptiveConfig
 from relrag.utils.llm_client import LLMChatClient
 from relrag.prompt import load_prompt, render_prompt
@@ -680,6 +681,30 @@ class NoteGenerator:
                     )
             except Exception as exc:  # noqa: BLE001
                 logger.warning("Repair attempt failed doc={} chunk={} err={}", doc_id, chunk_id, exc)
+
+        count_notes = extract_count_notes(chunk, doc_title=doc_title)
+        if count_notes:
+            if not parsed_notes:
+                parsed_notes = count_notes
+            else:
+                seen = set()
+                for note in parsed_notes:
+                    key = (
+                        (note.get("subj") or "").strip().lower(),
+                        (note.get("pred") or "").strip().lower(),
+                        (note.get("obj") or "").strip().lower(),
+                    )
+                    seen.add(key)
+                for note in count_notes:
+                    key = (
+                        (note.get("subj") or "").strip().lower(),
+                        (note.get("pred") or "").strip().lower(),
+                        (note.get("obj") or "").strip().lower(),
+                    )
+                    if key in seen:
+                        continue
+                    parsed_notes.append(note)
+                    seen.add(key)
 
         if not parsed_notes:
             self._record_stage_times(int((t1 - t0) * 1000), int((t2 - t1) * 1000), 0)

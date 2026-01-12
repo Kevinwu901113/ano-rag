@@ -50,5 +50,17 @@ def record_weak_ratio(ratio: float) -> None:
     _REGISTRY.incr("weak_ratio.count", 1)
 
 
+def record_retrieval_total() -> None:
+    _REGISTRY.incr("retrieval.total")
+
+
+def record_retrieval_no_path() -> None:
+    _REGISTRY.incr("retrieval.no_path")
+
+
+def record_retrieval_empty_context() -> None:
+    _REGISTRY.incr("retrieval.empty_context")
+
+
 def export_metrics() -> Dict[str, int]:
     return _REGISTRY.snapshot()

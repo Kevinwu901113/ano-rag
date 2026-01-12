@@ -147,9 +147,21 @@ PREDICATE_LIBRARY = [
             {"text": "works for", "entity_side": "right"},
             {"text": "worked for", "entity_side": "right"},
             {"text": "employed by", "entity_side": "right"},
+            {"regex": r"\b(works\s+for|worked\s+for|employed\s+by)\b", "entity_side": "right"},
+        ],
+    },
+    {
+        "pred": "affiliated_with",
+        "direction": "out",
+        "target_type": "ORG",
+        "seed_type": "PERSON",
+        "aliases": [
             {"text": "professor at", "entity_side": "right"},
+            {"text": "served as professor at", "entity_side": "right"},
+            {"text": "taught at", "entity_side": "right"},
             {"text": "teaches at", "entity_side": "right"},
-            {"regex": r"\b(works\s+for|worked\s+for|employed\s+by|professor\s+at|teaches\s+at)\b", "entity_side": "right"},
+            {"text": "affiliated with", "entity_side": "right"},
+            {"regex": r"\b(professor\s+at|served\s+as\s+professor\s+at|taught\s+at|teaches\s+at|affiliated\s+with)\b", "entity_side": "right"},
         ],
     },
     {
@@ -325,22 +337,13 @@ COMPOSITE_RULES = [
         "target_type": "ORG",
     },
     {
-        "pattern": re.compile(r"(?P<entity>.+?)\\s+(?:starred|starring|features|featuring)\\s+.*?heritage", re.I),
-        "seed_type": "WORK",
-        "chain": [
-            PredicateStep(pred="acted_in", direction="in", target_hint="PERSON"),
-            PredicateStep(pred="nationality", direction="out", target_hint="PLACE"),
-        ],
-        "target_type": "PLACE",
-    },
-    {
         "pattern": re.compile(
             r"(?:the\\s+)?(?:university|college|school)\\s+where\\s+(?P<entity>.+?)\\s+was\\s+(?:a|an)?\\s*professor",
             re.I,
         ),
         "seed_type": "PERSON",
         "chain": [
-            PredicateStep(pred="works_for", direction="out", target_hint="ORG"),
+            PredicateStep(pred="affiliated_with", direction="out", target_hint="ORG"),
             PredicateStep(pred="founded_on", direction="out", target_hint="TIME"),
         ],
         "target_type": "TIME",
@@ -367,6 +370,21 @@ def parse_question(question: str) -> Optional[QueryIR]:
         return None
 
     question_type = _detect_question_type(text)
+
+    between_compare = _match_between_compare(text)
+    if between_compare:
+        seeds = [Seed(text=entity, type_hint=None) for entity in between_compare["entities"]]
+        chain = [PredicateStep(pred=between_compare["attribute"], direction="out", target_hint=None)]
+        return QueryIR(
+            intent="relation_query",
+            seeds=seeds,
+            pred_chain=chain,
+            target_type=None,
+            question_type=question_type,
+            max_hops=max(_DEFAULT_MAX_HOPS, len(chain)),
+            fanout=15,
+            raw=question,
+        )
 
     between_entities = _match_between_entities(text)
     if between_entities:
@@ -450,6 +468,9 @@ def parse_question(question: str) -> Optional[QueryIR]:
         elif canonical_attr == "works_for":
             default_direction = "out"
             default_target = "ORG"
+        elif canonical_attr == "affiliated_with":
+            default_direction = "out"
+            default_target = "ORG"
         elif canonical_attr == "founded_by":
             default_direction = "out"
             default_target = "PERSON"
@@ -459,6 +480,9 @@ def parse_question(question: str) -> Optional[QueryIR]:
         elif canonical_attr == "parent":
             default_direction = "out"
             default_target = "PERSON"
+        elif canonical_attr in {"has_member_count", "has_species_count"}:
+            default_direction = "out"
+            default_target = "CONCEPT"
         elif canonical_attr in {"occupation", "title", "nationality", "born_on", "died_on", "headquartered_in"}:
             default_direction = "out"
             default_target = None
@@ -496,6 +520,19 @@ def _detect_question_type(question: str) -> Optional[str]:
 
 
 def _match_composite(question: str) -> Optional[dict]:
+    lowered = question.lower()
+    if "heritage" in lowered:
+        entity = _extract_heritage_work(question)
+        if entity:
+            return {
+                "entity": entity,
+                "chain": [
+                    PredicateStep(pred="acted_in", direction="in", target_hint="PERSON"),
+                    PredicateStep(pred="nationality", direction="out", target_hint="PLACE"),
+                ],
+                "seed_type": "WORK",
+                "target_type": "PLACE",
+            }
     for rule in COMPOSITE_RULES:
         match = rule["pattern"].search(question)
         if match:
@@ -518,6 +555,43 @@ def _match_between_entities(question: str) -> Optional[List[str]]:
     if not a or not b:
         return None
     return [a, b]
+
+
+def _match_between_compare(question: str) -> Optional[dict]:
+    match = re.search(
+        r"\bbetween\s+(?P<a>[^,?]+?)\s+and\s+(?P<b>[^,?]+?)\s*,?\s*which\b.*?\bmore\s+(?P<unit>species|members)\b",
+        question,
+        re.I,
+    )
+    if not match:
+        return None
+    a = match.group("a").strip(" ?.,")
+    b = match.group("b").strip(" ?.,")
+    unit = match.group("unit").strip().lower()
+    if not a or not b:
+        return None
+    attribute = "has_species_count" if "species" in unit else "has_member_count"
+    return {"entities": [a, b], "attribute": attribute}
+
+
+def _extract_heritage_work(question: str) -> Optional[str]:
+    quoted = re.search(r'["“”\']([^"“”\']+)["“”\']', question)
+    if quoted:
+        return quoted.group(1).strip()
+    movie_match = re.search(
+        r"\b(?:film|movie)\s+([A-Z][A-Za-z0-9'&\-]*(?:\s+[A-Z][A-Za-z0-9'&\-]*)*)",
+        question,
+    )
+    if movie_match:
+        return movie_match.group(1).strip()
+    acted_match = re.search(
+        r"\b(?:starred in|starring|features|featuring|acted in)\s+([A-Z][A-Za-z0-9'&\-]*(?:\s+[A-Z][A-Za-z0-9'&\-]*)*)",
+        question,
+        re.I,
+    )
+    if acted_match:
+        return acted_match.group(1).strip()
+    return None
 
 
 def _match_predicate(question: str) -> Optional[dict]:

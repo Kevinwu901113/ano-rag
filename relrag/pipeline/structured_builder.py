@@ -544,6 +544,8 @@ class StructuredBuilder:
             "validated_written": 0,
             "dropped_by_predicate": 0,
             "dropped_predicates": {},
+            "count_predicates": {"has_member_count": 0, "has_species_count": 0},
+            "count_pred_total": 0,
         }
         doc_notes: Dict[str, List[Dict[str, Any]]] = {}
         doc_pronoun_notes: Dict[str, List[Dict[str, Any]]] = {}
@@ -566,9 +568,16 @@ class StructuredBuilder:
                 doc_notes[key].extend(notes)
                 if pronoun_notes:
                     doc_pronoun_notes[key].extend(pronoun_notes)
+                if notes:
+                    count_bucket = note_stats.get("count_predicates") or {}
+                    for note in notes:
+                        pred = (note.get("pred") or "").strip().lower()
+                        if pred in count_bucket:
+                            count_bucket[pred] = count_bucket.get(pred, 0) + 1
+                            note_stats["count_pred_total"] = note_stats.get("count_pred_total", 0) + 1
                 raw_count = payload_stats.get("raw_count")
                 valid_count = payload_stats.get("valid_count")
-                skipped_count = payload_stats.get("skipped_count")
+                skipped_count = payload_stats.get("weak_predicate_count", payload_stats.get("skipped_count"))
                 if isinstance(raw_count, int):
                     note_stats["raw_generated"] += raw_count
                 if isinstance(valid_count, int):
@@ -686,6 +695,15 @@ class StructuredBuilder:
         logger.info("Wrote {} notes to {}", notes_written, notes_path)
         note_stats["written"] = notes_written
         note_stats["validated_written"] = notes_written
+        count_total = note_stats.get("count_pred_total", 0) or 0
+        count_cov = count_total / max(1, notes_written) if notes_written else 0.0
+        note_stats["count_pred_coverage"] = round(count_cov, 6)
+        logger.info(
+            "Count predicate coverage: {:.2%} (member_count={} species_count={})",
+            count_cov,
+            note_stats.get("count_predicates", {}).get("has_member_count", 0),
+            note_stats.get("count_predicates", {}).get("has_species_count", 0),
+        )
         try:
             dropped_predicates = note_stats.get("dropped_predicates") or {}
             top_dropped = sorted(

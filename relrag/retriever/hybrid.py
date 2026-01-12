@@ -343,6 +343,9 @@ class HybridRetriever:
             + weights.get("subject_match", 2.0) * subj_score
             + weights.get("source_agree", 1.0) * float(source_agree)
         )
+        meta = note.get("meta") or {}
+        if meta.get("weak"):
+            final *= 0.6
         return {"final": final, "subject_score": subj_score, "source_agree": source_agree, "match_by": match_by}
 
     def _normalize_label(self, attribute: Optional[str], value: Optional[str]) -> Optional[str]:

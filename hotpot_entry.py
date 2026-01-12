@@ -170,8 +170,10 @@ def _build_retrieved_context(
     for ev in evidences:
         note_id = ev.get("note_id")
         note = note_store.get_weak(note_id) if note_id else None
-        source = ((note or {}).get("meta") or {}).get("source")
-        doc_id = _resolve_doc_id_from_source(source)
+        source = ((note or {}).get("meta") or {}).get("source") or ev.get("source")
+        doc_id = _resolve_doc_id_from_source(source) if source else None
+        if not doc_id:
+            doc_id = ev.get("doc_id") or _resolve_doc_id_from_source(note_id)
         doc_meta = doc_index.get(doc_id) if doc_id else None
         title = doc_meta.get("title") if doc_meta else None
         sentences = doc_meta.get("sentences") if doc_meta else []

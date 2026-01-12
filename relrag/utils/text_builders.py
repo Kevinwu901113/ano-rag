@@ -47,7 +47,7 @@ def _collect_note_parts(note: Dict[str, Any]) -> Dict[str, List[str]]:
 def _truncate(text: str, max_len: Optional[int]) -> str:
     if not max_len or max_len <= 0 or len(text) <= max_len:
         return text
-    return text[: max_len - 3] + "..."
+    return text[:max_len].rstrip()
 
 
 def build_note_text_for_embed(note: Dict[str, Any], *, max_len: Optional[int] = None) -> str:

@@ -6,7 +6,7 @@ Each note object MUST contain the keys:
 Populate them as follows:
   - "subj","pred","obj","evidence" are non-empty strings; evidence is a verbatim snippet (>=4 chars).
   - "subj_type","obj_type" must be one of ["PERSON","WORK","ORG","PLACE","EVENT","CONCEPT","TIME"].
-  - "pred" must be one of ["performed_by","authored_by","directed_by","spouse","parent","born_in","located_in","member_of","works_for","acted_in","produced_by","released_in","label","founded_by","founded_on","headquartered_in","winner_of","part_of","occupation","title","category","nationality","born_on","died_on","alias_of","same_as","type"].
+  - "pred" must be one of ["performed_by","authored_by","directed_by","spouse","parent","born_in","located_in","member_of","works_for","affiliated_with","acted_in","produced_by","released_in","label","founded_by","founded_on","headquartered_in","winner_of","part_of","occupation","title","category","nationality","born_on","died_on","alias_of","same_as","type","has_member_count","has_species_count"].
   - For occupations, acceptable surface forms include ["occupation","profession","job","works as","career","title (when occupational)"]; ALWAYS output meta.attribute.name="occupation".
   - "meta" MUST include: {{"source": "{doc_id}", "confidence": float 0-1, "subject_profile": {{}}, "attribute": {{...}}}}
        * "subject_profile" = {{"type": <subj_type>, "aliases": [], "nationality": [], "birth": null, "death": null, "occupations": [], "titles": [], "categories": [], "same_as": []}}. Fill lists when evidence gives the data; use [] when unknown.
@@ -27,15 +27,17 @@ SUBJECT & PRONOUN GUIDANCE:
 • Keep subject/object capitalization and parentheses consistent (e.g., “National Basketball Association (NBA)” vs “NBA”).
 
 RELATION COVERAGE:
-Capture every important relation tied to the primary subject, including but not limited to birth/death dates, birthplaces, citizenship/nationality, occupations/titles, employers/affiliations (works_for), works and cast (acted_in/performed_by), awards (winner_of), spouse/parents, founded dates (founded_on), capital_of/located_in, authored_by, and key events. When a relation has multiple values (e.g., multiple occupations or spouses), emit one note per value. Skipping these core schema relations makes structured retrieval impossible.
+Capture every important relation tied to the primary subject, including but not limited to birth/death dates, birthplaces, citizenship/nationality, occupations/titles, employers/affiliations (works_for/affiliated_with), works and cast (acted_in/performed_by), awards (winner_of), spouse/parents, founded dates (founded_on), capital_of/located_in, count facts (has_member_count/has_species_count), authored_by, and key events. When a relation has multiple values (e.g., multiple occupations or spouses), emit one note per value. Skipping these core schema relations makes structured retrieval impossible.
 
 Extraction Priority / 抽取优先级（携带主体）:
 A) FULLNAME was/is a/an <NOUN> → (subj=FULLNAME, pred=occupation, obj=<NOUN>)
 B) FULLNAME married <NAME> → (subj=FULLNAME, pred=spouse, obj=<NAME>)
 C) FULLNAME was born in <PLACE> → (subj=FULLNAME, pred=born_in, obj=<PLACE>)
-D) FULLNAME was a professor at <ORG> / worked for <ORG> → (subj=FULLNAME, pred=works_for, obj=<ORG>)
+D) FULLNAME was a professor at <ORG> / worked for <ORG> → (subj=FULLNAME, pred=affiliated_with, obj=<ORG>)
 E) <ORG> was founded in/on <TIME> → (subj=<ORG>, pred=founded_on, obj=<TIME>)
 F) FULLNAME stars in <WORK> / was in <WORK> → (subj=FULLNAME, pred=acted_in, obj=<WORK>)
+G) <ORG> has 40 members → (subj=<ORG>, pred=has_member_count, obj="40")
+H) <GENUS> contains three species → (subj=<GENUS>, pred=has_species_count, obj="3")
 当句子以代词开头且无法确定代词指代实体时，跳过该句的抽取。
 
 {attr_rules}

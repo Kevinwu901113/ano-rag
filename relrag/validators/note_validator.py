@@ -7,8 +7,15 @@ from pathlib import Path
 
 from jsonschema import Draft7Validator, ValidationError
 
-from relrag.schema.note_schema_v1 import NOTE_JSON_SCHEMA, PRED_SYNONYM_SETS, PRED2ATTR, PROFILE_SCHEMA
-from relrag.schema.note_schema_v1 import ALLOWED_PREDICATES
+from relrag.schema.note_schema_v1 import (
+    NOTE_JSON_SCHEMA,
+    PRED_SYNONYM_SETS,
+    PRED2ATTR,
+    PROFILE_SCHEMA,
+    ALLOWED_PREDICATES,
+    CANONICAL_PREDICATES,
+    canonicalize_predicate,
+)
 from relrag.schema.vocabulary import normalize_entity_name, normalize_slot_value
 from relrag.utils import TextUtils
 
@@ -145,8 +152,11 @@ def _type_pattern_ok(subj_type: str, pred: str, obj_type: str) -> float:
         "produced_by": {("WORK", "PERSON"), ("WORK", "ORG")},
         "label": {("WORK", "ORG")},
         "member_of": {("PERSON", "ORG"), ("ORG", "ORG")},
+        "affiliated_with": {("PERSON", "ORG")},
         "award_received": {("PERSON", "CONCEPT"), ("WORK", "CONCEPT")},
         "works_for": {("PERSON", "ORG")},
+        "has_member_count": {("ORG", "CONCEPT"), ("CONCEPT", "CONCEPT")},
+        "has_species_count": {("CONCEPT", "CONCEPT"), ("ORG", "CONCEPT")},
         "educated_at": {("PERSON", "ORG")},
         "position_held": {("PERSON", "CONCEPT"), ("PERSON", "ORG")},
         "founded": {("PERSON", "ORG")},
@@ -426,19 +436,31 @@ def validate_and_normalize(raw_text: str, doc_id: str, chunk_id: str):
                 pred = "occupation"
                 pred_weight = min(pred_weight, 0.95)
 
+        canon_pred = canonicalize_predicate(raw_attr_name or pred, evidence_text)
+        if canon_pred:
+            pred = canon_pred
+
         if pred not in ALLOWED_PREDICATES:
             for pat, target in _COMPILED_ALIAS_PATTERNS:
                 if pat.search(evidence_text):
                     pred = target
                     pred_weight = max(pred_weight, 0.9)
                     break
-        if pred not in ALLOWED_PREDICATES:
+        canon_pred = canonicalize_predicate(pred, evidence_text)
+        if canon_pred:
+            pred = canon_pred
+
+        weak_pred = False
+        raw_pred = raw_attr_name or pred
+        if pred not in CANONICAL_PREDICATES:
             raw_key = raw_attr_name or "<blank>"
             unmatched_counter[raw_key] = unmatched_counter.get(raw_key, 0) + 1
             pred_key = pred or raw_key
             dropped_pred_counter[pred_key] = dropped_pred_counter.get(pred_key, 0) + 1
             skipped_count += 1
-            return None
+            weak_pred = True
+            pred = "raw_predicate"
+            pred_weight = min(pred_weight, 0.6)
 
         raw_values = attr.get("values")
         if not isinstance(raw_values, list) or not raw_values:
@@ -491,6 +513,13 @@ def validate_and_normalize(raw_text: str, doc_id: str, chunk_id: str):
         meta_ev_canon = (item.get("meta", {}) or {}).get("evidence_canonical")
         canonical_evidence = meta_ev_canon.strip() if isinstance(meta_ev_canon, str) and meta_ev_canon.strip() else evidence_text
         quality = _compute_quality(evidence_text, subject_profile, normalized_values, alias_hits)
+        weak_meta = {}
+        if weak_pred:
+            weak_meta = {
+                "weak": True,
+                "raw_pred": raw_pred,
+                "weak_reason": "predicate_unmapped",
+            }
 
         note_id = f"{doc_id}#{chunk_id}#{idx}"
         return {
@@ -517,6 +546,7 @@ def validate_and_normalize(raw_text: str, doc_id: str, chunk_id: str):
                 "quality_score": quality.get("score"),
                 "subject_profile": subject_profile,
                 "object_profile": object_profile,
+                **weak_meta,
             },
         }
 
@@ -567,7 +597,7 @@ def validate_and_normalize(raw_text: str, doc_id: str, chunk_id: str):
     stats["valid_count"] = len(valid_notes)
     if skipped_count:
         stats["unmatched_predicates"] = unmatched_counter
-        stats["skipped_count"] = skipped_count
+        stats["weak_predicate_count"] = skipped_count
     if dropped_pred_counter:
         stats["dropped_predicates"] = dropped_pred_counter
 

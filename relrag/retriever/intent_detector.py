@@ -99,11 +99,40 @@ ATTRIBUTE_HINTS = [
             re.compile(r"where did (?P<entity>.+?) work", re.I),
             re.compile(r"(?P<entity>.+?) works for", re.I),
             re.compile(r"(?P<entity>.+?) worked for", re.I),
-            re.compile(r"(?P<entity>.+?) was a professor at", re.I),
-            re.compile(r"(?P<entity>.+?) teaches at", re.I),
             re.compile(r"(?P<entity>.+?) employed by", re.I),
         ],
-        "keywords": ["works for", "worked for", "employed by", "professor at", "teaches at"],
+        "keywords": ["works for", "worked for", "employed by"],
+    },
+    {
+        "name": "affiliated_with",
+        "weight": 0.8,
+        "regex": [
+            re.compile(r"(?P<entity>.+?) was a professor at", re.I),
+            re.compile(r"(?P<entity>.+?) served as a professor at", re.I),
+            re.compile(r"(?P<entity>.+?) teaches at", re.I),
+            re.compile(r"(?P<entity>.+?) taught at", re.I),
+            re.compile(r"(?P<entity>.+?) affiliated with", re.I),
+        ],
+        "keywords": ["professor at", "taught at", "teaches at", "affiliated with"],
+    },
+    {
+        "name": "has_member_count",
+        "weight": 0.9,
+        "regex": [
+            re.compile(r"how many members (?:does|do) (?P<entity>.+?) have", re.I),
+            re.compile(r"number of members (?:in|of) (?P<entity>.+?)(?:\\?|$)", re.I),
+        ],
+        "keywords": ["member count", "number of members"],
+    },
+    {
+        "name": "has_species_count",
+        "weight": 0.9,
+        "regex": [
+            re.compile(r"how many species (?:does|do) (?P<entity>.+?) have", re.I),
+            re.compile(r"number of species (?:in|of) (?P<entity>.+?)(?:\\?|$)", re.I),
+            re.compile(r"(?P<entity>.+?) contains more species", re.I),
+        ],
+        "keywords": ["species count", "number of species"],
     },
     {
         "name": "founded_on",
@@ -176,7 +205,10 @@ ATTRIBUTE_TYPE_HINTS = {
     "headquartered_in": "ORG",
     "member_of": "PERSON",
     "works_for": "PERSON",
+    "affiliated_with": "PERSON",
     "founded_on": "ORG",
+    "has_member_count": "ORG",
+    "has_species_count": "CONCEPT",
 }
 
 
