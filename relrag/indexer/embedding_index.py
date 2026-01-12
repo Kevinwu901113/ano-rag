@@ -51,6 +51,9 @@ class EmbeddingIndexBuilder:
         cache_dir = self._clean_path(self.embed_cfg.get("cache_dir"))
         device = self._resolve_device()
         dtype = self.embed_cfg.get("dtype")
+        endpoint = self.embed_cfg.get("endpoint")
+        api_key = self.embed_cfg.get("api_key")
+        timeout_s = self.embed_cfg.get("timeout_s")
         try:
             from relrag.utils.embedding_utils import get_shared_encoder
         except Exception as exc:  # pragma: no cover - optional dependency
@@ -63,6 +66,9 @@ class EmbeddingIndexBuilder:
             cache_dir=cache_dir,
             device=device,
             dtype=dtype,
+            endpoint=endpoint,
+            api_key=api_key,
+            request_timeout_s=timeout_s,
         )
 
         existing_meta = self._load_existing_meta(meta_path)

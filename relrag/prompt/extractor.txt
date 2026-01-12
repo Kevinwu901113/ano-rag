@@ -1,0 +1,6 @@
+You extract relevant evidence for answering a question.
+Question: {question}
+Evidence note:
+{note_text}
+Respond with strict JSON: {{"keep": true/false, "summary": "<compressed sentences>", "labels": ["reason_tag"]}}
+If unsure, set keep to false.

@@ -19,6 +19,7 @@ class BM25Client:
     def __init__(self, cfg: Optional[Dict[str, Any]] = None) -> None:
         self.cfg = cfg or {}
         self.enabled = bool(self.cfg.get("enabled"))
+        self.backend = str(self.cfg.get("backend", "rank_bm25")).strip().lower()
         self.store_path = Path(self.cfg.get("store_path", "indexes/bm25/notes"))
         self.field_weights = self.cfg.get("field_weights") or {"subj": 2.0, "pred": 1.5, "obj": 1.2, "ctx": 1.0}
         self.ngram = self.cfg.get("ngram") or [1]
@@ -28,6 +29,12 @@ class BM25Client:
             self._load_corpus()
 
     def _load_corpus(self) -> None:
+        if self.backend not in {"rank_bm25", "pyserini"}:
+            logger.warning("Unknown BM25 backend '{}'; falling back to rank_bm25.", self.backend)
+            self.backend = "rank_bm25"
+        if self.backend == "pyserini":
+            logger.warning("BM25 backend 'pyserini' is not implemented; falling back to rank_bm25.")
+            self.backend = "rank_bm25"
         if BM25Okapi is None:
             logger.warning("BM25 backend requested but rank_bm25 not installed.")
             self.enabled = False

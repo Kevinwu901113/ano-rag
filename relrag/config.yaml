@@ -11,8 +11,8 @@ vllm:
   endpoint: "http://127.0.0.1:8000/v1"
   model: "qwen3-30b-a3b"
   temperature: 0.0
-  max_new_tokens: 32768
-  max_context_tokens: 32768
+  max_new_tokens: 2048
+  max_context_tokens: 4096
   context_safety_margin: 256
   concurrency:
     max_workers: 8
@@ -87,8 +87,9 @@ retriever:
     enable_name_rerank: true
   embedding:
     enabled: true
-    provider: "st"
-    model: "sentence-transformers/all-MiniLM-L6-v2"
+    provider: "vllm"
+    model: "qwen3-embedding"
+    endpoint: "http://127.0.0.1:8001/v1"
     model_path_override: null
     cache_dir: "/home/wjk/models/hf-cache"
     download_dir: null
@@ -106,7 +107,7 @@ retriever:
     normalize: true
   bm25:
     enabled: true
-    backend: "pyserini"
+    backend: "rank_bm25"
     store_path: "indexes/bm25/notes"
     k1: 0.9
     b: 0.4
@@ -142,6 +143,19 @@ notes:
   out_path: "notes/notes.jsonl"
   indexes_dir: "indexes/"
 
+hotpot_entry:
+  data: "data/hotpot_dev_distractor_5_jsonl.jsonl"
+  cache_dir: "result/cache"
+  output_dir: "result"
+  top_k: 10
+  limit: 0
+  workers: 1
+  debug_dir: "result/debug"
+  debug_max_notes: 50
+  stall_warn_sec: 300.0
+  stall_abort_sec: 900.0
+  force_build: false
+
 parsing:
   allow_jsonl: true
   enable_array_packer: true
@@ -150,6 +164,7 @@ parsing:
   loose_split_key: "subj"
   max_tokens: 32768
   parse_retry: 1
+  validation_retry: 1
   stop:
     - "]\n"
     - "\n]"

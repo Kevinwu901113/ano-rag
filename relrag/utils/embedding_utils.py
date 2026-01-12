@@ -27,6 +27,9 @@ class EmbeddingEncoder:
         fallback_to_cpu_on_oom: bool = True,
         batch_size: int = 16,
         normalize: bool = False,
+        endpoint: Optional[str] = None,
+        api_key: Optional[str] = None,
+        request_timeout_s: Optional[float] = None,
     ) -> None:
         self.provider = provider
         self.model_name = self._resolve_model_name(model_name)
@@ -43,6 +46,9 @@ class EmbeddingEncoder:
         self._model = None
         self._tokenizer = None
         self._encode_lock = threading.Lock()
+        self._endpoint = self._normalize_embedding_endpoint(endpoint)
+        self._api_key = api_key or "sk-no-key-required"
+        self._request_timeout_s = float(request_timeout_s) if request_timeout_s else 120.0
 
     def encode(
         self,
@@ -83,6 +89,12 @@ class EmbeddingEncoder:
                 max_length=max_length,
                 normalize=normalize,
             )
+        if self.provider in {"vllm", "openai"}:
+            return self._encode_vllm(
+                texts,
+                batch_size=batch_size,
+                normalize=normalize,
+            )
         if self.provider == "st":
             return self._encode_sentence_transformers(
                 texts,
@@ -104,6 +116,77 @@ class EmbeddingEncoder:
             norms = np.linalg.norm(vectors, axis=1, keepdims=True) + 1e-12
             vectors = vectors / norms
         return vectors
+
+    @staticmethod
+    def _normalize_embedding_endpoint(endpoint: Optional[str]) -> Optional[str]:
+        raw = (endpoint or "").strip()
+        if not raw:
+            return None
+        trimmed = raw.rstrip("/")
+        if trimmed.endswith("/embeddings"):
+            return trimmed
+        return f"{trimmed}/embeddings"
+
+    @staticmethod
+    def _normalize_vectors(vectors: np.ndarray) -> np.ndarray:
+        norms = np.linalg.norm(vectors, axis=1, keepdims=True) + 1e-12
+        return vectors / norms
+
+    def _encode_vllm(
+        self,
+        texts: Sequence[str],
+        *,
+        batch_size: Optional[int] = None,
+        normalize: Optional[bool] = None,
+    ) -> np.ndarray:
+        try:
+            import requests  # type: ignore
+        except Exception as exc:  # pragma: no cover - optional dependency
+            raise RuntimeError("requests is required for provider 'vllm'") from exc
+
+        if not self._endpoint:
+            raise ValueError("Embedding endpoint must be configured for provider 'vllm'")
+
+        batch_size = max(1, int(batch_size if batch_size is not None else self.batch_size))
+        normalize = bool(self.normalize if normalize is None else normalize)
+        headers = {
+            "Authorization": f"Bearer {self._api_key}",
+            "Content-Type": "application/json",
+        }
+
+        all_vectors = []
+        for start in range(0, len(texts), batch_size):
+            batch = list(texts[start : start + batch_size])
+            payload = {"model": self.model_name, "input": batch}
+            response = requests.post(
+                self._endpoint,
+                headers=headers,
+                json=payload,
+                timeout=self._request_timeout_s,
+            )
+            response.raise_for_status()
+            data = response.json()
+            if "error" in data:
+                raise RuntimeError(f"Embedding error response: {data['error']}")
+            items = data.get("data")
+            if not isinstance(items, list) or not items:
+                raise RuntimeError(f"Embedding response missing data: {data}")
+            if all(isinstance(item, dict) and "index" in item for item in items):
+                items = sorted(items, key=lambda item: int(item.get("index", 0)))
+            batch_vectors = []
+            for item in items:
+                if not isinstance(item, dict) or "embedding" not in item:
+                    raise RuntimeError(f"Embedding response missing embedding: {item}")
+                batch_vectors.append(np.asarray(item["embedding"], dtype="float32"))
+            if len(batch_vectors) != len(batch):
+                raise RuntimeError(
+                    f"Embedding response size mismatch: got {len(batch_vectors)} expected {len(batch)}"
+                )
+            stacked = np.vstack(batch_vectors).astype("float32")
+            if normalize:
+                stacked = self._normalize_vectors(stacked)
+            all_vectors.append(stacked)
+        return np.vstack(all_vectors).astype("float32")
 
     @staticmethod
     def _is_cuda_oom(exc: BaseException) -> bool:
@@ -447,7 +530,11 @@ def get_shared_encoder(
     cache_dir: Optional[str] = None,
     device: Optional[str] = None,
     dtype: Optional[str] = None,
+    endpoint: Optional[str] = None,
+    api_key: Optional[str] = None,
+    request_timeout_s: Optional[float] = None,
 ) -> EmbeddingEncoder:
+    api_key_hash = hashlib.md5(api_key.encode("utf-8")).hexdigest() if api_key else ""
     key = (
         str(provider or "").strip().lower(),
         str(model_name or "").strip(),
@@ -455,6 +542,8 @@ def get_shared_encoder(
         str(cache_dir or ""),
         str(device or ""),
         str(dtype or ""),
+        str(endpoint or ""),
+        api_key_hash,
     )
     with _ENCODER_LOCK:
         cached = _ENCODER_CACHE.get(key)
@@ -466,6 +555,9 @@ def get_shared_encoder(
                 cache_dir=cache_dir,
                 device=device,
                 dtype=dtype,
+                endpoint=endpoint,
+                api_key=api_key,
+                request_timeout_s=request_timeout_s,
             )
             _ENCODER_CACHE[key] = cached
         return cached

@@ -6,6 +6,11 @@ from typing import List, Optional
 from .ir import PredicateStep, QueryIR, Seed
 
 
+_DEFAULT_MAX_HOPS = QueryIR.__dataclass_fields__.get("max_hops").default
+if not isinstance(_DEFAULT_MAX_HOPS, int) or _DEFAULT_MAX_HOPS <= 0:
+    _DEFAULT_MAX_HOPS = 2
+
+
 # 问句类型：保留句首锚定，同时增加非句首的宽松匹配
 QUESTION_TYPE_PATTERNS = {
     "who": [re.compile(r"^\s*who\b", re.I), re.compile(r"\bwho\b", re.I)],
@@ -60,9 +65,20 @@ PREDICATE_LIBRARY = [
             {"text": "birthplace of", "entity_side": "right"},
             {"text": "was born in", "entity_side": "right"},
             {"text": "born at", "entity_side": "right"},
-            {"text": "born on", "entity_side": "right"},
             {"text": "native of", "entity_side": "right"},
-            {"regex": r"\b(?:was\s+)?born\s+(?:in|at|on)\b", "entity_side": "right"},
+            {"regex": r"\b(?:was\s+)?born\s+(?:in|at)\b", "entity_side": "right"},
+        ],
+    },
+    {
+        "pred": "born_on",
+        "direction": "out",
+        "target_type": "TIME",
+        "seed_type": "PERSON",
+        "aliases": [
+            {"text": "born on", "entity_side": "right"},
+            {"text": "birth date of", "entity_side": "right"},
+            {"text": "date of birth", "entity_side": "right"},
+            {"regex": r"\b(?:was\s+)?born\s+on\b", "entity_side": "right"},
         ],
     },
     {
@@ -123,6 +139,20 @@ PREDICATE_LIBRARY = [
         ],
     },
     {
+        "pred": "works_for",
+        "direction": "out",
+        "target_type": "ORG",
+        "seed_type": "PERSON",
+        "aliases": [
+            {"text": "works for", "entity_side": "right"},
+            {"text": "worked for", "entity_side": "right"},
+            {"text": "employed by", "entity_side": "right"},
+            {"text": "professor at", "entity_side": "right"},
+            {"text": "teaches at", "entity_side": "right"},
+            {"regex": r"\b(works\s+for|worked\s+for|employed\s+by|professor\s+at|teaches\s+at)\b", "entity_side": "right"},
+        ],
+    },
+    {
         "pred": "part_of",
         "direction": "out",
         "target_type": "ORG",
@@ -141,6 +171,20 @@ PREDICATE_LIBRARY = [
             {"text": "founded by", "entity_side": "right"},
             {"text": "founder of", "entity_side": "right"},
             {"regex": r"\bfounded\s+by\b", "entity_side": "right"},
+        ],
+    },
+    {
+        "pred": "founded_on",
+        "direction": "out",
+        "target_type": "TIME",
+        "seed_type": "ORG",
+        "aliases": [
+            {"text": "founded on", "entity_side": "right"},
+            {"text": "founded in", "entity_side": "right"},
+            {"text": "established in", "entity_side": "right"},
+            {"text": "established on", "entity_side": "right"},
+            {"text": "year founded", "entity_side": "right"},
+            {"regex": r"\b(founded\s+in|founded\s+on|established\s+in|established\s+on|year\s+founded)\b", "entity_side": "right"},
         ],
     },
     {
@@ -188,7 +232,11 @@ PREDICATE_LIBRARY = [
         "aliases": [
             {"text": "acted in", "entity_side": "right"},
             {"text": "starred in", "entity_side": "right"},
-            {"regex": r"\b(acted\s+in|starred\s+in)\b", "entity_side": "right"},
+            {"text": "starred", "entity_side": "right"},
+            {"text": "starring", "entity_side": "right"},
+            {"text": "features", "entity_side": "right"},
+            {"text": "featuring", "entity_side": "right"},
+            {"regex": r"\b(acted\s+in|starred\s+in|starred|starring|features|featuring)\b", "entity_side": "right"},
         ],
     },
     {
@@ -269,6 +317,35 @@ PREDICATE_LIBRARY = [
 
 COMPOSITE_RULES = [
     {
+        "pattern": re.compile(r"(?P<entity>.+?)\s+(?:was|is)\s+(?:an?\s+)?(?:\\w+\\s+)?member of\\b", re.I),
+        "seed_type": "PERSON",
+        "chain": [
+            PredicateStep(pred="member_of", direction="out", target_hint="ORG"),
+        ],
+        "target_type": "ORG",
+    },
+    {
+        "pattern": re.compile(r"(?P<entity>.+?)\\s+(?:starred|starring|features|featuring)\\s+.*?heritage", re.I),
+        "seed_type": "WORK",
+        "chain": [
+            PredicateStep(pred="acted_in", direction="in", target_hint="PERSON"),
+            PredicateStep(pred="nationality", direction="out", target_hint="PLACE"),
+        ],
+        "target_type": "PLACE",
+    },
+    {
+        "pattern": re.compile(
+            r"(?:the\\s+)?(?:university|college|school)\\s+where\\s+(?P<entity>.+?)\\s+was\\s+(?:a|an)?\\s*professor",
+            re.I,
+        ),
+        "seed_type": "PERSON",
+        "chain": [
+            PredicateStep(pred="works_for", direction="out", target_hint="ORG"),
+            PredicateStep(pred="founded_on", direction="out", target_hint="TIME"),
+        ],
+        "target_type": "TIME",
+    },
+    {
         "pattern": re.compile(r"spouse of (?:the )?(?P<entity>.+?) performer", re.I),
         "seed_type": "WORK",
         "chain": [
@@ -291,6 +368,21 @@ def parse_question(question: str) -> Optional[QueryIR]:
 
     question_type = _detect_question_type(text)
 
+    between_entities = _match_between_entities(text)
+    if between_entities:
+        seeds = [Seed(text=entity, type_hint=None) for entity in between_entities]
+        return QueryIR(
+            intent="open_entity_query",
+            seeds=seeds,
+            pred_chain=[],
+            target_type=None,
+            question_type=question_type,
+            max_hops=_DEFAULT_MAX_HOPS,
+            fanout=15,
+            raw=question,
+            fallback=True,
+        )
+
     composite = _match_composite(text)
     if composite:
         seeds = [Seed(text=composite["entity"], type_hint=composite.get("seed_type"))]
@@ -300,7 +392,7 @@ def parse_question(question: str) -> Optional[QueryIR]:
             pred_chain=composite["chain"],
             target_type=composite.get("target_type"),
             question_type=question_type,
-            max_hops=len(composite["chain"]),
+            max_hops=max(_DEFAULT_MAX_HOPS, len(composite["chain"])),
             fanout=12,
             raw=question,
         )
@@ -355,9 +447,15 @@ def parse_question(question: str) -> Optional[QueryIR]:
         elif canonical_attr == "member_of":
             default_direction = "out"
             default_target = "ORG"
+        elif canonical_attr == "works_for":
+            default_direction = "out"
+            default_target = "ORG"
         elif canonical_attr == "founded_by":
             default_direction = "out"
             default_target = "PERSON"
+        elif canonical_attr == "founded_on":
+            default_direction = "out"
+            default_target = "TIME"
         elif canonical_attr == "parent":
             default_direction = "out"
             default_target = "PERSON"
@@ -374,7 +472,7 @@ def parse_question(question: str) -> Optional[QueryIR]:
         pred_chain=chain,
         target_type=target_type,
         question_type=question_type,
-        max_hops=max(1, len(chain) or 1),
+        max_hops=max(_DEFAULT_MAX_HOPS, len(chain)),
         fanout=15 if not chain else 12,
         raw=question,
         fallback=not chain,
@@ -409,6 +507,17 @@ def _match_composite(question: str) -> Optional[dict]:
                 "target_type": rule.get("target_type"),
             }
     return None
+
+
+def _match_between_entities(question: str) -> Optional[List[str]]:
+    match = re.search(r"\bbetween\s+(?P<a>[^,?]+?)\s+and\s+(?P<b>[^,?]+)", question, re.I)
+    if not match:
+        return None
+    a = match.group("a").strip(" ?.,")
+    b = match.group("b").strip(" ?.,")
+    if not a or not b:
+        return None
+    return [a, b]
 
 
 def _match_predicate(question: str) -> Optional[dict]:

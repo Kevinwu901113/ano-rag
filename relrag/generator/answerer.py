@@ -3,27 +3,12 @@ from typing import Any, Dict, List, Optional
 from loguru import logger
 
 from relrag.generator.extractor import judge_and_compress
+from relrag.prompt import render_prompt
 from relrag.utils.llm_client import LLMChatClient
 from relrag.utils.output_protocol import build_final_instruction
 
 
-ANS_PROMPT = """You are a factual answerer. Use the provided evidence sentences to answer the question.
-If the evidence is insufficient, respond EXACTLY with "Insufficient evidence".
-Prioritize high-confidence evidence, but do not ignore weak evidence if it provides a reasonable answer and does not conflict with strong evidence.
-{label_instruction}
-{final_instruction}
-Question: {q}
-[STRUCTURED EVIDENCE]
-{strong_block}
-[WEAK EVIDENCE – lower confidence]
-{weak_block}
-Rules:
-- Prefer answers supported by strong evidence.
-- You can use weak evidence if it directly answers the question and is not contradicted by strong evidence.
-- If weak evidence conflicts with strong evidence, ignore the weak evidence.
-- If no sufficient evidence exists, answer "Insufficient evidence".
-Answer:
-"""
+ANSWER_PROMPT_NAME = "answerer.txt"
 
 
 def call_llm(
@@ -44,11 +29,12 @@ def call_llm(
     weak_items = [item for item in display_evs if item.get("weak")]
     strong_block = "\n".join(_fmt_strong(item, idx) for idx, item in enumerate(strong_items))
     weak_block = "\n".join(_fmt_weak(item) for item in weak_items)
-    strong_block = (strong_block or "None").replace("{", "{{").replace("}", "}}")
-    weak_block = (weak_block or "None").replace("{", "{{").replace("}", "}}")
+    strong_block = strong_block or "None"
+    weak_block = weak_block or "None"
     sanitized_labels = _prepare_allowed_labels(allowed_labels)
-    prompt = ANS_PROMPT.format(
-        q=question.replace("{", "{{").replace("}", "}}"),
+    prompt = render_prompt(
+        ANSWER_PROMPT_NAME,
+        q=question,
         strong_block=strong_block,
         weak_block=weak_block,
         label_instruction=_label_instruction(sanitized_labels, attribute_name),

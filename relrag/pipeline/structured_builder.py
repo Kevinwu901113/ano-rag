@@ -1,4 +1,5 @@
 import concurrent.futures
+import json
 import math
 import threading
 import time
@@ -197,6 +198,8 @@ class StructuredBuilder:
         timeout_pause_threshold = float(ccfg.get("pause_on_timeout_rate", 0.3))
         pause_sec = float(ccfg.get("pause_sec", 7.0))
         refill_factor = max(1.0, float(ccfg.get("refill_factor", 1.5)))
+        stall_warn_sec = float(ccfg.get("stall_warn_sec", 300.0))
+        stall_abort_sec = float(ccfg.get("stall_abort_sec", 900.0))
         bucket_cfg = ccfg.get("buckets")
         bucket_cfg = bucket_cfg if isinstance(bucket_cfg, dict) else {}
 
@@ -293,11 +296,13 @@ class StructuredBuilder:
             return s
 
         def _process_with_ledger(chunk: Dict[str, Any], ledger: EntityLedger):
+            pronoun_notes: List[Dict[str, Any]] = []
             try:
                 # Generate notes for chunk
                 result = self.generator.generate_for_chunk(chunk) or {}
                 notes = result.get("valid_notes") or []
                 pronoun_notes = result.get("pronoun_notes") or []
+                result_stats = result.get("stats") or {}
                 try:
                     notes = stitch_pronoun_notes(notes, chunk)
                 except Exception:
@@ -516,10 +521,10 @@ class StructuredBuilder:
                             meta.get("coref_confidence_obj") or 0.6,
                         )
                     enriched.append(note)
-                return {"valid_notes": enriched, "pronoun_notes": pronoun_notes}
+                return {"valid_notes": enriched, "pronoun_notes": pronoun_notes, "stats": result_stats}
             except Exception as exc:
                 logger.warning("Chunk generation failed doc={} chunk={} err={}", chunk.get("doc_id"), chunk.get("chunk_id"), exc)
-                return {"valid_notes": [], "pronoun_notes": pronoun_notes}
+                return {"valid_notes": [], "pronoun_notes": pronoun_notes, "stats": {}}
 
         def _process_one(chunk: Dict[str, Any]):
             doc_id = chunk.get("doc_id") or "__default__"
@@ -532,6 +537,14 @@ class StructuredBuilder:
                 return _process_with_ledger(chunk, ledger)
 
         notes_written = 0
+        note_stats: Dict[str, Any] = {
+            "raw_generated": 0,
+            "validated": 0,
+            "written": 0,
+            "validated_written": 0,
+            "dropped_by_predicate": 0,
+            "dropped_predicates": {},
+        }
         doc_notes: Dict[str, List[Dict[str, Any]]] = {}
         doc_pronoun_notes: Dict[str, List[Dict[str, Any]]] = {}
         doc_order: List[str] = []
@@ -542,6 +555,7 @@ class StructuredBuilder:
                 return
             notes = payload.get("valid_notes") or []
             pronoun_notes = payload.get("pronoun_notes") or []
+            payload_stats = payload.get("stats") or {}
             key = doc_id or "__default__"
             with doc_lock:
                 if key not in doc_notes:
@@ -552,6 +566,24 @@ class StructuredBuilder:
                 doc_notes[key].extend(notes)
                 if pronoun_notes:
                     doc_pronoun_notes[key].extend(pronoun_notes)
+                raw_count = payload_stats.get("raw_count")
+                valid_count = payload_stats.get("valid_count")
+                skipped_count = payload_stats.get("skipped_count")
+                if isinstance(raw_count, int):
+                    note_stats["raw_generated"] += raw_count
+                if isinstance(valid_count, int):
+                    note_stats["validated"] += valid_count
+                if isinstance(skipped_count, int):
+                    note_stats["dropped_by_predicate"] += skipped_count
+                dropped_predicates = payload_stats.get("dropped_predicates") or {}
+                if isinstance(dropped_predicates, dict):
+                    agg = note_stats["dropped_predicates"]
+                    for pred, count in dropped_predicates.items():
+                        try:
+                            inc = int(count)
+                        except (TypeError, ValueError):
+                            continue
+                        agg[pred] = agg.get(pred, 0) + inc
 
         if total_workers <= 1:
             for chunk in chunk_records:
@@ -598,8 +630,33 @@ class StructuredBuilder:
                             bucket_indices[name] += 1
 
                 _refill()
+                last_progress = time.time()
                 while all_futures:
-                    done, _ = concurrent.futures.wait(all_futures, return_when=concurrent.futures.FIRST_COMPLETED)
+                    done, _ = concurrent.futures.wait(
+                        all_futures,
+                        timeout=stall_warn_sec,
+                        return_when=concurrent.futures.FIRST_COMPLETED,
+                    )
+                    if not done:
+                        idle_for = time.time() - last_progress
+                        logger.warning(
+                            "No completed chunk futures for {:.0f}s; pending={}",
+                            idle_for,
+                            len(all_futures),
+                        )
+                        if stall_abort_sec > 0 and idle_for >= stall_abort_sec:
+                            logger.error(
+                                "Aborting {} stalled chunk futures after {:.0f}s idle",
+                                len(all_futures),
+                                idle_for,
+                            )
+                            for fut in list(all_futures):
+                                doc_id = future_doc.get(fut)
+                                if fut.cancel():
+                                    logger.error("Cancelled stalled chunk future doc={}", doc_id)
+                                all_futures.discard(fut)
+                            break
+                        continue
                     for fut in done:
                         all_futures.discard(fut)
                         bucket_name = future_bucket.pop(fut, None)
@@ -607,6 +664,7 @@ class StructuredBuilder:
                             inflight[bucket_name].discard(fut)
                         notes = fut.result()
                         _stash_notes(future_doc.pop(fut, "__default__"), notes)
+                        last_progress = time.time()
                     _refill()
 
         with open(notes_path, "w", encoding="utf-8") as handle:
@@ -626,6 +684,19 @@ class StructuredBuilder:
                 notes_written += FileUtils.write_jsonl_batch(handle, resolved_notes)
 
         logger.info("Wrote {} notes to {}", notes_written, notes_path)
+        note_stats["written"] = notes_written
+        note_stats["validated_written"] = notes_written
+        try:
+            dropped_predicates = note_stats.get("dropped_predicates") or {}
+            top_dropped = sorted(
+                dropped_predicates.items(), key=lambda item: item[1], reverse=True
+            )[:10]
+            note_stats["dropped_predicates_top"] = top_dropped
+            stats_path = notes_path.parent / "notes_stats.json"
+            stats_path.write_text(json.dumps(note_stats, ensure_ascii=False, indent=2), encoding="utf-8")
+            logger.info("Wrote notes stats to {}", stats_path)
+        except Exception as exc:
+            logger.warning("Failed to write notes stats for {}: {}", notes_path, exc)
         close_weak_note_writer(weak_out_dir)
         weak_notes_path = Path(weak_out_dir) / "weak" / "weak_notes.jsonl"
         if stats["weak_written"]:

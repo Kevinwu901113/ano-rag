@@ -1,0 +1,5 @@
+
+
+REMINDER: 上一次输出不是可解析的 JSON。请仅输出合法的 JSON 数组（无任何说明文字），若无可抽取信息则输出空数组 []。
+类型规则：所有字符串必须加引号；年份/日期必须是字符串（如 "1903"），meta.subject_profile.birth/death 只能是字符串或 null；只有 confidence 可以是数值。
+格式示例: [{"subj":"Alice","pred":"occupation","obj":"engineer","subj_type":"PERSON","obj_type":"CONCEPT","evidence":"Alice is an engineer.","meta":{"source":"DOC_ID","confidence":0.8,"subject_profile":{"type":"PERSON","aliases":[],"nationality":[],"birth":"1815-12-10","death":null,"occupations":[],"titles":[],"categories":[],"same_as":[]},"attribute":{"name":"occupation","values":[{"value":"engineer","normalized":"engineer","confidence":0.8,"source":"DOC_ID","evidence":"Alice is an engineer."}]}}}]

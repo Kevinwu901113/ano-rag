@@ -5,16 +5,11 @@ from typing import Any, Dict, List
 
 from loguru import logger
 
+from relrag.prompt import render_prompt
 from relrag.utils.text_builders import build_note_text_for_rank
 from relrag.utils.llm_client import LLMChatClient
 
-EXTRACT_PROMPT = """You extract relevant evidence for answering a question.
-Question: {question}
-Evidence note:
-{note_text}
-Respond with strict JSON: {{"keep": true/false, "summary": "<compressed sentences>", "labels": ["reason_tag"]}}
-If unsure, set keep to false.
-"""
+EXTRACT_PROMPT_NAME = "extractor.txt"
 
 
 class EvidenceExtractor:
@@ -30,7 +25,7 @@ class EvidenceExtractor:
         results: List[Dict[str, Any]] = []
         for note in notes:
             text = build_note_text_for_rank(note, max_len=768)
-            payload = EXTRACT_PROMPT.format(question=question, note_text=text)
+            payload = render_prompt(EXTRACT_PROMPT_NAME, question=question, note_text=text)
             try:
                 response = self.client.chat(
                     [{"role": "user", "content": payload}],

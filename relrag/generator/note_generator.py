@@ -21,6 +21,7 @@ from relrag.utils import TextUtils
 from relrag.doc import split_into_entity_aware_spans
 from relrag.utils.adaptive_concurrency import AdaptiveConcurrencyController, AdaptiveConfig
 from relrag.utils.llm_client import LLMChatClient
+from relrag.prompt import load_prompt, render_prompt
 
 
 class NoteGenerator:
@@ -153,6 +154,10 @@ class NoteGenerator:
             self._parse_retry = max(0, int(parsing_config.get("parse_retry", 0)))
         except Exception:
             self._parse_retry = 0
+        try:
+            self._validation_retry = max(0, int(parsing_config.get("validation_retry", 1)))
+        except Exception:
+            self._validation_retry = 1
 
     # -----------------------------
     # Backend pool helpers
@@ -191,67 +196,36 @@ class NoteGenerator:
         source_text = doc_text or ""
         attr_rules = NoteGenerator._attribute_instruction_block()
         main_entity = (doc_title or doc_id or "").strip() or doc_id
-        return (
-            "You are an ontology-aligned information extraction system. From the following text, extract factual notes.\n"
-            "Return ONLY valid JSON (RFC 8259). Output MUST be a JSON array; if nothing is found, return an empty array []. JSONL is allowed if necessary (one object per line, no surrounding brackets).\n"
-            'Format example (do NOT add prose): [{"subj":"Ada Lovelace","pred":"occupation","obj":"mathematician","subj_type":"PERSON","obj_type":"CONCEPT","evidence":"Ada was a mathematician.","meta":{"source":"DOC_ID","confidence":0.8,"subject_profile":{"type":"PERSON","aliases":[],"nationality":[],"birth":null,"death":null,"occupations":[],"titles":[],"categories":[],"same_as":[]},"attribute":{"name":"occupation","values":[{"value":"mathematician","normalized":"mathematician","confidence":0.8,"source":"DOC_ID","evidence":"Ada was a mathematician."}]}}}]\n'
-            "Each note object MUST contain the keys:\n"
-            '  "subj", "pred", "obj", "subj_type", "obj_type", "evidence", "meta"\n'
-            "Populate them as follows:\n"
-            '  - "subj","pred","obj","evidence" are non-empty strings; evidence is a verbatim snippet (>=4 chars).\n'
-            '  - "subj_type","obj_type" must be one of ["PERSON","WORK","ORG","PLACE","EVENT","CONCEPT","TIME"].\n'
-            '  - "pred" should use canonical attributes like ["occupation","title","category","nationality","born_on","died_on","spouse","parent","authored_by","performed_by","member_of","located_in","headquartered_in","label","same_as","alias_of","type"].\n'
-            '  - For occupations, acceptable surface forms include ["occupation","profession","job","works as","career","title (when occupational)"]; ALWAYS output meta.attribute.name="occupation".\n'
-            f'  - "meta" MUST include: {{"source": "{doc_id}", "confidence": float 0-1, "subject_profile": {{}}, "attribute": {{...}}}}\n'
-            '       * "subject_profile" = {"type": <subj_type>, "aliases": [], "nationality": [], "birth": null, "death": null, "occupations": [], "titles": [], "categories": [], "same_as": []}. Fill lists when evidence gives the data; use [] when unknown.\n'
-            f'       * "attribute" = {{"name": <same as pred>, "values": [{{"value": <raw>, "normalized": <canonical or same>, "confidence": 0-1, "source": "{doc_id}", "evidence": <snippet>}}]}}\n'
-            '       * Set "object_profile" when the object is an entity (type + aliases). Otherwise omit or use null.\n'
-            "Use canonical vocabulary (e.g., map 'comic artist' -> 'cartoonist', 'American' -> 'United States') when obvious; otherwise repeat the raw value.\n\n"
-            "SUBJECT & PRONOUN GUIDANCE:\n"
-            f"• Treat the document title or provided entity (“{main_entity}”) as the PRIMARY SUBJECT. At least ~80% of notes should anchor on this subject or a direct alias unless the text clearly switches to a new entity.\n"
-            "• When the text introduces a different person/place/organization, you may emit notes for that entity, but the subject must be the explicit name of that entity—not the primary subject.\n"
-            "• Never leave Subject/Object fields as pronouns. Resolve he/she/they/it/this/该人/此地等 pronouns to their concrete entity names based on context. If you cannot resolve the pronoun, skip the note.\n"
-            "• Keep subject/object capitalization and parentheses consistent (e.g., “National Basketball Association (NBA)” vs “NBA”).\n"
-            "\n"
-            "RELATION COVERAGE:\n"
-            "Capture every important relation tied to the primary subject, including but not limited to birth/death dates, birthplaces, citizenship/nationality, occupations/titles, employers/affiliations, works, awards, spouse/parents, capital_of/located_in, cause/effect, authored_by/authored_of, and key events. When a relation has multiple values (e.g., multiple occupations or spouses), emit one note per value. Skipping these core schema relations makes structured retrieval impossible.\n"
-            "\n"
-            "Extraction Priority / 抽取优先级（携带主体）：\n"
-            "A) FULLNAME was/is a/an <NOUN> → (subj=FULLNAME, pred=occupation, obj=<NOUN>)\n"
-            "B) FULLNAME married <NAME> → (subj=FULLNAME, pred=spouse, obj=<NAME>)\n"
-            "C) FULLNAME was born in <PLACE> → (subj=FULLNAME, pred=born_in, obj=<PLACE>)\n"
-            "当句子以代词开头且无法确定代词指代实体时，跳过该句的抽取。\n\n"
-            f"{attr_rules}\n"
-            "STYLE / 写作规范:\n"
-            "1) 不得使用代词（如 他/她/它/他们/其/该/this/that/they 等）作为主语。\n"
-            "2) 始终使用最具体、可辨识的实体全名或规范简称（如“Tim Berners-Lee”，“万科企业股份有限公司（万科）”）。\n"
-            "3) 若上下文能确定实体，统一回填实体全称，不要写‘他/她/其/该公司’。\n"
-            "4) Replace ALL pronouns with resolved entity names: he, she, it, they, this, that, these, those, his, her, their（以及中文代词：他、她、它、他们、其、该、这、那、这些、那些）均需替换为明确实体或名词。不得在“subj”“obj”“attribute.values”中保留代词。\n"
-            "5) 主语/宾语字段若仍是代词属于严重违规（Subject/Object fields may NOT contain pronouns），必须回填具体实体；如无法确认，请不要输出该三元组。\n"
-            "6) Evidence must remain verbatim—even when 由多句拼接而成，也只能使用原文；如需替换代词，仅在 meta.evidence_canonical 中进行。\n"
-            "7) 若无法确定代词指代的实体，请跳过该条笔记。\n\n"
-            "Examples / 例子:\n"
-            "[Bad] 他在1998年加入公司。\n"
-            "[Good] Tim Berners-Lee 在 1998 年加入万维网联盟（W3C）。\n"
-            "[Bad] She was born in 1988.\n"
-            "[Good] Ada Lovelace was born in 1815.\n\n"
-            "Text:\n"
-            f'"""{source_text}"""\n'
-            "Output only the JSON."
+        return render_prompt(
+            "note_extract.txt",
+            doc_id=doc_id,
+            main_entity=main_entity,
+            attr_rules=attr_rules,
+            source_text=source_text,
         )
 
     @staticmethod
     def _attach_format_reminder(prompt: str) -> str:
-        reminder = (
-            "\n\nREMINDER: 上一次输出不是可解析的 JSON。请仅输出合法的 JSON 数组（无任何说明文字），"
-            "若无可抽取信息则输出空数组 []。格式示例: "
-            '[{"subj":"Alice","pred":"occupation","obj":"engineer","subj_type":"PERSON","obj_type":"CONCEPT",'
-            '"evidence":"Alice is an engineer.","meta":{"source":"DOC_ID","confidence":0.8,"subject_profile":'
-            '{"type":"PERSON","aliases":[],"nationality":[],"birth":null,"death":null,"occupations":[],"titles":[],'
-            '"categories":[],"same_as":[]},"attribute":{"name":"occupation","values":[{"value":"engineer","normalized":'
-            '"engineer","confidence":0.8,"source":"DOC_ID","evidence":"Alice is an engineer."}]}}}]\n'
-        )
-        return prompt + reminder
+        return prompt + load_prompt("note_format_reminder.txt")
+
+    @staticmethod
+    def _summarize_validation_errors(
+        errors: List[Dict[str, Any]],
+        *,
+        limit: int = 3,
+        max_chars: int = 1500,
+    ) -> str:
+        if not errors:
+            return ""
+        parts: List[str] = []
+        for err in errors[:limit]:
+            msg = err.get("message") if isinstance(err, dict) else str(err)
+            if msg:
+                parts.append(str(msg).strip())
+        summary = " || ".join(parts)
+        if len(summary) > max_chars:
+            summary = summary[:max_chars].rstrip() + "..."
+        return summary
 
     @staticmethod
     def _attribute_instruction_block() -> str:
@@ -400,6 +374,19 @@ class NoteGenerator:
             return True
         return False
 
+    @staticmethod
+    def _parse_context_limit(snippet: str) -> Optional[tuple[int, int]]:
+        if not snippet:
+            return None
+        match_ctx = re.search(r"maximum context length is\s+(\d+)", snippet, re.I)
+        match_in = re.search(r"request has\s+(\d+)\s+input tokens", snippet, re.I)
+        if not match_ctx or not match_in:
+            return None
+        try:
+            return int(match_ctx.group(1)), int(match_in.group(1))
+        except (TypeError, ValueError):
+            return None
+
     def _call(self, prompt: str, *, stop: List[str] | None = None, max_tokens: int | None = None) -> str:
         attempts = max(1, self._retry_max_attempts)
         last_exc: Exception | None = None
@@ -424,8 +411,8 @@ class NoteGenerator:
                 available = 1
             if call_max_tokens > available:
                 call_max_tokens = available
-        req_tokens = max(1, prompt_tokens + call_max_tokens)
         for attempt in range(attempts):
+            req_tokens = max(1, prompt_tokens + call_max_tokens)
             endpoint = self._choose_endpoint(req_tokens)
             self._inflight_tokens[endpoint] = self._inflight_tokens.get(endpoint, 0) + req_tokens
             t0 = time.time()
@@ -508,6 +495,21 @@ class NoteGenerator:
                 resp = exc.response if hasattr(exc, "response") else None
                 status = getattr(resp, "status_code", None)
                 snippet = self._error_snippet(resp)
+                if status == 400 and snippet and ("max_tokens" in snippet or "max_completion_tokens" in snippet):
+                    parsed = self._parse_context_limit(snippet)
+                    if parsed:
+                        max_ctx, input_tokens = parsed
+                        allowed = max(1, max_ctx - input_tokens - 8)
+                        if allowed < call_max_tokens:
+                            logger.warning(
+                                "Reducing max_tokens from {} to {} due to context limit (max_ctx={} input={})",
+                                call_max_tokens,
+                                allowed,
+                                max_ctx,
+                                input_tokens,
+                            )
+                            call_max_tokens = allowed
+                            continue
                 if self._maybe_disable_json_mode(resp, snippet):
                     logger.warning(
                         "Disabling JSON mode after HTTP error status={} body_snippet={}",
@@ -652,14 +654,7 @@ class NoteGenerator:
         # Final salvage: if仍然无法解析，则请求模型把上一次输出修正为严格 JSON
         if not parsed_notes and last_raw:
             try:
-                repair_prompt = (
-                    "The previous response failed to parse as JSON.\n"
-                    "You must return a valid JSON array of objects with keys "
-                    '["subj","pred","obj","subj_type","obj_type","evidence","meta"]. '
-                    "Use the same factual content but fix formatting and quoting. "
-                    "Return ONLY the JSON array, nothing else.\n"
-                    f"Previous response:\n{last_raw}"
-                )
+                repair_prompt = render_prompt("note_repair_parse.txt", last_raw=last_raw)
                 t0 = time.time()
                 repaired_raw = self._call(repair_prompt, stop=stop_sequences, max_tokens=call_max_tokens)
                 t1 = time.time()
@@ -697,6 +692,47 @@ class NoteGenerator:
         validation_result = validate_and_normalize(serialized, doc_id, chunk_id)
         t4 = time.time()
         errors = validation_result.get("errors") or []
+        if errors and self._validation_retry > 0 and last_raw:
+            best_result = validation_result
+            best_errors = errors
+            best_count = len(best_result.get("valid_notes") or [])
+            for retry_idx in range(self._validation_retry):
+                error_summary = self._summarize_validation_errors(best_errors)
+                repair_prompt = render_prompt(
+                    "note_repair_validation.txt",
+                    error_summary=error_summary,
+                    last_raw=last_raw,
+                )
+                repaired_raw = self._call(repair_prompt, stop=stop_sequences, max_tokens=call_max_tokens)
+                parsed_notes = self.parser.parse(repaired_raw, doc_id)
+                if parsed_notes:
+                    try:
+                        self._resolve_pronoun_subjects(chunk, parsed_notes)
+                    except Exception as exc:  # noqa: BLE001
+                        logger.debug(
+                            "Pronoun resolution skipped after validation retry doc={} chunk={} err={}",
+                            doc_id,
+                            chunk_id,
+                            exc,
+                        )
+                validation_result = validate_and_normalize(
+                    json.dumps(parsed_notes, ensure_ascii=False), doc_id, chunk_id
+                )
+                errors = validation_result.get("errors") or []
+                note_count = len(validation_result.get("valid_notes") or [])
+                if note_count > best_count or len(errors) < len(best_errors):
+                    best_result = validation_result
+                    best_errors = errors
+                    best_count = note_count
+                last_raw = repaired_raw
+                if not errors:
+                    break
+            validation_result = best_result
+            errors = best_errors
+            if best_errors:
+                self._stats["validation_retries_exhausted"] = (
+                    self._stats.get("validation_retries_exhausted", 0) + 1
+                )
         if errors:
             logger.warning("Validation issues doc={} chunk={} details={}", doc_id, chunk_id, errors)
             self._stats["validation_failures"] = self._stats.get("validation_failures", 0) + 1

@@ -1,0 +1,6 @@
+You are re-ranking notes for answering a question.
+Question: {question}
+For each candidate note, provide a confidence score between 0 and 100 indicating how well it helps answer the question.
+Return strict JSON list: [{{"idx": <int>, "score": <0-100>, "labels": ["pred_hit","alias_hit","pronoun_risk","year_hit"]}}, ...]
+Candidates:
+{candidates}

@@ -7,8 +7,9 @@ from typing import Any, Dict
 
 
 CONFIG_ENV_VAR = "ANO_RAG_CONFIG"
-DEFAULT_EMBED_MODEL = "/home/wjk/models/qwen3-emb"
-DEFAULT_EMBED_DEVICE = "cpu"
+DEFAULT_EMBED_MODEL = "qwen3-embedding"
+DEFAULT_EMBED_DEVICE = "cuda"
+DEFAULT_EMBED_ENDPOINT = "http://127.0.0.1:8001/v1"
 
 
 DEFAULT_CONFIG: Dict[str, Any] = {
@@ -92,8 +93,10 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         },
         "embedding": {
             "enabled": True,
-            "provider": "qwen3",
+            "provider": "vllm",
             "model": DEFAULT_EMBED_MODEL,
+            "endpoint": DEFAULT_EMBED_ENDPOINT,
+            "api_key": "sk-no-key-required",
             "model_path_override": None,
             "cache_dir": None,
             "download_dir": None,
@@ -142,6 +145,19 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "final_weights": {"pre": 0.3, "rerank": 0.5, "struct": 0.2},
     },
     "notes": {"out_path": "notes/notes.jsonl", "indexes_dir": "indexes/"},
+    "hotpot_entry": {
+        "data": "data/hotpot_dev_distractor_5_jsonl.jsonl",
+        "cache_dir": "result/cache",
+        "output_dir": "result",
+        "top_k": 10,
+        "limit": 0,
+        "workers": 1,
+        "debug_dir": "result/debug",
+        "debug_max_notes": 50,
+        "stall_warn_sec": 300.0,
+        "stall_abort_sec": 900.0,
+        "force_build": False,
+    },
     "parsing": {
         "allow_jsonl": True,
         "enable_array_packer": True,
@@ -150,6 +166,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "loose_split_key": "subj",
         "max_tokens": 768,
         "parse_retry": 1,
+        "validation_retry": 1,
         "stop": ['"]\n', "\n]", "\n\nEND", "END_JSON", "\n\n"],
         "assume_valid_json": False,
     },
@@ -185,6 +202,8 @@ ENV_OVERRIDES = {
     "retriever.embedding.download_dir": "EMB_DOWNLOAD_DIR",
     "retriever.embedding.device": "EMB_DEVICE",
     "retriever.embedding.dtype": "EMB_DTYPE",
+    "retriever.embedding.endpoint": "EMB_ENDPOINT",
+    "retriever.embedding.api_key": "EMB_API_KEY",
 }
 
 

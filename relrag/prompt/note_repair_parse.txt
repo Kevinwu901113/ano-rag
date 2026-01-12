@@ -1,0 +1,7 @@
+The previous response failed to parse as JSON.
+You must return a valid JSON array of objects with keys ["subj","pred","obj","subj_type","obj_type","evidence","meta"].
+Use the same factual content but fix formatting and quoting.
+Type rules: all strings must be quoted; year/date values must be strings; meta.subject_profile.birth/death must be string or null; only confidence fields may be numbers.
+Return ONLY the JSON array, nothing else.
+Previous response:
+{last_raw}

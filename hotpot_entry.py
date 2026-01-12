@@ -1,11 +1,13 @@
 import argparse
 import json
 import re
+import shutil
+import sys
 import time
 from copy import deepcopy
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, TextIO, Tuple
 
 from loguru import logger
 
@@ -15,6 +17,17 @@ from relrag.indexer.bm25_index import BM25IndexBuilder
 from relrag.indexer.embedding_index import EmbeddingIndexBuilder
 from relrag.retriever.note_store import NoteStore
 from relrag.utils.output_eval import extract_final_answer, has_final_tag
+
+
+DEFAULT_STALL_WARN_SEC = 300.0
+DEFAULT_STALL_ABORT_SEC = 900.0
+DEFAULT_TOP_K = 10
+DEFAULT_LIMIT = 0
+DEFAULT_WORKERS = 1
+DEFAULT_CACHE_DIR = "result/cache"
+DEFAULT_OUTPUT_DIR = "result"
+DEFAULT_DEBUG_DIR = "result/debug"
+DEFAULT_DEBUG_MAX_NOTES = 50
 
 
 def _load_jsonl(path: Path) -> Iterable[Dict[str, Any]]:
@@ -34,6 +47,65 @@ def _slugify_title(title: str, max_len: int = 60) -> str:
 def _make_doc_id(qid: str, idx: int, title: str) -> str:
     slug = _slugify_title(title)
     return f"{qid}_{idx:02d}_{slug}"
+
+
+def _count_examples(path: Path, limit: int) -> int:
+    total = 0
+    with path.open("r", encoding="utf-8") as handle:
+        for line in handle:
+            if not line.strip():
+                continue
+            total += 1
+            if limit and total >= limit:
+                break
+    return total
+
+
+class ProgressBar:
+    def __init__(
+        self,
+        total: int,
+        stream: Optional[TextIO] = None,
+        min_interval_sec: float = 0.5,
+    ) -> None:
+        self.total = max(0, int(total))
+        self.processed = 0
+        self._stream = stream or sys.stderr
+        self._min_interval_sec = max(0.05, float(min_interval_sec))
+        self._last_update = 0.0
+        self._last_len = 0
+
+    def update(self, step: int = 1) -> None:
+        self.processed += max(0, int(step))
+        now = time.time()
+        if self.total and self.processed < self.total:
+            if (now - self._last_update) < self._min_interval_sec:
+                return
+        self._last_update = now
+        self._render()
+
+    def _render(self) -> None:
+        total = self.total
+        processed = min(self.processed, total) if total else self.processed
+        remaining = max(0, total - processed) if total else 0
+        if total > 0:
+            columns = shutil.get_terminal_size((80, 20)).columns
+            bar_width = max(10, min(40, columns - 40))
+            ratio = min(1.0, processed / total)
+            filled = int(bar_width * ratio)
+            bar = "=" * filled + "-" * (bar_width - filled)
+            msg = f"[{bar}] {processed}/{total} (remaining {remaining})"
+        else:
+            msg = f"{processed} processed"
+        pad = " " * max(0, self._last_len - len(msg))
+        self._stream.write("\r" + msg + pad)
+        self._stream.flush()
+        self._last_len = len(msg)
+
+    def close(self) -> None:
+        self._render()
+        self._stream.write("\n")
+        self._stream.flush()
 
 
 def _write_docs_for_example(
@@ -138,6 +210,69 @@ def _build_supporting_facts(retrieved_context: List[Dict[str, Any]]) -> List[Lis
     return facts
 
 
+def _collect_debug_notes(
+    note_store: NoteStore,
+    note_ids: Iterable[str],
+    max_notes: int,
+) -> Dict[str, Any]:
+    collected: Dict[str, Any] = {}
+    limit = max(0, int(max_notes))
+    for note_id in note_ids:
+        if not note_id or note_id in collected:
+            continue
+        note = note_store.get_weak(note_id)
+        if note:
+            collected[note_id] = note
+        if limit and len(collected) >= limit:
+            break
+    return collected
+
+
+def _write_debug_artifacts(
+    record: Dict[str, Any],
+    *,
+    debug_dir: Path,
+    docs_dir: Path,
+    notes_path: Path,
+    index_dir: Path,
+    doc_index: Dict[str, Dict[str, Any]],
+    note_store: NoteStore,
+    max_notes: int,
+) -> Optional[Path]:
+    qid = str(record.get("_id") or "unknown")
+    debug_dir.mkdir(parents=True, exist_ok=True)
+    retrieve_result = (record.get("intermediate") or {}).get("retrieve_result") or {}
+    support_note_ids = retrieve_result.get("support_note_ids") or []
+    evidence_note_ids = [
+        ev.get("note_id")
+        for ev in (retrieve_result.get("evidence") or [])
+        if ev.get("note_id")
+    ]
+    merged_note_ids = list(dict.fromkeys(list(support_note_ids) + list(evidence_note_ids)))
+    notes = _collect_debug_notes(note_store, merged_note_ids, max_notes=max_notes)
+
+    payload = {
+        "qid": qid,
+        "question": record.get("question"),
+        "paths": {
+            "docs_dir": str(docs_dir),
+            "notes_path": str(notes_path),
+            "indexes_dir": str(index_dir),
+        },
+        "doc_index": doc_index,
+        "note_ids": {
+            "support": support_note_ids,
+            "evidence": evidence_note_ids,
+            "saved": list(notes.keys()),
+        },
+        "notes": notes,
+        "record": record,
+    }
+    debug_path = debug_dir / f"{qid}.json"
+    debug_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    return debug_path
+
+
 def _resolve_llm_config(args: argparse.Namespace) -> Tuple[str, str]:
     cfg = global_config.load_config()
     endpoint = args.endpoint or (cfg.get("vllm") or {}).get("endpoint")
@@ -145,6 +280,37 @@ def _resolve_llm_config(args: argparse.Namespace) -> Tuple[str, str]:
     if not endpoint or not model:
         raise ValueError("LLM endpoint/model is required (use args or config)")
     return endpoint, model
+
+
+def _load_entry_config() -> Dict[str, Any]:
+    cfg = global_config.load_config()
+    entry_cfg = cfg.get("hotpot_entry") or cfg.get("entry") or {}
+    if not isinstance(entry_cfg, dict):
+        return {}
+    return entry_cfg
+
+
+def _coerce_int(value: Any, default: int) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return int(default)
+
+
+def _coerce_float(value: Any, default: float) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return float(default)
+
+
+def _pick_arg(args: argparse.Namespace, entry_cfg: Dict[str, Any], name: str, default: Any) -> Any:
+    value = getattr(args, name, None)
+    if value is not None:
+        return value
+    if name in entry_cfg:
+        return entry_cfg.get(name)
+    return default
 
 
 def _ensure_index(
@@ -249,6 +415,8 @@ def _process_example(
     llm_model: str,
     top_k: int,
     force_build: bool,
+    debug_dir: Optional[Path],
+    debug_max_notes: int,
 ) -> Dict[str, Any]:
     qid = str(example.get("_id") or "unknown")
     question = str(example.get("question") or "")
@@ -306,6 +474,18 @@ def _process_example(
             "intent": retrieve_result.get("intent"),
         },
     }
+    if debug_dir:
+        debug_path = _write_debug_artifacts(
+            output_record,
+            debug_dir=debug_dir,
+            docs_dir=docs_dir,
+            notes_path=notes_path,
+            index_dir=index_dir,
+            doc_index=doc_index,
+            note_store=note_store,
+            max_notes=debug_max_notes,
+        )
+        output_record["intermediate"]["debug_path"] = str(debug_path) if debug_path else None
 
     return output_record
 
@@ -313,19 +493,62 @@ def _process_example(
 def _drain_futures(
     future_map: Dict[Any, str],
     handle,
-) -> int:
-    processed = 0
-    for future in as_completed(future_map):
-        qid = future_map[future]
-        try:
-            record = future.result()
-        except Exception as exc:
-            logger.error("Failed example {}: {}", qid, exc)
+    progress: Optional[ProgressBar] = None,
+    stall_warn_sec: float = DEFAULT_STALL_WARN_SEC,
+    stall_abort_sec: float = DEFAULT_STALL_ABORT_SEC,
+) -> Tuple[int, int]:
+    completed = 0
+    succeeded = 0
+    pending = set(future_map)
+    last_progress = time.time()
+    stall_warn_sec = max(1.0, float(stall_warn_sec))
+    stall_abort_sec = float(stall_abort_sec)
+    if stall_abort_sec <= 0:
+        stall_abort_sec = 0.0
+    while pending:
+        done, pending = wait(pending, timeout=stall_warn_sec, return_when=FIRST_COMPLETED)
+        if not done:
+            idle_for = time.time() - last_progress
+            sample = [future_map[f] for f in list(pending)[:5]]
+            logger.warning(
+                "No completed futures for {:.0f}s; still waiting on {} examples (sample: {})",
+                idle_for,
+                len(pending),
+                sample,
+            )
+            if stall_abort_sec and idle_for >= stall_abort_sec:
+                logger.error(
+                    "Aborting {} stalled examples after {:.0f}s idle",
+                    len(pending),
+                    idle_for,
+                )
+                for future in list(pending):
+                    qid = future_map.get(future, "unknown")
+                    if not future.cancel():
+                        logger.warning("Failed to cancel stalled future qid={}", qid)
+                    else:
+                        logger.error("Cancelled stalled future qid={}", qid)
+                if progress is not None:
+                    progress.update(len(pending))
+                completed += len(pending)
+                pending.clear()
+                break
             continue
-        handle.write(json.dumps(record, ensure_ascii=False) + "\n")
-        handle.flush()
-        processed += 1
-    return processed
+        for future in done:
+            qid = future_map.get(future, "unknown")
+            try:
+                record = future.result()
+            except Exception as exc:
+                logger.error("Failed example {}: {}", qid, exc)
+            else:
+                handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+                handle.flush()
+                succeeded += 1
+            completed += 1
+            last_progress = time.time()
+            if progress is not None:
+                progress.update(1)
+    return completed, succeeded
 
 
 def _write_official_output(jsonl_path: Path, output_dir: Path, timestamp: int) -> Path:
@@ -350,15 +573,19 @@ def _write_official_output(jsonl_path: Path, output_dir: Path, timestamp: int) -
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="HotpotQA JSONL entry for RelRAG")
-    parser.add_argument("--data", required=True, help="Path to HotpotQA JSONL dataset")
+    parser.add_argument("--data", help="Path to HotpotQA JSONL dataset (fallback to config)")
     parser.add_argument("--endpoint", help="vLLM endpoint (defaults to config)")
     parser.add_argument("--model", help="LLM model name (defaults to config)")
-    parser.add_argument("--top_k", type=int, default=10, help="Top-k retrieval fanout")
-    parser.add_argument("--limit", type=int, default=0, help="Process only first N examples")
-    parser.add_argument("--workers", type=int, default=1, help="Parallel workers (single process)")
-    parser.add_argument("--cache_dir", default="result/cache", help="Cache root for per-question indexes")
-    parser.add_argument("--output_dir", default="result", help="Output directory")
+    parser.add_argument("--top_k", type=int, help="Top-k retrieval fanout (fallback to config)")
+    parser.add_argument("--limit", type=int, help="Process only first N examples (fallback to config)")
+    parser.add_argument("--workers", type=int, help="Parallel workers (single process, fallback to config)")
+    parser.add_argument("--cache_dir", help="Cache root for per-question indexes (fallback to config)")
+    parser.add_argument("--output_dir", help="Output directory (fallback to config)")
     parser.add_argument("--force_build", action="store_true", help="Rebuild indexes even if cached")
+    parser.add_argument("--debug_dir", help="Debug artifacts output directory (set empty to disable, fallback to config)")
+    parser.add_argument("--debug_max_notes", type=int, help="Max notes to store per question in debug dump (fallback to config)")
+    parser.add_argument("--stall_warn_sec", type=float, help="Warn if no worker finishes within this many seconds (fallback to config)")
+    parser.add_argument("--stall_abort_sec", type=float, help="Abort pending workers after this many idle seconds (0 to disable, fallback to config)")
 
     args = parser.parse_args()
     repo_root = Path(__file__).resolve().parent
@@ -366,6 +593,31 @@ def main() -> None:
     def _resolve_path(path_str: str) -> Path:
         path = Path(path_str)
         return path if path.is_absolute() else repo_root / path
+
+    entry_cfg = _load_entry_config()
+    args.data = _pick_arg(args, entry_cfg, "data", None)
+    if not args.data:
+        raise ValueError("Dataset path missing. Provide --data or set hotpot_entry.data in config.")
+    args.cache_dir = _pick_arg(args, entry_cfg, "cache_dir", DEFAULT_CACHE_DIR)
+    args.output_dir = _pick_arg(args, entry_cfg, "output_dir", DEFAULT_OUTPUT_DIR)
+    args.top_k = _coerce_int(_pick_arg(args, entry_cfg, "top_k", DEFAULT_TOP_K), DEFAULT_TOP_K)
+    args.limit = _coerce_int(_pick_arg(args, entry_cfg, "limit", DEFAULT_LIMIT), DEFAULT_LIMIT)
+    args.workers = _coerce_int(_pick_arg(args, entry_cfg, "workers", DEFAULT_WORKERS), DEFAULT_WORKERS)
+    args.debug_dir = _pick_arg(args, entry_cfg, "debug_dir", DEFAULT_DEBUG_DIR)
+    args.debug_max_notes = _coerce_int(
+        _pick_arg(args, entry_cfg, "debug_max_notes", DEFAULT_DEBUG_MAX_NOTES),
+        DEFAULT_DEBUG_MAX_NOTES,
+    )
+    args.stall_warn_sec = _coerce_float(
+        _pick_arg(args, entry_cfg, "stall_warn_sec", DEFAULT_STALL_WARN_SEC),
+        DEFAULT_STALL_WARN_SEC,
+    )
+    args.stall_abort_sec = _coerce_float(
+        _pick_arg(args, entry_cfg, "stall_abort_sec", DEFAULT_STALL_ABORT_SEC),
+        DEFAULT_STALL_ABORT_SEC,
+    )
+    if entry_cfg.get("force_build"):
+        args.force_build = True
 
     data_path = _resolve_path(args.data)
     if not data_path.exists():
@@ -377,13 +629,19 @@ def main() -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     timestamp = int(time.time())
     output_path = output_dir / f"result_{timestamp}.jsonl"
+    total_examples = _count_examples(data_path, args.limit)
+    progress = ProgressBar(total_examples)
+    debug_dir = _resolve_path(args.debug_dir) if args.debug_dir else None
+    if debug_dir:
+        debug_dir.mkdir(parents=True, exist_ok=True)
 
     logger.info("Writing results to {}", output_path)
     processed = 0
+    completed = 0
     with output_path.open("w", encoding="utf-8") as handle:
         if args.workers <= 1:
             for example in _load_jsonl(data_path):
-                if args.limit and processed >= args.limit:
+                if args.limit and completed >= args.limit:
                     break
                 try:
                     record = _process_example(
@@ -393,6 +651,8 @@ def main() -> None:
                         llm_model=llm_model,
                         top_k=args.top_k,
                         force_build=args.force_build,
+                        debug_dir=debug_dir,
+                        debug_max_notes=args.debug_max_notes,
                     )
                     handle.write(json.dumps(record, ensure_ascii=False) + "\n")
                     handle.flush()
@@ -400,6 +660,9 @@ def main() -> None:
                 except Exception as exc:
                     qid = example.get("_id")
                     logger.error("Failed example {}: {}", qid, exc)
+                finally:
+                    completed += 1
+                    progress.update(1)
         else:
             max_workers = max(1, int(args.workers))
             future_map: Dict[Any, str] = {}
@@ -418,16 +681,36 @@ def main() -> None:
                         llm_model,
                         args.top_k,
                         args.force_build,
+                        debug_dir,
+                        args.debug_max_notes,
                     )
                     future_map[future] = qid
                     scheduled += 1
                     if len(future_map) >= buffer_cap:
-                        processed += _drain_futures(future_map, handle)
+                        done_count, ok_count = _drain_futures(
+                            future_map,
+                            handle,
+                            progress=progress,
+                            stall_warn_sec=args.stall_warn_sec,
+                            stall_abort_sec=args.stall_abort_sec,
+                        )
+                        completed += done_count
+                        processed += ok_count
                         future_map = {}
                 if future_map:
-                    processed += _drain_futures(future_map, handle)
+                    done_count, ok_count = _drain_futures(
+                        future_map,
+                        handle,
+                        progress=progress,
+                        stall_warn_sec=args.stall_warn_sec,
+                        stall_abort_sec=args.stall_abort_sec,
+                    )
+                    completed += done_count
+                    processed += ok_count
 
-    logger.info("Completed {} examples", processed)
+    progress.close()
+    failed = completed - processed
+    logger.info("Completed {} examples (failed {})", processed, failed)
     official_path = _write_official_output(output_path, output_dir, timestamp)
     logger.info("Official-format output written to {}", official_path)
 

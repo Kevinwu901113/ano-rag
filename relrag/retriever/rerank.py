@@ -5,18 +5,13 @@ from typing import Any, Dict, List, Optional
 
 from loguru import logger
 
+from relrag.prompt import render_prompt
 from relrag.utils.text_builders import build_note_text_for_rank
 from relrag.utils.llm_client import LLMChatClient
 
 
 class LLMReranker:
-    PROMPT_TEMPLATE = """You are re-ranking notes for answering a question.
-Question: {question}
-For each candidate note, provide a confidence score between 0 and 100 indicating how well it helps answer the question.
-Return strict JSON list: [{{"idx": <int>, "score": <0-100>, "labels": ["pred_hit","alias_hit","pronoun_risk","year_hit"]}}, ...]
-Candidates:
-{candidates}
-"""
+    PROMPT_NAME = "rerank.txt"
 
     def __init__(self, cfg: Optional[Dict[str, Any]] = None, lm_cfg: Optional[Dict[str, Any]] = None) -> None:
         self.cfg = cfg or {}
@@ -76,7 +71,7 @@ Candidates:
             note = candidate.get("note") or {}
             text = build_note_text_for_rank(note, max_len=768)
             lines.append(f"{idx}. note_id={note.get('note_id')} :: {text}")
-        return self.PROMPT_TEMPLATE.format(question=question, candidates="\n".join(lines))
+        return render_prompt(self.PROMPT_NAME, question=question, candidates="\n".join(lines))
 
     def _parse_scores(self, content: str, expected: int) -> Dict[int, Dict[str, Any]]:
         text = content.strip()

@@ -127,6 +127,7 @@ class HybridRetriever:
                     "struct_score": struct_score,
                     "sources": item.get("sources", {}),
                     "subject_score": scoring["subject_score"],
+                    "subject_match_by": scoring.get("match_by"),
                     "source_agree": scoring["source_agree"],
                     "struct_path_score": struct_score_map.get(item["note_id"], 0.0),
                     "hybrid_score": scoring["final"],
@@ -158,7 +159,16 @@ class HybridRetriever:
         if not deduped:
             return None
 
-        support_note_ids = [cand["note_id"] for cand in deduped]
+        support_pool = deduped
+        support_filtered = False
+        if self.agreement_threshold > 1:
+            filtered = [
+                cand for cand in deduped if int(cand.get("source_agree", 0)) >= self.agreement_threshold
+            ]
+            if filtered:
+                support_pool = filtered
+                support_filtered = True
+        support_note_ids = [cand["note_id"] for cand in support_pool]
         evidences = structured_pipeline._schedule_evidences(
             note_store,
             support_note_ids,
@@ -175,6 +185,7 @@ class HybridRetriever:
                 "labels": cand.get("labels", []),
                 "agreement": cand.get("source_agree", 0),
                 "subject_score": cand.get("subject_score", 0.0),
+                "subject_match_by": cand.get("subject_match_by"),
             }
             for cand in deduped[:10]
         ]
@@ -184,11 +195,18 @@ class HybridRetriever:
             "agreement": best_hybrid.get("source_agree", 0),
             "subject_score": best_hybrid.get("subject_score", 0.0),
         }
-        consensus = self._aggregate_consensus(structured_candidates, deduped, getattr(intent, "attribute", None))
+        consensus_all = self._aggregate_consensus(structured_candidates, deduped, getattr(intent, "attribute", None))
+        consensus = [
+            item for item in consensus_all if int(item.get("agreement", 0)) >= self.agreement_threshold
+        ]
+        if not consensus:
+            consensus = consensus_all
         best_consensus = consensus[0] if consensus else {}
         if best_consensus:
             best_meta["consensus_label"] = best_consensus.get("label")
             best_meta["consensus_agreement"] = best_consensus.get("agreement", 0)
+        best_meta["agreement_threshold"] = self.agreement_threshold
+        best_meta["meets_agreement"] = int(best_hybrid.get("source_agree", 0)) >= self.agreement_threshold
 
         self.metrics.log_query(
             question,
@@ -229,6 +247,9 @@ class HybridRetriever:
                 "best": best_meta,
                 "agreement_threshold": self.agreement_threshold,
                 "consensus": consensus,
+                "consensus_all": consensus_all,
+                "support_filtered": support_filtered,
+                "support_pool_size": len(support_pool),
             },
             "meta": meta,
         }
@@ -306,6 +327,10 @@ class HybridRetriever:
         seed_texts: Sequence[str],
     ) -> Optional[Dict[str, Any]]:
         subj_score = subject_match(note.get("subj"), seed_texts, alias_lookup)
+        match_by = "subject"
+        if subj_score <= 0.0:
+            subj_score = self._entity_match_score(note, seed_texts)
+            match_by = "entity" if subj_score > 0.0 else "none"
         if subj_score <= 0.0:
             return None
         source_agree = int(bm25_score is not None) + int(embed_score is not None) + int(struct_path_score is not None)
@@ -317,7 +342,7 @@ class HybridRetriever:
             + weights.get("subject_match", 2.0) * subj_score
             + weights.get("source_agree", 1.0) * float(source_agree)
         )
-        return {"final": final, "subject_score": subj_score, "source_agree": source_agree}
+        return {"final": final, "subject_score": subj_score, "source_agree": source_agree, "match_by": match_by}
 
     def _normalize_label(self, attribute: Optional[str], value: Optional[str]) -> Optional[str]:
         if value is None:
@@ -329,6 +354,24 @@ class HybridRetriever:
             canonical, _ = normalize_slot_value(attribute, text)
             text = canonical or text
         return text.strip() or None
+
+    @staticmethod
+    def _normalize_token(text: str) -> str:
+        value = (text or "").strip().lower()
+        value = value.replace("-", " ").replace(".", " ")
+        return " ".join(value.split())
+
+    def _entity_match_score(self, note: Dict[str, Any], seed_texts: Sequence[str]) -> float:
+        meta = note.get("meta") or {}
+        entities = meta.get("entities") or []
+        if not entities or not seed_texts:
+            return 0.0
+        ent_norms = {self._normalize_token(ent) for ent in entities if ent}
+        for seed in seed_texts:
+            seed_norm = self._normalize_token(seed)
+            if seed_norm and seed_norm in ent_norms:
+                return 0.2
+        return 0.0
 
 
 def _top1_source(channels: Dict[str, List[Dict[str, Any]]]) -> str:

@@ -16,7 +16,7 @@ from relrag.config.config_loader import config as global_config
 
 VLLM_ENDPOINT = "http://127.0.0.1:8000/v1"
 SERVED_MODEL_NAME = "qwen3-30b-a3b"
-HF_MODEL_ID = "Qwen/Qwen3-30B-A3B-GPTQ-Int4"
+HF_MODEL_ID = "cyankiwi/Qwen3-30B-A3B-Instruct-2507-AWQ-4bit"
 ALLOW_CUSTOM_ENV = "RELRAG_ALLOW_CUSTOM_LLM"
 
 _DEFAULT_PROFILES = {

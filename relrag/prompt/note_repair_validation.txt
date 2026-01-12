@@ -1,0 +1,9 @@
+The previous JSON output failed schema validation. Fix the JSON so EVERY item conforms to the schema.
+Do NOT drop any items. Keep the same number of objects and only remove or rename invalid fields.
+For meta.subject_profile/object_profile, ONLY keep keys: type, aliases, nationality, birth, death, occupations, titles, categories, same_as, description.
+Remove any extra keys like name, founded, website, headquartered_in, members, dissolved, etc.
+Type fixes: meta.subject_profile.birth/death must be string or null (convert numbers to strings). attribute.values[].value/normalized must be strings. Only confidence fields may be numbers.
+Return ONLY a JSON array, no extra text.
+Validation errors (truncated): {error_summary}
+Previous response:
+{last_raw}

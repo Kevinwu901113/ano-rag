@@ -131,6 +131,12 @@ def test_smoke_build_retrieve(disable_hybrid_config, workspace):
     assert (out_path / "indexes" / "predicate_to_notes.json").exists()
     assert (out_path / "indexes" / "graph_edges.jsonl").exists()
     assert (out_path / "indexes" / "inverse_edges.jsonl").exists()
+    stats_path = out_path / "notes_stats.json"
+    assert stats_path.exists()
+    stats = json.loads(stats_path.read_text(encoding="utf-8"))
+    assert "raw_generated" in stats
+    assert "validated" in stats
+    assert "written" in stats
 
     notes_path = str(out_path / "notes.jsonl")
     index_dir = str(out_path / "indexes")

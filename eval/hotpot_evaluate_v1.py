@@ -1,5 +1,5 @@
 import sys
-import ujson as json
+import json
 import re
 import string
 from collections import Counter

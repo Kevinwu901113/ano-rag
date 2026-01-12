@@ -59,8 +59,10 @@ ATTRIBUTE_HINTS = [
             re.compile(r"nationality of (?P<entity>.+?)(?:\?|$)", re.I),
             re.compile(r"what nationality is (?P<entity>.+?)", re.I),
             re.compile(r"where is (?P<entity>.+?) from", re.I),
+            re.compile(r"heritage of (?P<entity>.+?)(?:\?|$)", re.I),
+            re.compile(r"(?P<entity>.+?) heritage\b", re.I),
         ],
-        "keywords": ["nationality", "citizenship", "from which country"],
+        "keywords": ["nationality", "citizenship", "from which country", "heritage", "ethnicity", "ethnic"],
     },
     {
         "name": "born_on",
@@ -88,6 +90,32 @@ ATTRIBUTE_HINTS = [
             re.compile(r"headquarters of (?P<entity>.+?)(?:\?|$)", re.I),
         ],
         "keywords": ["headquarters", "headquartered"]
+    },
+    {
+        "name": "works_for",
+        "weight": 0.8,
+        "regex": [
+            re.compile(r"where does (?P<entity>.+?) work", re.I),
+            re.compile(r"where did (?P<entity>.+?) work", re.I),
+            re.compile(r"(?P<entity>.+?) works for", re.I),
+            re.compile(r"(?P<entity>.+?) worked for", re.I),
+            re.compile(r"(?P<entity>.+?) was a professor at", re.I),
+            re.compile(r"(?P<entity>.+?) teaches at", re.I),
+            re.compile(r"(?P<entity>.+?) employed by", re.I),
+        ],
+        "keywords": ["works for", "worked for", "employed by", "professor at", "teaches at"],
+    },
+    {
+        "name": "founded_on",
+        "weight": 0.8,
+        "regex": [
+            re.compile(r"when was (?P<entity>.+?) founded", re.I),
+            re.compile(r"what year was (?P<entity>.+?) founded", re.I),
+            re.compile(r"year was (?P<entity>.+?) founded", re.I),
+            re.compile(r"(?P<entity>.+?) was founded in", re.I),
+            re.compile(r"(?P<entity>.+?) was established in", re.I),
+        ],
+        "keywords": ["founded", "founded in", "founded on", "established", "year founded"],
     },
     {
         "name": "authored_by",
@@ -134,7 +162,7 @@ ATTRIBUTE_HINTS = [
         "regex": [
             re.compile(r"who\s+(?:starred|acted)\s+in\s+(?P<entity>.+?)(?:\?|$)", re.I),
         ],
-        "keywords": ["starred in", "acted in"],
+        "keywords": ["starred in", "acted in", "starred", "starring", "features", "featuring"],
     },
 ]
 
@@ -147,6 +175,8 @@ ATTRIBUTE_TYPE_HINTS = {
     "died_on": "PERSON",
     "headquartered_in": "ORG",
     "member_of": "PERSON",
+    "works_for": "PERSON",
+    "founded_on": "ORG",
 }
 
 
@@ -271,4 +301,3 @@ class AnswerIntentDetector:
             if value == canon or value in synonyms:
                 return canon
         return value
-

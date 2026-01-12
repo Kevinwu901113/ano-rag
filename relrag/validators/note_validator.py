@@ -7,7 +7,7 @@ from pathlib import Path
 
 from jsonschema import Draft7Validator, ValidationError
 
-from relrag.schema.note_schema_v1 import NOTE_JSON_SCHEMA, PRED_SYNONYM_SETS, PRED2ATTR
+from relrag.schema.note_schema_v1 import NOTE_JSON_SCHEMA, PRED_SYNONYM_SETS, PRED2ATTR, PROFILE_SCHEMA
 from relrag.schema.note_schema_v1 import ALLOWED_PREDICATES
 from relrag.schema.vocabulary import normalize_entity_name, normalize_slot_value
 from relrag.utils import TextUtils
@@ -26,6 +26,8 @@ PROFILE_SLOT_MAP = {
 }
 
 DEFINITION_TRIGGERS = (" is a ", " is an ", " was a ", " is the ", " is an honorary ")
+
+_PROFILE_ALLOWED_KEYS = set(PROFILE_SCHEMA.get("properties", {}).keys())
 
 
 def _clamp(value: Any, default: float) -> float:
@@ -148,6 +150,7 @@ def _type_pattern_ok(subj_type: str, pred: str, obj_type: str) -> float:
         "educated_at": {("PERSON", "ORG")},
         "position_held": {("PERSON", "CONCEPT"), ("PERSON", "ORG")},
         "founded": {("PERSON", "ORG")},
+        "founded_on": {("ORG", "TIME"), ("ORG", "PLACE")},
         "parent_of": {("PERSON", "PERSON")},
         "child_of": {("PERSON", "PERSON")},
         "residence": {("PERSON", "PLACE")},
@@ -173,7 +176,8 @@ def _ensure_profile(
     if raw_profile is None and allow_null:
         return None
 
-    profile = dict(raw_profile) if isinstance(raw_profile, dict) else {}
+    raw_profile_dict = dict(raw_profile) if isinstance(raw_profile, dict) else {}
+    profile = {k: raw_profile_dict.get(k) for k in _PROFILE_ALLOWED_KEYS if k in raw_profile_dict}
     normalized_name, alias_hit = normalize_entity_name(entity_name)
     alias_candidates: List[str] = []
     existing_aliases = profile.get("aliases")
@@ -287,7 +291,7 @@ def validate_and_normalize(raw_text: str, doc_id: str, chunk_id: str):
         }
 
     patched: List[Dict[str, Any]] = []
-    stats: Dict[str, Any] = {}
+    stats: Dict[str, Any] = {"raw_count": len(parsed)}
     for obj in parsed:
         if not isinstance(obj, dict):
             continue
@@ -384,6 +388,7 @@ def validate_and_normalize(raw_text: str, doc_id: str, chunk_id: str):
     pronoun_notes: List[Dict[str, Any]] = []
     errors: List[Dict[str, Any]] = []
     unmatched_counter: Dict[str, int] = {}
+    dropped_pred_counter: Dict[str, int] = {}
     skipped_count = 0
 
     def _normalize_one(idx: int, item: Dict[str, Any]) -> dict | None:
@@ -428,8 +433,10 @@ def validate_and_normalize(raw_text: str, doc_id: str, chunk_id: str):
                     pred_weight = max(pred_weight, 0.9)
                     break
         if pred not in ALLOWED_PREDICATES:
-            key = raw_attr_name or "<blank>"
-            unmatched_counter[key] = unmatched_counter.get(key, 0) + 1
+            raw_key = raw_attr_name or "<blank>"
+            unmatched_counter[raw_key] = unmatched_counter.get(raw_key, 0) + 1
+            pred_key = pred or raw_key
+            dropped_pred_counter[pred_key] = dropped_pred_counter.get(pred_key, 0) + 1
             skipped_count += 1
             return None
 
@@ -544,10 +551,25 @@ def validate_and_normalize(raw_text: str, doc_id: str, chunk_id: str):
                 stats["pronoun_schema_hits"] = stats.get("pronoun_schema_hits", 0) + 1
             else:
                 errors.append({"index": idx, "message": str(exc), "doc_id": doc_id, "chunk_id": chunk_id})
+                if normalized is not None:
+                    meta = normalized.get("meta")
+                    if not isinstance(meta, dict):
+                        meta = {}
+                        normalized["meta"] = meta
+                    meta.setdefault("validation", "schema_error")
+                    violations = meta.get("violations")
+                    if not isinstance(violations, dict):
+                        violations = {}
+                    violations.setdefault("schema_error", str(exc))
+                    meta["violations"] = violations
+                    valid_notes.append(normalized)
 
+    stats["valid_count"] = len(valid_notes)
     if skipped_count:
         stats["unmatched_predicates"] = unmatched_counter
         stats["skipped_count"] = skipped_count
+    if dropped_pred_counter:
+        stats["dropped_predicates"] = dropped_pred_counter
 
     return {
         "valid_notes": valid_notes,

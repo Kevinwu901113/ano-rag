@@ -30,6 +30,8 @@ class EmbeddingClient:
     def __init__(self, cfg: Optional[Dict[str, Any]] = None) -> None:
         self.cfg = cfg or {}
         self.enabled = bool(self.cfg.get("enabled"))
+        self._auto_build = bool(self.cfg.get("auto_build", False))
+        self._auto_build_attempted = False
         self._index = None
         self._meta_df: Optional[pd.DataFrame] = None
         self._meta_by_id: Dict[int, Dict[str, Any]] = {}
@@ -44,6 +46,14 @@ class EmbeddingClient:
             return
         index_path = Path(self.cfg.get("offline_index_path", "indexes/faiss/notes.faiss"))
         meta_path = Path(self.cfg.get("meta_path", "indexes/faiss/notes.meta.parquet"))
+        if (not index_path.exists() or not meta_path.exists()) and self._auto_build and not self._auto_build_attempted:
+            self._auto_build_attempted = True
+            try:
+                from relrag.indexer.embedding_index import EmbeddingIndexBuilder
+                logger.info("Embedding artifacts missing; auto_build enabled, attempting build.")
+                EmbeddingIndexBuilder(self.cfg).build()
+            except Exception as exc:
+                logger.warning("Embedding auto_build failed: {}", exc)
         if not index_path.exists() or not meta_path.exists():
             logger.warning("Embedding artifacts missing ({} / {}); disabling embedding channel.", index_path, meta_path)
             self.enabled = False
@@ -67,6 +77,9 @@ class EmbeddingClient:
         cache_dir = self._clean_path(self.cfg.get("cache_dir"))
         device = self._resolve_device()
         dtype = self.cfg.get("dtype")
+        endpoint = self.cfg.get("endpoint")
+        api_key = self.cfg.get("api_key")
+        timeout_s = self.cfg.get("timeout_s")
         self._encoder = get_shared_encoder(
             provider,
             model,
@@ -74,6 +87,9 @@ class EmbeddingClient:
             cache_dir=cache_dir,
             device=device,
             dtype=dtype,
+            endpoint=endpoint,
+            api_key=api_key,
+            request_timeout_s=timeout_s,
         )
 
     def search(self, question: str, topn: int) -> List[Dict[str, Any]]:
