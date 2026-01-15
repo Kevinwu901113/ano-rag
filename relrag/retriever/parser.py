@@ -537,11 +537,23 @@ def _match_composite(question: str) -> Optional[dict]:
         match = rule["pattern"].search(question)
         if match:
             entity = match.group("entity").strip(" ?.,")
+            chain = list(rule["chain"])
+            target_type = rule.get("target_type")
+            if (
+                chain
+                and chain[0].pred == "member_of"
+                and re.search(r"\bhow\s+many\s+members\b|\bwith\s+how\s+many\s+members\b", question, re.I)
+            ):
+                chain = [
+                    PredicateStep(pred="member_of", direction="out", target_hint="ORG"),
+                    PredicateStep(pred="has_member_count", direction="out", target_hint=None),
+                ]
+                target_type = None
             return {
                 "entity": entity,
-                "chain": rule["chain"],
+                "chain": chain,
                 "seed_type": rule.get("seed_type"),
-                "target_type": rule.get("target_type"),
+                "target_type": target_type,
             }
     return None
 

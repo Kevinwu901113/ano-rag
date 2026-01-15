@@ -108,6 +108,7 @@ def retrieve_answer(
     vector_fallback_enabled = bool(structured_cfg.get("vector_fallback_enabled", True))
     normalized_doc_hint = _normalize_doc_hint(doc_hint)
     relaxed_path_used = False
+    rescue_used = False
 
     def _finalize_result(
         result: Dict[str, Any],
@@ -117,6 +118,8 @@ def retrieve_answer(
     ) -> Dict[str, Any]:
         active_ir = ir_override if ir_override is not None else ir
         active_intent = intent_override if intent_override is not None else intent
+        result_meta = result.setdefault("meta", {})
+        result_meta["multihop_rescue"] = rescue_used
         if normalized_doc_hint:
             _apply_doc_filter_to_result(result, note_store, normalized_doc_hint)
         result = _apply_chunk_fallback(
@@ -222,6 +225,26 @@ def retrieve_answer(
                 relaxed_path_used = True
                 try:
                     logger.info("relaxed retry yielded {} candidates", len(relaxed_candidates))
+                except Exception:
+                    pass
+        if not candidates and ir.pred_chain and len(ir.pred_chain) >= 2:
+            rescued = _rescue_multihop(
+                seed_entities,
+                ir,
+                indexes,
+                note_store,
+                seed_texts=seed_texts,
+                alias_lookup=alias_lookup,
+                attribute=intent.attribute,
+                entity_match_threshold=0.0,
+                path_match_threshold=path_consistency_threshold if ir.pred_chain else -1.0,
+            )
+            rescued = _filter_candidates_by_doc(rescued, normalized_doc_hint)
+            if rescued:
+                candidates = rescued
+                rescue_used = True
+                try:
+                    logger.info("multihop rescue yielded {} candidates", len(rescued))
                 except Exception:
                     pass
         try:
@@ -417,6 +440,78 @@ def _walk_chain(
                 score += 0.1
         answer = path[-1]["obj"] if path else None
         candidates.append(Candidate(answer=answer, path=path, note_ids=note_ids, score=score, path_metrics=metrics))
+    return candidates
+
+
+def _rescue_multihop(
+    entities: Sequence[str],
+    ir: QueryIR,
+    indexes: Indexes,
+    note_store: NoteStore,
+    *,
+    seed_texts: Optional[Sequence[str]] = None,
+    alias_lookup: Optional[Dict[str, str]] = None,
+    attribute: Optional[str] = None,
+    entity_match_threshold: float = 0.0,
+    path_match_threshold: float = -1.0,
+) -> List[Candidate]:
+    if not ir.pred_chain or len(ir.pred_chain) < 2:
+        return []
+    hop1 = ir.pred_chain[0]
+    hop2 = ir.pred_chain[1]
+    hop1_pred = _canonical_predicate(hop1.pred) or hop1.pred
+    hop2_pred = _canonical_predicate(hop2.pred) or hop2.pred
+
+    intermediates: List[Tuple[str, str, str, float]] = []
+    seen_intermediate = set()
+    for subj in entities:
+        expanded = EXPAND_from(indexes, subj, hop1_pred, direction=hop1.direction, limit=ir.fanout)
+        for mid, nid, conf in expanded:
+            key = (subj, mid, nid)
+            if key in seen_intermediate:
+                continue
+            seen_intermediate.add(key)
+            intermediates.append((subj, mid, nid, conf))
+
+    if not intermediates:
+        return []
+    max_intermediate = max(10, min(20, ir.fanout * 2))
+    intermediates = intermediates[:max_intermediate]
+
+    candidates: List[Candidate] = []
+    for subj0, mid, nid1, conf1 in intermediates:
+        expanded2 = EXPAND_from(indexes, mid, hop2_pred, direction=hop2.direction, limit=ir.fanout)
+        for obj2, nid2, conf2 in expanded2:
+            path = [
+                {"subj": subj0, "pred": hop1_pred, "obj": mid, "note_id": nid1, "conf": conf1},
+                {"subj": mid, "pred": hop2_pred, "obj": obj2, "note_id": nid2, "conf": conf2},
+            ]
+            note_ids = [nid1, nid2]
+            notes = note_store.get_many(note_ids)
+            score, metrics = score_path(
+                path,
+                notes=notes,
+                doc_name=None,
+                seeds=seed_texts,
+                query_ir=ir,
+                alias_lookup=alias_lookup,
+            )
+            if metrics.get("entity_score", 0.0) < entity_match_threshold:
+                continue
+            if ir.pred_chain and metrics.get("pred_score", 0.0) < path_match_threshold:
+                continue
+            final_note = note_store.get(nid2) if nid2 else None
+            score += _attribute_note_bonus(final_note, attribute, indexes)
+            answer = path[-1]["obj"] if path else None
+            candidates.append(
+                Candidate(
+                    answer=answer,
+                    path=path,
+                    note_ids=note_ids,
+                    score=score,
+                    path_metrics=metrics,
+                )
+            )
     return candidates
 
 
@@ -753,6 +848,9 @@ def _collect_weak_evidences(
                 "anchor_entity": meta.get("anchor_entity"),
                 "weak": True,
                 "score": round(score, 3),
+                "subj": note.get("subj"),
+                "pred": note.get("pred"),
+                "obj": note.get("obj"),
             }
         )
         if len(evidences) >= limit:
@@ -1098,6 +1196,10 @@ def _schedule_evidences(
             "canonical": meta.get("evidence_canonical") or note.get("evidence", ""),
             "quality": meta.get("quality_score"),
             "lead_in_note_id": meta.get("lead_in_note_id"),
+            "subj": note.get("subj"),
+            "pred": note.get("pred"),
+            "obj": note.get("obj"),
+            "weak": bool(meta.get("weak")),
         })
     # 留底：若数量不足，补齐到 keep_at_least
     if len(kept) < keep_at_least:
@@ -1115,6 +1217,10 @@ def _schedule_evidences(
                 "canonical": meta.get("evidence_canonical") or note.get("evidence", ""),
                 "quality": meta.get("quality_score"),
                 "lead_in_note_id": meta.get("lead_in_note_id"),
+                "subj": note.get("subj"),
+                "pred": note.get("pred"),
+                "obj": note.get("obj"),
+                "weak": bool(meta.get("weak")),
             })
             if len(kept) >= keep_at_least:
                 break

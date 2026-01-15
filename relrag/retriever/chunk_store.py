@@ -35,6 +35,15 @@ _STOPWORDS = {
     "between",
     "how",
     "many",
+    "member",
+    "members",
+    "legislature",
+    "upper",
+    "house",
+    "republican",
+    "democrat",
+    "senate",
+    "assembly",
 }
 
 
@@ -140,6 +149,9 @@ class ChunkStore:
                     "chunk_id": chunk_id,
                     "evidence": evidence,
                     "canonical": evidence,
+                    "subj": doc_id,
+                    "pred": "chunk",
+                    "obj": "",
                     "score": round(score, 4),
                     "chunk": True,
                 }

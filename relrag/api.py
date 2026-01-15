@@ -1,6 +1,7 @@
 from typing import List, Dict, Any, Optional
 from copy import deepcopy
 from pathlib import Path
+import re
 
 from relrag.pipeline.structured_builder import StructuredBuilder
 from relrag.retriever.pipeline import retrieve_answer
@@ -8,6 +9,7 @@ from relrag.retriever.operators import Indexes
 from relrag.retriever.note_store import NoteStore
 from relrag.generator.answerer import call_llm
 from relrag.config.config_loader import config as global_config
+from relrag.utils.number_utils import parse_int
 
 def build_index(
     docs_input: str,
@@ -100,6 +102,9 @@ def answer(
     """
     Generate answer from evidences.
     """
+    forced = _try_solve_between_compare(question, evidences)
+    if forced:
+        return f"FINAL: {forced}"
     return call_llm(
         endpoint=llm_endpoint,
         model=llm_model,
@@ -107,3 +112,55 @@ def answer(
         evidences=evidences,
         temperature=temperature
     )
+
+
+_COMPARE_RE = re.compile(
+    r"\bbetween\s+(?P<a>[^,?]+?)\s+and\s+(?P<b>[^,?]+?)\s*,?\s*which\b.*?\bmore\s+(?P<unit>species|members)\b",
+    re.I,
+)
+
+
+def _normalize_entity(text: str) -> str:
+    cleaned = re.sub(r"[^\w]+", " ", (text or "").lower()).strip()
+    if cleaned.startswith("the "):
+        cleaned = cleaned[4:]
+    return " ".join(cleaned.split())
+
+
+def _entity_matches(candidate: str, target: str) -> bool:
+    cand = _normalize_entity(candidate)
+    targ = _normalize_entity(target)
+    if not cand or not targ:
+        return False
+    return cand == targ or cand in targ or targ in cand
+
+
+def _try_solve_between_compare(question: str, evidences: List[Dict[str, Any]]) -> Optional[str]:
+    match = _COMPARE_RE.search(question or "")
+    if not match:
+        return None
+    a = match.group("a").strip(" ?.,")
+    b = match.group("b").strip(" ?.,")
+    unit = match.group("unit").strip().lower()
+    if not a or not b:
+        return None
+    target_pred = "has_species_count" if unit == "species" else "has_member_count"
+
+    values: Dict[str, int] = {}
+    for ev in evidences or []:
+        if ev.get("pred") != target_pred:
+            continue
+        subj = (ev.get("subj") or "").strip()
+        val = parse_int(ev.get("obj"))
+        if val is None or not subj:
+            continue
+        if _entity_matches(subj, a):
+            values["a"] = max(values.get("a", val), val)
+        if _entity_matches(subj, b):
+            values["b"] = max(values.get("b", val), val)
+
+    if "a" not in values or "b" not in values:
+        return None
+    if values["a"] == values["b"]:
+        return None
+    return a if values["a"] > values["b"] else b

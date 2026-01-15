@@ -144,7 +144,7 @@ notes:
   indexes_dir: "indexes/"
 
 hotpot_entry:
-  data: "data/hotpot_dev_distractor_5_jsonl.jsonl"
+  data: "data/hotpot_dev_fullwiki_500_jsonl.jsonl"
   cache_dir: "result/cache"
   output_dir: "result"
   top_k: 10

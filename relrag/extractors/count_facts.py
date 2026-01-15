@@ -4,43 +4,10 @@ import re
 from typing import Dict, List, Optional
 
 from relrag.utils import TextUtils
+from relrag.utils.number_utils import NUM_WORD_PATTERN, parse_int
 
 
-_NUM_WORDS = {
-    "zero": 0,
-    "one": 1,
-    "two": 2,
-    "three": 3,
-    "four": 4,
-    "five": 5,
-    "six": 6,
-    "seven": 7,
-    "eight": 8,
-    "nine": 9,
-    "ten": 10,
-    "eleven": 11,
-    "twelve": 12,
-    "thirteen": 13,
-    "fourteen": 14,
-    "fifteen": 15,
-    "sixteen": 16,
-    "seventeen": 17,
-    "eighteen": 18,
-    "nineteen": 19,
-    "twenty": 20,
-    "thirty": 30,
-    "forty": 40,
-    "fifty": 50,
-    "sixty": 60,
-    "seventy": 70,
-    "eighty": 80,
-    "ninety": 90,
-    "hundred": 100,
-    "thousand": 1000,
-}
-
-_NUM_WORD_PATTERN = "|".join(sorted(_NUM_WORDS.keys(), key=len, reverse=True))
-_COUNT_TOKEN = rf"(?:\d{{1,3}}(?:,\d{{3}})*|\d+|(?:{_NUM_WORD_PATTERN})(?:[\s-](?:{_NUM_WORD_PATTERN}))*)"
+_COUNT_TOKEN = rf"(?:\d{{1,3}}(?:,\d{{3}})*|\d+|(?:{NUM_WORD_PATTERN})(?:[\s-](?:{NUM_WORD_PATTERN}))*)"
 _SUBJ_TOKEN = r"(?:[Tt]he\s+)?[A-Z][A-Za-z0-9&'()./\-]*(?:\s+[A-Z][A-Za-z0-9&'()./\-]*)*"
 
 _COUNT_PATTERNS = [
@@ -78,34 +45,6 @@ _GENERIC_SUBJECTS = {
     "the committee",
     "the senate",
 }
-
-
-def _parse_number(text: str) -> Optional[int]:
-    raw = (text or "").strip().lower().replace(",", "")
-    if not raw:
-        return None
-    if raw.isdigit():
-        try:
-            return int(raw)
-        except ValueError:
-            return None
-    tokens = raw.replace("-", " ").split()
-    total = 0
-    current = 0
-    for tok in tokens:
-        if tok not in _NUM_WORDS:
-            return None
-        value = _NUM_WORDS[tok]
-        if value in (100, 1000):
-            if current == 0:
-                current = 1
-            current *= value
-            if value == 1000:
-                total += current
-                current = 0
-        else:
-            current += value
-    return total + current if (total + current) > 0 else None
 
 
 def _normalize_subject(subject: str, doc_title: Optional[str]) -> Optional[str]:
@@ -146,7 +85,7 @@ def extract_count_notes(
             subj = _normalize_subject(match.group("subj"), doc_title)
             if not subj:
                 continue
-            count_val = _parse_number(match.group("count"))
+            count_val = parse_int(match.group("count"))
             if count_val is None:
                 continue
             subj_type = TextUtils.guess_entity_type(subj) or "CONCEPT"
