@@ -129,6 +129,134 @@ retriever:
       subject_match: 2.0
       source_agree: 1.0
 
+hotpotqa:
+  retriever:
+    structured:
+      enabled: true
+      fanout: 8
+      entity_match_threshold: 0.5
+      path_consistency_threshold: 0.9
+      vector_fallback_enabled: false
+    simple_raptor:
+      # 每个 summary node 最多挂多少叶子 chunk（默认20太小）
+      max_descendants: 128
+
+      # 检索阶段，召回多少个树节点
+      top_k_nodes: 20
+
+      # 最终给 LLM 的 chunk 数量（默认5太少）
+      max_answer_chunks: 16
+
+      # 是否开启“名字感知”rerank
+      enable_name_rerank: true
+    embedding:
+      enabled: true
+      provider: "vllm"
+      model: "qwen3-embedding"
+      endpoint: "http://127.0.0.1:8001/v1"
+      model_path_override: null
+      cache_dir: "/home/wjk/models/hf-cache"
+      download_dir: null
+      device: "cuda:1"
+      dtype: "float32"
+      auto_build: true
+      offline_index_path: "indexes/faiss/notes.faiss"
+      meta_path: "indexes/faiss/notes.meta.parquet"
+      max_len_note: 256
+      topn: 200
+      faiss:
+        kind: "HNSW32"
+        nprobe: 16
+        efSearch: 128
+      normalize: true
+    bm25:
+      enabled: true
+      backend: "rank_bm25"
+      store_path: "indexes/bm25/notes"
+      k1: 0.9
+      b: 0.4
+      ngram: [1, 2]
+      field_weights: {subj: 2.0, pred: 1.6, obj: 1.2, ctx: 1.0}
+      topn: 200
+    fusion:
+      method: "rrf"
+      rrf_k: 60
+      weights: {struct: 0.4, emb: 0.35, bm25: 0.25}
+      pre_topM: 128
+      final_topK: 64
+    hybrid:
+      agreement_threshold: 2
+      weights:
+        bm25: 1.0
+        embedding: 1.0
+        structured: 1.5
+        subject_match: 2.0
+        source_agree: 1.0
+
+narrativeqa:
+  retriever:
+    structured:
+      enabled: true
+      fanout: 8
+      entity_match_threshold: 0.5
+      path_consistency_threshold: 0.9
+      vector_fallback_enabled: false
+    simple_raptor:
+      # 每个 summary node 最多挂多少叶子 chunk（默认20太小）
+      max_descendants: 128
+
+      # 检索阶段，召回多少个树节点
+      top_k_nodes: 20
+
+      # 最终给 LLM 的 chunk 数量（默认5太少）
+      max_answer_chunks: 16
+
+      # 是否开启“名字感知”rerank
+      enable_name_rerank: true
+    embedding:
+      enabled: true
+      provider: "vllm"
+      model: "qwen3-embedding"
+      endpoint: "http://127.0.0.1:8001/v1"
+      model_path_override: null
+      cache_dir: "/home/wjk/models/hf-cache"
+      download_dir: null
+      device: "cuda:1"
+      dtype: "float32"
+      auto_build: true
+      offline_index_path: "indexes/faiss/notes.faiss"
+      meta_path: "indexes/faiss/notes.meta.parquet"
+      max_len_note: 256
+      topn: 200
+      faiss:
+        kind: "HNSW32"
+        nprobe: 16
+        efSearch: 128
+      normalize: true
+    bm25:
+      enabled: true
+      backend: "rank_bm25"
+      store_path: "indexes/bm25/notes"
+      k1: 0.9
+      b: 0.4
+      ngram: [1, 2]
+      field_weights: {subj: 2.0, pred: 1.6, obj: 1.2, ctx: 1.0}
+      topn: 200
+    fusion:
+      method: "rrf"
+      rrf_k: 60
+      weights: {struct: 0.4, emb: 0.35, bm25: 0.25}
+      pre_topM: 128
+      final_topK: 64
+    hybrid:
+      agreement_threshold: 2
+      weights:
+        bm25: 1.0
+        embedding: 1.0
+        structured: 1.5
+        subject_match: 2.0
+        source_agree: 1.0
+
 reranker:
   enabled: true
   type: "llm"
@@ -152,6 +280,22 @@ hotpot_entry:
   workers: 1
   debug_dir: "result/debug"
   debug_max_notes: 50
+  stall_warn_sec: 300.0
+  stall_abort_sec: 900.0
+  force_build: false
+
+narrativeqa_entry:
+  qaps: "narrativeqa/qaps.csv"
+  summaries: "narrativeqa/third_party/wikipedia/summaries.csv"
+  stories_dir: "narrativeqa/tmp"
+  split: "valid"
+  context_mode: "summary"
+  modes: ["structured", "dense", "bm25", "hybrid"]
+  cache_dir: "result/narrativeqa/cache"
+  output_dir: "result/narrativeqa"
+  top_k: 10
+  limit: 0
+  workers: 1
   stall_warn_sec: 300.0
   stall_abort_sec: 900.0
   force_build: false

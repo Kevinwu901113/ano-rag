@@ -306,6 +306,25 @@ def _coerce_float(value: Any, default: float) -> float:
         return float(default)
 
 
+def _deep_merge(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any]:
+    merged = deepcopy(base)
+    for key, value in override.items():
+        if key in merged and isinstance(merged[key], dict) and isinstance(value, dict):
+            merged[key] = _deep_merge(merged[key], value)
+        else:
+            merged[key] = deepcopy(value)
+    return merged
+
+
+def _apply_dataset_retriever(cfg: Dict[str, Any], dataset_key: str) -> Dict[str, Any]:
+    dataset_cfg = cfg.get(dataset_key) or {}
+    retriever_override = dataset_cfg.get("retriever") if isinstance(dataset_cfg, dict) else None
+    if isinstance(retriever_override, dict):
+        base_retriever = cfg.get("retriever") or {}
+        cfg["retriever"] = _deep_merge(base_retriever, retriever_override)
+    return cfg
+
+
 def _pick_arg(args: argparse.Namespace, entry_cfg: Dict[str, Any], name: str, default: Any) -> Any:
     value = getattr(args, name, None)
     if value is not None:
@@ -336,7 +355,7 @@ def _ensure_index(
 
 
 def _prepare_aux_config(example_root: Path) -> Dict[str, Any]:
-    cfg = deepcopy(global_config.load_config())
+    cfg = _apply_dataset_retriever(deepcopy(global_config.load_config()), "hotpotqa")
     notes_path = example_root / "notes.jsonl"
     indexes_root = example_root / "indexes"
     cfg.setdefault("notes", {})["out_path"] = str(notes_path)
