@@ -70,6 +70,20 @@ DEFAULT_CONFIG: Dict[str, Any] = {
             "schema_name": "ano-note",
         },
     },
+    "openai": {
+        "enabled": True,
+        "model": "gpt-4",
+        "api_key_env": "OPENAI_API_KEY",
+        "temperature": 0.7,
+        "max_tokens": 1024,
+        "base_url": "https://api.openai.com/v1",
+        "timeout_sec": 60.0,
+        "max_retries": 2,
+        "retry_backoff_sec": 1.0,
+        "retry_backoff_max_sec": 20.0,
+        "system_prompt": "You are a helpful assistant.",
+    },
+    "datasets": {},
     "llm_profiles": {
         "extract": {"temperature": 0.0, "max_tokens": 256, "thinking": False},
         "generate": {"temperature": 0.2, "max_tokens": 128, "thinking": None},
@@ -245,6 +259,15 @@ def _finalize_config(config: Dict[str, Any]) -> None:
         embedding_cfg["device"] = system_device
 
 
+def _merge_models_config(config: Dict[str, Any], models_cfg: Dict[str, Any]) -> None:
+    for key in ("vllm", "openai"):
+        model_cfg = models_cfg.get(key)
+        if not isinstance(model_cfg, dict):
+            continue
+        base = config.get(key) if isinstance(config.get(key), dict) else {}
+        config[key] = _deep_merge(base, model_cfg)
+
+
 def _get_nested(config: Dict[str, Any], path: str) -> Any:
     cursor: Any = config
     for part in path.split("."):
@@ -294,6 +317,9 @@ class ConfigLoader:
             else:
                 user_config = {}
             self._config = _deep_merge(DEFAULT_CONFIG, user_config)
+
+            if isinstance(user_config.get("models"), dict):
+                _merge_models_config(self._config, user_config.get("models") or {})
 
             # RAG_EMBED_MODEL overrides retriever.embedding.model
             env_embed_model = os.environ.get("RAG_EMBED_MODEL")

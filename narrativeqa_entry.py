@@ -1,7 +1,7 @@
 import argparse
 import csv
 import json
-import math
+import os
 import re
 import shutil
 import sys
@@ -15,10 +15,18 @@ from typing import Any, Dict, List, Optional, TextIO, Tuple
 from loguru import logger
 
 from relrag.api import build_index, retrieve, answer
+from relrag.config.dataset_config import (
+    get_dataset_config,
+    resolve_openai_api_key,
+    resolve_openai_config,
+    resolve_reader,
+)
 from relrag.config.config_loader import config as global_config
 from relrag.indexer.bm25_index import BM25IndexBuilder
 from relrag.indexer.embedding_index import EmbeddingIndexBuilder
+from relrag.utils.openai_answer import generate_openai_answer as _generate_openai_answer
 from relrag.utils.output_eval import extract_final_answer
+from relrag.utils.eval_metrics import score_metrics
 
 
 DEFAULT_TOP_K = 10
@@ -27,7 +35,7 @@ DEFAULT_WORKERS = 1
 DEFAULT_CACHE_DIR = "result/narrativeqa/cache"
 DEFAULT_OUTPUT_DIR = "result/narrativeqa"
 DEFAULT_CONTEXT_MODE = "summary"
-DEFAULT_MODES = ("structured",)
+DEFAULT_MODES = ("bm25", "dense", "hybrid")
 DEFAULT_SPLIT = "valid"
 DEFAULT_STALL_WARN_SEC = 300.0
 DEFAULT_STALL_ABORT_SEC = 900.0
@@ -117,10 +125,18 @@ def _coerce_float(value: Any, default: float) -> float:
         return float(default)
 
 
-def _pick_arg(args: argparse.Namespace, entry_cfg: Dict[str, Any], name: str, default: Any) -> Any:
+def _pick_arg(
+    args: argparse.Namespace,
+    entry_cfg: Dict[str, Any],
+    dataset_cfg: Dict[str, Any],
+    name: str,
+    default: Any,
+) -> Any:
     value = getattr(args, name, None)
     if value is not None:
         return value
+    if name in dataset_cfg:
+        return dataset_cfg.get(name)
     if name in entry_cfg:
         return entry_cfg.get(name)
     return default
@@ -181,6 +197,110 @@ def _parse_modes(value: Any) -> List[str]:
     return normalized or list(DEFAULT_MODES)
 
 
+def _mode_config(cfg: Dict[str, Any], mode: str) -> Dict[str, Any]:
+    retriever_cfg = cfg.get("retriever") or {}
+    if mode == "dense":
+        dense_cfg = retriever_cfg.get("dense")
+        if isinstance(dense_cfg, dict):
+            return dense_cfg
+        return retriever_cfg.get("embedding") or {}
+    if mode == "bm25":
+        return retriever_cfg.get("bm25") or {}
+    if mode == "hybrid":
+        return retriever_cfg.get("hybrid") or {}
+    if mode == "structured":
+        return retriever_cfg.get("structured") or {}
+    return {}
+
+
+def _mode_enabled(cfg: Dict[str, Any], mode: str) -> bool:
+    mode_cfg = _mode_config(cfg, mode)
+    return bool(mode_cfg.get("enabled", True))
+
+
+def _resolve_mode_top_k(mode: str, cfg: Dict[str, Any], fallback: int) -> int:
+    mode_cfg = _mode_config(cfg, mode)
+    if "top_k" not in mode_cfg:
+        return fallback
+    return _coerce_int(mode_cfg.get("top_k"), fallback)
+
+
+def _resolve_retriever_modes(
+    *,
+    mode_arg: Optional[str],
+    modes_arg: Optional[str],
+    entry_cfg: Dict[str, Any],
+    dataset_cfg: Dict[str, Any],
+    base_cfg: Dict[str, Any],
+) -> List[str]:
+    raw = None
+    if mode_arg:
+        raw = mode_arg
+    elif modes_arg:
+        raw = modes_arg
+    elif dataset_cfg.get("retrievers") is not None:
+        raw = dataset_cfg.get("retrievers")
+    elif dataset_cfg.get("retriever_modes") is not None:
+        raw = dataset_cfg.get("retriever_modes")
+    elif entry_cfg.get("retrievers") is not None:
+        raw = entry_cfg.get("retrievers")
+    elif entry_cfg.get("modes") is not None:
+        raw = entry_cfg.get("modes")
+
+    modes = _parse_modes(raw) if raw is not None else list(DEFAULT_MODES)
+    enabled_modes = [mode for mode in modes if _mode_enabled(base_cfg, mode)]
+    if not enabled_modes:
+        raise ValueError("No retriever modes enabled in config.")
+    return enabled_modes
+
+
+def _resolve_readers(
+    args: argparse.Namespace,
+    cfg: Dict[str, Any],
+    dataset_cfg: Dict[str, Any],
+) -> List[str]:
+    if args.reader:
+        readers = [resolve_reader(args.reader, dataset_cfg)]
+    else:
+        if dataset_cfg.get("readers") is not None:
+            raw = dataset_cfg.get("readers")
+        elif dataset_cfg.get("models") is not None:
+            raw = dataset_cfg.get("models")
+        else:
+            raw = dataset_cfg.get("reader")
+        if raw is None:
+            readers = [resolve_reader(None, dataset_cfg)]
+        elif isinstance(raw, (list, tuple)):
+            readers = [resolve_reader(str(item), dataset_cfg) for item in raw if str(item).strip()]
+        else:
+            readers = [resolve_reader(str(raw), dataset_cfg)]
+
+    seen = set()
+    ordered: List[str] = []
+    for reader in readers:
+        if reader in seen:
+            continue
+        ordered.append(reader)
+        seen.add(reader)
+
+    vllm_enabled = bool((cfg.get("vllm") or {}).get("enabled", True))
+    openai_enabled = bool((cfg.get("openai") or {}).get("enabled", True))
+    for reader in ordered:
+        if reader == "vllm" and not vllm_enabled:
+            raise ValueError("vLLM mode disabled in config (vllm.enabled=false).")
+        if reader == "openai" and not openai_enabled:
+            raise ValueError("OpenAI mode disabled in config (openai.enabled=false).")
+    return ordered
+
+
+def _pred_filename(split: str, reader: str, mode: str, reader_count: int, mode_count: int) -> str:
+    if reader_count == 1 and mode_count > 1:
+        return f"pred_{split}_{mode}.jsonl"
+    if mode_count == 1 and reader_count > 1:
+        return f"pred_{split}_{reader}.jsonl"
+    return f"pred_{split}_{reader}_{mode}.jsonl"
+
+
 def _resolve_llm_config(args: argparse.Namespace) -> Tuple[str, str]:
     cfg = global_config.load_config()
     endpoint = args.endpoint or (cfg.get("vllm") or {}).get("endpoint")
@@ -192,6 +312,33 @@ def _resolve_llm_config(args: argparse.Namespace) -> Tuple[str, str]:
     if model_cfg and model_cfg != FIXED_LLM_MODEL:
         logger.warning("Overriding config model {} -> {}", model_cfg, FIXED_LLM_MODEL)
     return endpoint, FIXED_LLM_MODEL
+
+
+def generate_openai_answer(question: str, evidences: List[Dict[str, Any]], openai_cfg: Dict[str, Any]) -> str:
+    return _generate_openai_answer(question, evidences, openai_cfg)
+
+
+def generate_answer(
+    question: str,
+    evidences: List[Dict[str, Any]],
+    *,
+    reader: str,
+    llm_endpoint: str,
+    llm_model: str,
+    openai_cfg: Optional[Dict[str, Any]],
+) -> str:
+    if reader == "vllm":
+        return answer(
+            question=question,
+            evidences=evidences,
+            llm_endpoint=llm_endpoint,
+            llm_model=llm_model,
+        )
+    if reader == "openai":
+        if not openai_cfg:
+            raise ValueError("OpenAI config missing for reader=openai")
+        return generate_openai_answer(question, evidences, openai_cfg)
+    raise ValueError(f"Unknown reader type: {reader}")
 
 
 def _load_qaps(path: Path, split: str) -> List[Dict[str, Any]]:
@@ -320,7 +467,7 @@ def _ensure_index(
 
 
 def _apply_dataset_retriever(cfg: Dict[str, Any], dataset_key: str) -> Dict[str, Any]:
-    dataset_cfg = cfg.get(dataset_key) or {}
+    dataset_cfg = get_dataset_config(cfg, dataset_key)
     retriever_override = dataset_cfg.get("retriever") if isinstance(dataset_cfg, dict) else None
     if isinstance(retriever_override, dict):
         base_retriever = cfg.get("retriever") or {}
@@ -458,158 +605,6 @@ def _mode_requirements(mode: str) -> Tuple[bool, bool]:
     raise ValueError(f"Unsupported mode {mode}")
 
 
-def _tokenize(text: str) -> List[str]:
-    return re.findall(r"[A-Za-z0-9]+", (text or "").lower())
-
-
-def _ngram_counts(tokens: List[str], n: int) -> Dict[Tuple[str, ...], int]:
-    counts: Dict[Tuple[str, ...], int] = {}
-    if n <= 0:
-        return counts
-    for i in range(len(tokens) - n + 1):
-        gram = tuple(tokens[i : i + n])
-        counts[gram] = counts.get(gram, 0) + 1
-    return counts
-
-
-def _bleu_score(references: List[str], hypothesis: str, max_n: int) -> float:
-    hyp_tokens = _tokenize(hypothesis)
-    if not hyp_tokens:
-        return 0.0
-    ref_tokens_list = [_tokenize(ref) for ref in references if ref]
-    if not ref_tokens_list:
-        return 0.0
-
-    hyp_len = len(hyp_tokens)
-    ref_lens = [len(ref) for ref in ref_tokens_list]
-    closest_ref_len = min(ref_lens, key=lambda r: (abs(r - hyp_len), r))
-    if hyp_len > closest_ref_len:
-        bp = 1.0
-    else:
-        bp = math.exp(1.0 - (closest_ref_len / max(1, hyp_len)))
-
-    precisions: List[float] = []
-    for n in range(1, max_n + 1):
-        hyp_counts = _ngram_counts(hyp_tokens, n)
-        max_ref_counts: Dict[Tuple[str, ...], int] = {}
-        for ref_tokens in ref_tokens_list:
-            ref_counts = _ngram_counts(ref_tokens, n)
-            for gram, count in ref_counts.items():
-                max_ref_counts[gram] = max(max_ref_counts.get(gram, 0), count)
-        match = sum(min(count, max_ref_counts.get(gram, 0)) for gram, count in hyp_counts.items())
-        total = sum(hyp_counts.values())
-        if total == 0:
-            precision = 0.0
-        else:
-            precision = match / total
-        if precision == 0.0:
-            precision = (match + 1.0) / (total + 1.0)
-        precisions.append(precision)
-
-    score = bp * math.exp(sum(math.log(p) for p in precisions) / max_n)
-    return float(score)
-
-
-def _lcs_alignment(ref_tokens: List[str], hyp_tokens: List[str]) -> List[Tuple[int, int]]:
-    n = len(ref_tokens)
-    m = len(hyp_tokens)
-    if n == 0 or m == 0:
-        return []
-    dp = [[0] * (m + 1) for _ in range(n + 1)]
-    for i in range(n):
-        for j in range(m):
-            if ref_tokens[i] == hyp_tokens[j]:
-                dp[i + 1][j + 1] = dp[i][j] + 1
-            else:
-                dp[i + 1][j + 1] = max(dp[i][j + 1], dp[i + 1][j])
-    i = n
-    j = m
-    alignment: List[Tuple[int, int]] = []
-    while i > 0 and j > 0:
-        if ref_tokens[i - 1] == hyp_tokens[j - 1]:
-            alignment.append((i - 1, j - 1))
-            i -= 1
-            j -= 1
-        elif dp[i - 1][j] >= dp[i][j - 1]:
-            i -= 1
-        else:
-            j -= 1
-    alignment.reverse()
-    return alignment
-
-
-def _rouge_l_score(references: List[str], hypothesis: str) -> float:
-    hyp_tokens = _tokenize(hypothesis)
-    if not hyp_tokens:
-        return 0.0
-    best = 0.0
-    beta = 1.2
-    for ref in references:
-        ref_tokens = _tokenize(ref)
-        if not ref_tokens:
-            continue
-        alignment = _lcs_alignment(ref_tokens, hyp_tokens)
-        lcs_len = len(alignment)
-        if lcs_len == 0:
-            continue
-        prec = lcs_len / len(hyp_tokens)
-        rec = lcs_len / len(ref_tokens)
-        denom = rec + (beta * beta * prec)
-        if denom == 0:
-            f_score = 0.0
-        else:
-            f_score = (1 + beta * beta) * prec * rec / denom
-        best = max(best, f_score)
-    return float(best)
-
-
-def _meteor_score(references: List[str], hypothesis: str) -> float:
-    hyp_tokens = _tokenize(hypothesis)
-    if not hyp_tokens:
-        return 0.0
-    best = 0.0
-    for ref in references:
-        ref_tokens = _tokenize(ref)
-        if not ref_tokens:
-            continue
-        alignment = _lcs_alignment(ref_tokens, hyp_tokens)
-        matches = len(alignment)
-        if matches == 0:
-            continue
-        prec = matches / len(hyp_tokens)
-        rec = matches / len(ref_tokens)
-        denom = rec + 9 * prec
-        if denom == 0:
-            f_mean = 0.0
-        else:
-            f_mean = (10 * prec * rec) / denom
-        chunks = 1
-        for idx in range(1, len(alignment)):
-            prev = alignment[idx - 1]
-            curr = alignment[idx]
-            if curr[0] != prev[0] + 1 or curr[1] != prev[1] + 1:
-                chunks += 1
-        penalty = 0.5 * (chunks / matches) ** 3
-        score = (1 - penalty) * f_mean
-        best = max(best, score)
-    return float(best)
-
-
-def _score_metrics(prediction: str, references: List[str]) -> Dict[str, float]:
-    if not references:
-        return {"bleu1": 0.0, "bleu4": 0.0, "rougeL": 0.0, "meteor": 0.0}
-    bleu1 = _bleu_score(references, prediction, 1)
-    bleu4 = _bleu_score(references, prediction, 4)
-    rouge_l = _rouge_l_score(references, prediction)
-    meteor = _meteor_score(references, prediction)
-    return {
-        "bleu1": round(bleu1, 4),
-        "bleu4": round(bleu4, 4),
-        "rougeL": round(rouge_l, 4),
-        "meteor": round(meteor, 4),
-    }
-
-
 def _ensure_document_index(
     item: Dict[str, Any],
     *,
@@ -662,6 +657,7 @@ def _process_question(
     item: Dict[str, Any],
     *,
     cache_root: Path,
+    split: str,
     context_mode: str,
     summaries_map: Dict[str, str],
     summaries_all: Dict[str, str],
@@ -671,6 +667,8 @@ def _process_question(
     top_k: int,
     llm_endpoint: str,
     llm_model: str,
+    reader: str,
+    openai_cfg: Optional[Dict[str, Any]],
     force_build: bool,
     doc_cache: DocumentCache,
 ) -> Dict[str, Any]:
@@ -703,24 +701,33 @@ def _process_question(
         cfg=retriever_cfg,
     )
     evidences = retrieve_result.get("evidence") or []
-    raw_answer = answer(
+    raw_answer = generate_answer(
         question=item["question"],
         evidences=evidences,
+        reader=reader,
         llm_endpoint=llm_endpoint,
         llm_model=llm_model,
+        openai_cfg=openai_cfg,
     )
     final_answer = extract_final_answer(raw_answer) or raw_answer
-    metrics = _score_metrics(final_answer, item["references"])
+    metrics = score_metrics(final_answer, item["references"])
+    answer_model = openai_cfg.get("model") if reader == "openai" and openai_cfg else llm_model
 
     return {
         "qid": item["qid"],
         "document_id": doc_id,
+        "split": split,
+        "mode": mode,
+        "reader": reader,
+        "model": answer_model,
         "question": item["question"],
         "prediction": final_answer,
         "references": item["references"],
         "metrics": metrics,
         "meta": {
-            "mode": mode,
+            "retrieval_mode": mode,
+            "reader": reader,
+            "model": answer_model,
             "context_mode": context_mode,
             "top_k": top_k,
             "build_stats": build_stats,
@@ -804,9 +811,15 @@ def main() -> None:
     parser.add_argument("--stories_dir", help="Directory containing full stories (story-as-context)")
     parser.add_argument("--split", help="Dataset split: train, valid, or test (fallback to config)")
     parser.add_argument("--context_mode", help="summary-as-context or story-as-context (fallback to config)")
+    parser.add_argument("--retriever", help="Retriever mode: bm25, dense, or hybrid (fallback to config)")
     parser.add_argument("--modes", help="Retrieval modes: structured,dense,bm25,hybrid (fallback to config)")
     parser.add_argument("--endpoint", help="vLLM endpoint (defaults to config)")
     parser.add_argument("--model", help="Ignored; NarrativeQA uses qwen3-30b-a3b")
+    parser.add_argument("--reader", help="Reader backend: vllm or openai (fallback to config)")
+    parser.add_argument("--openai_model", help="OpenAI model name (fallback to config)")
+    parser.add_argument("--openai_api_key", help="OpenAI API key (reads env if omitted)")
+    parser.add_argument("--openai_temperature", type=float, help="OpenAI temperature (fallback to config)")
+    parser.add_argument("--openai_max_tokens", type=int, help="OpenAI max tokens (fallback to config)")
     parser.add_argument("--top_k", type=int, help="Top-k retrieval fanout (fallback to config)")
     parser.add_argument("--limit", type=int, help="Process only first N examples (fallback to config)")
     parser.add_argument("--workers", type=int, help="Parallel workers (fallback to config)")
@@ -823,28 +836,51 @@ def main() -> None:
         path = Path(path_str)
         return path if path.is_absolute() else repo_root / path
 
+    cfg = global_config.load_config()
+    dataset_cfg = get_dataset_config(cfg, "narrativeqa")
     entry_cfg = _load_entry_config()
-    args.qaps = _pick_arg(args, entry_cfg, "qaps", None)
-    args.summaries = _pick_arg(args, entry_cfg, "summaries", None)
-    args.stories_dir = _pick_arg(args, entry_cfg, "stories_dir", None)
-    args.split = _normalize_split(_pick_arg(args, entry_cfg, "split", DEFAULT_SPLIT))
-    args.context_mode = _normalize_context_mode(_pick_arg(args, entry_cfg, "context_mode", DEFAULT_CONTEXT_MODE))
-    args.modes = _parse_modes(_pick_arg(args, entry_cfg, "modes", DEFAULT_MODES))
-    args.cache_dir = _pick_arg(args, entry_cfg, "cache_dir", DEFAULT_CACHE_DIR)
-    args.output_dir = _pick_arg(args, entry_cfg, "output_dir", DEFAULT_OUTPUT_DIR)
-    args.top_k = _coerce_int(_pick_arg(args, entry_cfg, "top_k", DEFAULT_TOP_K), DEFAULT_TOP_K)
-    args.limit = _coerce_int(_pick_arg(args, entry_cfg, "limit", DEFAULT_LIMIT), DEFAULT_LIMIT)
-    args.workers = _coerce_int(_pick_arg(args, entry_cfg, "workers", DEFAULT_WORKERS), DEFAULT_WORKERS)
+    args.qaps = _pick_arg(args, entry_cfg, dataset_cfg, "qaps", None)
+    args.summaries = _pick_arg(args, entry_cfg, dataset_cfg, "summaries", None)
+    args.stories_dir = _pick_arg(args, entry_cfg, dataset_cfg, "stories_dir", None)
+    args.split = _normalize_split(_pick_arg(args, entry_cfg, dataset_cfg, "split", DEFAULT_SPLIT))
+    args.context_mode = _normalize_context_mode(
+        _pick_arg(args, entry_cfg, dataset_cfg, "context_mode", DEFAULT_CONTEXT_MODE)
+    )
+    args.modes = _pick_arg(args, entry_cfg, dataset_cfg, "modes", DEFAULT_MODES)
+    args.cache_dir = _pick_arg(args, entry_cfg, dataset_cfg, "cache_dir", DEFAULT_CACHE_DIR)
+    args.output_dir = _pick_arg(args, entry_cfg, dataset_cfg, "output_dir", DEFAULT_OUTPUT_DIR)
+    args.top_k = _coerce_int(
+        _pick_arg(args, entry_cfg, dataset_cfg, "top_k", DEFAULT_TOP_K),
+        DEFAULT_TOP_K,
+    )
+    args.limit = _coerce_int(_pick_arg(args, entry_cfg, dataset_cfg, "limit", DEFAULT_LIMIT), DEFAULT_LIMIT)
+    args.workers = _coerce_int(
+        _pick_arg(args, entry_cfg, dataset_cfg, "workers", DEFAULT_WORKERS),
+        DEFAULT_WORKERS,
+    )
     args.stall_warn_sec = _coerce_float(
-        _pick_arg(args, entry_cfg, "stall_warn_sec", DEFAULT_STALL_WARN_SEC),
+        _pick_arg(args, entry_cfg, dataset_cfg, "stall_warn_sec", DEFAULT_STALL_WARN_SEC),
         DEFAULT_STALL_WARN_SEC,
     )
     args.stall_abort_sec = _coerce_float(
-        _pick_arg(args, entry_cfg, "stall_abort_sec", DEFAULT_STALL_ABORT_SEC),
+        _pick_arg(args, entry_cfg, dataset_cfg, "stall_abort_sec", DEFAULT_STALL_ABORT_SEC),
         DEFAULT_STALL_ABORT_SEC,
     )
     if entry_cfg.get("force_build"):
         args.force_build = True
+
+    openai_overrides: Dict[str, Any] = {}
+    if args.openai_model:
+        openai_overrides["model"] = args.openai_model
+    if args.openai_temperature is not None:
+        openai_overrides["temperature"] = args.openai_temperature
+    if args.openai_max_tokens is not None:
+        openai_overrides["max_tokens"] = args.openai_max_tokens
+
+    openai_cfg = resolve_openai_config(cfg, dataset_cfg, overrides=openai_overrides)
+    if args.openai_api_key:
+        env_name = openai_cfg.get("api_key_env", "OPENAI_API_KEY")
+        os.environ[str(env_name)] = args.openai_api_key
 
     if not args.qaps or not args.summaries:
         raise ValueError("qaps and summaries paths are required (use args or config)")
@@ -879,77 +915,116 @@ def main() -> None:
         logger.warning("No examples found for split {}", split)
         return
 
-    base_cfg = _apply_dataset_retriever(deepcopy(global_config.load_config()), "narrativeqa")
+    base_cfg = _apply_dataset_retriever(deepcopy(cfg), "narrativeqa")
+    modes = _resolve_retriever_modes(
+        mode_arg=args.retriever,
+        modes_arg=args.modes,
+        entry_cfg=entry_cfg,
+        dataset_cfg=dataset_cfg,
+        base_cfg=base_cfg,
+    )
+    readers = _resolve_readers(args, cfg, dataset_cfg)
+    openai_runtime_cfg: Optional[Dict[str, Any]] = None
+    if "openai" in readers:
+        if not openai_cfg.get("enabled", True):
+            raise ValueError("OpenAI mode disabled in config (openai.enabled=false).")
+        openai_cfg["api_key"] = resolve_openai_api_key(openai_cfg)
+        openai_runtime_cfg = openai_cfg
     doc_cache = DocumentCache()
 
     summary_report: Dict[str, Any] = {
         "split": split,
         "context_mode": args.context_mode,
-        "model": llm_model,
-        "modes": {},
+        "readers": readers,
+        "retrievers": modes,
+        "runs": {},
     }
 
-    for mode in args.modes:
-        output_path = output_dir / f"pred_{split}_{mode}.jsonl"
-        logger.info("Running mode={} -> {}", mode, output_path)
-        totals = {"bleu1": 0.0, "bleu4": 0.0, "rougeL": 0.0, "meteor": 0.0}
-        progress = ProgressBar(total_examples)
-        processed = 0
-        completed = 0
-        with output_path.open("w", encoding="utf-8") as handle:
-            if args.workers <= 1:
-                for item in questions:
-                    try:
-                        record = _process_question(
-                            item,
-                            cache_root=cache_root,
-                            context_mode=args.context_mode,
-                            summaries_map=summaries_map,
-                            summaries_all=summaries_all,
-                            stories_dir=stories_dir,
-                            base_cfg=base_cfg,
-                            mode=mode,
-                            top_k=args.top_k,
-                            llm_endpoint=llm_endpoint,
-                            llm_model=llm_model,
-                            force_build=args.force_build,
-                            doc_cache=doc_cache,
-                        )
-                        handle.write(json.dumps(record, ensure_ascii=False) + "\n")
-                        handle.flush()
-                        _accumulate_metrics(totals, record.get("metrics") or {})
-                        processed += 1
-                    except Exception as exc:
-                        logger.error("Failed example {}: {}", item.get("qid"), exc)
-                    finally:
-                        completed += 1
-                        progress.update(1)
-            else:
-                max_workers = max(1, int(args.workers))
-                buffer_cap = max_workers * 2
-                future_map: Dict[Any, str] = {}
-                scheduled = 0
-                with ThreadPoolExecutor(max_workers=max_workers) as executor:
+    for reader in readers:
+        reader_openai_cfg = openai_runtime_cfg if reader == "openai" else None
+        answer_model = reader_openai_cfg.get("model") if reader == "openai" and reader_openai_cfg else llm_model
+        summary_report["runs"].setdefault(reader, {})
+        for mode in modes:
+            mode_top_k = _resolve_mode_top_k(mode, base_cfg, args.top_k)
+            output_name = _pred_filename(split, reader, mode, len(readers), len(modes))
+            output_path = output_dir / output_name
+            logger.info("Running reader={} mode={} -> {}", reader, mode, output_path)
+            totals = {"bleu1": 0.0, "bleu4": 0.0, "rougeL": 0.0, "meteor": 0.0}
+            progress = ProgressBar(total_examples)
+            processed = 0
+            completed = 0
+            with output_path.open("w", encoding="utf-8") as handle:
+                if args.workers <= 1:
                     for item in questions:
-                        future = executor.submit(
-                            _process_question,
-                            item,
-                            cache_root=cache_root,
-                            context_mode=args.context_mode,
-                            summaries_map=summaries_map,
-                            summaries_all=summaries_all,
-                            stories_dir=stories_dir,
-                            base_cfg=base_cfg,
-                            mode=mode,
-                            top_k=args.top_k,
-                            llm_endpoint=llm_endpoint,
-                            llm_model=llm_model,
-                            force_build=args.force_build,
-                            doc_cache=doc_cache,
-                        )
-                        future_map[future] = item.get("qid", "unknown")
-                        scheduled += 1
-                        if len(future_map) >= buffer_cap:
+                        try:
+                            record = _process_question(
+                                item,
+                                cache_root=cache_root,
+                                split=split,
+                                context_mode=args.context_mode,
+                                summaries_map=summaries_map,
+                                summaries_all=summaries_all,
+                                stories_dir=stories_dir,
+                                base_cfg=base_cfg,
+                                mode=mode,
+                                top_k=mode_top_k,
+                                llm_endpoint=llm_endpoint,
+                                llm_model=llm_model,
+                                reader=reader,
+                                openai_cfg=reader_openai_cfg,
+                                force_build=args.force_build,
+                                doc_cache=doc_cache,
+                            )
+                            handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+                            handle.flush()
+                            _accumulate_metrics(totals, record.get("metrics") or {})
+                            processed += 1
+                        except Exception as exc:
+                            logger.error("Failed example {}: {}", item.get("qid"), exc)
+                        finally:
+                            completed += 1
+                            progress.update(1)
+                else:
+                    max_workers = max(1, int(args.workers))
+                    buffer_cap = max_workers * 2
+                    future_map: Dict[Any, str] = {}
+                    scheduled = 0
+                    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                        for item in questions:
+                            future = executor.submit(
+                                _process_question,
+                                item,
+                                cache_root=cache_root,
+                                split=split,
+                                context_mode=args.context_mode,
+                                summaries_map=summaries_map,
+                                summaries_all=summaries_all,
+                                stories_dir=stories_dir,
+                                base_cfg=base_cfg,
+                                mode=mode,
+                                top_k=mode_top_k,
+                                llm_endpoint=llm_endpoint,
+                                llm_model=llm_model,
+                                reader=reader,
+                                openai_cfg=reader_openai_cfg,
+                                force_build=args.force_build,
+                                doc_cache=doc_cache,
+                            )
+                            future_map[future] = item.get("qid", "unknown")
+                            scheduled += 1
+                            if len(future_map) >= buffer_cap:
+                                done_count, ok_count = _drain_futures(
+                                    future_map,
+                                    handle,
+                                    totals,
+                                    progress=progress,
+                                    stall_warn_sec=args.stall_warn_sec,
+                                    stall_abort_sec=args.stall_abort_sec,
+                                )
+                                completed += done_count
+                                processed += ok_count
+                                future_map = {}
+                        if future_map:
                             done_count, ok_count = _drain_futures(
                                 future_map,
                                 handle,
@@ -960,30 +1035,25 @@ def main() -> None:
                             )
                             completed += done_count
                             processed += ok_count
-                            future_map = {}
-                    if future_map:
-                        done_count, ok_count = _drain_futures(
-                            future_map,
-                            handle,
-                            totals,
-                            progress=progress,
-                            stall_warn_sec=args.stall_warn_sec,
-                            stall_abort_sec=args.stall_abort_sec,
-                        )
-                        completed += done_count
-                        processed += ok_count
 
-        progress.close()
-        failed = completed - processed
-        logger.info("Mode {} completed {} examples (failed {})", mode, processed, failed)
-        denom = processed if processed > 0 else 1
-        summary_report["modes"][mode] = {
-            "bleu1": round(totals["bleu1"] / denom, 4),
-            "bleu4": round(totals["bleu4"] / denom, 4),
-            "rougeL": round(totals["rougeL"] / denom, 4),
-            "meteor": round(totals["meteor"] / denom, 4),
-            "count": processed,
-        }
+            progress.close()
+            failed = completed - processed
+            logger.info("Reader {} mode {} completed {} examples (failed {})", reader, mode, processed, failed)
+            denom = processed if processed > 0 else 1
+            summary_report["runs"][reader][mode] = {
+                "bleu1": round(totals["bleu1"] / denom, 4),
+                "bleu4": round(totals["bleu4"] / denom, 4),
+                "rougeL": round(totals["rougeL"] / denom, 4),
+                "meteor": round(totals["meteor"] / denom, 4),
+                "count": processed,
+                "model": answer_model,
+                "top_k": mode_top_k,
+            }
+
+    if len(readers) == 1:
+        summary_report["modes"] = summary_report["runs"][readers[0]]
+    if len(modes) == 1:
+        summary_report["models"] = {reader: summary_report["runs"][reader][modes[0]] for reader in readers}
 
     summary_path = output_dir / f"summary_{split}.json"
     summary_path.write_text(json.dumps(summary_report, ensure_ascii=False, indent=2), encoding="utf-8")

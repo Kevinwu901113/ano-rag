@@ -8,6 +8,7 @@ chunk:
   max_tokens: 768
 
 vllm:
+  enabled: true
   endpoint: "http://127.0.0.1:8000/v1"
   model: "qwen3-30b-a3b"
   temperature: 0.0
@@ -41,6 +42,31 @@ vllm:
     step_down: 2
     window_size: 50
     cool_down_sec: 5.0
+
+openai:
+  enabled: true
+  model: "gpt-4"
+  api_key_env: "OPENAI_API_KEY"
+  temperature: 0.7
+  max_tokens: 1024
+  base_url: "https://api.openai.com/v1"
+  timeout_sec: 60.0
+  max_retries: 2
+  retry_backoff_sec: 1.0
+  retry_backoff_max_sec: 20.0
+  system_prompt: "You are a helpful assistant."
+
+models:
+  vllm:
+    enabled: true
+    model: "qwen3-30b-a3b"
+    endpoint: "http://127.0.0.1:8000/v1"
+  openai:
+    enabled: true
+    model: "gpt-4"
+    api_key_env: "OPENAI_API_KEY"
+    temperature: 0.7
+    max_tokens: 1024
 
 routing:
   token_budget_hint: 320000
@@ -105,8 +131,12 @@ retriever:
       nprobe: 16
       efSearch: 128
     normalize: true
+  dense:
+    enabled: true
+    top_k: 5
   bm25:
     enabled: true
+    top_k: 10
     backend: "rank_bm25"
     store_path: "indexes/bm25/notes"
     k1: 0.9
@@ -121,6 +151,8 @@ retriever:
     pre_topM: 128
     final_topK: 64
   hybrid:
+    enabled: true
+    top_k: 5
     agreement_threshold: 2
     weights:
       bm25: 1.0
@@ -257,6 +289,21 @@ narrativeqa:
         subject_match: 2.0
         source_agree: 1.0
 
+datasets:
+  narrativeqa:
+    readers: ["openai"]
+    retrievers: ["bm25", "dense", "hybrid"]
+    reader: "openai"
+    top_k: 10
+  hotpotqa:
+    readers: ["openai"]
+    retrievers: ["bm25", "dense", "hybrid"]
+    reader: "openai"
+    top_k: 10
+  triviaqa:
+    reader: "openai"
+    top_k: 5
+
 reranker:
   enabled: true
   type: "llm"
@@ -275,6 +322,7 @@ hotpot_entry:
   data: "data/hotpot_dev_fullwiki_500_jsonl.jsonl"
   cache_dir: "result/cache"
   output_dir: "result"
+  split: "dev"
   top_k: 10
   limit: 0
   workers: 1
@@ -290,7 +338,7 @@ narrativeqa_entry:
   stories_dir: "narrativeqa/tmp"
   split: "valid"
   context_mode: "summary"
-  modes: ["structured", "dense", "bm25", "hybrid"]
+  modes: ["bm25", "dense", "hybrid"]
   cache_dir: "result/narrativeqa/cache"
   output_dir: "result/narrativeqa"
   top_k: 10
