@@ -21,6 +21,7 @@ def call_llm(
     retries: int = 2,
     allowed_labels: Optional[List[str]] = None,
     attribute_name: Optional[str] = None,
+    prompt_capture: Optional[Dict[str, Any]] = None,
 ) -> str:
     compressed = _compress_evidence(question, evidences, endpoint, model)
 
@@ -40,6 +41,9 @@ def call_llm(
         label_instruction=_label_instruction(sanitized_labels, attribute_name),
         final_instruction=build_final_instruction(),
     )
+    if prompt_capture is not None:
+        prompt_capture["prompt"] = prompt
+        prompt_capture["prompt_name"] = ANSWER_PROMPT_NAME
 
     client = LLMChatClient(
         endpoint=endpoint,

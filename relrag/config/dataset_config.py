@@ -16,7 +16,7 @@ DEFAULT_OPENAI_CONFIG: Dict[str, Any] = {
     "max_retries": 2,
     "retry_backoff_sec": 1.0,
     "retry_backoff_max_sec": 20.0,
-    "system_prompt": "You are a helpful assistant.",
+    "system_prompt_name": "system_prompt.txt",
 }
 
 
@@ -94,6 +94,9 @@ def resolve_openai_api_key(
     *,
     env: Optional[Mapping[str, str]] = None,
 ) -> str:
+    cfg_key = openai_cfg.get("api_key")
+    if cfg_key:
+        return str(cfg_key)
     env_name = openai_cfg.get("api_key_env", DEFAULT_OPENAI_CONFIG["api_key_env"])
     env_map = env or os.environ
     key = env_map.get(str(env_name))
@@ -132,6 +135,10 @@ def _normalize_openai_config(cfg: Dict[str, Any]) -> Dict[str, Any]:
         normalized.get("retry_backoff_max_sec", DEFAULT_OPENAI_CONFIG["retry_backoff_max_sec"]),
         DEFAULT_OPENAI_CONFIG["retry_backoff_max_sec"],
     )
-    if "system_prompt" not in normalized:
-        normalized["system_prompt"] = DEFAULT_OPENAI_CONFIG["system_prompt"]
+    name = normalized.get("system_prompt_name")
+    if name is None:
+        if "system_prompt" not in normalized:
+            normalized["system_prompt_name"] = DEFAULT_OPENAI_CONFIG["system_prompt_name"]
+    else:
+        normalized["system_prompt_name"] = str(name)
     return normalized

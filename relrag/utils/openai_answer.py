@@ -2,12 +2,28 @@ from __future__ import annotations
 
 from typing import Any, Dict, List
 
-from relrag.prompt import render_prompt
+from relrag.prompt import load_prompt, render_prompt
 from relrag.utils.openai_client import chat_completion
 from relrag.utils.output_protocol import build_final_instruction
 
 
 ANSWER_PROMPT_NAME = "answerer.txt"
+DEFAULT_SYSTEM_PROMPT_NAME = "system_prompt.txt"
+
+
+def _resolve_system_prompt(openai_cfg: Dict[str, Any]) -> str:
+    if "system_prompt" in openai_cfg:
+        raw = openai_cfg.get("system_prompt")
+        if raw is None:
+            return ""
+        return str(raw)
+    name = openai_cfg.get("system_prompt_name")
+    if name is None:
+        return load_prompt(DEFAULT_SYSTEM_PROMPT_NAME)
+    name = str(name).strip()
+    if not name:
+        return ""
+    return load_prompt(name)
 
 
 def _fmt_strong(item: Dict[str, Any], idx: int) -> str:
@@ -33,14 +49,19 @@ def _fmt_weak(item: Dict[str, Any]) -> str:
     return f"- [{nid}] (score≈{score_text}, subj≈{subj_hint}) {canon} | {raw}"
 
 
-def build_answer_prompt(question: str, evidences: List[Dict[str, Any]]) -> str:
+def build_answer_prompt(
+    question: str,
+    evidences: List[Dict[str, Any]],
+    *,
+    prompt_name: str = ANSWER_PROMPT_NAME,
+) -> str:
     strong_items = [item for item in evidences if not item.get("weak")]
     weak_items = [item for item in evidences if item.get("weak")]
     strong_block = "\n".join(_fmt_strong(item, idx) for idx, item in enumerate(strong_items)) or "None"
     weak_block = "\n".join(_fmt_weak(item) for item in weak_items) or "None"
     label_instruction = "If you can answer, output the canonical label only."
     return render_prompt(
-        ANSWER_PROMPT_NAME,
+        prompt_name,
         q=question,
         strong_block=strong_block,
         weak_block=weak_block,
@@ -53,11 +74,16 @@ def generate_openai_answer(
     question: str,
     evidences: List[Dict[str, Any]],
     openai_cfg: Dict[str, Any],
+    *,
+    prompt_capture: Dict[str, Any] | None = None,
 ) -> str:
-    prompt = build_answer_prompt(question, evidences)
-    system_prompt = openai_cfg.get("system_prompt")
-    if system_prompt is None:
-        system_prompt = "You are a helpful assistant."
+    prompt_name = openai_cfg.get("answer_prompt_name") or ANSWER_PROMPT_NAME
+    prompt = build_answer_prompt(question, evidences, prompt_name=prompt_name)
+    system_prompt = _resolve_system_prompt(openai_cfg)
+    if prompt_capture is not None:
+        prompt_capture["prompt"] = prompt
+        prompt_capture["system_prompt"] = system_prompt
+        prompt_capture["prompt_name"] = prompt_name
 
     messages = []
     if system_prompt:

@@ -21,7 +21,7 @@ from relrag.config.dataset_config import (
     resolve_openai_config,
     resolve_reader,
 )
-from relrag.config.config_loader import config as global_config
+from relrag.config.config_loader import ConfigLoader, config as global_config
 from relrag.indexer.bm25_index import BM25IndexBuilder
 from relrag.indexer.embedding_index import EmbeddingIndexBuilder
 from relrag.utils.openai_answer import generate_openai_answer as _generate_openai_answer
@@ -103,8 +103,7 @@ class DocumentCache:
             return lock
 
 
-def _load_entry_config() -> Dict[str, Any]:
-    cfg = global_config.load_config()
+def _load_entry_config(cfg: Dict[str, Any]) -> Dict[str, Any]:
     entry_cfg = cfg.get("narrativeqa_entry") or cfg.get("entry") or {}
     if not isinstance(entry_cfg, dict):
         return {}
@@ -301,8 +300,7 @@ def _pred_filename(split: str, reader: str, mode: str, reader_count: int, mode_c
     return f"pred_{split}_{reader}_{mode}.jsonl"
 
 
-def _resolve_llm_config(args: argparse.Namespace) -> Tuple[str, str]:
-    cfg = global_config.load_config()
+def _resolve_llm_config(args: argparse.Namespace, cfg: Dict[str, Any]) -> Tuple[str, str]:
     endpoint = args.endpoint or (cfg.get("vllm") or {}).get("endpoint")
     if not endpoint:
         raise ValueError("LLM endpoint is required (use --endpoint or config vllm.endpoint)")
@@ -806,6 +804,7 @@ def _drain_futures(
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="NarrativeQA CSV entry for RelRAG")
+    parser.add_argument("--config", help="Path to YAML config file (defaults to relrag/config/config.yaml)")
     parser.add_argument("--qaps", help="Path to NarrativeQA qaps.csv (fallback to config)")
     parser.add_argument("--summaries", help="Path to NarrativeQA summaries.csv (fallback to config)")
     parser.add_argument("--stories_dir", help="Directory containing full stories (story-as-context)")
@@ -836,9 +835,9 @@ def main() -> None:
         path = Path(path_str)
         return path if path.is_absolute() else repo_root / path
 
-    cfg = global_config.load_config()
+    cfg = ConfigLoader(args.config).load_config() if args.config else global_config.load_config()
     dataset_cfg = get_dataset_config(cfg, "narrativeqa")
-    entry_cfg = _load_entry_config()
+    entry_cfg = _load_entry_config(cfg)
     args.qaps = _pick_arg(args, entry_cfg, dataset_cfg, "qaps", None)
     args.summaries = _pick_arg(args, entry_cfg, dataset_cfg, "summaries", None)
     args.stories_dir = _pick_arg(args, entry_cfg, dataset_cfg, "stories_dir", None)
@@ -846,7 +845,10 @@ def main() -> None:
     args.context_mode = _normalize_context_mode(
         _pick_arg(args, entry_cfg, dataset_cfg, "context_mode", DEFAULT_CONTEXT_MODE)
     )
-    args.modes = _pick_arg(args, entry_cfg, dataset_cfg, "modes", DEFAULT_MODES)
+    if args.modes is None and args.retriever is None:
+        has_dataset_modes = dataset_cfg.get("retrievers") is not None or dataset_cfg.get("retriever_modes") is not None
+        if not has_dataset_modes:
+            args.modes = _pick_arg(args, entry_cfg, dataset_cfg, "modes", DEFAULT_MODES)
     args.cache_dir = _pick_arg(args, entry_cfg, dataset_cfg, "cache_dir", DEFAULT_CACHE_DIR)
     args.output_dir = _pick_arg(args, entry_cfg, dataset_cfg, "output_dir", DEFAULT_OUTPUT_DIR)
     args.top_k = _coerce_int(
@@ -898,7 +900,8 @@ def main() -> None:
     if stories_dir and not stories_dir.exists():
         raise FileNotFoundError(f"stories_dir not found: {stories_dir}")
 
-    llm_endpoint, llm_model = _resolve_llm_config(args)
+    llm_endpoint, llm_model = _resolve_llm_config(args, cfg)
+    logger.info("Using vLLM endpoint={} model={}", llm_endpoint, llm_model)
     cache_root = _resolve_path(args.cache_dir)
     output_dir = _resolve_path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -930,6 +933,14 @@ def main() -> None:
             raise ValueError("OpenAI mode disabled in config (openai.enabled=false).")
         openai_cfg["api_key"] = resolve_openai_api_key(openai_cfg)
         openai_runtime_cfg = openai_cfg
+        logger.info(
+            "OpenAI reader enabled base_url={} model={} temperature={} max_tokens={} api_key_env={}",
+            openai_runtime_cfg.get("base_url"),
+            openai_runtime_cfg.get("model"),
+            openai_runtime_cfg.get("temperature"),
+            openai_runtime_cfg.get("max_tokens"),
+            openai_runtime_cfg.get("api_key_env"),
+        )
     doc_cache = DocumentCache()
 
     summary_report: Dict[str, Any] = {

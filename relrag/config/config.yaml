@@ -1,0 +1,224 @@
+system:
+  project_name: ano-rag
+  device: cuda
+policies:
+  strict_definition_extraction: true
+  doc_entity_isolation: true
+  allow_cross_doc: false
+  answer_only_label: true
+  enable_evidence_canonical: true
+chunk:
+  n_sent: 3
+  overlap: 1
+  max_tokens: 768
+vllm:
+  endpoint: http://127.0.0.1:8000/v1
+  model: qwen3-30b-a3b
+  temperature: 0.0
+  max_tokens: 256
+  max_new_tokens: 256
+  concurrency:
+    max_workers: 16
+    batch_size: 1
+    endpoints: []
+    connect_timeout_sec: 3.05
+    read_timeout_sec: 20.0
+    retry_max_attempts: 2
+    retry_total_cap_sec: 30.0
+    retry_backoff_base: 1.0
+    retry_backoff_max_sec: 6.0
+    retry_jitter_frac: 0.5
+    pause_on_timeout_rate: 0.3
+    pause_sec: 7.0
+    blacklist_duration_sec: 15.0
+    endpoint_log_every: 0
+    buckets:
+      '0_256':
+        workers: 8
+      '256_512':
+        workers: 6
+      '512_1024':
+        workers: 4
+      1024_plus:
+        workers: 2
+    refill_factor: 1.5
+  adaptive:
+    enabled: false
+    min_workers: 2
+    max_workers: 16
+    target_p50_ms: 1200
+    target_p95_ms: 3500
+    step_up: 2
+    step_down: 2
+    window_size: 50
+    cool_down_sec: 5.0
+  json_mode:
+    use_guided_json: false
+    use_response_format: false
+    schema_name: ano-note
+openai:
+  enabled: true
+  model: deepseek-chat
+  answer_prompt_name: answerer_openai.txt
+  api_key: "sk-c003ed6c90c24b5f8caad6252b4d6a24"
+  api_key_env: OPENAI_API_KEY
+  temperature: 0.7
+  max_tokens: 1024
+  base_url: https://api.deepseek.com/v1
+  timeout_sec: 60.0
+  max_retries: 2
+  retry_backoff_sec: 1.0
+  retry_backoff_max_sec: 20.0
+  system_prompt_name: system_prompt.txt
+datasets: {}
+llm_profiles:
+  extract:
+    temperature: 0.0
+    max_tokens: 256
+    thinking: false
+  generate:
+    temperature: 0.2
+    max_tokens: 128
+    thinking: null
+structrag:
+  router: llm
+  supported_types:
+  - chunk
+  - graph
+  top_k: 10
+  llm_model: qwen3-30b-a3b
+routing:
+  token_budget_hint: 320000
+retriever:
+  structured:
+    enabled: true
+    fanout: 8
+    entity_match_threshold: 0.5
+    path_consistency_threshold: 0.9
+    vector_fallback_enabled: true
+  embedding:
+    enabled: true
+    provider: vllm
+    model: qwen3-embedding
+    endpoint: http://127.0.0.1:8001/v1
+    api_key: sk-no-key-required
+    model_path_override: null
+    cache_dir: null
+    download_dir: null
+    device: cuda
+    dtype: null
+    auto_build: false
+    offline_index_path: indexes/faiss/notes.faiss
+    meta_path: indexes/faiss/notes.meta.parquet
+    max_len_note: 256
+    topn: 200
+    faiss:
+      kind: HNSW32
+      nprobe: 16
+      efSearch: 128
+    normalize: true
+  hybrid:
+    enabled: true
+    agreement_threshold: 2
+    weights:
+      bm25: 1.0
+      embedding: 1.0
+      structured: 1.5
+      subject_match: 2.0
+      source_agree: 1.0
+  bm25:
+    enabled: true
+    backend: rank_bm25
+    store_path: indexes/bm25/notes
+    k1: 0.9
+    b: 0.4
+    ngram:
+    - 1
+    - 2
+    field_weights:
+      subj: 2.0
+      pred: 1.6
+      obj: 1.2
+      ctx: 1.0
+    topn: 200
+  fusion:
+    method: rrf
+    rrf_k: 60
+    weights:
+      struct: 0.5
+      emb: 0.3
+      bm25: 0.2
+    pre_topM: 128
+    final_topK: 64
+reranker:
+  enabled: true
+  type: llm
+  llm:
+    endpoint: ${vllm.endpoint}
+    model: ${vllm.model}
+    batch: 16
+    timeout_s: 60
+  final_weights:
+    pre: 0.3
+    rerank: 0.5
+    struct: 0.2
+notes:
+  out_path: notes/notes.jsonl
+  indexes_dir: indexes/
+hotpot_entry:
+  data: data/hotpot_dev_distractor_5_jsonl.jsonl
+  cache_dir: result/cache
+  output_dir: result
+  top_k: 10
+  limit: 0
+  workers: 1
+  debug_dir: result/debug
+  debug_max_notes: 50
+  stall_warn_sec: 300.0
+  stall_abort_sec: 900.0
+  force_build: false
+parsing:
+  allow_jsonl: true
+  enable_array_packer: true
+  enable_bare_key_fix: true
+  enable_loose_extractor: true
+  loose_split_key: subj
+  max_tokens: 768
+  parse_retry: 1
+  validation_retry: 1
+  stop:
+  - '"]
+
+    '
+  - '
+
+    ]'
+  - '
+
+
+    END'
+  - END_JSON
+  - '
+
+
+    '
+  assume_valid_json: false
+schema_guard:
+  min_evidence_len: 4
+  max_evidence_len: 512
+  type_map:
+    GROUP: ORG
+    OBJECT: CONCEPT
+    NUMBER: CONCEPT
+    QUANTITY: CONCEPT
+    PERCENT: CONCEPT
+    DATE: TIME
+    YEAR: TIME
+retrieval:
+  weights:
+    corefers: 1.0
+    mentions: 0.9
+    unresolved_pronoun: 0.8
+    neighbor_bonus: 0.9
+    alias_penalty: 0.95
+    fallback_contains_entity_boost: 1.05

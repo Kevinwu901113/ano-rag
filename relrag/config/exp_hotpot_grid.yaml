@@ -1,0 +1,41 @@
+datasets:
+  hotpotqa:
+    retrievers: ["bm25", "dense", "hybrid"]
+    readers: ["vllm", "openai"]
+    
+hotpot_entry:
+  data: "data/hotpot_dev_distractor_500_jsonl.jsonl"
+  cache_dir: "result/hotpot_grid/cache"
+  output_dir: "result/hotpot_grid"
+  debug_dir: "result/hotpot_grid/debug"
+
+vllm:
+  concurrency:
+    max_workers: 24
+    buckets:
+      "0_256":
+        workers: 12
+      "256_512":
+        workers: 6
+      "512_1024":
+        workers: 4
+      1024_plus:
+        workers: 2
+  
+retriever:
+  bm25:
+    top_k: 10
+  embedding: # Dense
+    provider: vllm
+    endpoint: http://127.0.0.1:8001/v1
+    model: qwen3-embedding
+    top_k: 10
+  hybrid:
+    top_k: 10
+
+openai:
+  answer_prompt_name: answerer_openai.txt
+  model: deepseek-chat
+  api_key: "sk-c003ed6c90c24b5f8caad6252b4d6a24"
+  api_key_env: "OPENAI_API_KEY"
+  base_url: https://api.deepseek.com/v1

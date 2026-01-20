@@ -81,7 +81,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "max_retries": 2,
         "retry_backoff_sec": 1.0,
         "retry_backoff_max_sec": 20.0,
-        "system_prompt": "You are a helpful assistant.",
+        "system_prompt_name": "system_prompt.txt",
     },
     "datasets": {},
     "llm_profiles": {
@@ -137,7 +137,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         },
         "bm25": {
             "enabled": True,
-            "backend": "pyserini",
+            "backend": "rank_bm25",
             "store_path": "indexes/bm25/notes",
             "k1": 0.9,
             "b": 0.4,
@@ -277,6 +277,64 @@ def _get_nested(config: Dict[str, Any], path: str) -> Any:
     return cursor
 
 
+def _is_url_like(value: str) -> bool:
+    lowered = value.strip().lower()
+    return "://" in lowered
+
+
+def _as_repo_relative(base_dir: Path, value: str) -> str:
+    candidate = Path(value).expanduser()
+    if candidate.is_absolute():
+        return str(candidate)
+    # STRATEGY: Resolve relative paths against the repo root
+    return str((base_dir / candidate).resolve())
+
+
+def _inject_runtime_paths(config: Dict[str, Any], *, repo_root: Path, config_path: Path) -> None:
+    paths = config.setdefault("paths", {})
+    if isinstance(paths, dict):
+        paths["repo_root"] = str(repo_root)
+        paths["config_path"] = str(config_path)
+        paths["config_dir"] = str(config_path.parent)
+
+
+def _normalize_path_fields(config: Dict[str, Any], *, base_dir: Path) -> None:
+    """
+    Normalize known path fields to be absolute, relative to base_dir (repo root).
+    """
+    dotted_keys = [
+        "notes.out_path",
+        "notes.indexes_dir",
+        "retriever.embedding.cache_dir",
+        "retriever.embedding.download_dir",
+        "retriever.embedding.model_path_override",
+        "retriever.embedding.offline_index_path",
+        "retriever.embedding.meta_path",
+        "retriever.bm25.store_path",
+        "hotpot_entry.data",
+        "hotpot_entry.cache_dir",
+        "hotpot_entry.output_dir",
+        "hotpot_entry.debug_dir",
+        "narrativeqa_entry.qaps",
+        "narrativeqa_entry.summaries",
+        "narrativeqa_entry.stories_dir",
+        "narrativeqa_entry.cache_dir",
+        "narrativeqa_entry.output_dir",
+    ]
+    for key in dotted_keys:
+        current = _get_nested(config, key)
+        if current is None:
+            continue
+        if not isinstance(current, str):
+            continue
+        raw = current.strip()
+        if not raw:
+            continue
+        if raw.startswith("${") or _is_url_like(raw):
+            continue
+        _set_nested(config, key, _as_repo_relative(base_dir, raw))
+
+
 def _resolve_placeholders(config: Dict[str, Any]) -> Dict[str, Any]:
     def _resolve(value: Any) -> Any:
         if isinstance(value, dict):
@@ -297,16 +355,27 @@ def _resolve_placeholders(config: Dict[str, Any]) -> Dict[str, Any]:
 
 
 class ConfigLoader:
-    """Minimal configuration loader for the structured RAG pipeline."""
+    """
+    Minimal configuration loader for the structured RAG pipeline.
+    
+    Priority:
+    1. --config argument (passed via init)
+    2. ANO_RAG_CONFIG environment variable
+    3. relrag/config/config.yaml (new default)
+    4. relrag/config.yaml (legacy fallback)
+    """
 
     def __init__(self, config_path: str | None = None):
+        self.repo_root = Path(__file__).resolve().parents[2]
+        default_v2 = Path(__file__).resolve().parent / "config.yaml"
+        default_v1 = Path(__file__).resolve().parent.parent / "config.yaml"
         if config_path is None:
             env_path = os.environ.get(CONFIG_ENV_VAR)
             if env_path:
                 config_path = Path(env_path)
             else:
-                config_path = Path(__file__).resolve().parent.parent / "config.yaml"
-        self.config_path = Path(config_path)
+                config_path = default_v2 if default_v2.exists() else default_v1
+        self.config_path = Path(config_path).expanduser()
         self._config: Dict[str, Any] | None = None
 
     def load_config(self) -> Dict[str, Any]:
@@ -329,6 +398,9 @@ class ConfigLoader:
             _apply_env_overrides(self._config)
             _finalize_config(self._config)
             self._config = _resolve_placeholders(self._config)
+            _inject_runtime_paths(self._config, repo_root=self.repo_root, config_path=self.config_path)
+            # STRATEGY: All relative paths are resolved against the REPO ROOT
+            _normalize_path_fields(self._config, base_dir=self.repo_root)
         return self._config
 
     def get(self, key: str, default: Any = None) -> Any:

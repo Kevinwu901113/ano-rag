@@ -6,14 +6,26 @@ import re
 import shutil
 import sys
 import time
-from copy import deepcopy
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
+from copy import deepcopy
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, TextIO, Tuple
 
 from loguru import logger
 
-from relrag.api import build_index, retrieve, answer
+try:
+    import numpy as np
+except Exception as exc:  # pragma: no cover - optional dependency
+    np = None  # type: ignore
+    logger.warning("numpy unavailable: {}. Dense retrieval disabled.", exc)
+
+try:
+    from rank_bm25 import BM25Okapi  # type: ignore
+except Exception as exc:  # pragma: no cover - optional dependency
+    BM25Okapi = None  # type: ignore
+    logger.warning("rank_bm25 unavailable: {}. BM25 retrieval disabled.", exc)
+
+from relrag.api import answer
 from relrag.config.dataset_config import (
     get_dataset_config,
     resolve_openai_api_key,
@@ -22,13 +34,11 @@ from relrag.config.dataset_config import (
 )
 from relrag.config.config_loader import ConfigLoader, config as global_config
 from relrag.generator import answerer as answerer_module
-from relrag.indexer.bm25_index import BM25IndexBuilder
-from relrag.indexer.embedding_index import EmbeddingIndexBuilder
-from relrag.retriever.note_store import NoteStore
 from relrag.prompt import load_prompt
 from relrag.utils.answer_source import resolve_short_answer, sha1_text
-from relrag.utils.openai_answer import generate_openai_answer
+from relrag.utils.embedding_utils import get_shared_encoder
 from relrag.utils.eval_metrics import score_metrics
+from relrag.utils.openai_answer import generate_openai_answer
 from relrag.utils.output_eval import has_final_tag
 
 
@@ -38,10 +48,7 @@ DEFAULT_TOP_K = 10
 DEFAULT_LIMIT = 0
 DEFAULT_WORKERS = 1
 DEFAULT_SPLIT = "dev"
-DEFAULT_CACHE_DIR = "result/cache"
 DEFAULT_OUTPUT_DIR = "result"
-DEFAULT_DEBUG_DIR = "result/debug"
-DEFAULT_DEBUG_MAX_NOTES = 50
 DEFAULT_OVERFETCH = 1.0
 
 
@@ -51,17 +58,6 @@ def _load_jsonl(path: Path) -> Iterable[Dict[str, Any]]:
             line = line.strip()
             if line:
                 yield json.loads(line)
-
-
-def _slugify_title(title: str, max_len: int = 60) -> str:
-    cleaned = re.sub(r"[^0-9A-Za-z]+", "_", (title or "")).strip("_").lower()
-    cleaned = cleaned or "doc"
-    return cleaned[:max_len]
-
-
-def _make_doc_id(qid: str, idx: int, title: str) -> str:
-    slug = _slugify_title(title)
-    return f"{qid}_{idx:02d}_{slug}"
 
 
 def _count_examples(path: Path, limit: int) -> int:
@@ -74,6 +70,17 @@ def _count_examples(path: Path, limit: int) -> int:
             if limit and total >= limit:
                 break
     return total
+
+
+def _slugify_title(title: str, max_len: int = 60) -> str:
+    cleaned = re.sub(r"[^0-9A-Za-z]+", "_", (title or "")).strip("_").lower()
+    cleaned = cleaned or "doc"
+    return cleaned[:max_len]
+
+
+def _make_doc_id(qid: str, idx: int, title: str) -> str:
+    slug = _slugify_title(title)
+    return f"{qid}_{idx:02d}_{slug}"
 
 
 class ProgressBar:
@@ -123,89 +130,150 @@ class ProgressBar:
         self._stream.flush()
 
 
-def _write_docs_for_example(
-    example: Dict[str, Any],
-    docs_dir: Path,
-    overwrite: bool = False,
-) -> Dict[str, Dict[str, Any]]:
-    docs_dir.mkdir(parents=True, exist_ok=True)
-    doc_index: Dict[str, Dict[str, Any]] = {}
+def _build_sentence_units(example: Dict[str, Any]) -> List[Dict[str, Any]]:
+    units: List[Dict[str, Any]] = []
     context = example.get("context") or []
-    qid = str(example.get("_id") or "unknown")
-
-    for idx, item in enumerate(context):
+    for doc_idx, item in enumerate(context):
         if not isinstance(item, list) or len(item) != 2:
             continue
         title, sentences = item
         if not isinstance(title, str) or not isinstance(sentences, list):
             continue
-        doc_id = _make_doc_id(qid, idx, title)
-        doc_index[doc_id] = {"title": title, "sentences": sentences}
+        for sent_idx, sentence in enumerate(sentences):
+            text = str(sentence).strip()
+            if not text:
+                continue
+            units.append(
+                {
+                    "doc_idx": doc_idx,
+                    "title": title,
+                    "sentence_idx": sent_idx,
+                    "text": text,
+                }
+            )
+    return units
 
-        text = " ".join(str(s).strip() for s in sentences if str(s).strip()).strip()
+
+def _tokenize(text: str, ngram: List[int]) -> List[str]:
+    base = [tok for tok in str(text).lower().split() if tok]
+    if not base:
+        return []
+    if not ngram:
+        return base
+    tokens: List[str] = []
+    for n in ngram:
+        n = int(n)
+        if n <= 1:
+            tokens.extend(base)
+            continue
+        if n > len(base):
+            continue
+        for i in range(len(base) - n + 1):
+            tokens.append(" ".join(base[i : i + n]))
+    return tokens or base
+
+
+def _bm25_search(
+    question: str,
+    units: List[Dict[str, Any]],
+    bm25_cfg: Dict[str, Any],
+    top_k: int,
+) -> List[Dict[str, Any]]:
+    if BM25Okapi is None:
+        raise RuntimeError("rank_bm25 is required for BM25 baseline retrieval.")
+    ngram = bm25_cfg.get("ngram") or [1]
+    docs: List[List[str]] = []
+    valid_units: List[Dict[str, Any]] = []
+    for unit in units:
+        tokens = _tokenize(unit.get("text", ""), ngram)
+        if not tokens:
+            continue
+        docs.append(tokens)
+        valid_units.append(unit)
+    query_tokens = _tokenize(question, ngram)
+    if not docs or not query_tokens:
+        return []
+    k1 = float(bm25_cfg.get("k1", 0.9))
+    b = float(bm25_cfg.get("b", 0.4))
+    bm25 = BM25Okapi(docs, k1=k1, b=b)
+    scores = bm25.get_scores(query_tokens)
+    ranked = sorted(enumerate(scores), key=lambda item: item[1], reverse=True)
+    results: List[Dict[str, Any]] = []
+    for idx, score in ranked[: max(0, int(top_k))]:
+        results.append({"unit": valid_units[idx], "score": float(score)})
+    return results
+
+
+def _dense_search(
+    question: str,
+    units: List[Dict[str, Any]],
+    encoder,
+    embed_cfg: Dict[str, Any],
+    top_k: int,
+) -> List[Dict[str, Any]]:
+    if np is None:
+        raise RuntimeError("numpy is required for dense baseline retrieval.")
+    if encoder is None:
+        raise RuntimeError("Dense encoder is not initialized.")
+    texts: List[str] = []
+    valid_units: List[Dict[str, Any]] = []
+    for unit in units:
+        text = unit.get("text")
         if not text:
             continue
-        doc_path = docs_dir / f"{doc_id}.txt"
-        if doc_path.exists() and not overwrite:
-            continue
-        doc_path.write_text(text, encoding="utf-8")
-
-    return doc_index
-
-
-def _resolve_doc_id_from_source(source: Optional[str]) -> Optional[str]:
-    if not source:
-        return None
-    return source.split("#", 1)[0].strip() or None
-
-
-def _normalize_for_match(text: str) -> str:
-    return re.sub(r"\W+", "", (text or "").lower())
-
-
-def _find_sentence_index(evidence: str, sentences: List[str]) -> Optional[int]:
-    ev_norm = _normalize_for_match(evidence)
-    if not ev_norm:
-        return None
-    for idx, sent in enumerate(sentences):
-        sent_norm = _normalize_for_match(sent)
-        if not sent_norm:
-            continue
-        if sent_norm in ev_norm or ev_norm in sent_norm:
-            return idx
-    return None
+        texts.append(text)
+        valid_units.append(unit)
+    if not texts or not question.strip():
+        return []
+    normalize = bool(embed_cfg.get("normalize", True))
+    max_len = int(embed_cfg.get("max_len_note", 256))
+    batch_size = _coerce_int(embed_cfg.get("batch_size", 16), 16)
+    q_vec = encoder.encode([question.strip()], max_length=max_len, batch_size=batch_size, normalize=normalize)
+    doc_vecs = encoder.encode(texts, max_length=max_len, batch_size=batch_size, normalize=normalize)
+    if q_vec.size == 0 or doc_vecs.size == 0:
+        return []
+    query = np.asarray(q_vec[0], dtype="float32")
+    doc_vecs = np.asarray(doc_vecs, dtype="float32")
+    if normalize:
+        scores = doc_vecs @ query
+    else:
+        denom = (np.linalg.norm(doc_vecs, axis=1) * (np.linalg.norm(query) + 1e-12)) + 1e-12
+        scores = (doc_vecs @ query) / denom
+    ranked_idx = np.argsort(scores)[::-1][: max(0, int(top_k))]
+    results: List[Dict[str, Any]] = []
+    for idx in ranked_idx:
+        results.append({"unit": valid_units[idx], "score": float(scores[idx])})
+    return results
 
 
 def _build_retrieved_context(
-    evidences: List[Dict[str, Any]],
-    note_store: NoteStore,
-    doc_index: Dict[str, Dict[str, Any]],
+    ranked: List[Dict[str, Any]],
+    *,
+    mode: str,
+    qid: str,
 ) -> List[Dict[str, Any]]:
     contexts: List[Dict[str, Any]] = []
-    for ev in evidences:
-        note_id = ev.get("note_id")
-        note = note_store.get_weak(note_id) if note_id else None
-        source = ((note or {}).get("meta") or {}).get("source") or ev.get("source")
-        doc_id = _resolve_doc_id_from_source(source) if source else None
-        if not doc_id:
-            doc_id = ev.get("doc_id") or _resolve_doc_id_from_source(note_id)
-        doc_meta = doc_index.get(doc_id) if doc_id else None
-        title = doc_meta.get("title") if doc_meta else None
-        sentences = doc_meta.get("sentences") if doc_meta else []
-        evidence_text = ev.get("canonical") or ev.get("evidence") or ""
-        sentence_idx = _find_sentence_index(evidence_text, sentences) if sentences else None
-
+    for rank, item in enumerate(ranked, start=1):
+        unit = item.get("unit") or {}
+        title = unit.get("title")
+        sentence_idx = unit.get("sentence_idx")
+        text = unit.get("text") or ""
+        doc_idx = unit.get("doc_idx")
+        if title is None or sentence_idx is None:
+            continue
+        doc_id = _make_doc_id(qid, int(doc_idx or 0), str(title))
+        note_id = f"{qid}_{int(doc_idx or 0):02d}_{int(sentence_idx):02d}"
         contexts.append(
             {
                 "note_id": note_id,
                 "doc_id": doc_id,
                 "title": title,
-                "sentence_idx": sentence_idx,
-                "evidence": ev.get("evidence"),
-                "canonical": ev.get("canonical"),
-                "weak": bool(ev.get("weak", False)),
-                "score": ev.get("score"),
-                "source": source,
+                "sentence_idx": int(sentence_idx),
+                "evidence": text,
+                "canonical": f"[{title}] {text}",
+                "score": item.get("score"),
+                "rank": rank,
+                "source": mode,
             }
         )
     return contexts
@@ -316,69 +384,6 @@ def _resolve_llm_input_hash(prompt_capture: Dict[str, Any]) -> str:
     return sha1_text(combined)
 
 
-def _collect_debug_notes(
-    note_store: NoteStore,
-    note_ids: Iterable[str],
-    max_notes: int,
-) -> Dict[str, Any]:
-    collected: Dict[str, Any] = {}
-    limit = max(0, int(max_notes))
-    for note_id in note_ids:
-        if not note_id or note_id in collected:
-            continue
-        note = note_store.get_weak(note_id)
-        if note:
-            collected[note_id] = note
-        if limit and len(collected) >= limit:
-            break
-    return collected
-
-
-def _write_debug_artifacts(
-    record: Dict[str, Any],
-    *,
-    debug_dir: Path,
-    docs_dir: Path,
-    notes_path: Path,
-    index_dir: Path,
-    doc_index: Dict[str, Dict[str, Any]],
-    note_store: NoteStore,
-    max_notes: int,
-) -> Optional[Path]:
-    qid = str(record.get("_id") or "unknown")
-    debug_dir.mkdir(parents=True, exist_ok=True)
-    retrieve_result = (record.get("intermediate") or {}).get("retrieve_result") or {}
-    support_note_ids = retrieve_result.get("support_note_ids") or []
-    evidence_note_ids = [
-        ev.get("note_id")
-        for ev in (retrieve_result.get("evidence") or [])
-        if ev.get("note_id")
-    ]
-    merged_note_ids = list(dict.fromkeys(list(support_note_ids) + list(evidence_note_ids)))
-    notes = _collect_debug_notes(note_store, merged_note_ids, max_notes=max_notes)
-
-    payload = {
-        "qid": qid,
-        "question": record.get("question"),
-        "paths": {
-            "docs_dir": str(docs_dir),
-            "notes_path": str(notes_path),
-            "indexes_dir": str(index_dir),
-        },
-        "doc_index": doc_index,
-        "note_ids": {
-            "support": support_note_ids,
-            "evidence": evidence_note_ids,
-            "saved": list(notes.keys()),
-        },
-        "notes": notes,
-        "record": record,
-    }
-    debug_path = debug_dir / f"{qid}.json"
-    debug_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-    return debug_path
-
-
 def _resolve_llm_config(args: argparse.Namespace) -> Tuple[str, str]:
     cfg = global_config.load_config()
     endpoint = args.endpoint or (cfg.get("vllm") or {}).get("endpoint")
@@ -481,10 +486,19 @@ def _deep_merge(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any
     return merged
 
 
+def _apply_dataset_retriever(cfg: Dict[str, Any], dataset_key: str) -> Dict[str, Any]:
+    dataset_cfg = get_dataset_config(cfg, dataset_key)
+    retriever_override = dataset_cfg.get("retriever") if isinstance(dataset_cfg, dict) else None
+    if isinstance(retriever_override, dict):
+        base_retriever = cfg.get("retriever") or {}
+        cfg["retriever"] = _deep_merge(base_retriever, retriever_override)
+    return cfg
+
+
 def _parse_modes(value: Any) -> List[str]:
-    allowed = {"structured", "dense", "bm25", "hybrid"}
+    allowed = {"bm25", "dense"}
     if not value:
-        return ["bm25", "dense", "hybrid"]
+        return ["bm25", "dense"]
     if isinstance(value, str):
         parts = [p for p in re.split(r"[,\s]+", value.strip()) if p]
     elif isinstance(value, (list, tuple)):
@@ -492,18 +506,22 @@ def _parse_modes(value: Any) -> List[str]:
     else:
         parts = [str(value)]
     normalized: List[str] = []
+    skipped: List[str] = []
     seen = set()
     for part in parts:
         key = part.strip().lower()
         if not key:
             continue
         if key not in allowed:
-            raise ValueError(f"Unsupported mode '{part}' (allowed: {sorted(allowed)})")
+            skipped.append(part)
+            continue
         if key in seen:
             continue
         normalized.append(key)
         seen.add(key)
-    return normalized or ["bm25", "dense", "hybrid"]
+    if skipped:
+        logger.warning("Skipping unsupported modes for baseline: {}", skipped)
+    return normalized or ["bm25", "dense"]
 
 
 def _mode_config(cfg: Dict[str, Any], mode: str) -> Dict[str, Any]:
@@ -515,10 +533,6 @@ def _mode_config(cfg: Dict[str, Any], mode: str) -> Dict[str, Any]:
         return retriever_cfg.get("embedding") or {}
     if mode == "bm25":
         return retriever_cfg.get("bm25") or {}
-    if mode == "hybrid":
-        return retriever_cfg.get("hybrid") or {}
-    if mode == "structured":
-        return retriever_cfg.get("structured") or {}
     return {}
 
 
@@ -537,7 +551,6 @@ def _resolve_mode_top_k(mode: str, cfg: Dict[str, Any], fallback: int) -> int:
 def _resolve_retriever_modes(
     *,
     mode_arg: Optional[str],
-    modes_arg: Optional[str],
     entry_cfg: Dict[str, Any],
     dataset_cfg: Dict[str, Any],
     base_cfg: Dict[str, Any],
@@ -545,8 +558,6 @@ def _resolve_retriever_modes(
     raw = None
     if mode_arg:
         raw = mode_arg
-    elif modes_arg:
-        raw = modes_arg
     elif dataset_cfg.get("retrievers") is not None:
         raw = dataset_cfg.get("retrievers")
     elif dataset_cfg.get("retriever_modes") is not None:
@@ -555,7 +566,6 @@ def _resolve_retriever_modes(
         raw = entry_cfg.get("retrievers")
     elif entry_cfg.get("modes") is not None:
         raw = entry_cfg.get("modes")
-
     modes = _parse_modes(raw) if raw is not None else _parse_modes(None)
     enabled_modes = [mode for mode in modes if _mode_enabled(base_cfg, mode)]
     if not enabled_modes:
@@ -613,333 +623,34 @@ def _pred_filename(split: str, reader: str, mode: str, reader_count: int, mode_c
     return f"pred_{split}_{reader}_{mode}.jsonl"
 
 
-def _mode_requirements(mode: str) -> Tuple[bool, bool]:
-    if mode == "structured":
-        return False, False
-    if mode == "dense":
-        return True, False
-    if mode == "bm25":
-        return False, True
-    if mode == "hybrid":
-        return True, True
-    raise ValueError(f"Unsupported mode {mode}")
-
-
-def _apply_dataset_retriever(cfg: Dict[str, Any], dataset_key: str) -> Dict[str, Any]:
-    dataset_cfg = get_dataset_config(cfg, dataset_key)
-    retriever_override = dataset_cfg.get("retriever") if isinstance(dataset_cfg, dict) else None
-    if isinstance(retriever_override, dict):
-        base_retriever = cfg.get("retriever") or {}
-        cfg["retriever"] = _deep_merge(base_retriever, retriever_override)
-    return cfg
-
-
-def _pick_arg(
-    args: argparse.Namespace,
-    entry_cfg: Dict[str, Any],
-    dataset_cfg: Dict[str, Any],
-    name: str,
-    default: Any,
-) -> Any:
-    value = getattr(args, name, None)
-    if value is not None:
-        return value
-    if name in dataset_cfg:
-        return dataset_cfg.get(name)
-    if name in entry_cfg:
-        return entry_cfg.get(name)
-    return default
-
-
-def _ensure_index(
-    docs_dir: Path,
-    index_root: Path,
-    llm_endpoint: str,
-    llm_model: str,
-    force_build: bool,
-) -> Dict[str, Any]:
-    notes_path = index_root / "notes.jsonl"
-    indexes_dir = index_root / "indexes"
-    if not force_build and notes_path.exists() and indexes_dir.exists():
-        return {"status": "reused"}
-    index_root.mkdir(parents=True, exist_ok=True)
-    return build_index(
-        docs_input=str(docs_dir),
-        output_dir=str(index_root),
-        llm_endpoint=llm_endpoint,
-        llm_model=llm_model,
-    )
-
-
-def _prepare_aux_config(example_root: Path, base_cfg: Dict[str, Any]) -> Dict[str, Any]:
-    cfg = deepcopy(base_cfg)
-    notes_path = example_root / "notes.jsonl"
-    indexes_root = example_root / "indexes"
-    cfg.setdefault("notes", {})["out_path"] = str(notes_path)
-    retriever_cfg = cfg.setdefault("retriever", {})
-    embed_cfg = retriever_cfg.setdefault("embedding", {})
-    bm25_cfg = retriever_cfg.setdefault("bm25", {})
-    embed_cfg["offline_index_path"] = str(indexes_root / "faiss" / "notes.faiss")
-    embed_cfg["meta_path"] = str(indexes_root / "faiss" / "notes.meta.parquet")
-    bm25_cfg["store_path"] = str(indexes_root / "bm25" / "notes")
-    return cfg
-
-
-def _build_aux_indexes(
-    example_root: Path,
-    *,
-    base_cfg: Dict[str, Any],
-    build_embedding: bool,
-    build_bm25: bool,
-    force_build: bool,
-) -> Dict[str, Any]:
-    cfg = _prepare_aux_config(example_root, base_cfg)
-    notes_path = Path(cfg.get("notes", {}).get("out_path", example_root / "notes.jsonl"))
-    stats: Dict[str, Any] = {}
-    if not notes_path.exists():
-        if build_embedding:
-            stats["embedding"] = "skipped_missing_notes"
-        if build_bm25:
-            stats["bm25"] = "skipped_missing_notes"
-        return stats
-
-    retriever_cfg = cfg.get("retriever") or {}
-    embed_cfg = retriever_cfg.get("embedding") or {}
-    bm25_cfg = retriever_cfg.get("bm25") or {}
-
-    if build_embedding:
-        embed_cfg["enabled"] = True
-        embed_index = Path(embed_cfg.get("offline_index_path", ""))
-        embed_meta = Path(embed_cfg.get("meta_path", ""))
-        embed_ready = embed_index.exists() and embed_meta.exists()
-        if force_build or not embed_ready:
-            try:
-                EmbeddingIndexBuilder(cfg).build()
-                stats["embedding"] = "ok"
-            except Exception as exc:
-                logger.warning("Embedding index build failed {}: {}", notes_path, exc)
-                stats["embedding"] = f"error:{exc}"
-        else:
-            stats["embedding"] = "reused"
-    else:
-        stats["embedding"] = "disabled"
-
-    if build_bm25:
-        bm25_cfg["enabled"] = True
-        bm25_corpus = Path(bm25_cfg.get("store_path", "")) / "notes.jsonl"
-        if force_build or not bm25_corpus.exists():
-            try:
-                BM25IndexBuilder(cfg).build()
-                stats["bm25"] = "ok"
-            except Exception as exc:
-                logger.warning("BM25 corpus build failed {}: {}", notes_path, exc)
-                stats["bm25"] = f"error:{exc}"
-        else:
-            stats["bm25"] = "reused"
-    else:
-        stats["bm25"] = "disabled"
-
-    return stats
-
-
-def _prepare_retriever_config(
-    example_root: Path,
-    base_cfg: Dict[str, Any],
-    mode: str,
-) -> Tuple[Dict[str, Any], Dict[str, Any]]:
-    cfg = _prepare_aux_config(example_root, base_cfg)
-    retriever_cfg = cfg.setdefault("retriever", {})
-    structured_cfg = retriever_cfg.setdefault("structured", {})
-    embed_cfg = retriever_cfg.setdefault("embedding", {})
-    bm25_cfg = retriever_cfg.setdefault("bm25", {})
-    hybrid_cfg = retriever_cfg.setdefault("hybrid", {})
-
-    mode = mode.lower()
-    if mode == "structured":
-        structured_cfg["enabled"] = True
-        structured_cfg["vector_fallback_enabled"] = False
-        embed_cfg["enabled"] = False
-        bm25_cfg["enabled"] = False
-        hybrid_cfg["enabled"] = False
-    elif mode == "dense":
-        structured_cfg["enabled"] = False
-        embed_cfg["enabled"] = True
-        bm25_cfg["enabled"] = False
-        hybrid_cfg["enabled"] = True
-    elif mode == "bm25":
-        structured_cfg["enabled"] = False
-        embed_cfg["enabled"] = False
-        bm25_cfg["enabled"] = True
-        hybrid_cfg["enabled"] = True
-    elif mode == "hybrid":
-        structured_cfg["enabled"] = True
-        embed_cfg["enabled"] = True
-        bm25_cfg["enabled"] = True
-        hybrid_cfg["enabled"] = True
-    else:
-        raise ValueError(f"Unknown mode {mode}")
-
-    embed_index = Path(embed_cfg.get("offline_index_path", ""))
-    embed_meta = Path(embed_cfg.get("meta_path", ""))
-    bm25_corpus = Path(bm25_cfg.get("store_path", "")) / "notes.jsonl"
-
-    embed_ready = embed_index.exists() and embed_meta.exists()
-    bm25_ready = bm25_corpus.exists()
-
-    if embed_cfg.get("enabled") and not embed_ready:
-        embed_cfg["enabled"] = False
-    if bm25_cfg.get("enabled") and not bm25_ready:
-        bm25_cfg["enabled"] = False
-
-    return cfg, {
-        "mode": mode,
-        "embedding_ready": embed_ready,
-        "bm25_ready": bm25_ready,
-        "embedding_index": str(embed_index),
-        "embedding_meta": str(embed_meta),
-        "bm25_corpus": str(bm25_corpus),
-    }
-
-
-def _process_example(
-    example: Dict[str, Any],
-    cache_root: Path,
-    base_cfg: Dict[str, Any],
-    llm_endpoint: str,
-    llm_model: str,
-    mode: str,
-    reader: str,
-    openai_cfg: Optional[Dict[str, Any]],
-    top_k: int,
-    top_k_raw: int,
-    top_k_raw_source: str,
-    force_build: bool,
-    debug_dir: Optional[Path],
-    debug_max_notes: int,
-) -> Dict[str, Any]:
-    qid = str(example.get("_id") or "unknown")
-    question = str(example.get("question") or "")
-
-    example_root = cache_root / qid
-    docs_dir = example_root / "docs"
-    doc_index = _write_docs_for_example(example, docs_dir, overwrite=force_build)
-    build_stats = _ensure_index(docs_dir, example_root, llm_endpoint, llm_model, force_build)
-    build_embedding, build_bm25 = _mode_requirements(mode)
-    aux_stats = _build_aux_indexes(
-        example_root,
-        base_cfg=base_cfg,
-        build_embedding=build_embedding,
-        build_bm25=build_bm25,
-        force_build=force_build,
-    )
-    retriever_cfg, retriever_paths = _prepare_retriever_config(example_root, base_cfg, mode)
-    retriever_cfg.setdefault("retriever", {}).setdefault("chunk_fallback", {})["top_k"] = top_k_raw
-
-    notes_path = example_root / "notes.jsonl"
-    index_dir = example_root / "indexes"
-    retrieve_result = retrieve(
-        question=question,
-        index_dir=str(index_dir),
-        notes_path=str(notes_path),
-        top_k=top_k_raw,
-        cfg=retriever_cfg,
-    )
-
-    evidences = retrieve_result.get("evidence") or []
-    raw_answer, prompt_meta = generate_answer(
-        question=question,
-        evidences=evidences,
-        reader=reader,
-        llm_endpoint=llm_endpoint,
-        llm_model=llm_model,
-        openai_cfg=openai_cfg,
-    )
-    structured_answer = retrieve_result.get("answer")
-    short_answer, answer_source, answer_source_detail = resolve_short_answer(structured_answer, raw_answer)
-    answer_model = openai_cfg.get("model") if reader == "openai" and openai_cfg else llm_model
-
-    references: List[str] = []
-    raw_reference = example.get("answer")
-    if isinstance(raw_reference, list):
-        references = [str(item).strip() for item in raw_reference if str(item).strip()]
-    elif raw_reference:
-        references = [str(raw_reference).strip()]
-    metrics = score_metrics(short_answer, references)
-
-    note_store = NoteStore(str(notes_path))
-    retrieved_context_raw = _build_retrieved_context(evidences, note_store, doc_index)
-    retrieved_context_topk, dedup_stats = _dedup_retrieved_context(retrieved_context_raw, top_k=top_k)
-    pred_sp = _build_pred_sp(retrieved_context_topk)
-    gold_sp = _extract_gold_sp(example)
-    llm_input_hash = prompt_meta.get("llm_input_hash") or ""
-
-    output_record = {
-        "_id": qid,
-        "question": question,
-        "answer": short_answer,
-        "short_answer": short_answer,
-        "answer_source": answer_source,
-        "answer_source_detail": answer_source_detail,
-        "gold_sp": gold_sp,
-        "pred_sp": pred_sp,
-        "sp": pred_sp,
-        "generated_answer": short_answer,
-        "supporting_facts": gold_sp,
-        "prediction": short_answer,
-        "references": references,
-        "metrics": metrics,
-        "mode": mode,
-        "reader": reader,
-        "model": answer_model,
-        "retrieved_context_raw": retrieved_context_raw,
-        "retrieved_context_topk": retrieved_context_topk,
-        "retrieved_context": retrieved_context_topk,
-        "top_k_raw": dedup_stats.get("top_k_raw"),
-        "top_k_final": dedup_stats.get("top_k_final"),
-        "duplicate_rate": dedup_stats.get("duplicate_rate"),
-        "llm_input_hash": llm_input_hash,
-        "intermediate": {
-            "build_stats": build_stats,
-            "aux_indexes": aux_stats,
-            "retriever_paths": retriever_paths,
-            "retrieve_result": retrieve_result,
-            "structured_answer": structured_answer,
-            "llm_raw": raw_answer,
-            "llm_has_final": has_final_tag(raw_answer),
-            "support_note_ids": retrieve_result.get("support_note_ids"),
-            "paths": retrieve_result.get("paths"),
-            "ir": retrieve_result.get("ir"),
-            "fallback": retrieve_result.get("fallback"),
-            "intent": retrieve_result.get("intent"),
-            "retrieval_mode": mode,
-            "reader": reader,
-            "model": answer_model,
-            "top_k": top_k,
-            "top_k_raw": top_k_raw,
-            "top_k_raw_source": top_k_raw_source,
-            "chunk_fallback_top_k": top_k_raw,
-            "chunk_fallback_top_k_source": top_k_raw_source,
-            "prompt_name": prompt_meta.get("prompt_name"),
-            "prompt_template_hash": prompt_meta.get("prompt_template_hash"),
-            "system_prompt_name": prompt_meta.get("system_prompt_name"),
-            "system_prompt_hash": prompt_meta.get("system_prompt_hash"),
-            "llm_input_hash": llm_input_hash,
-        },
-    }
-    if debug_dir:
-        debug_path = _write_debug_artifacts(
-            output_record,
-            debug_dir=debug_dir,
-            docs_dir=docs_dir,
-            notes_path=notes_path,
-            index_dir=index_dir,
-            doc_index=doc_index,
-            note_store=note_store,
-            max_notes=debug_max_notes,
-        )
-        output_record["intermediate"]["debug_path"] = str(debug_path) if debug_path else None
-
-    return output_record
+def _write_official_output(
+    jsonl_path: Path,
+    output_dir: Path,
+    timestamp: int,
+    suffix: Optional[str] = None,
+) -> Path:
+    answers: Dict[str, Any] = {}
+    supports: Dict[str, Any] = {}
+    with jsonl_path.open("r", encoding="utf-8") as handle:
+        for line in handle:
+            line = line.strip()
+            if not line:
+                continue
+            record = json.loads(line)
+            qid = str(record.get("_id") or "")
+            if not qid:
+                continue
+            if "short_answer" not in record:
+                raise ValueError(f"missing short_answer for qid={qid}")
+            if "pred_sp" not in record:
+                raise ValueError(f"missing pred_sp for qid={qid}")
+            answers[qid] = record.get("short_answer") or ""
+            supports[qid] = record.get("pred_sp") or []
+    suffix_part = f"_{suffix}" if suffix else ""
+    official_path = output_dir / f"result_{timestamp}{suffix_part}_official.json"
+    with official_path.open("w", encoding="utf-8") as handle:
+        json.dump({"answer": answers, "sp": supports}, handle, ensure_ascii=False)
+    return official_path
 
 
 def _accumulate_metrics(totals: Dict[str, float], metrics: Dict[str, float]) -> None:
@@ -1010,44 +721,154 @@ def _drain_futures(
     return completed, succeeded
 
 
-def _write_official_output(
-    jsonl_path: Path,
-    output_dir: Path,
-    timestamp: int,
-    suffix: Optional[str] = None,
-) -> Path:
-    answers: Dict[str, Any] = {}
-    supports: Dict[str, Any] = {}
-    with jsonl_path.open("r", encoding="utf-8") as handle:
-        for line in handle:
-            line = line.strip()
-            if not line:
-                continue
-            record = json.loads(line)
-            qid = str(record.get("_id") or "")
-            if not qid:
-                continue
-            if "short_answer" not in record:
-                raise ValueError(f"missing short_answer for qid={qid}")
-            if "pred_sp" not in record:
-                raise ValueError(f"missing pred_sp for qid={qid}")
-            answers[qid] = record.get("short_answer") or ""
-            supports[qid] = record.get("pred_sp") or []
-    suffix_part = f"_{suffix}" if suffix else ""
-    official_path = output_dir / f"result_{timestamp}{suffix_part}_official.json"
-    with official_path.open("w", encoding="utf-8") as handle:
-        json.dump({"answer": answers, "sp": supports}, handle, ensure_ascii=False)
-    return official_path
+def _process_example(
+    example: Dict[str, Any],
+    *,
+    base_cfg: Dict[str, Any],
+    llm_endpoint: str,
+    llm_model: str,
+    mode: str,
+    reader: str,
+    openai_cfg: Optional[Dict[str, Any]],
+    top_k: int,
+    top_k_raw: int,
+    top_k_raw_source: str,
+    dense_encoder,
+) -> Dict[str, Any]:
+    qid = str(example.get("_id") or "unknown")
+    question = str(example.get("question") or "")
+    units = _build_sentence_units(example)
+
+    retriever_cfg = base_cfg.get("retriever") or {}
+    bm25_cfg = retriever_cfg.get("bm25") or {}
+    embed_cfg = retriever_cfg.get("embedding") or {}
+
+    if mode == "bm25":
+        ranked = _bm25_search(question, units, bm25_cfg, top_k_raw)
+    elif mode == "dense":
+        ranked = _dense_search(question, units, dense_encoder, embed_cfg, top_k_raw)
+    else:
+        raise ValueError(f"Unsupported mode {mode}")
+
+    retrieved_context_raw = _build_retrieved_context(ranked, mode=mode, qid=qid)
+    retrieved_context_topk, dedup_stats = _dedup_retrieved_context(retrieved_context_raw, top_k=top_k)
+    pred_sp = _build_pred_sp(retrieved_context_topk)
+    gold_sp = _extract_gold_sp(example)
+    evidences = retrieved_context_topk
+
+    raw_answer, prompt_meta = generate_answer(
+        question=question,
+        evidences=evidences,
+        reader=reader,
+        llm_endpoint=llm_endpoint,
+        llm_model=llm_model,
+        openai_cfg=openai_cfg,
+    )
+    short_answer, answer_source, answer_source_detail = resolve_short_answer(None, raw_answer)
+    answer_model = openai_cfg.get("model") if reader == "openai" and openai_cfg else llm_model
+
+    references: List[str] = []
+    raw_reference = example.get("answer")
+    if isinstance(raw_reference, list):
+        references = [str(item).strip() for item in raw_reference if str(item).strip()]
+    elif raw_reference:
+        references = [str(raw_reference).strip()]
+    metrics = score_metrics(short_answer, references)
+
+    output_record = {
+        "_id": qid,
+        "question": question,
+        "answer": short_answer,
+        "short_answer": short_answer,
+        "answer_source": answer_source,
+        "answer_source_detail": answer_source_detail,
+        "gold_sp": gold_sp,
+        "pred_sp": pred_sp,
+        "sp": pred_sp,
+        "generated_answer": short_answer,
+        "supporting_facts": gold_sp,
+        "prediction": short_answer,
+        "references": references,
+        "metrics": metrics,
+        "mode": mode,
+        "reader": reader,
+        "model": answer_model,
+        "retrieved_context_raw": retrieved_context_raw,
+        "retrieved_context_topk": retrieved_context_topk,
+        "retrieved_context": retrieved_context_topk,
+        "top_k_raw": dedup_stats.get("top_k_raw"),
+        "top_k_final": dedup_stats.get("top_k_final"),
+        "duplicate_rate": dedup_stats.get("duplicate_rate"),
+        "llm_input_hash": prompt_meta.get("llm_input_hash") or "",
+        "intermediate": {
+            "llm_raw": raw_answer,
+            "llm_has_final": has_final_tag(raw_answer),
+            "retrieval_mode": mode,
+            "reader": reader,
+            "model": answer_model,
+            "top_k": top_k,
+            "top_k_raw": top_k_raw,
+            "top_k_raw_source": top_k_raw_source,
+            "prompt_name": prompt_meta.get("prompt_name"),
+            "prompt_template_hash": prompt_meta.get("prompt_template_hash"),
+            "system_prompt_name": prompt_meta.get("system_prompt_name"),
+            "system_prompt_hash": prompt_meta.get("system_prompt_hash"),
+            "llm_input_hash": prompt_meta.get("llm_input_hash"),
+            "context_count": len(units),
+            "retrieved_count": len(retrieved_context_topk),
+        },
+    }
+    return output_record
+
+
+def _build_dense_encoder(embed_cfg: Dict[str, Any]):
+    provider = embed_cfg.get("provider", "qwen3")
+    model = embed_cfg.get("model", "qwen3-embedding")
+    max_len = int(embed_cfg.get("max_len_note", 256))
+    cache_dir = embed_cfg.get("cache_dir")
+    device = embed_cfg.get("device")
+    dtype = embed_cfg.get("dtype")
+    endpoint = embed_cfg.get("endpoint")
+    api_key = embed_cfg.get("api_key")
+    timeout_s = embed_cfg.get("timeout_s") or embed_cfg.get("request_timeout_s")
+    return get_shared_encoder(
+        provider,
+        model,
+        max_length=max_len,
+        cache_dir=cache_dir,
+        device=device,
+        dtype=dtype,
+        endpoint=endpoint,
+        api_key=api_key,
+        request_timeout_s=timeout_s,
+    )
+
+
+def _pick_arg(
+    args: argparse.Namespace,
+    entry_cfg: Dict[str, Any],
+    dataset_cfg: Dict[str, Any],
+    name: str,
+    default: Any,
+) -> Any:
+    value = getattr(args, name, None)
+    if value is not None:
+        return value
+    if name in dataset_cfg:
+        return dataset_cfg.get(name)
+    if name in entry_cfg:
+        return entry_cfg.get(name)
+    return default
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="HotpotQA JSONL entry for RelRAG")
+    parser = argparse.ArgumentParser(description="HotpotQA JSONL entry for BM25/Dense baselines")
     parser.add_argument("--config", help="Path to YAML config file (defaults to relrag/config/config.yaml)")
     parser.add_argument("--data", help="Path to HotpotQA JSONL dataset (fallback to config)")
     parser.add_argument("--endpoint", help="vLLM endpoint (defaults to config)")
     parser.add_argument("--model", help="LLM model name (defaults to config)")
     parser.add_argument("--reader", help="Reader backend: vllm or openai (fallback to config)")
-    parser.add_argument("--retriever", help="Retriever mode: bm25, dense, or hybrid (fallback to config)")
+    parser.add_argument("--retriever", help="Retriever mode: bm25 or dense (fallback to config)")
     parser.add_argument("--split", help="Dataset split label for output naming (fallback to config)")
     parser.add_argument("--openai_model", help="OpenAI model name (fallback to config)")
     parser.add_argument("--openai_api_key", help="OpenAI API key (reads env if omitted)")
@@ -1058,11 +879,7 @@ def main() -> None:
     parser.add_argument("--overfetch", type=float, help="Overfetch multiplier before dedup (fallback to config)")
     parser.add_argument("--limit", type=int, help="Process only first N examples (fallback to config)")
     parser.add_argument("--workers", type=int, help="Parallel workers (single process, fallback to config)")
-    parser.add_argument("--cache_dir", help="Cache root for per-question indexes (fallback to config)")
     parser.add_argument("--output_dir", help="Output directory (fallback to config)")
-    parser.add_argument("--force_build", action="store_true", help="Rebuild indexes even if cached")
-    parser.add_argument("--debug_dir", help="Debug artifacts output directory (set empty to disable, fallback to config)")
-    parser.add_argument("--debug_max_notes", type=int, help="Max notes to store per question in debug dump (fallback to config)")
     parser.add_argument("--stall_warn_sec", type=float, help="Warn if no worker finishes within this many seconds (fallback to config)")
     parser.add_argument("--stall_abort_sec", type=float, help="Abort pending workers after this many idle seconds (0 to disable, fallback to config)")
 
@@ -1080,7 +897,6 @@ def main() -> None:
     if not args.data:
         raise ValueError("Dataset path missing. Provide --data or set hotpot_entry.data in config.")
     args.split = _pick_arg(args, entry_cfg, dataset_cfg, "split", DEFAULT_SPLIT)
-    args.cache_dir = _pick_arg(args, entry_cfg, dataset_cfg, "cache_dir", DEFAULT_CACHE_DIR)
     args.output_dir = _pick_arg(args, entry_cfg, dataset_cfg, "output_dir", DEFAULT_OUTPUT_DIR)
     args.top_k = _coerce_int(
         _pick_arg(args, entry_cfg, dataset_cfg, "top_k", DEFAULT_TOP_K),
@@ -1093,11 +909,6 @@ def main() -> None:
         _pick_arg(args, entry_cfg, dataset_cfg, "workers", DEFAULT_WORKERS),
         DEFAULT_WORKERS,
     )
-    args.debug_dir = _pick_arg(args, entry_cfg, dataset_cfg, "debug_dir", DEFAULT_DEBUG_DIR)
-    args.debug_max_notes = _coerce_int(
-        _pick_arg(args, entry_cfg, dataset_cfg, "debug_max_notes", DEFAULT_DEBUG_MAX_NOTES),
-        DEFAULT_DEBUG_MAX_NOTES,
-    )
     args.stall_warn_sec = _coerce_float(
         _pick_arg(args, entry_cfg, dataset_cfg, "stall_warn_sec", DEFAULT_STALL_WARN_SEC),
         DEFAULT_STALL_WARN_SEC,
@@ -1106,8 +917,6 @@ def main() -> None:
         _pick_arg(args, entry_cfg, dataset_cfg, "stall_abort_sec", DEFAULT_STALL_ABORT_SEC),
         DEFAULT_STALL_ABORT_SEC,
     )
-    if entry_cfg.get("force_build"):
-        args.force_build = True
 
     openai_overrides: Dict[str, Any] = {}
     if args.openai_model:
@@ -1128,19 +937,14 @@ def main() -> None:
 
     llm_endpoint, llm_model = _resolve_llm_config(args)
     logger.info("Using vLLM endpoint={} model={}", llm_endpoint, llm_model)
-    cache_root = _resolve_path(args.cache_dir)
     output_dir = _resolve_path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     timestamp = int(time.time())
     total_examples = _count_examples(data_path, args.limit)
-    debug_dir = _resolve_path(args.debug_dir) if args.debug_dir else None
-    if debug_dir:
-        debug_dir.mkdir(parents=True, exist_ok=True)
 
     base_cfg = _apply_dataset_retriever(deepcopy(cfg), "hotpotqa")
     modes = _resolve_retriever_modes(
         mode_arg=args.retriever,
-        modes_arg=None,
         entry_cfg=entry_cfg,
         dataset_cfg=dataset_cfg,
         base_cfg=base_cfg,
@@ -1160,6 +964,9 @@ def main() -> None:
             openai_runtime_cfg.get("max_tokens"),
             openai_runtime_cfg.get("api_key_env"),
         )
+
+    embed_cfg = (base_cfg.get("retriever") or {}).get("embedding") or {}
+    dense_encoder = _build_dense_encoder(embed_cfg) if "dense" in modes else None
 
     split = str(args.split or DEFAULT_SPLIT).strip() or DEFAULT_SPLIT
     summary_report: Dict[str, Any] = {
@@ -1182,10 +989,6 @@ def main() -> None:
             )
             output_name = _pred_filename(split, reader, mode, len(readers), len(modes))
             output_path = output_dir / output_name
-            run_debug_dir = debug_dir
-            if debug_dir and (len(readers) > 1 or len(modes) > 1):
-                run_debug_dir = debug_dir / f"{reader}_{mode}"
-                run_debug_dir.mkdir(parents=True, exist_ok=True)
             logger.info("Writing results to {}", output_path)
             totals = {"bleu1": 0.0, "bleu4": 0.0, "rougeL": 0.0, "meteor": 0.0}
             progress = ProgressBar(total_examples)
@@ -1199,7 +1002,6 @@ def main() -> None:
                         try:
                             record = _process_example(
                                 example,
-                                cache_root=cache_root,
                                 base_cfg=base_cfg,
                                 llm_endpoint=llm_endpoint,
                                 llm_model=llm_model,
@@ -1209,9 +1011,7 @@ def main() -> None:
                                 top_k=mode_top_k,
                                 top_k_raw=mode_top_k_raw,
                                 top_k_raw_source=top_k_raw_source,
-                                force_build=args.force_build,
-                                debug_dir=run_debug_dir,
-                                debug_max_notes=args.debug_max_notes,
+                                dense_encoder=dense_encoder,
                             )
                             handle.write(json.dumps(record, ensure_ascii=False) + "\n")
                             handle.flush()
@@ -1236,19 +1036,16 @@ def main() -> None:
                             future = executor.submit(
                                 _process_example,
                                 example,
-                                cache_root,
-                                base_cfg,
-                                llm_endpoint,
-                                llm_model,
-                                mode,
-                                reader,
-                                reader_openai_cfg,
-                                mode_top_k,
-                                mode_top_k_raw,
-                                top_k_raw_source,
-                                args.force_build,
-                                run_debug_dir,
-                                args.debug_max_notes,
+                                base_cfg=base_cfg,
+                                llm_endpoint=llm_endpoint,
+                                llm_model=llm_model,
+                                mode=mode,
+                                reader=reader,
+                                openai_cfg=reader_openai_cfg,
+                                top_k=mode_top_k,
+                                top_k_raw=mode_top_k_raw,
+                                top_k_raw_source=top_k_raw_source,
+                                dense_encoder=dense_encoder,
                             )
                             future_map[future] = qid
                             scheduled += 1

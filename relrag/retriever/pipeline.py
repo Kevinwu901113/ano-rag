@@ -102,6 +102,7 @@ def retrieve_answer(
 
     retr_cfg = cfg.get("retriever") or {}
     structured_cfg = retr_cfg.get("structured") or {}
+    embedding_cfg = retr_cfg.get("embedding") or {}
     structured_enabled = bool(structured_cfg.get("enabled", True))
     entity_match_threshold = float(structured_cfg.get("entity_match_threshold", 0.5))
     path_consistency_threshold = float(structured_cfg.get("path_consistency_threshold", 0.9))
@@ -274,7 +275,14 @@ def retrieve_answer(
     if not candidates:
         # 结构化兜底：在绑定实体范围内做向量-only检索补全
         structured = (
-            _structured_fallback(seed_entities, intent, indexes, note_store, doc_hint=normalized_doc_hint)
+            _structured_fallback(
+                seed_entities,
+                intent,
+                indexes,
+                note_store,
+                doc_hint=normalized_doc_hint,
+                embedding_cfg=embedding_cfg,
+            )
             if structured_enabled and vector_fallback_enabled
             else None
         )
@@ -1055,6 +1063,7 @@ def _structured_fallback(
     indexes: Indexes,
     note_store: NoteStore,
     doc_hint: Optional[str] = None,
+    embedding_cfg: Optional[Dict[str, Any]] = None,
 ) -> Optional[Dict[str, Any]]:
     # 仅在结构化实体范围内进行弱信号补全（Vector-only）
     canonical_attr = intent.attribute
@@ -1074,7 +1083,7 @@ def _structured_fallback(
         return None
     # 向量-only 在 scoped_notes 内检索（预筛与兜底）
     try:
-        vs = VectorSearcher()
+        vs = VectorSearcher(embedding_cfg=embedding_cfg)
         ranked = vs.search_in_notes(intent.entity or "", scoped_notes, top_k=16)
     except Exception:
         ranked = []
@@ -1429,7 +1438,17 @@ def _apply_chunk_fallback(
         return result
     retr_cfg = (cfg or {}).get("retriever") or {}
     chunk_cfg = retr_cfg.get("chunk_fallback") or {}
-    top_k = int(chunk_cfg.get("top_k", 6))
+    top_k = chunk_cfg.get("top_k")
+    if top_k is None:
+        structured_cfg = retr_cfg.get("structured") or {}
+        top_k = structured_cfg.get("top_k")
+    if top_k is None:
+        top_k = retr_cfg.get("top_k")
+    if top_k is None:
+        return result
+    top_k = int(top_k)
+    if top_k <= 0:
+        return result
     seeds: List[str] = []
     if ir:
         seeds.extend(seed.text for seed in ir.seeds if seed.text)

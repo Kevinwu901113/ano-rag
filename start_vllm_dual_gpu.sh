@@ -30,12 +30,12 @@ python run_vllm_dual_gpu.py \
   --embed-gpu 1 \
   --llm-gpu-mem 0.85 \
   --llm-max-model-len 4096 \
-  --llm-max-num-seqs 1 \
+  --llm-max-num-seqs 24 \
   --llm-max-num-batched-tokens 1024 \
   --llm-swap-space 8 \
   --llm-cpu-offload-gb 8 \
   --embed-max-model-len 8192 \
-  --embed-max-num-seqs 1 \
+  --embed-max-num-seqs 24 \
   --embed-max-num-batched-tokens 1024 \
   --hf-endpoint https://hf-mirror.com \
   --http-proxy http://192.168.192.246:7890 \

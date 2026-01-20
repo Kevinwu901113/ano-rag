@@ -35,7 +35,7 @@ python -m relrag.cli.answer \
 
 ## Config
 
-- Default config file: `relrag/config.yaml`
+- Default config file: `relrag/config/config.yaml`
 - Override config path: set `ANO_RAG_CONFIG=/path/to/config.yaml`
 - Override embedding model: set `RAG_EMBED_MODEL=...`
 

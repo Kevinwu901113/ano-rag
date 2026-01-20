@@ -98,6 +98,7 @@ def answer(
     llm_endpoint: str,
     llm_model: str,
     temperature: float = 0.2,
+    prompt_capture: Optional[Dict[str, Any]] = None,
 ) -> str:
     """
     Generate answer from evidences.
@@ -110,7 +111,8 @@ def answer(
         model=llm_model,
         question=question,
         evidences=evidences,
-        temperature=temperature
+        temperature=temperature,
+        prompt_capture=prompt_capture,
     )
 
 

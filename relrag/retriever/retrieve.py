@@ -287,7 +287,9 @@ def _vector_fallback(
         return []
     # 向量-only 排序（不做额外词面加权）
     try:
-        vs = VectorSearcher()
+        cfg = config.load_config()
+        embedding_cfg = (cfg.get("retriever") or {}).get("embedding") or {}
+        vs = VectorSearcher(embedding_cfg=embedding_cfg)
         ranked = vs.search_in_notes(question or "", notes, top_k=top_k)
     except Exception:
         ranked = []

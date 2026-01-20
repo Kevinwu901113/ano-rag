@@ -107,3 +107,6 @@ attributes:
       bad:
         - "Akari Hayami was scouted near her graduation from elementary school."
         - "Geu signed with Lusitânia EXPERT of the Liga Portuguesa de Basquetebol."
+openai:
+  api_key: "sk-c003ed6c90c24b5f8caad6252b4d6a24"
+  api_key_env: "OPENAI_API_KEY"

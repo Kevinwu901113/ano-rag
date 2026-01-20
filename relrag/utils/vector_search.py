@@ -11,13 +11,8 @@ except Exception as exc:  # pragma: no cover - optional dependency
     np = None  # type: ignore
     logger.warning("numpy unavailable: {}. Vector search disabled.", exc)
 
-try:
-    from sklearn.metrics.pairwise import cosine_similarity
-except Exception as exc:  # pragma: no cover - optional dependency
-    cosine_similarity = None  # type: ignore
-    logger.warning("sklearn unavailable: {}. Vector search disabled.", exc)
-
 from .text_builders import build_note_text_for_embed
+from .embedding_utils import get_shared_encoder
 
 try:
     from sentence_transformers import SentenceTransformer
@@ -37,12 +32,19 @@ class VectorSearcher:
         model_name: str = "all-MiniLM-L6-v2",
         device: Optional[str] = None,
         fallback_to_cpu_on_oom: bool = True,
+        *,
+        embedding_cfg: Optional[Dict[str, Any]] = None,
     ) -> None:
         self.model_name = model_name
         env_device = os.environ.get("EMB_DEVICE")
         chosen = (device or env_device or "").strip().lower()
         self.device: Optional[str] = chosen or None
         self.fallback_to_cpu_on_oom = bool(fallback_to_cpu_on_oom)
+        self.embedding_cfg = embedding_cfg if isinstance(embedding_cfg, dict) else None
+        self._encoder = None
+        self._encoder_batch_size = 16
+        self._encoder_max_len = 256
+        self._encoder_normalize = True
         self._resolved_device: Optional[str] = None
         self._model: Optional[SentenceTransformer] = None
 
@@ -75,6 +77,8 @@ class VectorSearcher:
 
     def _ensure_model(self) -> None:
         if self._model is not None:
+            return
+        if self.embedding_cfg:
             return
         if SentenceTransformer is None:
             raise RuntimeError("sentence_transformers is not available")
@@ -109,6 +113,42 @@ class VectorSearcher:
                 logger.error("Failed to load fallback vector model: {}", e2)
                 raise e2
 
+    def _ensure_encoder(self) -> None:
+        if self._encoder is not None:
+            return
+        if not self.embedding_cfg:
+            return
+        provider = str(self.embedding_cfg.get("provider") or "").strip().lower()
+        model_name = str(self.embedding_cfg.get("model") or "").strip()
+        if not provider or not model_name:
+            return
+        self._encoder_batch_size = int(self.embedding_cfg.get("batch_size", 16))
+        self._encoder_max_len = int(self.embedding_cfg.get("max_len_note", 256))
+        self._encoder_normalize = bool(self.embedding_cfg.get("normalize", True))
+        cache_dir = self.embedding_cfg.get("cache_dir")
+        device = self.embedding_cfg.get("device")
+        dtype = self.embedding_cfg.get("dtype")
+        endpoint = self.embedding_cfg.get("endpoint")
+        api_key = self.embedding_cfg.get("api_key")
+        timeout_s = self.embedding_cfg.get("timeout_s") or self.embedding_cfg.get("request_timeout_s")
+        self._encoder = get_shared_encoder(
+            provider,
+            model_name,
+            max_length=self._encoder_max_len,
+            cache_dir=cache_dir,
+            device=device,
+            dtype=dtype,
+            endpoint=endpoint,
+            api_key=api_key,
+            request_timeout_s=timeout_s,
+        )
+        logger.info("Vector fallback embedding: provider={} model={}", provider, model_name)
+
+    @staticmethod
+    def _cosine_similarity_matrix(vectors: "np.ndarray", query: "np.ndarray") -> "np.ndarray":
+        denom = (np.linalg.norm(vectors, axis=1) * (np.linalg.norm(query) + 1e-12)) + 1e-12
+        return (vectors @ query) / denom
+
     def search_in_notes(
         self,
         question: str,
@@ -116,12 +156,18 @@ class VectorSearcher:
         top_k: int = 64,
     ) -> List[Tuple[Dict[str, Any], float]]:
         """在给定的笔记集合中进行向量检索，返回 top_k (note, score)。"""
-        if np is None or cosine_similarity is None:
+        if np is None:
             return []
         if not notes:
             return []
+        use_encoder = bool(self.embedding_cfg and self.embedding_cfg.get("provider") and self.embedding_cfg.get("model"))
         try:
-            self._ensure_model()
+            if use_encoder:
+                self._ensure_encoder()
+                if self._encoder is None:
+                    raise RuntimeError("Vector fallback embedding encoder unavailable")
+            else:
+                self._ensure_model()
         except RuntimeError as exc:
             logger.warning("Vector search unavailable: {}", exc)
             return []
@@ -135,21 +181,39 @@ class VectorSearcher:
         if not valid_notes:
             return []
         try:
-            q_emb = self._model.encode([question])[0]
-            n_embs = self._model.encode(texts)
-        except Exception as exc:
-            model_device = str(getattr(self._model, "device", self._resolved_device) or "")
-            if self.fallback_to_cpu_on_oom and self._is_cuda_oom(exc) and model_device.startswith("cuda"):
-                logger.warning("CUDA OOM during vector encoding; switching to CPU and retrying")
-                self._switch_to_cpu()
-                self._ensure_model()
+            if use_encoder and self._encoder is not None:
+                q_emb = self._encoder.encode(
+                    [question],
+                    batch_size=self._encoder_batch_size,
+                    max_length=self._encoder_max_len,
+                    normalize=self._encoder_normalize,
+                )[0]
+                n_embs = self._encoder.encode(
+                    texts,
+                    batch_size=self._encoder_batch_size,
+                    max_length=self._encoder_max_len,
+                    normalize=self._encoder_normalize,
+                )
+            else:
                 q_emb = self._model.encode([question])[0]
                 n_embs = self._model.encode(texts)
+        except Exception as exc:
+            if not use_encoder:
+                model_device = str(getattr(self._model, "device", self._resolved_device) or "")
+                if self.fallback_to_cpu_on_oom and self._is_cuda_oom(exc) and model_device.startswith("cuda"):
+                    logger.warning("CUDA OOM during vector encoding; switching to CPU and retrying")
+                    self._switch_to_cpu()
+                    self._ensure_model()
+                    q_emb = self._model.encode([question])[0]
+                    n_embs = self._model.encode(texts)
+                else:
+                    logger.error("Vector encoding failed: {}", exc)
+                    return []
             else:
-                logger.error("Vector encoding failed: {}", exc)
+                logger.error("Vector fallback encoding failed: {}", exc)
                 return []
         # 余弦相似度
-        sims = cosine_similarity(np.array([q_emb]), np.array(n_embs))[0]
+        sims = self._cosine_similarity_matrix(np.array(n_embs), np.array(q_emb))
         ranked = sorted(zip(valid_notes, sims.tolist()), key=lambda x: x[1], reverse=True)
         return ranked[: top_k]
 

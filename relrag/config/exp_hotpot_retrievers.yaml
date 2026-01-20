@@ -1,0 +1,17 @@
+datasets:
+  hotpotqa:
+    retrievers: ["bm25", "dense", "hybrid"]
+    readers: ["vllm"]
+retriever:
+  bm25:
+    top_k: 10
+  dense:
+    top_k: 10
+  hybrid:
+    top_k: 10
+openai:
+  answer_prompt_name: answerer_openai.txt
+  model: deepseek-chat
+  api_key: "sk-c003ed6c90c24b5f8caad6252b4d6a24"
+  api_key_env: "OPENAI_API_KEY"
+  base_url: https://api.deepseek.com/v1
