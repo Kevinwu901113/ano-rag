@@ -145,7 +145,7 @@ def retrieve_answer(
     except Exception:
         pass
     if ir is None or not ir.is_valid:
-        result = _fallback_lookup(intent, indexes, note_store, None, "parse_failed", normalized_doc_hint)
+        result = _fallback_lookup(intent, indexes, note_store, None, "parse_failed", normalized_doc_hint, cfg=cfg)
         result.setdefault("meta", {})["relaxed_path_retry"] = False
         return _finalize_result(result, ir_override=ir, intent_override=intent)
 
@@ -169,7 +169,7 @@ def retrieve_answer(
         except Exception:
             pass
         # 结构化优先兜底：尝试限制在别名索引范围内的弱信号补全（向量-only）
-        result = _fallback_lookup(intent, indexes, note_store, ir, "no_seed_match", normalized_doc_hint)
+        result = _fallback_lookup(intent, indexes, note_store, ir, "no_seed_match", normalized_doc_hint, cfg=cfg)
         result.setdefault("meta", {})["relaxed_path_retry"] = False
         return _finalize_result(result, ir_override=ir, intent_override=intent)
 
@@ -289,7 +289,7 @@ def retrieve_answer(
         if structured:
             structured.setdefault("meta", {})["relaxed_path_retry"] = relaxed_path_used
             return _finalize_result(structured, ir_override=ir, intent_override=intent)
-        result = _fallback_lookup(intent, indexes, note_store, ir, "no_path", normalized_doc_hint)
+        result = _fallback_lookup(intent, indexes, note_store, ir, "no_path", normalized_doc_hint, cfg=cfg)
         result.setdefault("meta", {})["relaxed_path_retry"] = relaxed_path_used
         return _finalize_result(result, ir_override=ir, intent_override=intent)
 
@@ -309,6 +309,7 @@ def retrieve_answer(
         support_note_ids,
         keep_at_least=max(3, ir.fanout // 2),
         doc_hint=normalized_doc_hint,
+        cfg=cfg,
     )
     try:
         logger.info("evidence_kept={}  after_scheduler", len(evidences))
@@ -570,6 +571,7 @@ def _fallback_lookup(
     ir: Optional[QueryIR],
     trigger: str,
     doc_hint: Optional[str],
+    cfg: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     doc_hint_norm = _normalize_doc_hint(doc_hint)
     entity_queries: List[str] = []
@@ -764,7 +766,13 @@ def _fallback_lookup(
     support_note_ids = [item["note_id"] for item in scored_candidates[:5] if item.get("note_id")]
 
     support_note_ids = _filter_note_ids_by_doc(support_note_ids, doc_hint_norm)
-    evidences = _schedule_evidences(note_store, support_note_ids, keep_at_least=3, doc_hint=doc_hint_norm)
+    evidences = _schedule_evidences(
+        note_store,
+        support_note_ids,
+        keep_at_least=3,
+        doc_hint=doc_hint_norm,
+        cfg=cfg,
+    )
 
     primary_note = note_store.get(top_candidate["note_id"]) if top_candidate.get("note_id") else None
     paths = []
@@ -1177,8 +1185,23 @@ def _schedule_evidences(
     note_ids: List[str],
     keep_at_least: int = 3,
     doc_hint: Optional[str] = None,
+    cfg: Optional[Dict[str, Any]] = None,
 ) -> List[Dict[str, Any]]:
     # 放宽置信阈值、轻度去重，并设置留底下限，避免全清空
+    sched_cfg = (cfg or {}).get("retriever", {}).get("scheduler") or {}
+    if sched_cfg.get("keep_at_least") is not None:
+        try:
+            keep_at_least = max(keep_at_least, int(sched_cfg.get("keep_at_least")))
+        except (TypeError, ValueError):
+            pass
+    min_conf = sched_cfg.get("min_confidence", 0.3)
+    try:
+        min_conf_val = float(min_conf) if min_conf is not None else None
+    except (TypeError, ValueError):
+        min_conf_val = 0.3
+    if min_conf_val is not None and min_conf_val <= 0:
+        min_conf_val = None
+    dedup_subject = bool(sched_cfg.get("dedup_subject", True))
     raw_notes = note_store.get_many(note_ids)
     normalized_doc_hint = _normalize_doc_hint(doc_hint)
     if normalized_doc_hint:
@@ -1189,15 +1212,21 @@ def _schedule_evidences(
         meta = (note.get("meta", {}) or {})
         conf = meta.get("confidence")
         # min_confidence=0.3；None 视为通过
-        if conf is not None and float(conf) < 0.3:
-            continue
+        if min_conf_val is not None and conf is not None:
+            try:
+                conf_val = float(conf)
+            except (TypeError, ValueError):
+                conf_val = None
+            if conf_val is not None and conf_val < min_conf_val:
+                continue
         subj = (note.get("subj") or "").strip()
         # 轻度按主体去重（非激进）
-        if subj and subj in seen_entities:
+        if dedup_subject and subj and subj in seen_entities:
             # 保留少量重复，避免过度去重
             if len(kept) >= 2:
                 continue
-        seen_entities.add(subj)
+        if subj:
+            seen_entities.add(subj)
         record_anchor_usage(bool(meta.get("anchor")))
         kept.append({
             "note_id": note.get("note_id"),

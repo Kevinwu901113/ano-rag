@@ -13,7 +13,7 @@ from typing import Any, Dict, Iterable, List, Optional, TextIO, Tuple
 
 from loguru import logger
 
-from relrag.api import build_index, retrieve, answer
+from relrag.api import retrieve, answer
 from relrag.config.dataset_config import (
     get_dataset_config,
     resolve_openai_api_key,
@@ -22,6 +22,7 @@ from relrag.config.dataset_config import (
 )
 from relrag.config.config_loader import ConfigLoader, config as global_config
 from relrag.generator import answerer as answerer_module
+from relrag.indexer import IndexBuilder
 from relrag.indexer.bm25_index import BM25IndexBuilder
 from relrag.indexer.embedding_index import EmbeddingIndexBuilder
 from relrag.retriever.note_store import NoteStore
@@ -42,7 +43,8 @@ DEFAULT_CACHE_DIR = "result/cache"
 DEFAULT_OUTPUT_DIR = "result"
 DEFAULT_DEBUG_DIR = "result/debug"
 DEFAULT_DEBUG_MAX_NOTES = 50
-DEFAULT_OVERFETCH = 1.0
+DEFAULT_OVERFETCH = 2.0
+MIN_OVERFETCH = 2.0
 
 
 def _load_jsonl(path: Path) -> Iterable[Dict[str, Any]]:
@@ -153,6 +155,45 @@ def _write_docs_for_example(
     return doc_index
 
 
+def _write_sentence_notes_for_example(
+    doc_index: Dict[str, Dict[str, Any]],
+    notes_path: Path,
+    overwrite: bool = False,
+) -> int:
+    if notes_path.exists() and not overwrite:
+        return 0
+    notes_path.parent.mkdir(parents=True, exist_ok=True)
+    written = 0
+    with notes_path.open("w", encoding="utf-8") as handle:
+        for doc_id, meta in doc_index.items():
+            title = meta.get("title") or ""
+            sentences = meta.get("sentences") or []
+            for sent_idx, sentence in enumerate(sentences):
+                text = str(sentence).strip()
+                if not text:
+                    continue
+                note = {
+                    "note_id": f"{doc_id}#s{sent_idx:04d}",
+                    "subj": str(title).strip() or str(doc_id),
+                    "pred": "sentence",
+                    "obj": text,
+                    "subj_type": "CONCEPT",
+                    "obj_type": "CONCEPT",
+                    "evidence": text,
+                    "meta": {
+                        "source": str(doc_id),
+                        "sentence_idx": sent_idx,
+                        "confidence": 1.0,
+                        "final_conf": 1.0,
+                        "quality_score": 1.0,
+                        "evidence_canonical": text,
+                    },
+                }
+                handle.write(json.dumps(note, ensure_ascii=False) + "\n")
+                written += 1
+    return written
+
+
 def _resolve_doc_id_from_source(source: Optional[str]) -> Optional[str]:
     if not source:
         return None
@@ -176,6 +217,13 @@ def _find_sentence_index(evidence: str, sentences: List[str]) -> Optional[int]:
     return None
 
 
+def _coerce_sentence_idx(value: Any) -> Optional[int]:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def _build_retrieved_context(
     evidences: List[Dict[str, Any]],
     note_store: NoteStore,
@@ -185,7 +233,8 @@ def _build_retrieved_context(
     for ev in evidences:
         note_id = ev.get("note_id")
         note = note_store.get_weak(note_id) if note_id else None
-        source = ((note or {}).get("meta") or {}).get("source") or ev.get("source")
+        meta = (note or {}).get("meta") or {}
+        source = meta.get("source") or ev.get("source")
         doc_id = _resolve_doc_id_from_source(source) if source else None
         if not doc_id:
             doc_id = ev.get("doc_id") or _resolve_doc_id_from_source(note_id)
@@ -193,7 +242,11 @@ def _build_retrieved_context(
         title = doc_meta.get("title") if doc_meta else None
         sentences = doc_meta.get("sentences") if doc_meta else []
         evidence_text = ev.get("canonical") or ev.get("evidence") or ""
-        sentence_idx = _find_sentence_index(evidence_text, sentences) if sentences else None
+        sentence_idx = _coerce_sentence_idx(meta.get("sentence_idx"))
+        if sentence_idx is None:
+            sentence_idx = _coerce_sentence_idx(ev.get("sentence_idx"))
+        if sentence_idx is None and sentences:
+            sentence_idx = _find_sentence_index(evidence_text, sentences)
 
         contexts.append(
             {
@@ -285,14 +338,23 @@ def _dedup_retrieved_context(
         seen.add(key)
         deduped.append(ctx)
     unique_count = len(deduped)
-    if top_k > 0:
-        deduped = deduped[:top_k]
+    backfilled = 0
+    target = raw_count if top_k <= 0 else min(top_k, raw_count)
+    if target > 0:
+        deduped = deduped[:target]
+        if len(deduped) < target:
+            for ctx in retrieved_context:
+                if len(deduped) >= target:
+                    break
+                deduped.append(ctx)
+                backfilled += 1
     duplicate_rate = duplicates / raw_count if raw_count else 0.0
     return deduped, {
         "top_k_raw": raw_count,
         "top_k_final": len(deduped),
         "unique_count": unique_count,
         "duplicate_rate": duplicate_rate,
+        "backfill_count": backfilled,
     }
 
 
@@ -456,19 +518,21 @@ def _coerce_float(value: Any, default: float) -> float:
 
 
 def _resolve_top_k_raw(top_k: int, top_k_raw: Optional[Any], overfetch: Optional[Any]) -> Tuple[int, str]:
+    min_raw = int(math.ceil(top_k * MIN_OVERFETCH))
     if top_k_raw is not None:
         raw = _coerce_int(top_k_raw, top_k)
-        return max(top_k, raw), "top_k_raw"
+        return max(min_raw, raw), "top_k_raw"
+    factor = None
     if overfetch is not None:
         try:
             factor = float(overfetch)
         except (TypeError, ValueError):
             factor = DEFAULT_OVERFETCH
-        if factor <= 0:
-            factor = DEFAULT_OVERFETCH
-        raw = int(math.ceil(top_k * factor))
-        return max(top_k, raw), "overfetch"
-    return top_k, "top_k"
+    if factor is None or factor <= 0:
+        factor = DEFAULT_OVERFETCH
+    factor = max(factor, MIN_OVERFETCH)
+    raw = int(math.ceil(top_k * factor))
+    return max(min_raw, raw), "overfetch"
 
 
 def _deep_merge(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any]:
@@ -652,10 +716,8 @@ def _pick_arg(
 
 
 def _ensure_index(
-    docs_dir: Path,
+    doc_index: Dict[str, Dict[str, Any]],
     index_root: Path,
-    llm_endpoint: str,
-    llm_model: str,
     force_build: bool,
 ) -> Dict[str, Any]:
     notes_path = index_root / "notes.jsonl"
@@ -663,12 +725,13 @@ def _ensure_index(
     if not force_build and notes_path.exists() and indexes_dir.exists():
         return {"status": "reused"}
     index_root.mkdir(parents=True, exist_ok=True)
-    return build_index(
-        docs_input=str(docs_dir),
-        output_dir=str(index_root),
-        llm_endpoint=llm_endpoint,
-        llm_model=llm_model,
-    )
+    notes_written = 0
+    if force_build or not notes_path.exists():
+        notes_written = _write_sentence_notes_for_example(doc_index, notes_path, overwrite=True)
+    builder = IndexBuilder()
+    builder.build_from_jsonl(str(notes_path))
+    builder.dump(str(indexes_dir))
+    return {"status": "ok", "notes": notes_written}
 
 
 def _prepare_aux_config(example_root: Path, base_cfg: Dict[str, Any]) -> Dict[str, Any]:
@@ -823,7 +886,7 @@ def _process_example(
     example_root = cache_root / qid
     docs_dir = example_root / "docs"
     doc_index = _write_docs_for_example(example, docs_dir, overwrite=force_build)
-    build_stats = _ensure_index(docs_dir, example_root, llm_endpoint, llm_model, force_build)
+    build_stats = _ensure_index(doc_index, example_root, force_build)
     build_embedding, build_bm25 = _mode_requirements(mode)
     aux_stats = _build_aux_indexes(
         example_root,
@@ -833,6 +896,10 @@ def _process_example(
         force_build=force_build,
     )
     retriever_cfg, retriever_paths = _prepare_retriever_config(example_root, base_cfg, mode)
+    scheduler_cfg = retriever_cfg.setdefault("retriever", {}).setdefault("scheduler", {})
+    scheduler_cfg["keep_at_least"] = top_k
+    scheduler_cfg["min_confidence"] = 0.0
+    scheduler_cfg["dedup_subject"] = False
     retriever_cfg.setdefault("retriever", {}).setdefault("chunk_fallback", {})["top_k"] = top_k_raw
 
     notes_path = example_root / "notes.jsonl"
@@ -855,7 +922,7 @@ def _process_example(
         openai_cfg=openai_cfg,
     )
     structured_answer = retrieve_result.get("answer")
-    short_answer, answer_source, answer_source_detail = resolve_short_answer(structured_answer, raw_answer)
+    short_answer, answer_source, answer_source_detail = resolve_short_answer(None, raw_answer)
     answer_model = openai_cfg.get("model") if reader == "openai" and openai_cfg else llm_model
 
     references: List[str] = []

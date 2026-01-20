@@ -174,6 +174,7 @@ class HybridRetriever:
             note_store,
             support_note_ids,
             keep_at_least=max(3, getattr(ir, "fanout", 4) // 2),
+            cfg=self.cfg,
         )
 
         hybrid_info = [
