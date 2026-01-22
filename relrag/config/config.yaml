@@ -70,7 +70,9 @@ openai:
   retry_backoff_sec: 1.0
   retry_backoff_max_sec: 20.0
   system_prompt_name: system_prompt.txt
-datasets: {}
+datasets:
+  musique:
+    data: data/musique_full_v1.0_dev_500.jsonl
 llm_profiles:
   extract:
     temperature: 0.0
@@ -174,6 +176,35 @@ hotpot_entry:
   workers: 1
   debug_dir: result/debug
   debug_max_notes: 50
+  stall_warn_sec: 300.0
+  stall_abort_sec: 900.0
+  force_build: false
+musique_entry:
+  data: data/musique_full_v1.0_dev_500.jsonl
+  cache_dir: result/musique/cache
+  output_dir: result/musique
+  top_k: 10
+  limit: 0
+  workers: 1
+  debug_dir: result/musique/debug
+  debug_max_notes: 50
+  stall_warn_sec: 300.0
+  stall_abort_sec: 900.0
+  force_build: false
+  use_structured_answer: false
+  include_decomposition_sp: true
+  unanswerable_token: "Insufficient evidence"
+  official_template: sample/sample_dev_pred.json
+narrativeqa_entry:
+  qaps: narrativeqa/qaps.csv
+  summaries: narrativeqa/third_party/wikipedia/summaries.csv
+  stories_dir: narrativeqa/tmp
+  cache_dir: result/narrativeqa/cache
+  output_dir: result/narrativeqa
+  context_mode: summary
+  top_k: 10
+  limit: 0
+  workers: 1
   stall_warn_sec: 300.0
   stall_abort_sec: 900.0
   force_build: false

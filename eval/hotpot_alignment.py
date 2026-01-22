@@ -34,9 +34,11 @@ def _normalize_supporting_facts(raw: Any) -> List[List[Any]]:
 
 def _pairs_from_context(context: Any) -> List[List[Any]]:
     pairs: List[List[Any]] = []
+    seen = set()
     for item in context or []:
         if not isinstance(item, dict):
             continue
+        chunk_id = item.get("chunk_id")
         title = item.get("title")
         idx = item.get("sentence_idx")
         if title is None or idx is None:
@@ -45,6 +47,13 @@ def _pairs_from_context(context: Any) -> List[List[Any]]:
             sent_idx = int(idx)
         except (TypeError, ValueError):
             continue
+        if chunk_id:
+            key = ("chunk_id", str(chunk_id))
+        else:
+            key = ("title_idx", str(title), sent_idx)
+        if key in seen:
+            continue
+        seen.add(key)
         pairs.append([str(title), sent_idx])
     return pairs
 
@@ -92,7 +101,7 @@ def main() -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
 
     gold_basename = gold_path.stem
-    gold_official_out = Path(args.gold_official_out) if args.gold_official_out else Path("data") / f"{gold_basename}_official_gold.json"
+    gold_official_out = Path(args.gold_official_out) if args.gold_official_out else output_dir / "official_gold.json"
     pred_official_out = Path(args.pred_official_out) if args.pred_official_out else output_dir / "official_pred.json"
 
     pred_records = list(_load_jsonl(pred_path))
@@ -241,7 +250,7 @@ def main() -> None:
             "duplicate_rate": _summarize(duplicate_rates),
             "top_k_raw_source": first_meta.get("top_k_raw_source"),
             "overfetch_factor": overfetch_factor,
-            "dedup_key_strategy": "doc_id+sentence_idx > title+sentence_idx > title+text_hash",
+            "dedup_key_strategy": "chunk_id > doc_id+sentence_idx > title+sentence_idx > title+text_hash",
             "chunk_fallback": {
                 "top_k": first_meta.get("chunk_fallback_top_k"),
                 "source": first_meta.get("chunk_fallback_top_k_source"),

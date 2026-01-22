@@ -2,9 +2,11 @@ import argparse
 import json
 import math
 import os
-import subprocess
+import platform
 import re
 import shutil
+import socket
+import subprocess
 import sys
 import time
 from copy import deepcopy
@@ -30,7 +32,6 @@ from relrag.retriever.note_store import NoteStore
 from relrag.prompt import load_prompt
 from relrag.utils.answer_source import resolve_short_answer, sha1_text
 from relrag.utils.openai_answer import generate_openai_answer
-from relrag.utils.eval_metrics import score_metrics
 from relrag.utils.output_eval import has_final_tag
 
 
@@ -40,9 +41,9 @@ DEFAULT_TOP_K = 10
 DEFAULT_LIMIT = 0
 DEFAULT_WORKERS = 1
 DEFAULT_SPLIT = "dev"
-DEFAULT_CACHE_DIR = "result/cache"
-DEFAULT_OUTPUT_DIR = "result"
-DEFAULT_DEBUG_DIR = "result/debug"
+DEFAULT_CACHE_DIR = "result/musique/cache"
+DEFAULT_OUTPUT_DIR = "result/musique"
+DEFAULT_DEBUG_DIR = "result/musique/debug"
 DEFAULT_DEBUG_MAX_NOTES = 50
 DEFAULT_OVERFETCH = 2.0
 MIN_OVERFETCH = 2.0
@@ -51,6 +52,8 @@ DEFAULT_BACKFILL_STEP = 1.5
 DEFAULT_BACKFILL_ROUNDS = 3
 DEFAULT_LLM_RETRY_ON_EMPTY = 1
 DEFAULT_LLM_RETRY_EVIDENCE = 6
+DEFAULT_OFFICIAL_SAMPLE = "sample/sample_dev_pred.json"
+DEFAULT_UNANSWERABLE = "Insufficient evidence"
 
 
 def _load_jsonl(path: Path) -> Iterable[Dict[str, Any]]:
@@ -94,6 +97,86 @@ def _count_examples(path: Path, limit: int) -> int:
             if limit and total >= limit:
                 break
     return total
+
+
+def _normalize_answer(text: str) -> str:
+    def _remove_articles(value: str) -> str:
+        return re.sub(r"\b(a|an|the)\b", " ", value)
+
+    def _white_space_fix(value: str) -> str:
+        return " ".join(value.split())
+
+    def _remove_punc(value: str) -> str:
+        exclude = set("!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~")
+        return "".join(ch for ch in value if ch not in exclude)
+
+    def _lower(value: str) -> str:
+        return value.lower()
+
+    return _white_space_fix(_remove_articles(_remove_punc(_lower(text or ""))))
+
+
+def _f1_score(prediction: str, ground_truth: str) -> Tuple[float, float, float]:
+    normalized_prediction = _normalize_answer(prediction)
+    normalized_ground_truth = _normalize_answer(ground_truth)
+    zero = (0.0, 0.0, 0.0)
+    special = {"yes", "no", "noanswer", "insufficient evidence"}
+    if normalized_prediction in special and normalized_prediction != normalized_ground_truth:
+        return zero
+    if normalized_ground_truth in special and normalized_prediction != normalized_ground_truth:
+        return zero
+
+    prediction_tokens = normalized_prediction.split()
+    ground_truth_tokens = normalized_ground_truth.split()
+    if not prediction_tokens or not ground_truth_tokens:
+        return zero
+    common = {}
+    for token in prediction_tokens:
+        common[token] = common.get(token, 0) + 1
+    num_same = 0
+    for token in ground_truth_tokens:
+        if token in common and common[token] > 0:
+            num_same += 1
+            common[token] -= 1
+    if num_same == 0:
+        return zero
+    precision = num_same / len(prediction_tokens)
+    recall = num_same / len(ground_truth_tokens)
+    f1 = (2 * precision * recall) / (precision + recall)
+    return float(f1), float(precision), float(recall)
+
+
+def _exact_match_score(prediction: str, ground_truth: str) -> bool:
+    return _normalize_answer(prediction) == _normalize_answer(ground_truth)
+
+
+def _best_answer_metrics(prediction: str, golds: List[str]) -> Dict[str, float]:
+    if not golds:
+        return {"em": 0.0, "f1": 0.0, "prec": 0.0, "recall": 0.0}
+    best = {"em": 0.0, "f1": 0.0, "prec": 0.0, "recall": 0.0}
+    for gold in golds:
+        em = 1.0 if _exact_match_score(prediction, gold) else 0.0
+        f1, prec, recall = _f1_score(prediction, gold)
+        if f1 > best["f1"] or (f1 == best["f1"] and em > best["em"]):
+            best = {"em": em, "f1": f1, "prec": prec, "recall": recall}
+    return best
+
+
+def _resolve_gold_answers(
+    example: Dict[str, Any],
+    *,
+    use_answerable_policy: bool,
+    unanswerable_token: str,
+) -> Tuple[List[str], bool, List[str]]:
+    answerable = bool(example.get("answerable", True))
+    raw_answer = example.get("answer") or ""
+    answer = str(raw_answer).strip()
+    aliases = [str(item).strip() for item in (example.get("answer_aliases") or []) if str(item).strip()]
+    if use_answerable_policy and not answerable:
+        return [unanswerable_token], answerable, aliases
+    golds = [answer] if answer else []
+    golds.extend(aliases)
+    return golds, answerable, aliases
 
 
 class ProgressBar:
@@ -150,19 +233,27 @@ def _write_docs_for_example(
 ) -> Dict[str, Dict[str, Any]]:
     docs_dir.mkdir(parents=True, exist_ok=True)
     doc_index: Dict[str, Dict[str, Any]] = {}
-    context = example.get("context") or []
-    qid = str(example.get("_id") or "unknown")
+    paragraphs = example.get("paragraphs") or []
+    qid = str(example.get("id") or "unknown")
 
-    for idx, item in enumerate(context):
-        if not isinstance(item, list) or len(item) != 2:
+    for para in paragraphs:
+        if not isinstance(para, dict):
             continue
-        title, sentences = item
-        if not isinstance(title, str) or not isinstance(sentences, list):
+        idx = para.get("idx")
+        try:
+            para_idx = int(idx)
+        except (TypeError, ValueError):
             continue
-        doc_id = _make_doc_id(qid, idx, title)
-        doc_index[doc_id] = {"title": title, "sentences": sentences}
+        title = str(para.get("title") or "")
+        text = str(para.get("paragraph_text") or "").strip()
+        doc_id = _make_doc_id(qid, para_idx, title or f"p{para_idx}")
+        doc_index[doc_id] = {
+            "title": title,
+            "paragraph_idx": para_idx,
+            "text": text,
+            "sentences": [text] if text else [],
+        }
 
-        text = " ".join(str(s).strip() for s in sentences if str(s).strip()).strip()
         if not text:
             continue
         doc_path = docs_dir / f"{doc_id}.txt"
@@ -173,7 +264,7 @@ def _write_docs_for_example(
     return doc_index
 
 
-def _write_sentence_notes_for_example(
+def _write_paragraph_notes_for_example(
     doc_index: Dict[str, Dict[str, Any]],
     notes_path: Path,
     overwrite: bool = False,
@@ -185,30 +276,30 @@ def _write_sentence_notes_for_example(
     with notes_path.open("w", encoding="utf-8") as handle:
         for doc_id, meta in doc_index.items():
             title = meta.get("title") or ""
-            sentences = meta.get("sentences") or []
-            for sent_idx, sentence in enumerate(sentences):
-                text = str(sentence).strip()
-                if not text:
-                    continue
-                note = {
-                    "note_id": f"{doc_id}#s{sent_idx:04d}",
-                    "subj": str(title).strip() or str(doc_id),
-                    "pred": "sentence",
-                    "obj": text,
-                    "subj_type": "CONCEPT",
-                    "obj_type": "CONCEPT",
-                    "evidence": text,
-                    "meta": {
-                        "source": str(doc_id),
-                        "sentence_idx": sent_idx,
-                        "confidence": 1.0,
-                        "final_conf": 1.0,
-                        "quality_score": 1.0,
-                        "evidence_canonical": text,
-                    },
-                }
-                handle.write(json.dumps(note, ensure_ascii=False) + "\n")
-                written += 1
+            para_idx = meta.get("paragraph_idx")
+            text = str(meta.get("text") or "").strip()
+            if text == "" or para_idx is None:
+                continue
+            note = {
+                "note_id": f"{doc_id}#p{int(para_idx):04d}",
+                "subj": str(title).strip() or str(doc_id),
+                "pred": "paragraph",
+                "obj": text,
+                "subj_type": "CONCEPT",
+                "obj_type": "CONCEPT",
+                "evidence": text,
+                "meta": {
+                    "source": str(doc_id),
+                    "sentence_idx": int(para_idx),
+                    "paragraph_idx": int(para_idx),
+                    "confidence": 1.0,
+                    "final_conf": 1.0,
+                    "quality_score": 1.0,
+                    "evidence_canonical": text,
+                },
+            }
+            handle.write(json.dumps(note, ensure_ascii=False) + "\n")
+            written += 1
     return written
 
 
@@ -258,11 +349,16 @@ def _build_retrieved_context(
             doc_id = ev.get("doc_id") or _resolve_doc_id_from_source(note_id)
         doc_meta = doc_index.get(doc_id) if doc_id else None
         title = doc_meta.get("title") if doc_meta else None
+        paragraph_idx = _coerce_sentence_idx(meta.get("paragraph_idx"))
+        if paragraph_idx is None and doc_meta:
+            paragraph_idx = _coerce_sentence_idx(doc_meta.get("paragraph_idx"))
         sentences = doc_meta.get("sentences") if doc_meta else []
         evidence_text = ev.get("canonical") or ev.get("evidence") or ""
         sentence_idx = _coerce_sentence_idx(meta.get("sentence_idx"))
         if sentence_idx is None:
             sentence_idx = _coerce_sentence_idx(ev.get("sentence_idx"))
+        if sentence_idx is None:
+            sentence_idx = paragraph_idx
         if sentence_idx is None and sentences:
             sentence_idx = _find_sentence_index(evidence_text, sentences)
 
@@ -274,6 +370,8 @@ def _build_retrieved_context(
                 "chunk_id": _make_chunk_id(doc_id, sentence_idx, note_id),
                 "title": title,
                 "sentence_idx": sentence_idx,
+                "paragraph_idx": paragraph_idx if paragraph_idx is not None else sentence_idx,
+                "idx": paragraph_idx if paragraph_idx is not None else sentence_idx,
                 "text": text,
                 "text_hash": sha1_text(text) if text else None,
                 "evidence": ev.get("evidence"),
@@ -286,31 +384,68 @@ def _build_retrieved_context(
     return contexts
 
 
-def _normalize_supporting_facts(raw: Any) -> List[List[Any]]:
-    if not raw:
-        return []
-    normalized: List[List[Any]] = []
-    for item in raw:
-        if not isinstance(item, (list, tuple)) or len(item) < 2:
+def _normalize_title(value: Any, fallback: str) -> str:
+    text = str(value or "").strip()
+    return text or fallback
+
+
+def _extract_gold_sp(
+    example: Dict[str, Any],
+    *,
+    include_decomposition: bool = True,
+) -> List[List[Any]]:
+    paragraphs = example.get("paragraphs") or []
+    idx_to_title: Dict[int, str] = {}
+    for para in paragraphs:
+        if not isinstance(para, dict):
             continue
-        title = item[0]
-        idx = item[1]
-        if title is None:
-            continue
+        idx = para.get("idx")
         try:
-            sent_idx = int(idx)
+            para_idx = int(idx)
         except (TypeError, ValueError):
             continue
-        normalized.append([str(title), sent_idx])
-    return normalized
+        title = _normalize_title(para.get("title"), f"paragraph_{para_idx}")
+        idx_to_title[para_idx] = title
 
+    facts: List[List[Any]] = []
+    seen = set()
 
-def _extract_gold_sp(example: Dict[str, Any]) -> List[List[Any]]:
-    if "supporting_facts" in example:
-        return _normalize_supporting_facts(example.get("supporting_facts"))
-    if "sp" in example:
-        return _normalize_supporting_facts(example.get("sp"))
-    return []
+    def _add(title: str, para_idx: int) -> None:
+        key = (title, int(para_idx))
+        if key in seen:
+            return
+        seen.add(key)
+        facts.append([title, int(para_idx)])
+
+    for para in paragraphs:
+        if not isinstance(para, dict):
+            continue
+        if not bool(para.get("is_supporting")):
+            continue
+        try:
+            para_idx = int(para.get("idx"))
+        except (TypeError, ValueError):
+            continue
+        title = idx_to_title.get(para_idx, f"paragraph_{para_idx}")
+        _add(title, para_idx)
+
+    if include_decomposition:
+        for step in example.get("question_decomposition") or []:
+            if not isinstance(step, dict):
+                continue
+            idx = step.get("paragraph_support_idx")
+            if idx is None:
+                continue
+            try:
+                para_idx = int(idx)
+            except (TypeError, ValueError):
+                continue
+            title = idx_to_title.get(para_idx)
+            if not title:
+                continue
+            _add(title, para_idx)
+
+    return facts
 
 
 def _build_pred_sp(retrieved_context: List[Dict[str, Any]]) -> List[List[Any]]:
@@ -318,7 +453,9 @@ def _build_pred_sp(retrieved_context: List[Dict[str, Any]]) -> List[List[Any]]:
     seen = set()
     for ctx in retrieved_context:
         title = ctx.get("title")
-        idx = ctx.get("sentence_idx")
+        idx = ctx.get("paragraph_idx")
+        if idx is None:
+            idx = ctx.get("sentence_idx")
         if title is None or idx is None:
             continue
         key = (title, int(idx))
@@ -550,7 +687,7 @@ def generate_answer(
 
 
 def _load_entry_config(cfg: Dict[str, Any]) -> Dict[str, Any]:
-    entry_cfg = cfg.get("hotpot_entry") or cfg.get("entry") or {}
+    entry_cfg = cfg.get("musique_entry") or cfg.get("entry") or {}
     if not isinstance(entry_cfg, dict):
         return {}
     return entry_cfg
@@ -790,7 +927,7 @@ def _ensure_index(
     index_root.mkdir(parents=True, exist_ok=True)
     notes_written = 0
     if force_build or not notes_path.exists():
-        notes_written = _write_sentence_notes_for_example(doc_index, notes_path, overwrite=True)
+        notes_written = _write_paragraph_notes_for_example(doc_index, notes_path, overwrite=True)
     builder = IndexBuilder()
     builder.build_from_jsonl(str(notes_path))
     builder.dump(str(indexes_dir))
@@ -1047,8 +1184,11 @@ def _process_example(
     force_build: bool,
     debug_dir: Optional[Path],
     debug_max_notes: int,
+    use_structured_answer: bool,
+    include_decomposition_sp: bool,
+    unanswerable_token: str,
 ) -> Dict[str, Any]:
-    qid = str(example.get("_id") or "unknown")
+    qid = str(example.get("id") or "unknown")
     question = str(example.get("question") or "")
 
     example_root = cache_root / qid
@@ -1090,7 +1230,7 @@ def _process_example(
     )
 
     evidences = retrieve_result.get("evidence") or []
-    structured_answer = retrieve_result.get("answer")
+    structured_answer = retrieve_result.get("answer") if use_structured_answer else None
     raw_answer, prompt_meta, llm_error, llm_error_reason = generate_answer(
         question=question,
         evidences=evidences,
@@ -1159,16 +1299,24 @@ def _process_example(
                 break
     answer_model = openai_cfg.get("model") if reader == "openai" and openai_cfg else llm_model
 
-    references: List[str] = []
-    raw_reference = example.get("answer")
-    if isinstance(raw_reference, list):
-        references = [str(item).strip() for item in raw_reference if str(item).strip()]
-    elif raw_reference:
-        references = [str(raw_reference).strip()]
-    metrics = score_metrics(short_answer, references)
+    gold_primary, answerable, aliases = _resolve_gold_answers(
+        example,
+        use_answerable_policy=True,
+        unanswerable_token=unanswerable_token,
+    )
+    gold_alt, _, _ = _resolve_gold_answers(
+        example,
+        use_answerable_policy=False,
+        unanswerable_token=unanswerable_token,
+    )
+    metrics_primary = _best_answer_metrics(short_answer, gold_primary)
+    metrics_alt = _best_answer_metrics(short_answer, gold_alt)
 
     pred_sp = _build_pred_sp(retrieved_context_topk)
-    gold_sp = _extract_gold_sp(example)
+    gold_sp = _extract_gold_sp(example, include_decomposition=include_decomposition_sp)
+    gold_set = set((item[0], int(item[1])) for item in gold_sp if len(item) >= 2)
+    topk_set = set((item[0], int(item[1])) for item in pred_sp if len(item) >= 2)
+    gold_subset = 1.0 if gold_set.issubset(topk_set) else 0.0
     llm_input_hash = prompt_meta.get("llm_input_hash") or ""
     top_k_raw_value = dedup_stats.get("top_k_raw")
     overfetch_factor = None
@@ -1178,21 +1326,43 @@ def _process_example(
     if backfill_attempts > 0:
         top_k_raw_source_final = "backfill"
 
+    top_k_final_value = dedup_stats.get("top_k_final")
+    top_k_hit = 1.0 if top_k_final_value == top_k else 0.0
+    fallback_flag = 1.0 if (fallback_reason or answer_source != "llm_final") else 0.0
+    duplicate_rate = float(dedup_stats.get("duplicate_rate") or 0.0)
+    metrics = {
+        "em": metrics_primary.get("em", 0.0),
+        "f1": metrics_primary.get("f1", 0.0),
+        "prec": metrics_primary.get("prec", 0.0),
+        "recall": metrics_primary.get("recall", 0.0),
+        "gold_sp_subset": gold_subset,
+        "top_k_hit": top_k_hit,
+        "fallback": fallback_flag,
+        "duplicate_rate": duplicate_rate,
+    }
+
     output_record = {
         "_id": qid,
+        "id": qid,
         "question": question,
         "answer": short_answer,
         "short_answer": short_answer,
         "answer_source": answer_source,
         "answer_source_detail": answer_source_detail,
+        "answerable": answerable,
+        "gold_answer": example.get("answer"),
+        "gold_aliases": aliases,
+        "gold_answers_primary": gold_primary,
+        "gold_answers_alt": gold_alt,
         "gold_sp": gold_sp,
         "pred_sp": pred_sp,
         "sp": pred_sp,
         "generated_answer": short_answer,
         "supporting_facts": gold_sp,
         "prediction": short_answer,
-        "references": references,
+        "references": gold_primary,
         "metrics": metrics,
+        "metrics_alt": metrics_alt,
         "mode": mode,
         "reader": reader,
         "model": answer_model,
@@ -1202,8 +1372,9 @@ def _process_example(
         "top_k": top_k,
         "top_k_raw": dedup_stats.get("top_k_raw"),
         "top_k_final": dedup_stats.get("top_k_final"),
-        "duplicate_rate": dedup_stats.get("duplicate_rate"),
+        "duplicate_rate": duplicate_rate,
         "overfetch_factor": overfetch_factor,
+        "fallback": fallback_flag,
         "fallback_reason": fallback_reason,
         "llm_error": llm_error,
         "top_k_fill_reason": top_k_fill_reason,
@@ -1214,6 +1385,7 @@ def _process_example(
             "retriever_paths": retriever_paths,
             "retrieve_result": retrieve_result,
             "structured_answer": structured_answer,
+            "structured_answer_used": use_structured_answer,
             "llm_raw": raw_answer,
             "llm_has_final": has_final_tag(raw_answer),
             "support_note_ids": retrieve_result.get("support_note_ids"),
@@ -1263,10 +1435,163 @@ def _accumulate_metrics(totals: Dict[str, float], metrics: Dict[str, float]) -> 
         totals[key] = totals.get(key, 0.0) + float(value)
 
 
+def _write_retrieval_payloads(
+    record: Dict[str, Any],
+    *,
+    raw_handle: Optional[TextIO],
+    topk_handle: Optional[TextIO],
+) -> None:
+    if raw_handle is not None:
+        raw_payload = {
+            "id": record.get("id"),
+            "question": record.get("question"),
+            "retrieved_context_raw": record.get("retrieved_context_raw") or [],
+            "top_k_raw": record.get("top_k_raw"),
+            "top_k_raw_requested": (record.get("intermediate") or {}).get("top_k_raw_requested"),
+            "top_k_raw_source": (record.get("intermediate") or {}).get("top_k_raw_source"),
+            "overfetch_factor": record.get("overfetch_factor"),
+            "top_k_backfill_rounds": (record.get("intermediate") or {}).get("top_k_backfill_rounds"),
+            "top_k_fill_reason": record.get("top_k_fill_reason"),
+        }
+        raw_handle.write(json.dumps(raw_payload, ensure_ascii=False) + "\n")
+        raw_handle.flush()
+    if topk_handle is not None:
+        topk_payload = {
+            "id": record.get("id"),
+            "question": record.get("question"),
+            "retrieved_context_topk": record.get("retrieved_context_topk") or [],
+            "top_k": record.get("top_k"),
+            "top_k_final": record.get("top_k_final"),
+            "duplicate_rate": record.get("duplicate_rate"),
+            "gold_sp_subset": (record.get("metrics") or {}).get("gold_sp_subset"),
+        }
+        topk_handle.write(json.dumps(topk_payload, ensure_ascii=False) + "\n")
+        topk_handle.flush()
+
+
+def _record_fallback_sample(rollup: Optional[Dict[str, Any]], record: Dict[str, Any]) -> None:
+    if rollup is None:
+        return
+    if not record.get("fallback"):
+        return
+    samples = rollup.setdefault("fallback_samples", [])
+    metrics = record.get("metrics") or {}
+    samples.append(
+        {
+            "id": record.get("id"),
+            "answer_source": record.get("answer_source"),
+            "fallback_reason": record.get("fallback_reason"),
+            "llm_error": record.get("llm_error"),
+            "em": metrics.get("em"),
+            "f1": metrics.get("f1"),
+        }
+    )
+
+
+def _update_answerable_counts(rollup: Optional[Dict[str, Any]], record: Dict[str, Any]) -> None:
+    if rollup is None:
+        return
+    if record.get("answerable"):
+        rollup["answerable_count"] = rollup.get("answerable_count", 0) + 1
+    else:
+        rollup["unanswerable_count"] = rollup.get("unanswerable_count", 0) + 1
+
+
+def _sanitize_config(cfg: Dict[str, Any]) -> Dict[str, Any]:
+    sanitized = deepcopy(cfg)
+    openai_cfg = sanitized.get("openai")
+    if isinstance(openai_cfg, dict) and openai_cfg.get("api_key"):
+        openai_cfg["api_key"] = "***"
+    retriever_cfg = sanitized.get("retriever")
+    if isinstance(retriever_cfg, dict):
+        embedding_cfg = retriever_cfg.get("embedding")
+        if isinstance(embedding_cfg, dict) and embedding_cfg.get("api_key"):
+            embedding_cfg["api_key"] = "***"
+    return sanitized
+
+
+def _sanitize_argv(argv: List[str]) -> List[str]:
+    sanitized: List[str] = []
+    skip_next = False
+    for arg in argv:
+        if skip_next:
+            sanitized.append("***")
+            skip_next = False
+            continue
+        if arg.startswith("--openai_api_key="):
+            sanitized.append("--openai_api_key=***")
+            continue
+        if arg == "--openai_api_key":
+            sanitized.append(arg)
+            skip_next = True
+            continue
+        sanitized.append(arg)
+    return sanitized
+
+
+def _git_info(repo_root: Path) -> Dict[str, Any]:
+    info: Dict[str, Any] = {}
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=str(repo_root),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if result.returncode == 0:
+            info["commit"] = result.stdout.strip()
+    except Exception:
+        info["commit"] = None
+    try:
+        status = subprocess.run(
+            ["git", "status", "--porcelain"],
+            cwd=str(repo_root),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if status.returncode == 0:
+            info["dirty"] = bool(status.stdout.strip())
+    except Exception:
+        info["dirty"] = None
+    return info
+
+
+def _env_snapshot() -> Dict[str, Optional[str]]:
+    keys = [
+        "CUDA_VISIBLE_DEVICES",
+        "OPENAI_API_KEY",
+        "RELRAG_ALLOW_CUSTOM_LLM",
+        "EMB_ENDPOINT",
+        "VLLM_ENDPOINT",
+        "HF_ENDPOINT",
+        "HF_HOME",
+        "HF_HUB_CACHE",
+        "TRANSFORMERS_CACHE",
+    ]
+    snapshot: Dict[str, Optional[str]] = {}
+    for key in keys:
+        value = os.environ.get(key)
+        if value and key == "OPENAI_API_KEY":
+            snapshot[key] = "***"
+        else:
+            snapshot[key] = value
+    return snapshot
+
+
+def _write_json(path: Path, payload: Dict[str, Any]) -> None:
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
 def _drain_futures(
     future_map: Dict[Any, str],
     handle,
     totals: Dict[str, float],
+    alt_totals: Optional[Dict[str, float]] = None,
+    rollup: Optional[Dict[str, Any]] = None,
+    raw_handle: Optional[TextIO] = None,
+    topk_handle: Optional[TextIO] = None,
     progress: Optional[ProgressBar] = None,
     stall_warn_sec: float = DEFAULT_STALL_WARN_SEC,
     stall_abort_sec: float = DEFAULT_STALL_ABORT_SEC,
@@ -1317,7 +1642,12 @@ def _drain_futures(
             else:
                 handle.write(json.dumps(record, ensure_ascii=False) + "\n")
                 handle.flush()
+                _write_retrieval_payloads(record, raw_handle=raw_handle, topk_handle=topk_handle)
                 _accumulate_metrics(totals, record.get("metrics") or {})
+                if alt_totals is not None:
+                    _accumulate_metrics(alt_totals, record.get("metrics_alt") or {})
+                _record_fallback_sample(rollup, record)
+                _update_answerable_counts(rollup, record)
                 succeeded += 1
             completed += 1
             last_progress = time.time()
@@ -1329,8 +1659,8 @@ def _drain_futures(
 def _write_official_output(
     jsonl_path: Path,
     output_dir: Path,
-    timestamp: int,
-    suffix: Optional[str] = None,
+    *,
+    output_name: str = "official_pred.json",
 ) -> Path:
     answers: Dict[str, Any] = {}
     supports: Dict[str, Any] = {}
@@ -1349,8 +1679,7 @@ def _write_official_output(
                 raise ValueError(f"missing pred_sp for qid={qid}")
             answers[qid] = record.get("short_answer") or ""
             supports[qid] = record.get("pred_sp") or []
-    suffix_part = f"_{suffix}" if suffix else ""
-    official_path = output_dir / f"result_{timestamp}{suffix_part}_official.json"
+    official_path = output_dir / output_name
     with official_path.open("w", encoding="utf-8") as handle:
         json.dump({"answer": answers, "sp": supports}, handle, ensure_ascii=False)
     return official_path
@@ -1406,9 +1735,42 @@ def _run_alignment(
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="HotpotQA JSONL entry for RelRAG")
+    parser = argparse.ArgumentParser(description="MuSiQue JSONL entry for RelRAG")
     parser.add_argument("--config", help="Path to YAML config file (defaults to relrag/config/config.yaml)")
-    parser.add_argument("--data", help="Path to HotpotQA JSONL dataset (fallback to config)")
+    parser.add_argument("--data", help="Path to MuSiQue JSONL dataset (fallback to config)")
+    parser.add_argument("--run_dir", help="Run directory (enables full artifact layout)")
+    parser.add_argument(
+        "--official_template",
+        help="Official export template (default: sample/sample_dev_pred.json)",
+    )
+    parser.add_argument(
+        "--use_structured_answer",
+        action="store_true",
+        help="Use structured answer override from retriever",
+    )
+    parser.add_argument(
+        "--no_structured_answer",
+        action="store_false",
+        dest="use_structured_answer",
+        help="Disable structured answer override",
+    )
+    parser.set_defaults(use_structured_answer=None)
+    parser.add_argument(
+        "--include_decomposition_sp",
+        action="store_true",
+        help="Include question_decomposition paragraph_support_idx in gold_sp",
+    )
+    parser.add_argument(
+        "--no_decomposition_sp",
+        action="store_false",
+        dest="include_decomposition_sp",
+        help="Exclude question_decomposition paragraph_support_idx from gold_sp",
+    )
+    parser.set_defaults(include_decomposition_sp=None)
+    parser.add_argument(
+        "--unanswerable_token",
+        help='Gold token when answerable==false (default: "Insufficient evidence")',
+    )
     parser.add_argument("--endpoint", help="vLLM endpoint (defaults to config)")
     parser.add_argument("--model", help="LLM model name (defaults to config)")
     parser.add_argument("--reader", help="Reader backend: vllm or openai (fallback to config)")
@@ -1445,11 +1807,11 @@ def main() -> None:
         return path if path.is_absolute() else repo_root / path
 
     cfg = ConfigLoader(args.config).load_config() if args.config else global_config.load_config()
-    dataset_cfg = get_dataset_config(cfg, "hotpotqa")
+    dataset_cfg = get_dataset_config(cfg, "musique")
     entry_cfg = _load_entry_config(cfg)
     args.data = _pick_arg(args, entry_cfg, dataset_cfg, "data", None)
     if not args.data:
-        raise ValueError("Dataset path missing. Provide --data or set hotpot_entry.data in config.")
+        raise ValueError("Dataset path missing. Provide --data or set musique_entry.data in config.")
     args.split = _pick_arg(args, entry_cfg, dataset_cfg, "split", DEFAULT_SPLIT)
     args.cache_dir = _pick_arg(args, entry_cfg, dataset_cfg, "cache_dir", DEFAULT_CACHE_DIR)
     args.output_dir = _pick_arg(args, entry_cfg, dataset_cfg, "output_dir", DEFAULT_OUTPUT_DIR)
@@ -1459,30 +1821,6 @@ def main() -> None:
     )
     args.top_k_raw = _pick_arg(args, entry_cfg, dataset_cfg, "top_k_raw", None)
     args.overfetch = _pick_arg(args, entry_cfg, dataset_cfg, "overfetch", None)
-    args.min_overfetch = _coerce_float(
-        _pick_arg(args, entry_cfg, dataset_cfg, "min_overfetch", MIN_OVERFETCH),
-        MIN_OVERFETCH,
-    )
-    args.backfill_max_overfetch = _coerce_float(
-        _pick_arg(args, entry_cfg, dataset_cfg, "backfill_max_overfetch", DEFAULT_BACKFILL_MAX_OVERFETCH),
-        DEFAULT_BACKFILL_MAX_OVERFETCH,
-    )
-    args.backfill_step = _coerce_float(
-        _pick_arg(args, entry_cfg, dataset_cfg, "backfill_step", DEFAULT_BACKFILL_STEP),
-        DEFAULT_BACKFILL_STEP,
-    )
-    args.backfill_rounds = _coerce_int(
-        _pick_arg(args, entry_cfg, dataset_cfg, "backfill_rounds", DEFAULT_BACKFILL_ROUNDS),
-        DEFAULT_BACKFILL_ROUNDS,
-    )
-    args.llm_retry_on_empty = _coerce_int(
-        _pick_arg(args, entry_cfg, dataset_cfg, "llm_retry_on_empty", DEFAULT_LLM_RETRY_ON_EMPTY),
-        DEFAULT_LLM_RETRY_ON_EMPTY,
-    )
-    args.llm_retry_max_evidence = _coerce_int(
-        _pick_arg(args, entry_cfg, dataset_cfg, "llm_retry_max_evidence", DEFAULT_LLM_RETRY_EVIDENCE),
-        DEFAULT_LLM_RETRY_EVIDENCE,
-    )
     args.min_overfetch = _coerce_float(
         _pick_arg(args, entry_cfg, dataset_cfg, "min_overfetch", MIN_OVERFETCH),
         MIN_OVERFETCH,
@@ -1525,6 +1863,35 @@ def main() -> None:
         _pick_arg(args, entry_cfg, dataset_cfg, "stall_abort_sec", DEFAULT_STALL_ABORT_SEC),
         DEFAULT_STALL_ABORT_SEC,
     )
+    args.use_structured_answer = _pick_arg(
+        args,
+        entry_cfg,
+        dataset_cfg,
+        "use_structured_answer",
+        False,
+    )
+    args.include_decomposition_sp = _pick_arg(
+        args,
+        entry_cfg,
+        dataset_cfg,
+        "include_decomposition_sp",
+        True,
+    )
+    args.unanswerable_token = _pick_arg(
+        args,
+        entry_cfg,
+        dataset_cfg,
+        "unanswerable_token",
+        DEFAULT_UNANSWERABLE,
+    )
+    args.official_template = _pick_arg(
+        args,
+        entry_cfg,
+        dataset_cfg,
+        "official_template",
+        DEFAULT_OFFICIAL_SAMPLE,
+    )
+    args.run_dir = _pick_arg(args, entry_cfg, dataset_cfg, "run_dir", args.run_dir)
     if entry_cfg.get("force_build"):
         args.force_build = True
 
@@ -1544,19 +1911,27 @@ def main() -> None:
     data_path = _resolve_path(args.data)
     if not data_path.exists():
         raise FileNotFoundError(f"Dataset not found: {data_path}")
+    official_template_path = _resolve_path(args.official_template)
+    if not official_template_path.exists():
+        logger.warning("Official template not found: {}", official_template_path)
+    args.official_template = str(official_template_path)
 
     llm_endpoint, llm_model = _resolve_llm_config(args)
     logger.info("Using vLLM endpoint={} model={}", llm_endpoint, llm_model)
     cache_root = _resolve_path(args.cache_dir)
     output_dir = _resolve_path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
-    timestamp = int(time.time())
+    run_dir = _resolve_path(args.run_dir) if args.run_dir else None
+    if run_dir:
+        run_dir.mkdir(parents=True, exist_ok=True)
     total_examples = _count_examples(data_path, args.limit)
     debug_dir = _resolve_path(args.debug_dir) if args.debug_dir else None
+    if run_dir and debug_dir:
+        debug_dir = run_dir / "debug"
     if debug_dir:
         debug_dir.mkdir(parents=True, exist_ok=True)
 
-    base_cfg = _apply_dataset_retriever(deepcopy(cfg), "hotpotqa")
+    base_cfg = _apply_dataset_retriever(deepcopy(cfg), "musique")
     modes = _resolve_retriever_modes(
         mode_arg=args.retriever,
         modes_arg=None,
@@ -1565,6 +1940,8 @@ def main() -> None:
         base_cfg=base_cfg,
     )
     readers = _resolve_readers(args, cfg, dataset_cfg)
+    if run_dir and (len(readers) != 1 or len(modes) != 1):
+        raise ValueError("run_dir requires exactly one reader and one retriever.")
     openai_runtime_cfg: Optional[Dict[str, Any]] = None
     if "openai" in readers:
         if not openai_cfg.get("enabled", True):
@@ -1600,142 +1977,316 @@ def main() -> None:
                 args.overfetch,
                 args.min_overfetch,
             )
-            output_name = _pred_filename(split, reader, mode, len(readers), len(modes))
-            output_path = output_dir / output_name
+            output_base = run_dir if run_dir else output_dir
+            output_name = "predictions.jsonl" if run_dir else _pred_filename(split, reader, mode, len(readers), len(modes))
+            output_path = output_base / output_name
+            retrieval_raw_path = run_dir / "retrieved_context_raw.jsonl" if run_dir else None
+            retrieval_topk_path = run_dir / "retrieved_context_topk.jsonl" if run_dir else None
             run_debug_dir = debug_dir
-            if debug_dir and (len(readers) > 1 or len(modes) > 1):
+            if debug_dir and (len(readers) > 1 or len(modes) > 1) and not run_dir:
                 run_debug_dir = debug_dir / f"{reader}_{mode}"
                 run_debug_dir.mkdir(parents=True, exist_ok=True)
             logger.info("Writing results to {}", output_path)
-            totals = {"bleu1": 0.0, "bleu4": 0.0, "rougeL": 0.0, "meteor": 0.0}
+
+            run_started_at = time.time()
+            run_meta: Optional[Dict[str, Any]] = None
+            if run_dir:
+                resolved_cfg = deepcopy(base_cfg)
+                if args.endpoint:
+                    resolved_cfg.setdefault("vllm", {})["endpoint"] = args.endpoint
+                if args.model:
+                    resolved_cfg.setdefault("vllm", {})["model"] = args.model
+                if reader_openai_cfg:
+                    resolved_cfg["openai"] = deepcopy(reader_openai_cfg)
+                entry_snapshot = resolved_cfg.setdefault("musique_entry", {})
+                entry_snapshot.update(
+                    {
+                        "data": str(data_path),
+                        "cache_dir": str(cache_root),
+                        "output_dir": str(run_dir),
+                        "split": split,
+                        "reader": reader,
+                        "retriever": mode,
+                        "top_k": mode_top_k,
+                        "top_k_raw": mode_top_k_raw,
+                        "overfetch": args.overfetch,
+                        "min_overfetch": args.min_overfetch,
+                        "backfill_max_overfetch": args.backfill_max_overfetch,
+                        "backfill_step": args.backfill_step,
+                        "backfill_rounds": args.backfill_rounds,
+                        "llm_retry_on_empty": args.llm_retry_on_empty,
+                        "llm_retry_max_evidence": args.llm_retry_max_evidence,
+                        "limit": args.limit,
+                        "workers": args.workers,
+                        "use_structured_answer": args.use_structured_answer,
+                        "include_decomposition_sp": args.include_decomposition_sp,
+                        "unanswerable_token": args.unanswerable_token,
+                        "official_template": args.official_template,
+                    }
+                )
+                _write_json(run_dir / "config.resolved.json", _sanitize_config(resolved_cfg))
+                gold_sp_policy = "paragraphs.is_supporting"
+                if args.include_decomposition_sp:
+                    gold_sp_policy = gold_sp_policy + " + question_decomposition.paragraph_support_idx"
+                run_meta = {
+                    "run_dir": str(run_dir),
+                    "dataset": "musique",
+                    "data_path": str(data_path),
+                    "sample_count": total_examples,
+                    "split": split,
+                    "reader": reader,
+                    "retriever": mode,
+                    "cache_dir": str(cache_root),
+                    "llm_endpoint": llm_endpoint,
+                    "llm_model": llm_model,
+                    "openai": {
+                        "base_url": (reader_openai_cfg or {}).get("base_url"),
+                        "model": (reader_openai_cfg or {}).get("model"),
+                    }
+                    if reader == "openai"
+                    else None,
+                    "embedding_endpoint": ((base_cfg.get("retriever") or {}).get("embedding") or {}).get("endpoint"),
+                    "top_k": mode_top_k,
+                    "top_k_raw": mode_top_k_raw,
+                    "top_k_raw_source": top_k_raw_source,
+                    "overfetch": args.overfetch,
+                    "min_overfetch": args.min_overfetch,
+                    "backfill_max_overfetch": args.backfill_max_overfetch,
+                    "backfill_step": args.backfill_step,
+                    "backfill_rounds": args.backfill_rounds,
+                    "llm_retry_on_empty": args.llm_retry_on_empty,
+                    "llm_retry_max_evidence": args.llm_retry_max_evidence,
+                    "workers": args.workers,
+                    "use_structured_answer": args.use_structured_answer,
+                    "include_decomposition_sp": args.include_decomposition_sp,
+                    "unanswerable_token": args.unanswerable_token,
+                    "answer_policy_primary": f"answerable_false_as_{args.unanswerable_token}",
+                    "answer_policy_secondary": "always_use_answer_field",
+                    "gold_sp_policy": gold_sp_policy,
+                    "pred_sp_policy": "retrieved_context_topk (title, paragraph_idx)",
+                    "official_export": {
+                        "template": str(args.official_template),
+                        "mapping": "answer=short_answer, sp=pred_sp",
+                    },
+                    "command": _sanitize_argv(sys.argv),
+                    "started_at": int(run_started_at),
+                    "host": socket.gethostname(),
+                    "platform": platform.platform(),
+                    "python": sys.version,
+                    "git": _git_info(repo_root),
+                    "env": _env_snapshot(),
+                }
+                _write_json(run_dir / "run_meta.json", run_meta)
+
+            totals = {
+                "em": 0.0,
+                "f1": 0.0,
+                "prec": 0.0,
+                "recall": 0.0,
+                "gold_sp_subset": 0.0,
+                "top_k_hit": 0.0,
+                "fallback": 0.0,
+                "duplicate_rate": 0.0,
+            }
+            alt_totals = {"em": 0.0, "f1": 0.0, "prec": 0.0, "recall": 0.0}
+            rollup: Dict[str, Any] = {"fallback_samples": [], "answerable_count": 0, "unanswerable_count": 0}
             progress = ProgressBar(total_examples)
             processed = 0
             completed = 0
-            with output_path.open("w", encoding="utf-8") as handle:
-                if args.workers <= 1:
-                    for example in _load_jsonl(data_path):
-                        if args.limit and completed >= args.limit:
-                            break
-                        try:
-                            record = _process_example(
-                                example,
-                                cache_root=cache_root,
-                                base_cfg=base_cfg,
-                                llm_endpoint=llm_endpoint,
-                                llm_model=llm_model,
-                                mode=mode,
-                                reader=reader,
-                                openai_cfg=reader_openai_cfg,
-                                top_k=mode_top_k,
-                                top_k_raw=mode_top_k_raw,
-                                top_k_raw_source=top_k_raw_source,
-                                backfill_max_overfetch=args.backfill_max_overfetch,
-                                backfill_step=args.backfill_step,
-                                backfill_rounds=args.backfill_rounds,
-                                llm_retry_on_empty=args.llm_retry_on_empty,
-                                llm_retry_max_evidence=args.llm_retry_max_evidence,
-                                force_build=args.force_build,
-                                debug_dir=run_debug_dir,
-                                debug_max_notes=args.debug_max_notes,
-                            )
-                            handle.write(json.dumps(record, ensure_ascii=False) + "\n")
-                            handle.flush()
-                            _accumulate_metrics(totals, record.get("metrics") or {})
-                            processed += 1
-                        except Exception as exc:
-                            qid = example.get("_id")
-                            logger.error("Failed example {}: {}", qid, exc)
-                        finally:
-                            completed += 1
-                            progress.update(1)
-                else:
-                    max_workers = max(1, int(args.workers))
-                    future_map: Dict[Any, str] = {}
-                    scheduled = 0
-                    buffer_cap = max_workers * 2
-                    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            if run_dir:
+                raw_handle = retrieval_raw_path.open("w", encoding="utf-8")
+                topk_handle = retrieval_topk_path.open("w", encoding="utf-8")
+            else:
+                raw_handle = None
+                topk_handle = None
+            try:
+                with output_path.open("w", encoding="utf-8") as handle:
+                    if args.workers <= 1:
                         for example in _load_jsonl(data_path):
-                            if args.limit and scheduled >= args.limit:
+                            if args.limit and completed >= args.limit:
                                 break
-                            qid = str(example.get("_id") or "unknown")
-                            future = executor.submit(
-                                _process_example,
-                                example,
-                                cache_root,
-                                base_cfg,
-                                llm_endpoint,
-                                llm_model,
-                                mode,
-                                reader,
-                                reader_openai_cfg,
-                                mode_top_k,
-                                mode_top_k_raw,
-                                top_k_raw_source,
-                                args.backfill_max_overfetch,
-                                args.backfill_step,
-                                args.backfill_rounds,
-                                args.llm_retry_on_empty,
-                                args.llm_retry_max_evidence,
-                                args.force_build,
-                                run_debug_dir,
-                                args.debug_max_notes,
-                            )
-                            future_map[future] = qid
-                            scheduled += 1
-                            if len(future_map) >= buffer_cap:
+                            try:
+                                record = _process_example(
+                                    example,
+                                    cache_root=cache_root,
+                                    base_cfg=base_cfg,
+                                    llm_endpoint=llm_endpoint,
+                                    llm_model=llm_model,
+                                    mode=mode,
+                                    reader=reader,
+                                    openai_cfg=reader_openai_cfg,
+                                    top_k=mode_top_k,
+                                    top_k_raw=mode_top_k_raw,
+                                    top_k_raw_source=top_k_raw_source,
+                                    backfill_max_overfetch=args.backfill_max_overfetch,
+                                    backfill_step=args.backfill_step,
+                                    backfill_rounds=args.backfill_rounds,
+                                    llm_retry_on_empty=args.llm_retry_on_empty,
+                                    llm_retry_max_evidence=args.llm_retry_max_evidence,
+                                    force_build=args.force_build,
+                                    debug_dir=run_debug_dir,
+                                    debug_max_notes=args.debug_max_notes,
+                                    use_structured_answer=args.use_structured_answer,
+                                    include_decomposition_sp=args.include_decomposition_sp,
+                                    unanswerable_token=args.unanswerable_token,
+                                )
+                                handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+                                handle.flush()
+                                _write_retrieval_payloads(record, raw_handle=raw_handle, topk_handle=topk_handle)
+                                _accumulate_metrics(totals, record.get("metrics") or {})
+                                _accumulate_metrics(alt_totals, record.get("metrics_alt") or {})
+                                _record_fallback_sample(rollup, record)
+                                _update_answerable_counts(rollup, record)
+                                processed += 1
+                            except Exception as exc:
+                                qid = example.get("id")
+                                logger.error("Failed example {}: {}", qid, exc)
+                            finally:
+                                completed += 1
+                                progress.update(1)
+                    else:
+                        max_workers = max(1, int(args.workers))
+                        future_map: Dict[Any, str] = {}
+                        scheduled = 0
+                        buffer_cap = max_workers * 2
+                        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                            for example in _load_jsonl(data_path):
+                                if args.limit and scheduled >= args.limit:
+                                    break
+                                qid = str(example.get("id") or "unknown")
+                                future = executor.submit(
+                                    _process_example,
+                                    example,
+                                    cache_root,
+                                    base_cfg,
+                                    llm_endpoint,
+                                    llm_model,
+                                    mode,
+                                    reader,
+                                    reader_openai_cfg,
+                                    mode_top_k,
+                                    mode_top_k_raw,
+                                    top_k_raw_source,
+                                    args.backfill_max_overfetch,
+                                    args.backfill_step,
+                                    args.backfill_rounds,
+                                    args.llm_retry_on_empty,
+                                    args.llm_retry_max_evidence,
+                                    args.force_build,
+                                    run_debug_dir,
+                                    args.debug_max_notes,
+                                    args.use_structured_answer,
+                                    args.include_decomposition_sp,
+                                    args.unanswerable_token,
+                                )
+                                future_map[future] = qid
+                                scheduled += 1
+                                if len(future_map) >= buffer_cap:
+                                    done_count, ok_count = _drain_futures(
+                                        future_map,
+                                        handle,
+                                        totals,
+                                        alt_totals=alt_totals,
+                                        rollup=rollup,
+                                        raw_handle=raw_handle,
+                                        topk_handle=topk_handle,
+                                        progress=progress,
+                                        stall_warn_sec=args.stall_warn_sec,
+                                        stall_abort_sec=args.stall_abort_sec,
+                                    )
+                                    completed += done_count
+                                    processed += ok_count
+                                    future_map = {}
+                            if future_map:
                                 done_count, ok_count = _drain_futures(
                                     future_map,
                                     handle,
                                     totals,
+                                    alt_totals=alt_totals,
+                                    rollup=rollup,
+                                    raw_handle=raw_handle,
+                                    topk_handle=topk_handle,
                                     progress=progress,
                                     stall_warn_sec=args.stall_warn_sec,
                                     stall_abort_sec=args.stall_abort_sec,
                                 )
                                 completed += done_count
                                 processed += ok_count
-                                future_map = {}
-                        if future_map:
-                            done_count, ok_count = _drain_futures(
-                                future_map,
-                                handle,
-                                totals,
-                                progress=progress,
-                                stall_warn_sec=args.stall_warn_sec,
-                                stall_abort_sec=args.stall_abort_sec,
-                            )
-                            completed += done_count
-                            processed += ok_count
+            finally:
+                if raw_handle is not None:
+                    raw_handle.close()
+                if topk_handle is not None:
+                    topk_handle.close()
 
             progress.close()
             failed = completed - processed
+            duration_sec = max(0.0, time.time() - run_started_at)
             logger.info("Reader {} mode {} completed {} examples (failed {})", reader, mode, processed, failed)
             denom = processed if processed > 0 else 1
+            metrics_summary = {
+                "em": round(totals["em"] / denom, 4),
+                "f1": round(totals["f1"] / denom, 4),
+                "prec": round(totals["prec"] / denom, 4),
+                "recall": round(totals["recall"] / denom, 4),
+                "gold_sp_subset": round(totals["gold_sp_subset"] / denom, 4),
+                "top_k_hit": round(totals["top_k_hit"] / denom, 4),
+                "fallback_rate": round(totals["fallback"] / denom, 4),
+                "duplicate_rate": round(totals["duplicate_rate"] / denom, 6),
+            }
+            metrics_alt_summary = {
+                "em": round(alt_totals["em"] / denom, 4),
+                "f1": round(alt_totals["f1"] / denom, 4),
+                "prec": round(alt_totals["prec"] / denom, 4),
+                "recall": round(alt_totals["recall"] / denom, 4),
+            }
             summary_report["runs"][reader][mode] = {
-                "bleu1": round(totals["bleu1"] / denom, 4),
-                "bleu4": round(totals["bleu4"] / denom, 4),
-                "rougeL": round(totals["rougeL"] / denom, 4),
-                "meteor": round(totals["meteor"] / denom, 4),
+                "em": metrics_summary["em"],
+                "f1": metrics_summary["f1"],
+                "gold_sp_subset": metrics_summary["gold_sp_subset"],
+                "top_k_hit": metrics_summary["top_k_hit"],
+                "fallback_rate": metrics_summary["fallback_rate"],
+                "duplicate_rate": metrics_summary["duplicate_rate"],
                 "count": processed,
                 "model": answer_model,
                 "top_k": mode_top_k,
+                "top_k_raw": mode_top_k_raw,
             }
 
-            if len(readers) == 1 and len(modes) == 1:
-                official_path = _write_official_output(output_path, output_dir, timestamp)
+            if run_dir:
+                metrics_payload = {
+                    "split": split,
+                    "reader": reader,
+                    "retriever": mode,
+                    "model": answer_model,
+                    "count": processed,
+                    "failed": failed,
+                    "duration_sec": round(duration_sec, 2),
+                    "metrics": metrics_summary,
+                    "metrics_alt": metrics_alt_summary,
+                    "top_k": mode_top_k,
+                    "top_k_raw": mode_top_k_raw,
+                    "top_k_raw_source": top_k_raw_source,
+                    "answerable_count": rollup.get("answerable_count", 0),
+                    "unanswerable_count": rollup.get("unanswerable_count", 0),
+                    "fallback_samples": rollup.get("fallback_samples", []),
+                }
+                _write_json(run_dir / "metrics.json", metrics_payload)
+                official_path = _write_official_output(output_path, run_dir, output_name="official_pred.json")
                 logger.info("Official-format output written to {}", official_path)
-
-            try:
-                _run_alignment(
-                    repo_root=repo_root,
-                    pred_path=output_path,
-                    gold_path=data_path,
-                    output_dir=output_dir,
-                    split=split,
+                if run_meta is not None:
+                    run_meta["ended_at"] = int(time.time())
+                    run_meta["duration_sec"] = round(duration_sec, 2)
+                    _write_json(run_dir / "run_meta.json", run_meta)
+                _write_json(
+                    run_dir / "completed.json",
+                    {
+                        "status": "ok" if failed == 0 else "partial",
+                        "processed": processed,
+                        "failed": failed,
+                        "duration_sec": round(duration_sec, 2),
+                        "timestamp": int(time.time()),
+                    },
                 )
-                logger.info("Alignment artifacts written for {}", output_path)
-            except Exception as exc:
-                logger.error("Alignment generation failed for {}: {}", output_path, exc)
-                raise
 
     if len(readers) == 1:
         summary_report["modes"] = summary_report["runs"][readers[0]]
