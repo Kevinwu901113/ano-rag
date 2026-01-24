@@ -12,6 +12,9 @@ import aiohttp
 from loguru import logger
 
 from relrag.config.config_loader import config as global_config
+from relrag.utils.llm_errors import ContextLengthError, is_context_length_error, parse_error_message
+from relrag.utils.llm_stats import get_active_llm_stats
+from relrag.utils.text_utils import TextUtils
 
 
 VLLM_ENDPOINT = "http://127.0.0.1:8000/v1"
@@ -86,6 +89,16 @@ def _normalize_model(model: Optional[str]) -> str:
         return SERVED_MODEL_NAME
     logger.warning("Overriding LLM model {} -> {}", raw, SERVED_MODEL_NAME)
     return SERVED_MODEL_NAME
+
+
+def _trim_messages(messages: List[Dict[str, str]], max_chars: int = 200) -> List[Dict[str, str]]:
+    trimmed: List[Dict[str, str]] = []
+    for msg in messages or []:
+        content = str(msg.get("content") or "")
+        if len(content) > max_chars:
+            content = content[:max_chars].rstrip() + "..."
+        trimmed.append({**msg, "content": content})
+    return trimmed
 
 
 def get_profile_config(profile: Optional[str] = None, config: Optional[Dict[str, Any]] = None) -> LLMProfileConfig:
@@ -257,6 +270,14 @@ class LLMChatClient:
         profile = (llm_profile or self.llm_profile or "generate").strip().lower()
         endpoint = _normalize_endpoint(endpoint_override or self.endpoint)
         url = f"{endpoint}/chat/completions"
+        stats = get_active_llm_stats()
+        prompt_chars = 0
+        prompt_tokens_est = 0
+        if stats is not None:
+            for msg in messages or []:
+                content = str(msg.get("content") or "")
+                prompt_chars += len(content)
+                prompt_tokens_est += TextUtils.rough_token_len(content)
         payload = self._build_payload(
             messages,
             temperature=temperature if temperature is not None else self.temperature,
@@ -270,6 +291,7 @@ class LLMChatClient:
 
         last_exc: Optional[Exception] = None
         for attempt in range(self.retries + 1):
+            start = time.time()
             try:
                 if session is not None:
                     resp = session.post(url, json=payload, headers=self._headers(), timeout=req_timeout)
@@ -278,24 +300,88 @@ class LLMChatClient:
                 resp.raise_for_status()
                 data = resp.json()
                 content = self._extract_content(data)
+                if stats is not None:
+                    usage = data.get("usage") if isinstance(data, dict) else {}
+                    prompt_used = usage.get("prompt_tokens") if isinstance(usage, dict) else None
+                    completion_used = usage.get("completion_tokens") if isinstance(usage, dict) else None
+                    if completion_used is None:
+                        completion_used = TextUtils.rough_token_len(content)
+                    finish_reason = None
+                    choices = data.get("choices") if isinstance(data, dict) else None
+                    if isinstance(choices, list) and choices:
+                        finish_reason = choices[0].get("finish_reason")
+                    stats.record_llm_attempt(
+                        prompt_tokens=prompt_used if prompt_used is not None else prompt_tokens_est,
+                        completion_tokens=completion_used,
+                        prompt_chars=prompt_chars,
+                        completion_chars=len(content),
+                        duration_ms=(time.time() - start) * 1000.0,
+                        finish_reason=finish_reason,
+                        retry=attempt > 0,
+                    )
                 return LLMResponse(content=content, raw=data)
             except requests.HTTPError as exc:
                 last_exc = exc
-                if exc.response.status_code == 400:
-                    logger.error("LLM 400 Bad Request:\nResponse: {}\nPayload: {}", exc.response.text, json.dumps({
+                response = exc.response
+                status = response.status_code if response is not None else None
+                if status == 400 and response is not None:
+                    message = parse_error_message(response.text or "")
+                    if is_context_length_error(message):
+                        if stats is not None:
+                            stats.record_llm_attempt(
+                                prompt_tokens=prompt_tokens_est,
+                                completion_tokens=None,
+                                prompt_chars=prompt_chars,
+                                completion_chars=None,
+                                duration_ms=(time.time() - start) * 1000.0,
+                                error_type="context_len",
+                                retry=attempt > 0,
+                            )
+                        raise ContextLengthError(message, response_text=response.text) from exc
+                    logger.error("LLM 400 Bad Request:\nResponse: {}\nPayload: {}", response.text, json.dumps({
                         "model": payload.get("model"),
-                        "messages_sample": payload.get("messages", [])[:1],
+                        "messages_sample": _trim_messages(payload.get("messages", [])[:1]),
                         "max_tokens": payload.get("max_tokens"),
                         "temperature": payload.get("temperature"),
                         "has_chat_template_kwargs": "chat_template_kwargs" in payload
                     }, indent=2))
+                if stats is not None:
+                    stats.record_llm_attempt(
+                        prompt_tokens=prompt_tokens_est,
+                        completion_tokens=None,
+                        prompt_chars=prompt_chars,
+                        completion_chars=None,
+                        duration_ms=(time.time() - start) * 1000.0,
+                        error_type=f"http_{status}" if status is not None else "http_error",
+                        retry=attempt > 0,
+                    )
                 logger.warning("LLM HTTP error (attempt {}): {}", attempt + 1, exc)
             except requests.Timeout as exc:
                 last_exc = exc
                 logger.warning("LLM call timed out after {}s (attempt {})", req_timeout, attempt + 1)
+                if stats is not None:
+                    stats.record_llm_attempt(
+                        prompt_tokens=prompt_tokens_est,
+                        completion_tokens=None,
+                        prompt_chars=prompt_chars,
+                        completion_chars=None,
+                        duration_ms=(time.time() - start) * 1000.0,
+                        error_type="timeout",
+                        retry=attempt > 0,
+                    )
             except requests.RequestException as exc:  # noqa: PERF203
                 last_exc = exc
                 logger.warning("LLM call failed (attempt {}): {}", attempt + 1, exc)
+                if stats is not None:
+                    stats.record_llm_attempt(
+                        prompt_tokens=prompt_tokens_est,
+                        completion_tokens=None,
+                        prompt_chars=prompt_chars,
+                        completion_chars=None,
+                        duration_ms=(time.time() - start) * 1000.0,
+                        error_type="request_error",
+                        retry=attempt > 0,
+                    )
             if attempt < self.retries:
                 backoff = 2 ** attempt
                 time.sleep(backoff)
@@ -375,9 +461,12 @@ class LLMChatClient:
             except aiohttp.ClientResponseError as exc:
                 last_exc = exc
                 if exc.status == 400:
+                    message = parse_error_message(exc.message or "")
+                    if is_context_length_error(message):
+                        raise ContextLengthError(message, response_text=exc.message) from exc
                     logger.error("LLM Async 400 Bad Request:\nPayload: {}", json.dumps({
                         "model": payload.get("model"),
-                        "messages_sample": payload.get("messages", [])[:1],
+                        "messages_sample": _trim_messages(payload.get("messages", [])[:1]),
                         "max_tokens": payload.get("max_tokens"),
                         "temperature": payload.get("temperature"),
                         "has_chat_template_kwargs": "chat_template_kwargs" in payload

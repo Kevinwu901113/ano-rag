@@ -32,6 +32,7 @@ class HybridRetriever:
             "rerank": 0.4,
             "struct": 0.35,
         }
+        self.require_seed_match = bool(self.hybrid_cfg.get("require_seed_match", True))
         self.hybrid_weights = self.hybrid_cfg.get("weights") or {
             "bm25": 0.6,
             "embedding": 0.6,
@@ -42,7 +43,13 @@ class HybridRetriever:
         self.agreement_threshold = int(self.hybrid_cfg.get("agreement_threshold", 2))
         self.embedding_client = EmbeddingClient(self.embed_cfg) if self.embed_cfg.get("enabled") else None
         self.bm25_client = BM25Client(self.bm25_cfg) if self.bm25_cfg.get("enabled") else None
-        self.reranker = LLMReranker(self.rerank_cfg, lm_cfg=self.cfg.get("vllm"))
+        runtime_cfg = self.cfg.get("runtime") if isinstance(self.cfg.get("runtime"), dict) else {}
+        self.reranker = LLMReranker(
+            self.rerank_cfg,
+            lm_cfg=self.cfg.get("vllm"),
+            base_cfg=self.cfg,
+            run_dir=runtime_cfg.get("run_dir"),
+        )
         self.metrics = MetricsLogger()
 
     def retrieve(
@@ -333,7 +340,7 @@ class HybridRetriever:
         if subj_score <= 0.0:
             subj_score = self._entity_match_score(note, seed_texts)
             match_by = "entity" if subj_score > 0.0 else "none"
-        if subj_score <= 0.0:
+        if subj_score <= 0.0 and self.require_seed_match:
             return None
         source_agree = int(bm25_score is not None) + int(embed_score is not None) + int(struct_path_score is not None)
         weights = self.hybrid_weights

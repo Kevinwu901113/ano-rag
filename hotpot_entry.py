@@ -484,6 +484,8 @@ def generate_answer(
     llm_endpoint: str,
     llm_model: str,
     openai_cfg: Optional[Dict[str, Any]],
+    base_cfg: Optional[Dict[str, Any]] = None,
+    run_dir: Optional[str] = None,
 ) -> Tuple[str, Dict[str, Any], Optional[str], Optional[str]]:
     prompt_capture: Dict[str, Any] = {}
     if reader == "vllm":
@@ -494,6 +496,8 @@ def generate_answer(
                 llm_endpoint=llm_endpoint,
                 llm_model=llm_model,
                 prompt_capture=prompt_capture,
+                cfg=base_cfg,
+                run_dir=run_dir,
             )
         except Exception as exc:
             reason, message = _classify_llm_exception(exc)
@@ -517,7 +521,14 @@ def generate_answer(
         if not openai_cfg:
             raise ValueError("OpenAI config missing for reader=openai")
         try:
-            raw_answer = generate_openai_answer(question, evidences, openai_cfg, prompt_capture=prompt_capture)
+            raw_answer = generate_openai_answer(
+                question,
+                evidences,
+                openai_cfg,
+                prompt_capture=prompt_capture,
+                run_dir=run_dir,
+                cfg=base_cfg,
+            )
         except Exception as exc:
             reason, message = _classify_llm_exception(exc)
             prompt_name = prompt_capture.get("prompt_name") or openai_cfg.get("answer_prompt_name")
@@ -1047,6 +1058,7 @@ def _process_example(
     force_build: bool,
     debug_dir: Optional[Path],
     debug_max_notes: int,
+    run_dir: Optional[str] = None,
 ) -> Dict[str, Any]:
     qid = str(example.get("_id") or "unknown")
     question = str(example.get("question") or "")
@@ -1098,6 +1110,8 @@ def _process_example(
         llm_endpoint=llm_endpoint,
         llm_model=llm_model,
         openai_cfg=openai_cfg,
+        base_cfg=base_cfg,
+        run_dir=run_dir,
     )
     short_answer, answer_source, answer_source_detail = resolve_short_answer(structured_answer, raw_answer)
     if answer_source == "empty":
@@ -1131,6 +1145,8 @@ def _process_example(
                 llm_endpoint=llm_endpoint,
                 llm_model=llm_model,
                 openai_cfg=openai_cfg,
+                base_cfg=base_cfg,
+                run_dir=run_dir,
             )
             retry_short, retry_source, retry_detail = resolve_short_answer(structured_answer, retry_raw)
             if retry_source == "empty":
@@ -1550,6 +1566,7 @@ def main() -> None:
     cache_root = _resolve_path(args.cache_dir)
     output_dir = _resolve_path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
+    run_dir: Optional[Path] = None
     timestamp = int(time.time())
     total_examples = _count_examples(data_path, args.limit)
     debug_dir = _resolve_path(args.debug_dir) if args.debug_dir else None
@@ -1637,6 +1654,7 @@ def main() -> None:
                                 force_build=args.force_build,
                                 debug_dir=run_debug_dir,
                                 debug_max_notes=args.debug_max_notes,
+                                run_dir=str(run_dir) if run_dir else None,
                             )
                             handle.write(json.dumps(record, ensure_ascii=False) + "\n")
                             handle.flush()

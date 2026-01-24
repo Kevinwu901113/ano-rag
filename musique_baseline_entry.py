@@ -566,6 +566,8 @@ def generate_answer(
     llm_endpoint: str,
     llm_model: str,
     openai_cfg: Optional[Dict[str, Any]],
+    base_cfg: Optional[Dict[str, Any]] = None,
+    run_dir: Optional[str] = None,
 ) -> Tuple[str, Dict[str, Any], Optional[str], Optional[str]]:
     prompt_capture: Dict[str, Any] = {}
     if reader == "vllm":
@@ -576,6 +578,8 @@ def generate_answer(
                 llm_endpoint=llm_endpoint,
                 llm_model=llm_model,
                 prompt_capture=prompt_capture,
+                cfg=base_cfg,
+                run_dir=run_dir,
             )
         except Exception as exc:
             reason, message = _classify_llm_exception(exc)
@@ -599,7 +603,14 @@ def generate_answer(
         if not openai_cfg:
             raise ValueError("OpenAI config missing for reader=openai")
         try:
-            raw_answer = generate_openai_answer(question, evidences, openai_cfg, prompt_capture=prompt_capture)
+            raw_answer = generate_openai_answer(
+                question,
+                evidences,
+                openai_cfg,
+                prompt_capture=prompt_capture,
+                run_dir=run_dir,
+                cfg=base_cfg,
+            )
         except Exception as exc:
             reason, message = _classify_llm_exception(exc)
             prompt_name = prompt_capture.get("prompt_name") or openai_cfg.get("answer_prompt_name")
@@ -1232,6 +1243,7 @@ def _process_example(
     dense_encoder,
     include_decomposition_sp: bool,
     unanswerable_token: str,
+    run_dir: Optional[str] = None,
 ) -> Dict[str, Any]:
     qid = str(example.get("id") or "unknown")
     question = str(example.get("question") or "")
@@ -1269,6 +1281,8 @@ def _process_example(
         llm_endpoint=llm_endpoint,
         llm_model=llm_model,
         openai_cfg=openai_cfg,
+        base_cfg=base_cfg,
+        run_dir=run_dir,
     )
     short_answer, answer_source, answer_source_detail = resolve_short_answer(None, raw_answer)
     if answer_source == "empty":
@@ -1302,6 +1316,8 @@ def _process_example(
                 llm_endpoint=llm_endpoint,
                 llm_model=llm_model,
                 openai_cfg=openai_cfg,
+                base_cfg=base_cfg,
+                run_dir=run_dir,
             )
             retry_short, retry_source, retry_detail = resolve_short_answer(None, retry_raw)
             if retry_source == "empty":
@@ -1636,6 +1652,8 @@ def main() -> None:
     total_examples = _count_examples(data_path, args.limit)
 
     base_cfg = _apply_dataset_retriever(deepcopy(cfg), "musique")
+    if run_dir:
+        base_cfg.setdefault("runtime", {})["run_dir"] = str(run_dir)
     modes = _resolve_retriever_modes(
         mode_arg=args.retriever,
         entry_cfg=entry_cfg,
@@ -1823,6 +1841,7 @@ def main() -> None:
                                     dense_encoder=dense_encoder,
                                     include_decomposition_sp=args.include_decomposition_sp,
                                     unanswerable_token=args.unanswerable_token,
+                                    run_dir=str(run_dir) if run_dir else None,
                                 )
                                 handle.write(json.dumps(record, ensure_ascii=False) + "\n")
                                 handle.flush()

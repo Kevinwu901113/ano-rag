@@ -71,6 +71,39 @@ openai:
   retry_backoff_max_sec: 20.0
   system_prompt_name: system_prompt.txt
 datasets:
+  mirage:
+    cache_dir: result/mirage/cache
+    output_dir: result/mirage
+    top_k: 5
+    limit: 0
+    workers: 1
+    doc_chunk_max_chars: 0
+    llm_retry_on_empty: 0
+    llm_retry_max_evidence: 0
+    retriever:
+      structured:
+        top_k: 5
+        fanout: 5
+    answer:
+      max_evidence_items: 5
+    answerer:
+      compress_evidence:
+        enabled: false
+      include_raw_evidence: false
+      evidence_max_chars: 320
+      stop:
+      - "\n\nEND"
+    reranker:
+      enabled: false
+    llm:
+      max_context_len: 8192
+    llm_profiles:
+      generate:
+        temperature: 0.2
+        max_tokens: 128
+    openai:
+      temperature: 0.2
+      max_tokens: 128
   musique:
     data: data/musique_full_v1.0_dev_500.jsonl
 llm_profiles:
@@ -91,6 +124,15 @@ structrag:
   llm_model: qwen3-30b-a3b
 routing:
   token_budget_hint: 320000
+llm:
+  max_context_len: 8192
+  safety_margin_tokens: 256
+rerank:
+  max_candidates: 12
+  max_candidate_tokens: 256
+answer:
+  max_evidence_items: 8
+  max_evidence_tokens: 256
 retriever:
   structured:
     enabled: true

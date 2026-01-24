@@ -29,7 +29,7 @@ python run_vllm_dual_gpu.py \
   --llm-gpu 0 \
   --embed-gpu 1 \
   --llm-gpu-mem 0.85 \
-  --llm-max-model-len 4096 \
+  --llm-max-model-len 8192 \
   --llm-max-num-seqs 24 \
   --llm-max-num-batched-tokens 1024 \
   --llm-swap-space 8 \

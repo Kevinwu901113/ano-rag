@@ -97,6 +97,18 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "routing": {
         "token_budget_hint": 320000,
     },
+    "llm": {
+        "max_context_len": 8192,
+        "safety_margin_tokens": 256,
+    },
+    "rerank": {
+        "max_candidates": 12,
+        "max_candidate_tokens": 256,
+    },
+    "answer": {
+        "max_evidence_items": 8,
+        "max_evidence_tokens": 256,
+    },
     "retriever": {
         "structured": {
             "enabled": True,

@@ -361,6 +361,8 @@ def generate_answer(
     llm_endpoint: str,
     llm_model: str,
     openai_cfg: Optional[Dict[str, Any]],
+    base_cfg: Optional[Dict[str, Any]] = None,
+    run_dir: Optional[str] = None,
 ) -> Tuple[str, Dict[str, Any], Optional[str], Optional[str]]:
     prompt_capture: Dict[str, Any] = {}
     if reader == "vllm":
@@ -371,6 +373,8 @@ def generate_answer(
                 llm_endpoint=llm_endpoint,
                 llm_model=llm_model,
                 prompt_capture=prompt_capture,
+                cfg=base_cfg,
+                run_dir=run_dir,
             )
         except Exception as exc:
             reason, message = _classify_llm_exception(exc)
@@ -394,7 +398,14 @@ def generate_answer(
         if not openai_cfg:
             raise ValueError("OpenAI config missing for reader=openai")
         try:
-            raw_answer = generate_openai_answer(question, evidences, openai_cfg, prompt_capture=prompt_capture)
+            raw_answer = generate_openai_answer(
+                question,
+                evidences,
+                openai_cfg,
+                prompt_capture=prompt_capture,
+                run_dir=run_dir,
+                cfg=base_cfg,
+            )
         except Exception as exc:
             reason, message = _classify_llm_exception(exc)
             prompt_name = prompt_capture.get("prompt_name") or openai_cfg.get("answer_prompt_name")
@@ -974,6 +985,7 @@ def _process_question(
     llm_retry_max_evidence: int,
     force_build: bool,
     doc_cache: DocumentCache,
+    run_dir: Optional[str] = None,
 ) -> Dict[str, Any]:
     doc_id = item["document_id"]
     build_embedding, build_bm25 = _mode_requirements(mode)
@@ -1024,6 +1036,8 @@ def _process_question(
         llm_endpoint=llm_endpoint,
         llm_model=llm_model,
         openai_cfg=openai_cfg,
+        base_cfg=base_cfg,
+        run_dir=run_dir,
     )
     short_answer, answer_source, answer_source_detail = resolve_short_answer(structured_answer, raw_answer)
     if answer_source == "empty":
@@ -1057,6 +1071,8 @@ def _process_question(
                 llm_endpoint=llm_endpoint,
                 llm_model=llm_model,
                 openai_cfg=openai_cfg,
+                base_cfg=base_cfg,
+                run_dir=run_dir,
             )
             retry_short, retry_source, retry_detail = resolve_short_answer(structured_answer, retry_raw)
             if retry_source == "empty":
@@ -1537,6 +1553,7 @@ def main() -> None:
         if args.resume and (run_dir / "completed.json").exists():
             logger.info("Run already completed at {}; skipping (--resume).", run_dir)
             return
+        base_cfg.setdefault("runtime", {})["run_dir"] = str(run_dir)
     openai_runtime_cfg: Optional[Dict[str, Any]] = None
     if "openai" in readers:
         if not openai_cfg.get("enabled", True):
@@ -1671,6 +1688,7 @@ def main() -> None:
                                     llm_retry_max_evidence=args.llm_retry_max_evidence,
                                     force_build=args.force_build,
                                     doc_cache=doc_cache,
+                                    run_dir=str(run_dir) if run_dir else None,
                                 )
                                 handle.write(json.dumps(record, ensure_ascii=False) + "\n")
                                 handle.flush()

@@ -30,6 +30,7 @@ from relrag.indexer.bm25_index import BM25IndexBuilder
 from relrag.indexer.embedding_index import EmbeddingIndexBuilder
 from relrag.retriever.note_store import NoteStore
 from relrag.prompt import load_prompt
+from relrag.utils import TextUtils
 from relrag.utils.answer_source import resolve_short_answer, sha1_text
 from relrag.utils.openai_answer import generate_openai_answer
 from relrag.utils.output_eval import has_final_tag
@@ -273,6 +274,17 @@ def _write_paragraph_notes_for_example(
         return 0
     notes_path.parent.mkdir(parents=True, exist_ok=True)
     written = 0
+
+    def _append_entity(entities: List[str], seen: set[str], value: str) -> None:
+        cleaned = str(value or "").strip()
+        if not cleaned:
+            return
+        key = cleaned.lower()
+        if key in seen:
+            return
+        seen.add(key)
+        entities.append(cleaned)
+
     with notes_path.open("w", encoding="utf-8") as handle:
         for doc_id, meta in doc_index.items():
             title = meta.get("title") or ""
@@ -280,6 +292,13 @@ def _write_paragraph_notes_for_example(
             text = str(meta.get("text") or "").strip()
             if text == "" or para_idx is None:
                 continue
+            entities: List[str] = []
+            seen_entities: set[str] = set()
+            _append_entity(entities, seen_entities, title)
+            for candidate in TextUtils.extract_entity_candidates(text):
+                _append_entity(entities, seen_entities, candidate)
+            if len(entities) > 32:
+                entities = entities[:32]
             note = {
                 "note_id": f"{doc_id}#p{int(para_idx):04d}",
                 "subj": str(title).strip() or str(doc_id),
@@ -296,11 +315,65 @@ def _write_paragraph_notes_for_example(
                     "final_conf": 1.0,
                     "quality_score": 1.0,
                     "evidence_canonical": text,
+                    "entities": entities,
                 },
             }
             handle.write(json.dumps(note, ensure_ascii=False) + "\n")
             written += 1
     return written
+
+
+def _write_chunks_for_example(
+    doc_index: Dict[str, Dict[str, Any]],
+    chunks_path: Path,
+    overwrite: bool = False,
+) -> int:
+    if chunks_path.exists() and not overwrite:
+        return 0
+    chunks_path.parent.mkdir(parents=True, exist_ok=True)
+    written = 0
+    with chunks_path.open("w", encoding="utf-8") as handle:
+        for doc_id, meta in doc_index.items():
+            title = meta.get("title") or ""
+            para_idx = meta.get("paragraph_idx")
+            text = str(meta.get("text") or "").strip()
+            if text == "" or para_idx is None:
+                continue
+            chunk_id = f"c{int(para_idx):04d}_{doc_id}"
+            chunk = {
+                "chunk_id": chunk_id,
+                "doc_id": doc_id,
+                "text": text,
+                "meta": {
+                    "title": str(title),
+                    "paragraph_idx": int(para_idx),
+                },
+            }
+            handle.write(json.dumps(chunk, ensure_ascii=False) + "\n")
+            written += 1
+    return written
+
+
+def _notes_have_entities(notes_path: Path) -> bool:
+    if not notes_path.exists():
+        return False
+    try:
+        with notes_path.open("r", encoding="utf-8") as handle:
+            for line in handle:
+                line = line.strip()
+                if not line:
+                    continue
+                payload = json.loads(line)
+                if not isinstance(payload, dict):
+                    return False
+                meta = payload.get("meta")
+                if not isinstance(meta, dict):
+                    return False
+                entities = meta.get("entities")
+                return isinstance(entities, list)
+    except Exception:
+        return False
+    return False
 
 
 def _resolve_doc_id_from_source(source: Optional[str]) -> Optional[str]:
@@ -571,6 +644,7 @@ def _write_debug_artifacts(
     max_notes: int,
 ) -> Optional[Path]:
     qid = str(record.get("_id") or "unknown")
+    cache_key = str(record.get("_cache_key") or qid)
     debug_dir.mkdir(parents=True, exist_ok=True)
     retrieve_result = (record.get("intermediate") or {}).get("retrieve_result") or {}
     support_note_ids = retrieve_result.get("support_note_ids") or []
@@ -599,7 +673,7 @@ def _write_debug_artifacts(
         "notes": notes,
         "record": record,
     }
-    debug_path = debug_dir / f"{qid}.json"
+    debug_path = debug_dir / f"{cache_key}.json"
     debug_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     return debug_path
 
@@ -621,6 +695,8 @@ def generate_answer(
     llm_endpoint: str,
     llm_model: str,
     openai_cfg: Optional[Dict[str, Any]],
+    base_cfg: Optional[Dict[str, Any]] = None,
+    run_dir: Optional[str] = None,
 ) -> Tuple[str, Dict[str, Any], Optional[str], Optional[str]]:
     prompt_capture: Dict[str, Any] = {}
     if reader == "vllm":
@@ -631,6 +707,8 @@ def generate_answer(
                 llm_endpoint=llm_endpoint,
                 llm_model=llm_model,
                 prompt_capture=prompt_capture,
+                cfg=base_cfg,
+                run_dir=run_dir,
             )
         except Exception as exc:
             reason, message = _classify_llm_exception(exc)
@@ -654,7 +732,14 @@ def generate_answer(
         if not openai_cfg:
             raise ValueError("OpenAI config missing for reader=openai")
         try:
-            raw_answer = generate_openai_answer(question, evidences, openai_cfg, prompt_capture=prompt_capture)
+            raw_answer = generate_openai_answer(
+                question,
+                evidences,
+                openai_cfg,
+                prompt_capture=prompt_capture,
+                run_dir=run_dir,
+                cfg=base_cfg,
+            )
         except Exception as exc:
             reason, message = _classify_llm_exception(exc)
             prompt_name = prompt_capture.get("prompt_name") or openai_cfg.get("answer_prompt_name")
@@ -922,16 +1007,35 @@ def _ensure_index(
 ) -> Dict[str, Any]:
     notes_path = index_root / "notes.jsonl"
     indexes_dir = index_root / "indexes"
-    if not force_build and notes_path.exists() and indexes_dir.exists():
-        return {"status": "reused"}
+    chunks_path = index_root / "chunks.jsonl"
+    notes_ready = notes_path.exists()
+    indexes_ready = indexes_dir.exists()
+    chunks_ready = chunks_path.exists()
+
+    notes_need_rebuild = force_build or not notes_ready
+    if not notes_need_rebuild and notes_ready:
+        notes_need_rebuild = not _notes_have_entities(notes_path)
+
+    if not force_build and notes_ready and indexes_ready and chunks_ready and not notes_need_rebuild:
+        return {"status": "reused", "notes": 0, "chunks": 0}
+
     index_root.mkdir(parents=True, exist_ok=True)
     notes_written = 0
-    if force_build or not notes_path.exists():
+    if notes_need_rebuild:
         notes_written = _write_paragraph_notes_for_example(doc_index, notes_path, overwrite=True)
-    builder = IndexBuilder()
-    builder.build_from_jsonl(str(notes_path))
-    builder.dump(str(indexes_dir))
-    return {"status": "ok", "notes": notes_written}
+
+    index_status = "reused"
+    if force_build or notes_need_rebuild or not indexes_ready:
+        builder = IndexBuilder()
+        builder.build_from_jsonl(str(notes_path))
+        builder.dump(str(indexes_dir))
+        index_status = "ok"
+
+    chunks_written = 0
+    if force_build or not chunks_ready:
+        chunks_written = _write_chunks_for_example(doc_index, chunks_path, overwrite=True)
+
+    return {"status": index_status, "notes": notes_written, "chunks": chunks_written}
 
 
 def _prepare_aux_config(example_root: Path, base_cfg: Dict[str, Any]) -> Dict[str, Any]:
@@ -1054,6 +1158,8 @@ def _prepare_retriever_config(
     if bm25_cfg.get("enabled") and not bm25_ready:
         bm25_cfg["enabled"] = False
 
+    hybrid_cfg["require_seed_match"] = False
+
     return cfg, {
         "mode": mode,
         "embedding_ready": embed_ready,
@@ -1166,6 +1272,7 @@ def _retrieve_with_backfill(
 
 def _process_example(
     example: Dict[str, Any],
+    example_idx: int,
     cache_root: Path,
     base_cfg: Dict[str, Any],
     llm_endpoint: str,
@@ -1187,11 +1294,12 @@ def _process_example(
     use_structured_answer: bool,
     include_decomposition_sp: bool,
     unanswerable_token: str,
+    run_dir: Optional[str] = None,
 ) -> Dict[str, Any]:
     qid = str(example.get("id") or "unknown")
     question = str(example.get("question") or "")
-
-    example_root = cache_root / qid
+    cache_key = f"{qid}__{int(example_idx):05d}"
+    example_root = cache_root / cache_key
     docs_dir = example_root / "docs"
     doc_index = _write_docs_for_example(example, docs_dir, overwrite=force_build)
     build_stats = _ensure_index(doc_index, example_root, force_build)
@@ -1238,6 +1346,8 @@ def _process_example(
         llm_endpoint=llm_endpoint,
         llm_model=llm_model,
         openai_cfg=openai_cfg,
+        base_cfg=base_cfg,
+        run_dir=run_dir,
     )
     short_answer, answer_source, answer_source_detail = resolve_short_answer(structured_answer, raw_answer)
     if answer_source == "empty":
@@ -1271,6 +1381,8 @@ def _process_example(
                 llm_endpoint=llm_endpoint,
                 llm_model=llm_model,
                 openai_cfg=openai_cfg,
+                base_cfg=base_cfg,
+                run_dir=run_dir,
             )
             retry_short, retry_source, retry_detail = resolve_short_answer(structured_answer, retry_raw)
             if retry_source == "empty":
@@ -1343,6 +1455,8 @@ def _process_example(
 
     output_record = {
         "_id": qid,
+        "_example_idx": int(example_idx),
+        "_cache_key": cache_key,
         "id": qid,
         "question": question,
         "answer": short_answer,
@@ -1932,6 +2046,8 @@ def main() -> None:
         debug_dir.mkdir(parents=True, exist_ok=True)
 
     base_cfg = _apply_dataset_retriever(deepcopy(cfg), "musique")
+    if run_dir:
+        base_cfg.setdefault("runtime", {})["run_dir"] = str(run_dir)
     modes = _resolve_retriever_modes(
         mode_arg=args.retriever,
         modes_arg=None,
@@ -2102,12 +2218,13 @@ def main() -> None:
             try:
                 with output_path.open("w", encoding="utf-8") as handle:
                     if args.workers <= 1:
-                        for example in _load_jsonl(data_path):
+                        for example_idx, example in enumerate(_load_jsonl(data_path)):
                             if args.limit and completed >= args.limit:
                                 break
                             try:
                                 record = _process_example(
                                     example,
+                                    example_idx=example_idx,
                                     cache_root=cache_root,
                                     base_cfg=base_cfg,
                                     llm_endpoint=llm_endpoint,
@@ -2129,6 +2246,7 @@ def main() -> None:
                                     use_structured_answer=args.use_structured_answer,
                                     include_decomposition_sp=args.include_decomposition_sp,
                                     unanswerable_token=args.unanswerable_token,
+                                    run_dir=str(run_dir) if run_dir else None,
                                 )
                                 handle.write(json.dumps(record, ensure_ascii=False) + "\n")
                                 handle.flush()
@@ -2150,13 +2268,15 @@ def main() -> None:
                         scheduled = 0
                         buffer_cap = max_workers * 2
                         with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                            for example in _load_jsonl(data_path):
+                            for example_idx, example in enumerate(_load_jsonl(data_path)):
                                 if args.limit and scheduled >= args.limit:
                                     break
                                 qid = str(example.get("id") or "unknown")
+                                cache_key = f"{qid}__{int(example_idx):05d}"
                                 future = executor.submit(
                                     _process_example,
                                     example,
+                                    example_idx,
                                     cache_root,
                                     base_cfg,
                                     llm_endpoint,
@@ -2179,7 +2299,7 @@ def main() -> None:
                                     args.include_decomposition_sp,
                                     args.unanswerable_token,
                                 )
-                                future_map[future] = qid
+                                future_map[future] = cache_key
                                 scheduled += 1
                                 if len(future_map) >= buffer_cap:
                                     done_count, ok_count = _drain_futures(

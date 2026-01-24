@@ -3,6 +3,45 @@ from __future__ import annotations
 from typing import Any, Dict, List, Optional
 
 
+def _normalize_text_key(text: str) -> str:
+    if not text:
+        return ""
+    return " ".join(text.strip().lower().split())
+
+
+def _collapse_pipe_duplicates(text: str) -> str:
+    if not text:
+        return ""
+    parts = [part.strip() for part in text.split("|")]
+    cleaned: List[str] = []
+    for part in parts:
+        if not part:
+            continue
+        if not cleaned or part != cleaned[-1]:
+            cleaned.append(part)
+    if not cleaned:
+        return ""
+    if len(cleaned) == 1:
+        return cleaned[0]
+    first_key = _normalize_text_key(cleaned[0])
+    if first_key and all(_normalize_text_key(part) == first_key for part in cleaned[1:]):
+        return cleaned[0]
+    return " | ".join(cleaned)
+
+
+def _dedupe_texts(texts: List[str]) -> List[str]:
+    seen: set[str] = set()
+    deduped: List[str] = []
+    for text in texts:
+        cleaned = _collapse_pipe_duplicates(text.strip())
+        key = _normalize_text_key(cleaned)
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        deduped.append(cleaned)
+    return deduped
+
+
 def _collect_note_parts(note: Dict[str, Any]) -> Dict[str, List[str]]:
     """Break note into semantic buckets to support various text builders."""
     meta = (note.get("meta") or {}) if isinstance(note, dict) else {}
@@ -27,8 +66,9 @@ def _collect_note_parts(note: Dict[str, Any]) -> Dict[str, List[str]]:
         "obj_type": str(note.get("obj_type") or "").strip(),
     }
 
+    evidence_texts = [text for text in [evidence, raw_evidence] if isinstance(text, str) and text.strip()]
     return {
-        "evidence": [text for text in [evidence, raw_evidence] if isinstance(text, str) and text.strip()],
+        "evidence": _dedupe_texts(evidence_texts),
         "attribute": [
             text.strip()
             for text in (
