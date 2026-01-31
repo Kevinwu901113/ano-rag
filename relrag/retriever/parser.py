@@ -357,6 +357,32 @@ COMPOSITE_RULES = [
         ],
         "target_type": "PERSON",
     },
+    {
+        "pattern": re.compile(r"nationality of the director of (?:the film )?(?P<entity>.+)", re.I),
+        "seed_type": "WORK",
+        "chain": [
+            PredicateStep(pred="directed_by", direction="out", target_hint="PERSON"),
+            PredicateStep(pred="nationality", direction="out", target_hint="PLACE"),
+        ],
+        "target_type": "PLACE",
+    },
+    {
+        "pattern": re.compile(r"nationality of the author of (?:the book )?(?P<entity>.+)", re.I),
+        "seed_type": "WORK",
+        "chain": [
+            PredicateStep(pred="authored_by", direction="out", target_hint="PERSON"),
+            PredicateStep(pred="nationality", direction="out", target_hint="PLACE"),
+        ],
+        "target_type": "PLACE",
+    },
+    {
+        "pattern": re.compile(r"screenwriter of (?:the film )?(?P<entity>.+)", re.I),
+        "seed_type": "WORK",
+        "chain": [
+            PredicateStep(pred="authored_by", direction="out", target_hint="PERSON"),
+        ],
+        "target_type": "PERSON",
+    },
 ]
 
 

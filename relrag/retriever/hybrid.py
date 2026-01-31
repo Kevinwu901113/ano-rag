@@ -109,8 +109,10 @@ class HybridRetriever:
         note_map = {note.get("note_id"): note for note in notes}
         assembled = []
         attribute = getattr(intent, "attribute", None)
-        bm25_scores = {item["note_id"]: item.get("score") for item in recall_channels.get("bm25") or [] if item.get("note_id")}
-        emb_scores = {item["note_id"]: item.get("score") for item in recall_channels.get("emb") or [] if item.get("note_id")}
+        bm25_items = recall_channels.get("bm25") or []
+        emb_items = recall_channels.get("emb") or []
+        bm25_scores = _normalize_scores_map(bm25_items)
+        emb_scores = _normalize_scores_map(emb_items)
         seed_texts = [seed.text for seed in (ir.seeds or []) if getattr(seed, "text", None)] if ir else []
         for item in pre_candidates:
             note = note_map.get(item["note_id"])
@@ -397,3 +399,20 @@ def _top1_source(channels: Dict[str, List[Dict[str, Any]]]) -> str:
             best_source = source
             best_score = score
     return best_source
+
+
+def _normalize_scores_map(items: List[Dict[str, Any]]) -> Dict[str, float]:
+    if not items:
+        return {}
+    scores = [float(item.get("score", 0.0)) for item in items if item.get("note_id")]
+    if not scores:
+        return {}
+    min_s, max_s = min(scores), max(scores)
+    span = max_s - min_s
+    if span <= 1e-9:
+        return {item["note_id"]: 1.0 for item in items if item.get("note_id")}
+    return {
+        item["note_id"]: (float(item.get("score", 0.0)) - min_s) / span
+        for item in items
+        if item.get("note_id")
+    }

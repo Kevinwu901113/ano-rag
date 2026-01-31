@@ -8,10 +8,11 @@ import shutil
 import sys
 import time
 from copy import deepcopy
-from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, ProcessPoolExecutor, wait
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, TextIO, Tuple
 
+from filelock import FileLock
 from loguru import logger
 
 from relrag.api import retrieve, answer
@@ -707,7 +708,10 @@ def _resolve_readers(
     dataset_cfg: Dict[str, Any],
 ) -> List[str]:
     if args.reader:
-        readers = [resolve_reader(args.reader, dataset_cfg)]
+        if isinstance(args.reader, list):
+            readers = [resolve_reader(str(r), dataset_cfg) for r in args.reader]
+        else:
+            readers = [resolve_reader(args.reader, dataset_cfg)]
     else:
         if dataset_cfg.get("readers") is not None:
             raw = dataset_cfg.get("readers")
@@ -796,16 +800,20 @@ def _ensure_index(
 ) -> Dict[str, Any]:
     notes_path = index_root / "notes.jsonl"
     indexes_dir = index_root / "indexes"
-    if not force_build and notes_path.exists() and indexes_dir.exists():
-        return {"status": "reused"}
-    index_root.mkdir(parents=True, exist_ok=True)
-    notes_written = 0
-    if force_build or not notes_path.exists():
-        notes_written = _write_sentence_notes_for_example(doc_index, notes_path, overwrite=True)
-    builder = IndexBuilder()
-    builder.build_from_jsonl(str(notes_path))
-    builder.dump(str(indexes_dir))
-    return {"status": "ok", "notes": notes_written}
+    lock_path = index_root / "build.lock"
+    
+    with FileLock(str(lock_path)):
+        if not force_build and notes_path.exists() and indexes_dir.exists():
+            return {"status": "reused"}
+        
+        index_root.mkdir(parents=True, exist_ok=True)
+        notes_written = 0
+        if force_build or not notes_path.exists():
+            notes_written = _write_sentence_notes_for_example(doc_index, notes_path, overwrite=True)
+        builder = IndexBuilder()
+        builder.build_from_jsonl(str(notes_path))
+        builder.dump(str(indexes_dir))
+        return {"status": "ok", "notes": notes_written}
 
 
 def _prepare_aux_config(example_root: Path, base_cfg: Dict[str, Any]) -> Dict[str, Any]:
@@ -844,37 +852,39 @@ def _build_aux_indexes(
     embed_cfg = retriever_cfg.get("embedding") or {}
     bm25_cfg = retriever_cfg.get("bm25") or {}
 
-    if build_embedding:
-        embed_cfg["enabled"] = True
-        embed_index = Path(embed_cfg.get("offline_index_path", ""))
-        embed_meta = Path(embed_cfg.get("meta_path", ""))
-        embed_ready = embed_index.exists() and embed_meta.exists()
-        if force_build or not embed_ready:
-            try:
-                EmbeddingIndexBuilder(cfg).build()
-                stats["embedding"] = "ok"
-            except Exception as exc:
-                logger.warning("Embedding index build failed {}: {}", notes_path, exc)
-                stats["embedding"] = f"error:{exc}"
+    lock_path = example_root / "aux_build.lock"
+    with FileLock(str(lock_path)):
+        if build_embedding:
+            embed_cfg["enabled"] = True
+            embed_index = Path(embed_cfg.get("offline_index_path", ""))
+            embed_meta = Path(embed_cfg.get("meta_path", ""))
+            embed_ready = embed_index.exists() and embed_meta.exists()
+            if force_build or not embed_ready:
+                try:
+                    EmbeddingIndexBuilder(cfg).build()
+                    stats["embedding"] = "ok"
+                except Exception as exc:
+                    logger.warning("Embedding index build failed {}: {}", notes_path, exc)
+                    stats["embedding"] = f"error:{exc}"
+            else:
+                stats["embedding"] = "reused"
         else:
-            stats["embedding"] = "reused"
-    else:
-        stats["embedding"] = "disabled"
+            stats["embedding"] = "disabled"
 
-    if build_bm25:
-        bm25_cfg["enabled"] = True
-        bm25_corpus = Path(bm25_cfg.get("store_path", "")) / "notes.jsonl"
-        if force_build or not bm25_corpus.exists():
-            try:
-                BM25IndexBuilder(cfg).build()
-                stats["bm25"] = "ok"
-            except Exception as exc:
-                logger.warning("BM25 corpus build failed {}: {}", notes_path, exc)
-                stats["bm25"] = f"error:{exc}"
+        if build_bm25:
+            bm25_cfg["enabled"] = True
+            bm25_corpus = Path(bm25_cfg.get("store_path", "")) / "notes.jsonl"
+            if force_build or not bm25_corpus.exists():
+                try:
+                    BM25IndexBuilder(cfg).build()
+                    stats["bm25"] = "ok"
+                except Exception as exc:
+                    logger.warning("BM25 corpus build failed {}: {}", notes_path, exc)
+                    stats["bm25"] = f"error:{exc}"
+            else:
+                stats["bm25"] = "reused"
         else:
-            stats["bm25"] = "reused"
-    else:
-        stats["bm25"] = "disabled"
+            stats["bm25"] = "disabled"
 
     return stats
 
@@ -1421,14 +1431,215 @@ def _run_alignment(
     _ensure_alignment_artifacts(align_dir)
 
 
+def run_experiment_task(
+    reader: str,
+    mode: str,
+    split: str,
+    data_path: Path,
+    cache_root: Path,
+    output_dir: Path,
+    debug_dir: Optional[Path],
+    run_dir: Optional[str],
+    repo_root: Path,
+    timestamp: int,
+    base_cfg: Dict[str, Any],
+    openai_runtime_cfg: Optional[Dict[str, Any]],
+    llm_endpoint: str,
+    llm_model: str,
+    top_k: int,
+    top_k_raw: Optional[int],
+    overfetch: Optional[float],
+    min_overfetch: float,
+    backfill_max_overfetch: float,
+    backfill_step: float,
+    backfill_rounds: int,
+    llm_retry_on_empty: int,
+    llm_retry_max_evidence: int,
+    limit: int,
+    workers: int,
+    force_build: bool,
+    debug_max_notes: int,
+    stall_warn_sec: float,
+    stall_abort_sec: float,
+    readers_count: int,
+    modes_count: int,
+) -> Dict[str, Any]:
+    reader_openai_cfg = openai_runtime_cfg if reader == "openai" else None
+    answer_model = reader_openai_cfg.get("model") if reader == "openai" and reader_openai_cfg else llm_model
+    
+    mode_top_k = _resolve_mode_top_k(mode, base_cfg, top_k)
+    mode_top_k_raw, top_k_raw_source = _resolve_top_k_raw(
+        mode_top_k,
+        top_k_raw,
+        overfetch,
+        min_overfetch,
+    )
+    
+    output_name = _pred_filename(split, reader, mode, readers_count, modes_count)
+    output_path = output_dir / output_name
+    
+    run_debug_dir = debug_dir
+    if debug_dir and (readers_count > 1 or modes_count > 1):
+        run_debug_dir = debug_dir / f"{reader}_{mode}"
+        run_debug_dir.mkdir(parents=True, exist_ok=True)
+        
+    logger.info("Starting run: reader={} mode={} output={}", reader, mode, output_path)
+    
+    totals = {"bleu1": 0.0, "bleu4": 0.0, "rougeL": 0.0, "meteor": 0.0}
+    total_examples = _count_examples(data_path, limit)
+    
+    # Only show progress bar if running alone, otherwise it messes up stdout
+    show_progress = (readers_count == 1 and modes_count == 1)
+    progress = ProgressBar(total_examples) if show_progress else None
+    
+    processed = 0
+    completed = 0
+    
+    with output_path.open("w", encoding="utf-8") as handle:
+        if workers <= 1:
+            for example in _load_jsonl(data_path):
+                if limit and completed >= limit:
+                    break
+                try:
+                    record = _process_example(
+                        example,
+                        cache_root=cache_root,
+                        base_cfg=base_cfg,
+                        llm_endpoint=llm_endpoint,
+                        llm_model=llm_model,
+                        mode=mode,
+                        reader=reader,
+                        openai_cfg=reader_openai_cfg,
+                        top_k=mode_top_k,
+                        top_k_raw=mode_top_k_raw,
+                        top_k_raw_source=top_k_raw_source,
+                        backfill_max_overfetch=backfill_max_overfetch,
+                        backfill_step=backfill_step,
+                        backfill_rounds=backfill_rounds,
+                        llm_retry_on_empty=llm_retry_on_empty,
+                        llm_retry_max_evidence=llm_retry_max_evidence,
+                        force_build=force_build,
+                        debug_dir=run_debug_dir,
+                        debug_max_notes=debug_max_notes,
+                        run_dir=run_dir,
+                    )
+                    handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+                    handle.flush()
+                    _accumulate_metrics(totals, record.get("metrics") or {})
+                    processed += 1
+                except Exception as exc:
+                    qid = example.get("_id")
+                    logger.error("Failed example {}: {}", qid, exc)
+                finally:
+                    completed += 1
+                    if progress: progress.update(1)
+        else:
+            max_workers = max(1, int(workers))
+            future_map: Dict[Any, str] = {}
+            scheduled = 0
+            buffer_cap = max_workers * 2
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                for example in _load_jsonl(data_path):
+                    if limit and scheduled >= limit:
+                        break
+                    qid = str(example.get("_id") or "unknown")
+                    future = executor.submit(
+                        _process_example,
+                        example,
+                        cache_root,
+                        base_cfg,
+                        llm_endpoint,
+                        llm_model,
+                        mode,
+                        reader,
+                        reader_openai_cfg,
+                        mode_top_k,
+                        mode_top_k_raw,
+                        top_k_raw_source,
+                        backfill_max_overfetch,
+                        backfill_step,
+                        backfill_rounds,
+                        llm_retry_on_empty,
+                        llm_retry_max_evidence,
+                        force_build,
+                        run_debug_dir,
+                        debug_max_notes,
+                        run_dir,
+                    )
+                    future_map[future] = qid
+                    scheduled += 1
+                    if len(future_map) >= buffer_cap:
+                        done_count, ok_count = _drain_futures(
+                            future_map,
+                            handle,
+                            totals,
+                            progress=progress,
+                            stall_warn_sec=stall_warn_sec,
+                            stall_abort_sec=stall_abort_sec,
+                        )
+                        completed += done_count
+                        processed += ok_count
+                        future_map = {}
+                if future_map:
+                    done_count, ok_count = _drain_futures(
+                        future_map,
+                        handle,
+                        totals,
+                        progress=progress,
+                        stall_warn_sec=stall_warn_sec,
+                        stall_abort_sec=stall_abort_sec,
+                    )
+                    completed += done_count
+                    processed += ok_count
+
+    if progress: progress.close()
+    
+    failed = completed - processed
+    logger.info("Reader {} mode {} completed {} examples (failed {})", reader, mode, processed, failed)
+    
+    denom = processed if processed > 0 else 1
+    stats = {
+        "bleu1": round(totals["bleu1"] / denom, 4),
+        "bleu4": round(totals["bleu4"] / denom, 4),
+        "rougeL": round(totals["rougeL"] / denom, 4),
+        "meteor": round(totals["meteor"] / denom, 4),
+        "count": processed,
+        "model": answer_model,
+        "top_k": mode_top_k,
+    }
+    
+    if readers_count == 1 and modes_count == 1:
+        official_path = _write_official_output(output_path, output_dir, timestamp)
+        logger.info("Official-format output written to {}", official_path)
+
+    try:
+        _run_alignment(
+            repo_root=repo_root,
+            pred_path=output_path,
+            gold_path=data_path,
+            output_dir=output_dir,
+            split=split,
+        )
+        logger.info("Alignment artifacts written for {}", output_path)
+    except Exception as exc:
+        logger.error("Alignment generation failed for {}: {}", output_path, exc)
+
+    return {
+        "reader": reader,
+        "mode": mode,
+        "stats": stats,
+        "output_path": str(output_path)
+    }
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="HotpotQA JSONL entry for RelRAG")
     parser.add_argument("--config", help="Path to YAML config file (defaults to relrag/config/config.yaml)")
     parser.add_argument("--data", help="Path to HotpotQA JSONL dataset (fallback to config)")
     parser.add_argument("--endpoint", help="vLLM endpoint (defaults to config)")
     parser.add_argument("--model", help="LLM model name (defaults to config)")
-    parser.add_argument("--reader", help="Reader backend: vllm or openai (fallback to config)")
-    parser.add_argument("--retriever", help="Retriever mode: bm25, dense, or hybrid (fallback to config)")
+    parser.add_argument("--reader", nargs="+", help="Reader backend: vllm or openai (fallback to config)")
+    parser.add_argument("--retriever", nargs="+", help="Retriever mode: bm25, dense, or hybrid (fallback to config)")
     parser.add_argument("--split", help="Dataset split label for output naming (fallback to config)")
     parser.add_argument("--openai_model", help="OpenAI model name (fallback to config)")
     parser.add_argument("--openai_api_key", help="OpenAI API key (reads env if omitted)")
@@ -1447,6 +1658,7 @@ def main() -> None:
     parser.add_argument("--workers", type=int, help="Parallel workers (single process, fallback to config)")
     parser.add_argument("--cache_dir", help="Cache root for per-question indexes (fallback to config)")
     parser.add_argument("--output_dir", help="Output directory (fallback to config)")
+    parser.add_argument("--output", help="Alias for --output_dir")
     parser.add_argument("--force_build", action="store_true", help="Rebuild indexes even if cached")
     parser.add_argument("--debug_dir", help="Debug artifacts output directory (set empty to disable, fallback to config)")
     parser.add_argument("--debug_max_notes", type=int, help="Max notes to store per question in debug dump (fallback to config)")
@@ -1463,6 +1675,10 @@ def main() -> None:
     cfg = ConfigLoader(args.config).load_config() if args.config else global_config.load_config()
     dataset_cfg = get_dataset_config(cfg, "hotpotqa")
     entry_cfg = _load_entry_config(cfg)
+
+    if args.output and not args.output_dir:
+        args.output_dir = args.output
+
     args.data = _pick_arg(args, entry_cfg, dataset_cfg, "data", None)
     if not args.data:
         raise ValueError("Dataset path missing. Provide --data or set hotpot_entry.data in config.")
@@ -1475,30 +1691,6 @@ def main() -> None:
     )
     args.top_k_raw = _pick_arg(args, entry_cfg, dataset_cfg, "top_k_raw", None)
     args.overfetch = _pick_arg(args, entry_cfg, dataset_cfg, "overfetch", None)
-    args.min_overfetch = _coerce_float(
-        _pick_arg(args, entry_cfg, dataset_cfg, "min_overfetch", MIN_OVERFETCH),
-        MIN_OVERFETCH,
-    )
-    args.backfill_max_overfetch = _coerce_float(
-        _pick_arg(args, entry_cfg, dataset_cfg, "backfill_max_overfetch", DEFAULT_BACKFILL_MAX_OVERFETCH),
-        DEFAULT_BACKFILL_MAX_OVERFETCH,
-    )
-    args.backfill_step = _coerce_float(
-        _pick_arg(args, entry_cfg, dataset_cfg, "backfill_step", DEFAULT_BACKFILL_STEP),
-        DEFAULT_BACKFILL_STEP,
-    )
-    args.backfill_rounds = _coerce_int(
-        _pick_arg(args, entry_cfg, dataset_cfg, "backfill_rounds", DEFAULT_BACKFILL_ROUNDS),
-        DEFAULT_BACKFILL_ROUNDS,
-    )
-    args.llm_retry_on_empty = _coerce_int(
-        _pick_arg(args, entry_cfg, dataset_cfg, "llm_retry_on_empty", DEFAULT_LLM_RETRY_ON_EMPTY),
-        DEFAULT_LLM_RETRY_ON_EMPTY,
-    )
-    args.llm_retry_max_evidence = _coerce_int(
-        _pick_arg(args, entry_cfg, dataset_cfg, "llm_retry_max_evidence", DEFAULT_LLM_RETRY_EVIDENCE),
-        DEFAULT_LLM_RETRY_EVIDENCE,
-    )
     args.min_overfetch = _coerce_float(
         _pick_arg(args, entry_cfg, dataset_cfg, "min_overfetch", MIN_OVERFETCH),
         MIN_OVERFETCH,
@@ -1575,8 +1767,8 @@ def main() -> None:
 
     base_cfg = _apply_dataset_retriever(deepcopy(cfg), "hotpotqa")
     modes = _resolve_retriever_modes(
-        mode_arg=args.retriever,
-        modes_arg=None,
+        mode_arg=None,
+        modes_arg=args.retriever,
         entry_cfg=entry_cfg,
         dataset_cfg=dataset_cfg,
         base_cfg=base_cfg,
@@ -1605,155 +1797,63 @@ def main() -> None:
         "runs": {},
     }
 
+    tasks = []
     for reader in readers:
-        reader_openai_cfg = openai_runtime_cfg if reader == "openai" else None
-        answer_model = reader_openai_cfg.get("model") if reader == "openai" and reader_openai_cfg else llm_model
         summary_report["runs"].setdefault(reader, {})
         for mode in modes:
-            mode_top_k = _resolve_mode_top_k(mode, base_cfg, args.top_k)
-            mode_top_k_raw, top_k_raw_source = _resolve_top_k_raw(
-                mode_top_k,
-                args.top_k_raw,
-                args.overfetch,
-                args.min_overfetch,
-            )
-            output_name = _pred_filename(split, reader, mode, len(readers), len(modes))
-            output_path = output_dir / output_name
-            run_debug_dir = debug_dir
-            if debug_dir and (len(readers) > 1 or len(modes) > 1):
-                run_debug_dir = debug_dir / f"{reader}_{mode}"
-                run_debug_dir.mkdir(parents=True, exist_ok=True)
-            logger.info("Writing results to {}", output_path)
-            totals = {"bleu1": 0.0, "bleu4": 0.0, "rougeL": 0.0, "meteor": 0.0}
-            progress = ProgressBar(total_examples)
-            processed = 0
-            completed = 0
-            with output_path.open("w", encoding="utf-8") as handle:
-                if args.workers <= 1:
-                    for example in _load_jsonl(data_path):
-                        if args.limit and completed >= args.limit:
-                            break
-                        try:
-                            record = _process_example(
-                                example,
-                                cache_root=cache_root,
-                                base_cfg=base_cfg,
-                                llm_endpoint=llm_endpoint,
-                                llm_model=llm_model,
-                                mode=mode,
-                                reader=reader,
-                                openai_cfg=reader_openai_cfg,
-                                top_k=mode_top_k,
-                                top_k_raw=mode_top_k_raw,
-                                top_k_raw_source=top_k_raw_source,
-                                backfill_max_overfetch=args.backfill_max_overfetch,
-                                backfill_step=args.backfill_step,
-                                backfill_rounds=args.backfill_rounds,
-                                llm_retry_on_empty=args.llm_retry_on_empty,
-                                llm_retry_max_evidence=args.llm_retry_max_evidence,
-                                force_build=args.force_build,
-                                debug_dir=run_debug_dir,
-                                debug_max_notes=args.debug_max_notes,
-                                run_dir=str(run_dir) if run_dir else None,
-                            )
-                            handle.write(json.dumps(record, ensure_ascii=False) + "\n")
-                            handle.flush()
-                            _accumulate_metrics(totals, record.get("metrics") or {})
-                            processed += 1
-                        except Exception as exc:
-                            qid = example.get("_id")
-                            logger.error("Failed example {}: {}", qid, exc)
-                        finally:
-                            completed += 1
-                            progress.update(1)
-                else:
-                    max_workers = max(1, int(args.workers))
-                    future_map: Dict[Any, str] = {}
-                    scheduled = 0
-                    buffer_cap = max_workers * 2
-                    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                        for example in _load_jsonl(data_path):
-                            if args.limit and scheduled >= args.limit:
-                                break
-                            qid = str(example.get("_id") or "unknown")
-                            future = executor.submit(
-                                _process_example,
-                                example,
-                                cache_root,
-                                base_cfg,
-                                llm_endpoint,
-                                llm_model,
-                                mode,
-                                reader,
-                                reader_openai_cfg,
-                                mode_top_k,
-                                mode_top_k_raw,
-                                top_k_raw_source,
-                                args.backfill_max_overfetch,
-                                args.backfill_step,
-                                args.backfill_rounds,
-                                args.llm_retry_on_empty,
-                                args.llm_retry_max_evidence,
-                                args.force_build,
-                                run_debug_dir,
-                                args.debug_max_notes,
-                            )
-                            future_map[future] = qid
-                            scheduled += 1
-                            if len(future_map) >= buffer_cap:
-                                done_count, ok_count = _drain_futures(
-                                    future_map,
-                                    handle,
-                                    totals,
-                                    progress=progress,
-                                    stall_warn_sec=args.stall_warn_sec,
-                                    stall_abort_sec=args.stall_abort_sec,
-                                )
-                                completed += done_count
-                                processed += ok_count
-                                future_map = {}
-                        if future_map:
-                            done_count, ok_count = _drain_futures(
-                                future_map,
-                                handle,
-                                totals,
-                                progress=progress,
-                                stall_warn_sec=args.stall_warn_sec,
-                                stall_abort_sec=args.stall_abort_sec,
-                            )
-                            completed += done_count
-                            processed += ok_count
+            tasks.append({
+                "reader": reader,
+                "mode": mode,
+                "split": split,
+                "data_path": data_path,
+                "cache_root": cache_root,
+                "output_dir": output_dir,
+                "debug_dir": debug_dir,
+                "run_dir": str(run_dir) if run_dir else None,
+                "repo_root": repo_root,
+                "timestamp": timestamp,
+                "base_cfg": base_cfg,
+                "openai_runtime_cfg": openai_runtime_cfg,
+                "llm_endpoint": llm_endpoint,
+                "llm_model": llm_model,
+                "top_k": args.top_k,
+                "top_k_raw": args.top_k_raw,
+                "overfetch": args.overfetch,
+                "min_overfetch": args.min_overfetch,
+                "backfill_max_overfetch": args.backfill_max_overfetch,
+                "backfill_step": args.backfill_step,
+                "backfill_rounds": args.backfill_rounds,
+                "llm_retry_on_empty": args.llm_retry_on_empty,
+                "llm_retry_max_evidence": args.llm_retry_max_evidence,
+                "limit": args.limit,
+                "workers": args.workers,
+                "force_build": args.force_build,
+                "debug_max_notes": args.debug_max_notes,
+                "stall_warn_sec": args.stall_warn_sec,
+                "stall_abort_sec": args.stall_abort_sec,
+                "readers_count": len(readers),
+                "modes_count": len(modes),
+            })
 
-            progress.close()
-            failed = completed - processed
-            logger.info("Reader {} mode {} completed {} examples (failed {})", reader, mode, processed, failed)
-            denom = processed if processed > 0 else 1
-            summary_report["runs"][reader][mode] = {
-                "bleu1": round(totals["bleu1"] / denom, 4),
-                "bleu4": round(totals["bleu4"] / denom, 4),
-                "rougeL": round(totals["rougeL"] / denom, 4),
-                "meteor": round(totals["meteor"] / denom, 4),
-                "count": processed,
-                "model": answer_model,
-                "top_k": mode_top_k,
-            }
+    results = []
+    if len(tasks) == 1:
+        results.append(run_experiment_task(**tasks[0]))
+    else:
+        max_proc = min(len(tasks), 8)
+        logger.info("Running {} tasks in parallel with {} processes...", len(tasks), max_proc)
+        with ProcessPoolExecutor(max_workers=max_proc) as executor:
+            futures = [executor.submit(run_experiment_task, **task) for task in tasks]
+            for future in futures:
+                try:
+                    results.append(future.result())
+                except Exception as exc:
+                    logger.error("Experiment task failed: {}", exc)
 
-            if len(readers) == 1 and len(modes) == 1:
-                official_path = _write_official_output(output_path, output_dir, timestamp)
-                logger.info("Official-format output written to {}", official_path)
-
-            try:
-                _run_alignment(
-                    repo_root=repo_root,
-                    pred_path=output_path,
-                    gold_path=data_path,
-                    output_dir=output_dir,
-                    split=split,
-                )
-                logger.info("Alignment artifacts written for {}", output_path)
-            except Exception as exc:
-                logger.error("Alignment generation failed for {}: {}", output_path, exc)
-                raise
+    for res in results:
+        reader = res["reader"]
+        mode = res["mode"]
+        stats = res["stats"]
+        summary_report["runs"][reader][mode] = stats
 
     if len(readers) == 1:
         summary_report["modes"] = summary_report["runs"][readers[0]]

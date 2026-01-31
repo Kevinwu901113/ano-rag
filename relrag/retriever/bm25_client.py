@@ -73,7 +73,7 @@ class BM25Client:
         tokens: List[str] = []
         fields = record.get("fields") or {}
         for field, weight in self.field_weights.items():
-            text = (fields.get(field) or record.get("text") or "").strip()
+            text = (fields.get(field) or record.get(field) or record.get("text") or "").strip()
             if not text:
                 continue
             weighted = self._tokenize(text, repeats=max(1, int(round(weight * 2))))
