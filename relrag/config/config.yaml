@@ -59,17 +59,17 @@ vllm:
 openai:
   enabled: true
   model: deepseek-chat
-  answer_prompt_name: answerer.txt
+  answer_prompt_name: answerer_openai.txt
   api_key: "sk-c003ed6c90c24b5f8caad6252b4d6a24"
   api_key_env: OPENAI_API_KEY
-  temperature: 0.2
-  max_tokens: 64
+  temperature: 0.7
+  max_tokens: 8192
   base_url: https://api.deepseek.com/v1
   timeout_sec: 60.0
   max_retries: 2
   retry_backoff_sec: 1.0
   retry_backoff_max_sec: 20.0
-  system_prompt_name: ""
+  system_prompt_name: system_prompt.txt
 datasets:
   mirage:
     cache_dir: result/mirage/cache
@@ -189,9 +189,9 @@ retriever:
     method: rrf
     rrf_k: 60
     weights:
-      struct: 0.5
-      emb: 0.3
-      bm25: 0.2
+      struct: 1.0
+      emb: 1.5
+      bm25: 0.5
     pre_topM: 128
     final_topK: 64
 reranker:
