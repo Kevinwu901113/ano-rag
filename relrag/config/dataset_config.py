@@ -9,14 +9,14 @@ DEFAULT_OPENAI_CONFIG: Dict[str, Any] = {
     "enabled": True,
     "model": "gpt-4",
     "api_key_env": "OPENAI_API_KEY",
-    "temperature": 0.7,
-    "max_tokens": 1024,
+    "temperature": 0.2,
+    "max_tokens": 128,
     "base_url": "https://api.openai.com/v1",
     "timeout_sec": 60.0,
     "max_retries": 2,
     "retry_backoff_sec": 1.0,
     "retry_backoff_max_sec": 20.0,
-    "system_prompt_name": "system_prompt.txt",
+    "system_prompt_name": "",
 }
 
 

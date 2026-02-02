@@ -1290,7 +1290,7 @@ def _process_example(
     llm_retry_used = False
     llm_retry_source = None
     llm_retry_reason = None
-    if reader == "vllm" and llm_retry_on_empty > 0 and answer_source == "llm_fallback":
+    if llm_retry_on_empty > 0 and answer_source == "llm_fallback":
         retry_evidences = evidences
         if llm_retry_max_evidence > 0:
             retry_evidences = evidences[: int(llm_retry_max_evidence)]
