@@ -35,6 +35,8 @@ class NoteGenerator:
         parsing_config: Dict[str, Any] | None = None,
         schema_guard_config: Dict[str, Any] | None = None,
         strict_endpoint: bool = False,
+        provider: str = "vllm",
+        api_key: Optional[str] = None,
     ):
         # Concurrency config
         vllm_cfg = global_config.get("vllm", {}) or {}
@@ -45,11 +47,15 @@ class NoteGenerator:
         self._use_response_format = bool(json_cfg.get("use_response_format", False))
         self._schema_name = str(json_cfg.get("schema_name", "ano-note") or "ano-note")
         self._note_schema = NOTE_GEN_JSON_SCHEMA or NOTE_JSON_SCHEMA
+        self._provider = (provider or "vllm").strip().lower()
+        if self._provider == "openai":
+            self._use_guided_json = False
+            self._use_response_format = False
 
         # Endpoint pool: prefer env-based endpoints in non-strict mode; fall back to config list
         endpoints_cfg = ccfg.get("endpoints") or []
         self._endpoint_lock = threading.Lock()
-        self._strict_endpoint = bool(strict_endpoint)
+        self._strict_endpoint = bool(strict_endpoint) or self._provider == "openai"
         # Resolve endpoint pool
         if self._strict_endpoint:
             self._endpoints = [endpoint.rstrip("/")]
@@ -110,6 +116,8 @@ class NoteGenerator:
             llm_profile="extract",
             timeout=(self._connect_timeout_sec, self._read_timeout_sec),
             retries=0,
+            api_key=api_key or "sk-no-key-required",
+            provider=self._provider,
         )
 
         # Adaptive concurrency hooks (latency sampling)

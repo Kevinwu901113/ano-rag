@@ -118,6 +118,8 @@ class StructuredBuilder:
         model: str,
         temperature: float = 0.0,
         max_tokens: Optional[int] = None,
+        provider: str = "vllm",
+        api_key: Optional[str] = None,
     ) -> None:
         if not endpoint or not model:
             raise ValueError("vLLM endpoint/model must be provided")
@@ -133,7 +135,14 @@ class StructuredBuilder:
             resolved_max = int(default_max)
         if resolved_max <= 0:
             resolved_max = 1
-        self.generator = NoteGenerator(endpoint, model, temperature, resolved_max)
+        self.generator = NoteGenerator(
+            endpoint,
+            model,
+            temperature,
+            resolved_max,
+            provider=provider,
+            api_key=api_key,
+        )
         coref_cfg = global_config.get("coref", {}) if "global_config" in globals() else {}
         self._ledger_capacity = max(1, int(coref_cfg.get("ledger_capacity", 3) or 3))
         self._doc_ledgers: Dict[str, EntityLedger] = {}

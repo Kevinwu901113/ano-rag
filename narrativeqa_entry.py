@@ -547,6 +547,8 @@ def _ensure_index(
     index_root: Path,
     llm_endpoint: str,
     llm_model: str,
+    llm_provider: str,
+    llm_api_key: Optional[str],
     force_build: bool,
 ) -> Dict[str, Any]:
     notes_path = index_root / "notes.jsonl"
@@ -559,6 +561,8 @@ def _ensure_index(
         output_dir=str(index_root),
         llm_endpoint=llm_endpoint,
         llm_model=llm_model,
+        llm_provider=llm_provider,
+        llm_api_key=llm_api_key,
     )
 
 
@@ -568,6 +572,26 @@ def _apply_dataset_retriever(cfg: Dict[str, Any], dataset_key: str) -> Dict[str,
     if isinstance(retriever_override, dict):
         base_retriever = cfg.get("retriever") or {}
         cfg["retriever"] = _deep_merge(base_retriever, retriever_override)
+    return cfg
+
+
+def _apply_openai_reranker(base_cfg: Dict[str, Any], openai_cfg: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    if not openai_cfg:
+        return base_cfg
+    cfg = deepcopy(base_cfg)
+    reranker = cfg.setdefault("reranker", {})
+    reranker["provider"] = "openai"
+    reranker["openai"] = {
+        "model": openai_cfg.get("model"),
+        "api_key": openai_cfg.get("api_key"),
+        "api_key_env": openai_cfg.get("api_key_env"),
+        "base_url": openai_cfg.get("base_url"),
+        "temperature": openai_cfg.get("temperature"),
+        "timeout_sec": openai_cfg.get("timeout_sec"),
+        "max_retries": openai_cfg.get("max_retries"),
+        "retry_backoff_sec": openai_cfg.get("retry_backoff_sec"),
+        "retry_backoff_max_sec": openai_cfg.get("retry_backoff_max_sec"),
+    }
     return cfg
 
 
@@ -922,6 +946,8 @@ def _ensure_document_index(
     stories_dir: Optional[Path],
     llm_endpoint: str,
     llm_model: str,
+    llm_provider: str,
+    llm_api_key: Optional[str],
     base_cfg: Dict[str, Any],
     force_build: bool,
     build_embedding: bool,
@@ -948,6 +974,8 @@ def _ensure_document_index(
             doc_root,
             llm_endpoint,
             llm_model,
+            llm_provider,
+            llm_api_key,
             force_build=force_build,
         )
         cfg = _prepare_aux_config(base_cfg, doc_root)
@@ -979,6 +1007,8 @@ def _process_question(
     backfill_rounds: int,
     llm_endpoint: str,
     llm_model: str,
+    llm_provider: str,
+    llm_api_key: Optional[str],
     reader: str,
     openai_cfg: Optional[Dict[str, Any]],
     llm_retry_on_empty: int,
@@ -998,6 +1028,8 @@ def _process_question(
         stories_dir=stories_dir,
         llm_endpoint=llm_endpoint,
         llm_model=llm_model,
+        llm_provider=llm_provider,
+        llm_api_key=llm_api_key,
         base_cfg=base_cfg,
         force_build=force_build,
         build_embedding=build_embedding,
@@ -1039,7 +1071,11 @@ def _process_question(
         base_cfg=base_cfg,
         run_dir=run_dir,
     )
-    short_answer, answer_source, answer_source_detail = resolve_short_answer(structured_answer, raw_answer)
+    short_answer, answer_source, answer_source_detail = resolve_short_answer(
+        structured_answer,
+        raw_answer,
+        question=question,
+    )
     if answer_source == "empty":
         answer_source = "llm_fallback"
         answer_source_detail["fallback_override"] = "empty"
@@ -1074,7 +1110,11 @@ def _process_question(
                 base_cfg=base_cfg,
                 run_dir=run_dir,
             )
-            retry_short, retry_source, retry_detail = resolve_short_answer(structured_answer, retry_raw)
+            retry_short, retry_source, retry_detail = resolve_short_answer(
+                structured_answer,
+                retry_raw,
+                question=question,
+            )
             if retry_source == "empty":
                 retry_source = "llm_fallback"
                 retry_detail["fallback_override"] = "empty"
@@ -1197,6 +1237,11 @@ def _sanitize_config(cfg: Dict[str, Any]) -> Dict[str, Any]:
     openai_cfg = sanitized.get("openai")
     if isinstance(openai_cfg, dict) and openai_cfg.get("api_key"):
         openai_cfg["api_key"] = "***"
+    reranker_cfg = sanitized.get("reranker")
+    if isinstance(reranker_cfg, dict):
+        rerank_openai = reranker_cfg.get("openai")
+        if isinstance(rerank_openai, dict) and rerank_openai.get("api_key"):
+            rerank_openai["api_key"] = "***"
     retriever_cfg = sanitized.get("retriever")
     if isinstance(retriever_cfg, dict):
         embedding_cfg = retriever_cfg.get("embedding")
@@ -1580,10 +1625,20 @@ def main() -> None:
 
     for reader in readers:
         reader_openai_cfg = openai_runtime_cfg if reader == "openai" else None
+        reader_base_cfg = _apply_openai_reranker(base_cfg, reader_openai_cfg) if reader == "openai" else base_cfg
+        llm_endpoint_for_reader = llm_endpoint
+        llm_model_for_reader = llm_model
+        llm_provider_for_reader = "vllm"
+        llm_api_key_for_reader: Optional[str] = None
+        if reader_openai_cfg:
+            llm_endpoint_for_reader = reader_openai_cfg.get("base_url") or llm_endpoint
+            llm_model_for_reader = reader_openai_cfg.get("model") or llm_model
+            llm_provider_for_reader = "openai"
+            llm_api_key_for_reader = reader_openai_cfg.get("api_key")
         answer_model = reader_openai_cfg.get("model") if reader == "openai" and reader_openai_cfg else llm_model
         summary_report["runs"].setdefault(reader, {})
         for mode in modes:
-            mode_top_k = _resolve_mode_top_k(mode, base_cfg, args.top_k)
+            mode_top_k = _resolve_mode_top_k(mode, reader_base_cfg, args.top_k)
             mode_top_k_raw, top_k_raw_source = _resolve_top_k_raw(
                 mode_top_k,
                 args.top_k_raw,
@@ -1597,7 +1652,7 @@ def main() -> None:
             retrieval_topk_path = run_dir / "retrieval_topk.jsonl" if run_dir else None
             run_started_at = time.time()
             if run_dir:
-                resolved_cfg = deepcopy(base_cfg)
+                resolved_cfg = deepcopy(reader_base_cfg)
                 if args.endpoint:
                     resolved_cfg.setdefault("vllm", {})["endpoint"] = args.endpoint
                 if args.model:
@@ -1672,7 +1727,7 @@ def main() -> None:
                                     summaries_map=summaries_map,
                                     summaries_all=summaries_all,
                                     stories_dir=stories_dir,
-                                    base_cfg=base_cfg,
+                                    base_cfg=reader_base_cfg,
                                     mode=mode,
                                     top_k=mode_top_k,
                                     top_k_raw=mode_top_k_raw,
@@ -1680,8 +1735,10 @@ def main() -> None:
                                     backfill_max_overfetch=args.backfill_max_overfetch,
                                     backfill_step=args.backfill_step,
                                     backfill_rounds=args.backfill_rounds,
-                                    llm_endpoint=llm_endpoint,
-                                    llm_model=llm_model,
+                                    llm_endpoint=llm_endpoint_for_reader,
+                                    llm_model=llm_model_for_reader,
+                                    llm_provider=llm_provider_for_reader,
+                                    llm_api_key=llm_api_key_for_reader,
                                     reader=reader,
                                     openai_cfg=reader_openai_cfg,
                                     llm_retry_on_empty=args.llm_retry_on_empty,
@@ -1739,7 +1796,7 @@ def main() -> None:
                                     summaries_map=summaries_map,
                                     summaries_all=summaries_all,
                                     stories_dir=stories_dir,
-                                    base_cfg=base_cfg,
+                                    base_cfg=reader_base_cfg,
                                     mode=mode,
                                     top_k=mode_top_k,
                                     top_k_raw=mode_top_k_raw,
@@ -1747,8 +1804,10 @@ def main() -> None:
                                     backfill_max_overfetch=args.backfill_max_overfetch,
                                     backfill_step=args.backfill_step,
                                     backfill_rounds=args.backfill_rounds,
-                                    llm_endpoint=llm_endpoint,
-                                    llm_model=llm_model,
+                                    llm_endpoint=llm_endpoint_for_reader,
+                                    llm_model=llm_model_for_reader,
+                                    llm_provider=llm_provider_for_reader,
+                                    llm_api_key=llm_api_key_for_reader,
                                     reader=reader,
                                     openai_cfg=reader_openai_cfg,
                                     llm_retry_on_empty=args.llm_retry_on_empty,

@@ -816,6 +816,26 @@ def _apply_dataset_retriever(cfg: Dict[str, Any], dataset_key: str) -> Dict[str,
     return cfg
 
 
+def _apply_openai_reranker(base_cfg: Dict[str, Any], openai_cfg: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    if not openai_cfg:
+        return base_cfg
+    cfg = deepcopy(base_cfg)
+    reranker = cfg.setdefault("reranker", {})
+    reranker["provider"] = "openai"
+    reranker["openai"] = {
+        "model": openai_cfg.get("model"),
+        "api_key": openai_cfg.get("api_key"),
+        "api_key_env": openai_cfg.get("api_key_env"),
+        "base_url": openai_cfg.get("base_url"),
+        "temperature": openai_cfg.get("temperature"),
+        "timeout_sec": openai_cfg.get("timeout_sec"),
+        "max_retries": openai_cfg.get("max_retries"),
+        "retry_backoff_sec": openai_cfg.get("retry_backoff_sec"),
+        "retry_backoff_max_sec": openai_cfg.get("retry_backoff_max_sec"),
+    }
+    return cfg
+
+
 def _deep_merge(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any]:
     merged = deepcopy(base)
     for key, value in override.items():
@@ -1035,6 +1055,11 @@ def _sanitize_config(cfg: Dict[str, Any]) -> Dict[str, Any]:
     openai_cfg = sanitized.get("openai")
     if isinstance(openai_cfg, dict) and openai_cfg.get("api_key"):
         openai_cfg["api_key"] = "***"
+    reranker_cfg = sanitized.get("reranker")
+    if isinstance(reranker_cfg, dict):
+        rerank_openai = reranker_cfg.get("openai")
+        if isinstance(rerank_openai, dict) and rerank_openai.get("api_key"):
+            rerank_openai["api_key"] = "***"
     retriever_cfg = sanitized.get("retriever")
     if isinstance(retriever_cfg, dict):
         embedding_cfg = retriever_cfg.get("embedding")
@@ -1269,7 +1294,11 @@ def _process_example(
             run_dir=run_dir,
         )
     t_total_ms = (time.time() - total_start) * 1000.0
-    short_answer, answer_source, answer_source_detail = resolve_short_answer(None, raw_answer)
+    short_answer, answer_source, answer_source_detail = resolve_short_answer(
+        None,
+        raw_answer,
+        question=question,
+    )
     if answer_source == "empty":
         answer_source = "llm_fallback"
         answer_source_detail["fallback_override"] = "empty"
@@ -1305,7 +1334,11 @@ def _process_example(
                 base_cfg=base_cfg,
                 run_dir=run_dir,
             )
-            retry_short, retry_source, retry_detail = resolve_short_answer(None, retry_raw)
+            retry_short, retry_source, retry_detail = resolve_short_answer(
+                None,
+                retry_raw,
+                question=question,
+            )
             if retry_source == "empty":
                 retry_source = "llm_fallback"
                 retry_detail["fallback_override"] = "empty"
@@ -1599,13 +1632,14 @@ def main() -> None:
 
     for reader in readers:
         reader_openai_cfg = openai_runtime_cfg if reader == "openai" else None
+        reader_base_cfg = _apply_openai_reranker(base_cfg, reader_openai_cfg) if reader == "openai" else base_cfg
         answer_model = reader_openai_cfg.get("model") if reader == "openai" and reader_openai_cfg else llm_model
         summary_report["runs"].setdefault(reader, {})
         for mode in modes:
             build_embedding, build_bm25 = _mode_requirements(mode)
             aux_stats = _build_aux_indexes(
                 cache_root,
-                base_cfg=base_cfg,
+                base_cfg=reader_base_cfg,
                 build_embedding=build_embedding,
                 build_bm25=build_bm25,
                 force_build=args.force_build,
@@ -1627,7 +1661,7 @@ def main() -> None:
             run_started_at = time.time()
             run_meta: Optional[Dict[str, Any]] = None
             if args.run_dir:
-                resolved_cfg = deepcopy(base_cfg)
+                resolved_cfg = deepcopy(reader_base_cfg)
                 if args.endpoint:
                     resolved_cfg.setdefault("vllm", {})["endpoint"] = args.endpoint
                 if args.model:
@@ -1685,7 +1719,7 @@ def main() -> None:
                     }
                     if reader == "openai"
                     else None,
-                    "embedding_endpoint": ((base_cfg.get("retriever") or {}).get("embedding") or {}).get("endpoint"),
+                    "embedding_endpoint": ((reader_base_cfg.get("retriever") or {}).get("embedding") or {}).get("endpoint"),
                     "top_k": args.top_k,
                     "top_k_raw": top_k_raw,
                     "top_k_raw_source": top_k_raw_source,
@@ -1747,7 +1781,7 @@ def main() -> None:
                                     index_root=cache_root,
                                     note_store=note_store,
                                     indexes=indexes,
-                                    base_cfg=base_cfg,
+                                    base_cfg=reader_base_cfg,
                                     llm_endpoint=llm_endpoint,
                                     llm_model=llm_model,
                                     mode=mode,
@@ -1792,7 +1826,7 @@ def main() -> None:
                                     index_root=cache_root,
                                     note_store=note_store,
                                     indexes=indexes,
-                                    base_cfg=base_cfg,
+                                    base_cfg=reader_base_cfg,
                                     llm_endpoint=llm_endpoint,
                                     llm_model=llm_model,
                                     mode=mode,

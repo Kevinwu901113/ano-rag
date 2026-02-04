@@ -3,6 +3,8 @@ from __future__ import annotations
 import time
 from typing import Any, Dict, List
 
+from loguru import logger
+
 from relrag.prompt import load_prompt, render_prompt
 from relrag.utils.openai_client import chat_completion
 from relrag.utils.output_protocol import build_final_instruction
@@ -119,6 +121,9 @@ def generate_openai_answer(
     except (TypeError, ValueError):
         base_max_item_tokens = None
     requested_max_tokens = int(openai_cfg.get("max_tokens", 256) or 256)
+    if requested_max_tokens < 256:
+        logger.warning(f"Requested max_tokens {requested_max_tokens} is very small. Adjusting to 256.")
+        requested_max_tokens = 256
     max_items_override = None
     max_item_tokens_override = None
     max_item_chars_override = None
@@ -185,6 +190,9 @@ def generate_openai_answer(
                 stop=normalized_stop,
             )
             response_text = response.strip()
+            if not response_text:
+                logger.warning("OpenAI returned empty response. Downstream fallback may be triggered.")
+            
             log_budget_event(
                 run_dir,
                 stage="answer",

@@ -75,12 +75,12 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "model": "gpt-4",
         "api_key_env": "OPENAI_API_KEY",
         "temperature": 0.7,
-        "max_tokens": 1024,
+        "max_tokens": 8192,
         "base_url": "https://api.openai.com/v1",
         "timeout_sec": 60.0,
-        "max_retries": 2,
-        "retry_backoff_sec": 1.0,
-        "retry_backoff_max_sec": 20.0,
+        "max_retries": 5,
+        "retry_backoff_sec": 2.0,
+        "retry_backoff_max_sec": 60.0,
         "system_prompt_name": "system_prompt.txt",
     },
     "datasets": {},
@@ -106,8 +106,8 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "max_candidate_tokens": 256,
     },
     "answer": {
-        "max_evidence_items": 8,
-        "max_evidence_tokens": 256,
+        "max_evidence_items": 12,
+        "max_evidence_tokens": 512,
     },
     "retriever": {
         "structured": {
@@ -181,8 +181,8 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "workers": 1,
         "debug_dir": "result/debug",
         "debug_max_notes": 50,
-        "stall_warn_sec": 300.0,
-        "stall_abort_sec": 900.0,
+        "stall_warn_sec": 600.0,
+        "stall_abort_sec": 1800.0,
         "force_build": False,
     },
     "musique_entry": {

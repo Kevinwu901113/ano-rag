@@ -7,33 +7,98 @@ from typing import Iterable, Tuple
 def has_final_tag(text: str) -> bool:
     if not text:
         return False
-    return bool(re.search(r"^\s*final\s*:", text, flags=re.IGNORECASE | re.MULTILINE))
+    return bool(re.search(r"\bfinal\s*:", text, flags=re.IGNORECASE))
+
+
+_ANSWER_PATTERNS = [
+    re.compile(r"(?:^|[\n\r])\s*(?:final answer|answer|ans|response)\s*[:\-]\s*(.+)", re.IGNORECASE),
+    re.compile(r"(?:the\s+)?answer\s+is\s+(.+)", re.IGNORECASE),
+    re.compile(r"(?:therefore|thus|hence|so)[^\n\r]{0,120}?\banswer(?:\s+is)?\s+(.+)", re.IGNORECASE),
+]
+
+
+def _truncate_tokens(text: str, max_tokens: int) -> str:
+    if not text:
+        return ""
+    if max_tokens <= 0:
+        return text.strip()
+    tokens = text.split()
+    if len(tokens) <= max_tokens:
+        return text.strip()
+    return " ".join(tokens[:max_tokens]).strip()
+
+
+def _clean_candidate(text: str) -> str:
+    if not text:
+        return ""
+    candidate = text.strip()
+    if not candidate:
+        return ""
+    if re.search(r"\binsufficient evidence\b", candidate, flags=re.IGNORECASE):
+        return "Insufficient evidence"
+    candidate = candidate.strip(" \t\"'`")
+    candidate = re.sub(r"[\s\-\u2013\u2014,;.!?]+$", "", candidate).strip()
+    lowered = candidate.lower()
+    for sep in (" because ", " since ", " as ", " therefore ", " thus ", " so "):
+        idx = lowered.find(sep)
+        if idx > 0:
+            candidate = candidate[:idx].strip()
+            break
+    return candidate
+
+
+def _find_answer_candidate(text: str) -> str:
+    if not text:
+        return ""
+    last = ""
+    for pattern in _ANSWER_PATTERNS:
+        for match in pattern.finditer(text):
+            value = (match.group(1) or "").strip()
+            if value:
+                last = value
+    return last
+
+
+def _clean_text_for_extract(text: str) -> str:
+    if not text:
+        return ""
+    output = _strip_tag_markers(str(text))
+    output = _strip_code_fence_markers(output)
+    return output.strip()
 
 
 def extract_final_answer(text: str, *, max_tokens: int = 50) -> str:
     if not text:
         return ""
-    lines = [ln.rstrip() for ln in str(text).splitlines() if ln.strip()]
+    raw_text = str(text)
+    lines = [ln.rstrip() for ln in raw_text.splitlines() if ln.strip()]
     final_line = ""
     for ln in reversed(lines):
-        match = re.match(r"^\s*final\s*:\s*(.*)$", ln, flags=re.IGNORECASE)
+        match = re.search(r"\bfinal\s*:\s*(.*)$", ln, flags=re.IGNORECASE)
         if match:
             final_line = match.group(1).strip()
             break
-    if not final_line and lines:
-        final_line = lines[-1].strip()
-    if not final_line:
-        return ""
-    tokens = final_line.split()
-    if max_tokens > 0 and len(tokens) > max_tokens:
-        final_line = " ".join(tokens[:max_tokens]).strip()
-    return final_line
+    if final_line:
+        return _truncate_tokens(_clean_candidate(final_line), max_tokens)
+
+    cleaned = _clean_text_for_extract(raw_text)
+    candidate = _find_answer_candidate(cleaned)
+    if not candidate:
+        cleaned_lines = [ln.rstrip() for ln in cleaned.splitlines() if ln.strip()]
+        if cleaned_lines:
+            candidate = cleaned_lines[-1].strip()
+    candidate = _clean_candidate(candidate)
+    return _truncate_tokens(candidate, max_tokens)
 
 
 def _strip_tag_markers(text: str) -> str:
     if not text:
         return ""
-    # Only remove the tag markers, keep the text inside.
+    # Remove <think>...</think> blocks including content
+    text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL | re.IGNORECASE)
+    # Remove any dangling <think> tag to end of text
+    text = re.sub(r"<think>.*$", "", text, flags=re.DOTALL | re.IGNORECASE)
+    # Cleanup any remaining tags just in case
     text = text.replace("<think>", "").replace("</think>", "")
     return text
 

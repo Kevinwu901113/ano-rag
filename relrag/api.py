@@ -18,6 +18,8 @@ def build_index(
     llm_model: str,
     temperature: float = 0.0,
     max_tokens: Optional[int] = None,
+    llm_provider: str = "vllm",
+    llm_api_key: Optional[str] = None,
 ) -> Dict[str, int]:
     """
     Build index from documents.
@@ -33,7 +35,9 @@ def build_index(
         endpoint=llm_endpoint,
         model=llm_model,
         temperature=temperature,
-        max_tokens=max_tokens
+        max_tokens=max_tokens,
+        provider=llm_provider,
+        api_key=llm_api_key,
     )
     
     out_path = Path(output_dir)

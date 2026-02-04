@@ -74,6 +74,12 @@ def _normalize_endpoint(endpoint: Optional[str]) -> str:
         return VLLM_ENDPOINT
     return normalized
 
+def _normalize_custom_endpoint(endpoint: Optional[str]) -> str:
+    raw = (endpoint or "").strip()
+    if not raw:
+        return VLLM_ENDPOINT
+    return raw.rstrip("/")
+
 
 def _normalize_model(model: Optional[str]) -> str:
     raw = (model or "").strip()
@@ -181,9 +187,15 @@ class LLMChatClient:
         retries: int = 2,
         stop: Optional[List[str]] = None,
         api_key: str = "sk-no-key-required",
+        provider: Optional[str] = None,
     ) -> None:
-        self.endpoint = _normalize_endpoint(endpoint)
-        self.model = _normalize_model(model)
+        self.provider = (provider or "vllm").strip().lower()
+        if self.provider == "openai":
+            self.endpoint = _normalize_custom_endpoint(endpoint)
+            self.model = str(model or "")
+        else:
+            self.endpoint = _normalize_endpoint(endpoint)
+            self.model = _normalize_model(model)
         self.llm_profile = llm_profile or "generate"
         self.temperature = temperature
         self.max_tokens = max_tokens
@@ -222,6 +234,12 @@ class LLMChatClient:
             payload.setdefault("chat_template_kwargs", {})
             payload["chat_template_kwargs"]["enable_thinking"] = False
 
+    def _resolve_endpoint(self, endpoint_override: Optional[str]) -> str:
+        if self.provider == "openai":
+            raw = (endpoint_override or self.endpoint or "").strip()
+            return raw.rstrip("/")
+        return _normalize_endpoint(endpoint_override or self.endpoint)
+
     def _build_payload(
         self,
         messages: List[Dict[str, str]],
@@ -245,12 +263,13 @@ class LLMChatClient:
         }
         if self.stop or stop:
             payload["stop"] = stop if stop is not None else self.stop
-        if response_format:
+        if response_format and self.provider != "openai":
             payload["response_format"] = response_format
-        if extra_body:
+        if extra_body and self.provider != "openai":
             payload.setdefault("extra_body", {})
             payload["extra_body"].update(extra_body)
-        self._apply_profile(payload, profile)
+        if self.provider != "openai":
+            self._apply_profile(payload, profile)
         return payload
 
     def chat(
@@ -268,7 +287,7 @@ class LLMChatClient:
         session: Optional[requests.Session] = None,
     ) -> LLMResponse:
         profile = (llm_profile or self.llm_profile or "generate").strip().lower()
-        endpoint = _normalize_endpoint(endpoint_override or self.endpoint)
+        endpoint = self._resolve_endpoint(endpoint_override)
         url = f"{endpoint}/chat/completions"
         stats = get_active_llm_stats()
         prompt_chars = 0
@@ -402,7 +421,7 @@ class LLMChatClient:
         session: Optional[requests.Session] = None,
     ) -> requests.Response:
         profile = (llm_profile or self.llm_profile or "generate").strip().lower()
-        endpoint = _normalize_endpoint(endpoint_override or self.endpoint)
+        endpoint = self._resolve_endpoint(endpoint_override)
         url = f"{endpoint}/chat/completions"
         payload = self._build_payload(
             messages,
@@ -432,7 +451,7 @@ class LLMChatClient:
         timeout: Optional[float] = None,
     ) -> LLMResponse:
         profile = (llm_profile or self.llm_profile or "generate").strip().lower()
-        endpoint = _normalize_endpoint(endpoint_override or self.endpoint)
+        endpoint = self._resolve_endpoint(endpoint_override)
         url = f"{endpoint}/chat/completions"
         payload = self._build_payload(
             messages,

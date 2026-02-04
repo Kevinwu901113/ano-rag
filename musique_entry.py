@@ -983,6 +983,26 @@ def _apply_dataset_retriever(cfg: Dict[str, Any], dataset_key: str) -> Dict[str,
     return cfg
 
 
+def _apply_openai_reranker(base_cfg: Dict[str, Any], openai_cfg: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    if not openai_cfg:
+        return base_cfg
+    cfg = deepcopy(base_cfg)
+    reranker = cfg.setdefault("reranker", {})
+    reranker["provider"] = "openai"
+    reranker["openai"] = {
+        "model": openai_cfg.get("model"),
+        "api_key": openai_cfg.get("api_key"),
+        "api_key_env": openai_cfg.get("api_key_env"),
+        "base_url": openai_cfg.get("base_url"),
+        "temperature": openai_cfg.get("temperature"),
+        "timeout_sec": openai_cfg.get("timeout_sec"),
+        "max_retries": openai_cfg.get("max_retries"),
+        "retry_backoff_sec": openai_cfg.get("retry_backoff_sec"),
+        "retry_backoff_max_sec": openai_cfg.get("retry_backoff_max_sec"),
+    }
+    return cfg
+
+
 def _pick_arg(
     args: argparse.Namespace,
     entry_cfg: Dict[str, Any],
@@ -1349,7 +1369,11 @@ def _process_example(
         base_cfg=base_cfg,
         run_dir=run_dir,
     )
-    short_answer, answer_source, answer_source_detail = resolve_short_answer(structured_answer, raw_answer)
+    short_answer, answer_source, answer_source_detail = resolve_short_answer(
+        structured_answer,
+        raw_answer,
+        question=question,
+    )
     if answer_source == "empty":
         answer_source = "llm_fallback"
         answer_source_detail["fallback_override"] = "empty"
@@ -1384,7 +1408,11 @@ def _process_example(
                 base_cfg=base_cfg,
                 run_dir=run_dir,
             )
-            retry_short, retry_source, retry_detail = resolve_short_answer(structured_answer, retry_raw)
+            retry_short, retry_source, retry_detail = resolve_short_answer(
+                structured_answer,
+                retry_raw,
+                question=question,
+            )
             if retry_source == "empty":
                 retry_source = "llm_fallback"
                 retry_detail["fallback_override"] = "empty"
@@ -1616,6 +1644,11 @@ def _sanitize_config(cfg: Dict[str, Any]) -> Dict[str, Any]:
     openai_cfg = sanitized.get("openai")
     if isinstance(openai_cfg, dict) and openai_cfg.get("api_key"):
         openai_cfg["api_key"] = "***"
+    reranker_cfg = sanitized.get("reranker")
+    if isinstance(reranker_cfg, dict):
+        rerank_openai = reranker_cfg.get("openai")
+        if isinstance(rerank_openai, dict) and rerank_openai.get("api_key"):
+            rerank_openai["api_key"] = "***"
     retriever_cfg = sanitized.get("retriever")
     if isinstance(retriever_cfg, dict):
         embedding_cfg = retriever_cfg.get("embedding")
@@ -2083,10 +2116,11 @@ def main() -> None:
 
     for reader in readers:
         reader_openai_cfg = openai_runtime_cfg if reader == "openai" else None
+        reader_base_cfg = _apply_openai_reranker(base_cfg, reader_openai_cfg) if reader == "openai" else base_cfg
         answer_model = reader_openai_cfg.get("model") if reader == "openai" and reader_openai_cfg else llm_model
         summary_report["runs"].setdefault(reader, {})
         for mode in modes:
-            mode_top_k = _resolve_mode_top_k(mode, base_cfg, args.top_k)
+            mode_top_k = _resolve_mode_top_k(mode, reader_base_cfg, args.top_k)
             mode_top_k_raw, top_k_raw_source = _resolve_top_k_raw(
                 mode_top_k,
                 args.top_k_raw,
@@ -2107,7 +2141,7 @@ def main() -> None:
             run_started_at = time.time()
             run_meta: Optional[Dict[str, Any]] = None
             if run_dir:
-                resolved_cfg = deepcopy(base_cfg)
+                resolved_cfg = deepcopy(reader_base_cfg)
                 if args.endpoint:
                     resolved_cfg.setdefault("vllm", {})["endpoint"] = args.endpoint
                 if args.model:
@@ -2161,7 +2195,7 @@ def main() -> None:
                     }
                     if reader == "openai"
                     else None,
-                    "embedding_endpoint": ((base_cfg.get("retriever") or {}).get("embedding") or {}).get("endpoint"),
+                    "embedding_endpoint": ((reader_base_cfg.get("retriever") or {}).get("embedding") or {}).get("endpoint"),
                     "top_k": mode_top_k,
                     "top_k_raw": mode_top_k_raw,
                     "top_k_raw_source": top_k_raw_source,
@@ -2226,7 +2260,7 @@ def main() -> None:
                                     example,
                                     example_idx=example_idx,
                                     cache_root=cache_root,
-                                    base_cfg=base_cfg,
+                                    base_cfg=reader_base_cfg,
                                     llm_endpoint=llm_endpoint,
                                     llm_model=llm_model,
                                     mode=mode,
@@ -2278,7 +2312,7 @@ def main() -> None:
                                     example,
                                     example_idx,
                                     cache_root,
-                                    base_cfg,
+                                    reader_base_cfg,
                                     llm_endpoint,
                                     llm_model,
                                     mode,

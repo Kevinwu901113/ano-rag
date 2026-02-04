@@ -4,6 +4,30 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "${SCRIPT_DIR}"
 
+mode="both"
+extra_args=()
+for arg in "$@"; do
+  case "${arg}" in
+    --llm)
+      if [[ "${mode}" == "emb" ]]; then
+        printf '%s\n' "Error: cannot use --llm and --emb together." >&2
+        exit 1
+      fi
+      mode="llm"
+      ;;
+    --emb)
+      if [[ "${mode}" == "llm" ]]; then
+        printf '%s\n' "Error: cannot use --llm and --emb together." >&2
+        exit 1
+      fi
+      mode="emb"
+      ;;
+    *)
+      extra_args+=("${arg}")
+      ;;
+  esac
+done
+
 export HF_ENDPOINT=https://hf-mirror.com
 export HF_HOME=/home/wjk/.cache/hf
 export HF_HUB_CACHE=/home/wjk/.cache/hf
@@ -19,6 +43,14 @@ printf '%s\n' "export TRANSFORMERS_CACHE=${TRANSFORMERS_CACHE}"
 printf '%s\n' "export http_proxy=${http_proxy}"
 printf '%s\n' "export https_proxy=${https_proxy}"
 printf '%s\n' "export PYTORCH_CUDA_ALLOC_CONF=${PYTORCH_CUDA_ALLOC_CONF}"
+
+args=()
+if [[ "${mode}" == "llm" ]]; then
+  args+=(--llm-only)
+elif [[ "${mode}" == "emb" ]]; then
+  args+=(--embed-only)
+fi
+args+=("${extra_args[@]}")
 
 python run_vllm_dual_gpu.py \
   --cache-dir /home/wjk/.cache/hf \
@@ -39,4 +71,5 @@ python run_vllm_dual_gpu.py \
   --embed-max-num-batched-tokens 1024 \
   --hf-endpoint https://hf-mirror.com \
   --http-proxy http://192.168.192.246:7890 \
-  --https-proxy http://192.168.192.246:7890
+  --https-proxy http://192.168.192.246:7890 \
+  "${args[@]}"

@@ -776,6 +776,26 @@ def _apply_dataset_retriever(cfg: Dict[str, Any], dataset_key: str) -> Dict[str,
     return cfg
 
 
+def _apply_openai_reranker(base_cfg: Dict[str, Any], openai_cfg: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    if not openai_cfg:
+        return base_cfg
+    cfg = deepcopy(base_cfg)
+    reranker = cfg.setdefault("reranker", {})
+    reranker["provider"] = "openai"
+    reranker["openai"] = {
+        "model": openai_cfg.get("model"),
+        "api_key": openai_cfg.get("api_key"),
+        "api_key_env": openai_cfg.get("api_key_env"),
+        "base_url": openai_cfg.get("base_url"),
+        "temperature": openai_cfg.get("temperature"),
+        "timeout_sec": openai_cfg.get("timeout_sec"),
+        "max_retries": openai_cfg.get("max_retries"),
+        "retry_backoff_sec": openai_cfg.get("retry_backoff_sec"),
+        "retry_backoff_max_sec": openai_cfg.get("retry_backoff_max_sec"),
+    }
+    return cfg
+
+
 def _pick_arg(
     args: argparse.Namespace,
     entry_cfg: Dict[str, Any],
@@ -1123,7 +1143,11 @@ def _process_example(
         base_cfg=base_cfg,
         run_dir=run_dir,
     )
-    short_answer, answer_source, answer_source_detail = resolve_short_answer(structured_answer, raw_answer)
+    short_answer, answer_source, answer_source_detail = resolve_short_answer(
+        structured_answer,
+        raw_answer,
+        question=question,
+    )
     if answer_source == "empty":
         answer_source = "llm_fallback"
         answer_source_detail["fallback_override"] = "empty"
@@ -1143,7 +1167,7 @@ def _process_example(
     llm_retry_used = False
     llm_retry_source = None
     llm_retry_reason = None
-    if reader == "vllm" and llm_retry_on_empty > 0 and answer_source == "llm_fallback":
+    if (reader == "vllm" or reader == "openai") and llm_retry_on_empty > 0 and answer_source == "llm_fallback":
         retry_evidences = evidences
         if llm_retry_max_evidence > 0:
             retry_evidences = evidences[: int(llm_retry_max_evidence)]
@@ -1158,7 +1182,11 @@ def _process_example(
                 base_cfg=base_cfg,
                 run_dir=run_dir,
             )
-            retry_short, retry_source, retry_detail = resolve_short_answer(structured_answer, retry_raw)
+            retry_short, retry_source, retry_detail = resolve_short_answer(
+                structured_answer,
+                retry_raw,
+                question=question,
+            )
             if retry_source == "empty":
                 retry_source = "llm_fallback"
                 retry_detail["fallback_override"] = "empty"
@@ -1799,6 +1827,9 @@ def main() -> None:
 
     tasks = []
     for reader in readers:
+        task_base_cfg = base_cfg
+        if reader == "openai":
+            task_base_cfg = _apply_openai_reranker(base_cfg, openai_runtime_cfg)
         summary_report["runs"].setdefault(reader, {})
         for mode in modes:
             tasks.append({
@@ -1812,7 +1843,7 @@ def main() -> None:
                 "run_dir": str(run_dir) if run_dir else None,
                 "repo_root": repo_root,
                 "timestamp": timestamp,
-                "base_cfg": base_cfg,
+                "base_cfg": task_base_cfg,
                 "openai_runtime_cfg": openai_runtime_cfg,
                 "llm_endpoint": llm_endpoint,
                 "llm_model": llm_model,

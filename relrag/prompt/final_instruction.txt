@@ -1,1 +1,1 @@
-Your output MUST end with exactly one line that starts with FINAL: followed by the answer. Do NOT put the final answer inside <think>.
+Output exactly one line that starts with FINAL: followed by the answer. Do not output any other text before or after that line.

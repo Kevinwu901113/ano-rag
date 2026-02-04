@@ -1284,7 +1284,11 @@ def _process_example(
         base_cfg=base_cfg,
         run_dir=run_dir,
     )
-    short_answer, answer_source, answer_source_detail = resolve_short_answer(None, raw_answer)
+    short_answer, answer_source, answer_source_detail = resolve_short_answer(
+        None,
+        raw_answer,
+        question=question,
+    )
     if answer_source == "empty":
         answer_source = "llm_fallback"
         answer_source_detail["fallback_override"] = "empty"
@@ -1319,7 +1323,11 @@ def _process_example(
                 base_cfg=base_cfg,
                 run_dir=run_dir,
             )
-            retry_short, retry_source, retry_detail = resolve_short_answer(None, retry_raw)
+            retry_short, retry_source, retry_detail = resolve_short_answer(
+                None,
+                retry_raw,
+                question=question,
+            )
             if retry_source == "empty":
                 retry_source = "llm_fallback"
                 retry_detail["fallback_override"] = "empty"

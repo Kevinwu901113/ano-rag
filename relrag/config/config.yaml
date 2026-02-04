@@ -66,17 +66,20 @@ openai:
   max_tokens: 8192
   base_url: https://api.deepseek.com/v1
   timeout_sec: 60.0
-  max_retries: 2
-  retry_backoff_sec: 1.0
-  retry_backoff_max_sec: 20.0
-  system_prompt_name: system_prompt.txt
+  max_retries: 5
+  retry_backoff_sec: 2.0
+  retry_backoff_max_sec: 60.0
+  system_prompt_name: system_prompt_openai.txt
+answerer:
+  stop:
+  - "\n"
 datasets:
   mirage:
     cache_dir: result/mirage/cache
     output_dir: result/mirage
     top_k: 5
     limit: 0
-    workers: 1
+    workers: 8
     doc_chunk_max_chars: 0
     llm_retry_on_empty: 0
     llm_retry_max_evidence: 0
@@ -106,6 +109,14 @@ datasets:
       max_tokens: 128
   musique:
     data: data/musique_full_v1.0_dev_500.jsonl
+    workers: 8
+  hotpotqa:
+    workers: 8
+    openai:
+      temperature: 0.2
+      max_tokens: 512
+  narrativeqa:
+    workers: 8
 llm_profiles:
   extract:
     temperature: 0.0
@@ -131,8 +142,8 @@ rerank:
   max_candidates: 12
   max_candidate_tokens: 256
 answer:
-  max_evidence_items: 8
-  max_evidence_tokens: 256
+  max_evidence_items: 12
+  max_evidence_tokens: 512
 retriever:
   structured:
     enabled: true
@@ -218,8 +229,8 @@ hotpot_entry:
   workers: 1
   debug_dir: result/debug
   debug_max_notes: 50
-  stall_warn_sec: 300.0
-  stall_abort_sec: 900.0
+  stall_warn_sec: 600.0
+  stall_abort_sec: 1800.0
   force_build: false
 musique_entry:
   data: data/musique_full_v1.0_dev_500.jsonl

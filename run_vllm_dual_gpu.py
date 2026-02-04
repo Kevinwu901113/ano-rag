@@ -365,6 +365,8 @@ def main() -> None:
     parser.add_argument("--embed-quantization", default="")
     parser.add_argument("--log-dir", default="logs")
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--llm-only", action="store_true", help="Only start the LLM server")
+    parser.add_argument("--embed-only", action="store_true", help="Only start the embedding server")
     args = parser.parse_args()
 
     if not args.http_proxy:
@@ -377,102 +379,121 @@ def main() -> None:
     if args.pytorch_alloc_conf:
         os.environ["PYTORCH_CUDA_ALLOC_CONF"] = args.pytorch_alloc_conf
 
+    if args.llm_only and args.embed_only:
+        raise RuntimeError("Choose only one of --llm-only or --embed-only")
+    start_llm = not args.embed_only
+    start_embed = not args.llm_only
+
     if not args.dry_run:
         _check_vllm_version((0, 9, 0))
         count = _gpu_count()
-        if count < 2:
-            raise RuntimeError(f"Need at least 2 visible GPUs, found {count}")
-        if args.llm_gpu == args.embed_gpu:
-            raise RuntimeError("LLM and embedding GPU must be different")
-        if args.llm_gpu >= count or args.embed_gpu >= count:
-            raise RuntimeError(f"GPU index out of range (visible GPUs: {count})")
+        if start_llm and start_embed:
+            if count < 2:
+                raise RuntimeError(f"Need at least 2 visible GPUs, found {count}")
+            if args.llm_gpu == args.embed_gpu:
+                raise RuntimeError("LLM and embedding GPU must be different")
+            if args.llm_gpu >= count or args.embed_gpu >= count:
+                raise RuntimeError(f"GPU index out of range (visible GPUs: {count})")
+        else:
+            if count < 1:
+                raise RuntimeError(f"Need at least 1 visible GPU, found {count}")
+            gpu_idx = args.llm_gpu if start_llm else args.embed_gpu
+            if gpu_idx >= count:
+                raise RuntimeError(f"GPU index out of range (visible GPUs: {count})")
 
     cache_dir = Path(args.cache_dir).expanduser()
     cache_dir.mkdir(parents=True, exist_ok=True)
     log_dir = Path(args.log_dir).expanduser()
 
     if not args.dry_run:
-        _preload_model(
-            args.llm_model,
+        if start_llm:
+            _preload_model(
+                args.llm_model,
+                cache_dir=cache_dir,
+                http_proxy=args.http_proxy,
+                https_proxy=args.https_proxy,
+                hf_endpoint=args.hf_endpoint,
+            )
+        if start_embed:
+            _preload_model(
+                args.embed_model,
+                cache_dir=cache_dir,
+                http_proxy=args.http_proxy,
+                https_proxy=args.https_proxy,
+                hf_endpoint=args.hf_endpoint,
+            )
+
+    llm_proc = None
+    embed_proc = None
+    if start_llm:
+        llm_quantization, llm_quant_reason = _resolve_quantization(
+            args.llm_model, args.llm_quantization or None, cache_dir
+        )
+        llm_proc = _spawn_server(
+            name="qwen3-30b-a3b",
+            model_id=args.llm_model,
+            host=args.host,
+            port=args.llm_port,
+            gpu_id=args.llm_gpu,
             cache_dir=cache_dir,
             http_proxy=args.http_proxy,
             https_proxy=args.https_proxy,
             hf_endpoint=args.hf_endpoint,
+            gpu_mem_util=args.llm_gpu_mem,
+            trust_remote_code=args.trust_remote_code,
+            task=None,
+            quantization=llm_quantization,
+            quantization_reason=llm_quant_reason,
+            log_dir=log_dir,
+            label="llm",
+            max_model_len=args.llm_max_model_len,
+            max_num_seqs=args.llm_max_num_seqs,
+            max_num_batched_tokens=args.llm_max_num_batched_tokens,
+            swap_space=args.llm_swap_space,
+            cpu_offload_gb=args.llm_cpu_offload_gb,
+            kv_cache_dtype=args.llm_kv_cache_dtype or None,
+            pytorch_alloc_conf=args.pytorch_alloc_conf or None,
+            dry_run=args.dry_run,
         )
-        _preload_model(
-            args.embed_model,
+    if start_embed:
+        embed_proc = _spawn_server(
+            name="qwen3-embedding",
+            model_id=args.embed_model,
+            host=args.host,
+            port=args.embed_port,
+            gpu_id=args.embed_gpu,
             cache_dir=cache_dir,
             http_proxy=args.http_proxy,
             https_proxy=args.https_proxy,
             hf_endpoint=args.hf_endpoint,
+            gpu_mem_util=args.embed_gpu_mem,
+            trust_remote_code=args.trust_remote_code,
+            task=args.embed_task,
+            quantization=args.embed_quantization or None,
+            quantization_reason="explicit" if args.embed_quantization else "none",
+            log_dir=log_dir,
+            label="embedding",
+            max_model_len=args.embed_max_model_len,
+            max_num_seqs=args.embed_max_num_seqs,
+            max_num_batched_tokens=args.embed_max_num_batched_tokens,
+            swap_space=None,
+            cpu_offload_gb=None,
+            kv_cache_dtype=args.embed_kv_cache_dtype or None,
+            pytorch_alloc_conf=args.pytorch_alloc_conf or None,
+            dry_run=args.dry_run,
         )
-
-    llm_quantization, llm_quant_reason = _resolve_quantization(
-        args.llm_model, args.llm_quantization or None, cache_dir
-    )
-
-    llm_proc = _spawn_server(
-        name="qwen3-30b-a3b",
-        model_id=args.llm_model,
-        host=args.host,
-        port=args.llm_port,
-        gpu_id=args.llm_gpu,
-        cache_dir=cache_dir,
-        http_proxy=args.http_proxy,
-        https_proxy=args.https_proxy,
-        hf_endpoint=args.hf_endpoint,
-        gpu_mem_util=args.llm_gpu_mem,
-        trust_remote_code=args.trust_remote_code,
-        task=None,
-        quantization=llm_quantization,
-        quantization_reason=llm_quant_reason,
-        log_dir=log_dir,
-        label="llm",
-        max_model_len=args.llm_max_model_len,
-        max_num_seqs=args.llm_max_num_seqs,
-        max_num_batched_tokens=args.llm_max_num_batched_tokens,
-        swap_space=args.llm_swap_space,
-        cpu_offload_gb=args.llm_cpu_offload_gb,
-        kv_cache_dtype=args.llm_kv_cache_dtype or None,
-        pytorch_alloc_conf=args.pytorch_alloc_conf or None,
-        dry_run=args.dry_run,
-    )
-    embed_proc = _spawn_server(
-        name="qwen3-embedding",
-        model_id=args.embed_model,
-        host=args.host,
-        port=args.embed_port,
-        gpu_id=args.embed_gpu,
-        cache_dir=cache_dir,
-        http_proxy=args.http_proxy,
-        https_proxy=args.https_proxy,
-        hf_endpoint=args.hf_endpoint,
-        gpu_mem_util=args.embed_gpu_mem,
-        trust_remote_code=args.trust_remote_code,
-        task=args.embed_task,
-        quantization=args.embed_quantization or None,
-        quantization_reason="explicit" if args.embed_quantization else "none",
-        log_dir=log_dir,
-        label="embedding",
-        max_model_len=args.embed_max_model_len,
-        max_num_seqs=args.embed_max_num_seqs,
-        max_num_batched_tokens=args.embed_max_num_batched_tokens,
-        swap_space=None,
-        cpu_offload_gb=None,
-        kv_cache_dtype=args.embed_kv_cache_dtype or None,
-        pytorch_alloc_conf=args.pytorch_alloc_conf or None,
-        dry_run=args.dry_run,
-    )
 
     if args.dry_run:
         return
 
+    procs = [proc for proc in (llm_proc, embed_proc) if proc is not None]
+
     def _shutdown(*_args) -> None:
-        for proc in (llm_proc, embed_proc):
+        for proc in procs:
             if proc.poll() is None:
                 proc.terminate()
         time.sleep(1.0)
-        for proc in (llm_proc, embed_proc):
+        for proc in procs:
             if proc.poll() is None:
                 proc.kill()
 
@@ -482,7 +503,7 @@ def main() -> None:
     try:
         while True:
             time.sleep(2.0)
-            if llm_proc.poll() is not None or embed_proc.poll() is not None:
+            if any(proc.poll() is not None for proc in procs):
                 raise RuntimeError("One of the vLLM processes exited")
     finally:
         _shutdown()

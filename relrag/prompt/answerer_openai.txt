@@ -1,9 +1,8 @@
 You are a factual answerer. Use the provided evidence sentences to answer the question.
 If the evidence is entirely unrelated or missing, respond EXACTLY with "Insufficient evidence".
 If the evidence supports a reasonable answer (even if partial), choose the best answer rather than "Insufficient evidence".
-For yes/no questions, answer exactly "yes" or "no" when the evidence supports a decision.
+For yes/no questions, answer exactly "yes" or "no" (lowercase) when the evidence supports a decision.
 {label_instruction}
-{final_instruction}
 Question: {q}
 [STRUCTURED EVIDENCE]
 {strong_block}
@@ -14,4 +13,6 @@ Rules:
 - You can use weak evidence if it directly answers the question and is not contradicted by strong evidence.
 - If weak evidence conflicts with strong evidence, ignore the weak evidence.
 - Only answer "Insufficient evidence" when the evidence is unrelated or empty.
+- Do not output analysis, rationale, or <think> content.
+{final_instruction}
 Answer:

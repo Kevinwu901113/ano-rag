@@ -8,12 +8,14 @@ from loguru import logger
 from relrag.prompt import render_prompt
 from relrag.utils.text_builders import build_note_text_for_rank
 from relrag.utils.llm_client import LLMChatClient
+from relrag.utils.openai_client import chat_completion as openai_chat_completion
 from relrag.utils.context_budget import (
     apply_load_shed,
     budget_rerank_prompt,
     log_budget_event,
 )
 from relrag.utils.llm_errors import ContextLengthError
+import os
 
 
 class LLMReranker:
@@ -33,21 +35,39 @@ class LLMReranker:
         self.run_dir = run_dir or runtime_cfg.get("run_dir") or self.base_cfg.get("run_dir")
         self.enabled = bool(self.cfg.get("enabled", False))
         self.type = self.cfg.get("type", "llm")
-        self.llm_cfg = self.cfg.get("llm") or lm_cfg or {}
+        self.provider = str(self.cfg.get("provider") or self.cfg.get("backend") or "vllm").strip().lower()
+        self.openai_cfg = self.cfg.get("openai") if isinstance(self.cfg.get("openai"), dict) else {}
+        if self.provider == "openai":
+            self.llm_cfg = self.openai_cfg
+        else:
+            self.llm_cfg = self.cfg.get("llm") or lm_cfg or {}
         self.endpoint = self.llm_cfg.get("endpoint")
         self.model = self.llm_cfg.get("model")
         self.batch = int(self.llm_cfg.get("batch", 8))
         self.timeout = int(self.llm_cfg.get("timeout_s", 10))
         self.client: Optional[LLMChatClient] = None
-        if self.type != "llm" or not self.endpoint or not self.model:
+        if self.type != "llm":
             self.enabled = False
+        elif self.provider == "openai":
+            if not self.openai_cfg.get("model"):
+                self.enabled = False
         else:
-            self.client = LLMChatClient(
-                endpoint=self.endpoint,
-                model=self.model,
-                llm_profile="extract",
-                timeout=self.timeout,
-            )
+            if not self.endpoint or not self.model:
+                self.enabled = False
+            else:
+                self.client = LLMChatClient(
+                    endpoint=self.endpoint,
+                    model=self.model,
+                    llm_profile="extract",
+                    timeout=self.timeout,
+                )
+
+    def _resolve_openai_key(self) -> str:
+        key = self.openai_cfg.get("api_key")
+        if key:
+            return str(key)
+        env_name = self.openai_cfg.get("api_key_env", "OPENAI_API_KEY")
+        return os.environ.get(str(env_name), "")
 
     def score(self, question: str, candidates: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
         if not self.enabled or not candidates:
@@ -94,15 +114,32 @@ class LLMReranker:
                     extra={"chunk_size": len(chunk)},
                 )
                 try:
-                    if not self.client:
-                        raise RuntimeError("LLM reranker client not initialized")
-                    response = self.client.chat(
-                        budgeted.messages,
-                        temperature=0.0,
-                        max_tokens=budgeted.report.effective_max_tokens,
-                        llm_profile="extract",
-                    )
-                    content = response.content
+                    if self.provider == "openai":
+                        api_key = self._resolve_openai_key()
+                        if not api_key:
+                            raise RuntimeError("OpenAI API key is required for reranker.")
+                        content = openai_chat_completion(
+                            budgeted.messages,
+                            model=self.openai_cfg.get("model"),
+                            api_key=api_key,
+                            base_url=self.openai_cfg.get("base_url"),
+                            temperature=0.0,
+                            max_tokens=budgeted.report.effective_max_tokens,
+                            timeout_sec=self.openai_cfg.get("timeout_sec", 60.0),
+                            max_retries=self.openai_cfg.get("max_retries", 2),
+                            retry_backoff_sec=self.openai_cfg.get("retry_backoff_sec", 1.0),
+                            retry_backoff_max_sec=self.openai_cfg.get("retry_backoff_max_sec", 20.0),
+                        )
+                    else:
+                        if not self.client:
+                            raise RuntimeError("LLM reranker client not initialized")
+                        response = self.client.chat(
+                            budgeted.messages,
+                            temperature=0.0,
+                            max_tokens=budgeted.report.effective_max_tokens,
+                            llm_profile="extract",
+                        )
+                        content = response.content
                     scores = self._parse_scores(content, len(used_items))
                     log_budget_event(
                         self.run_dir,
