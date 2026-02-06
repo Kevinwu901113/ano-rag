@@ -23,14 +23,18 @@ This protocol freezes the experimental setup for UltraDomain Mix + Legal replica
 
 ## 3) Chunking (Frozen)
 - Tokenizer: **DeepSeek tokenizer** (`deepseek-ai/DeepSeek-V3.2`), `add_special_tokens=False`.
-- Chunking:
-  - `chunk_size = 1200 tokens`
-  - `chunk_overlap = 100 tokens` (step = 1100)
-  - **No partial truncation**: only full 1200-token chunks are kept. The tail shorter than 1200 is dropped.
+- Sentence-aware chunking (sentence as atomic unit):
+  - Split text into sentences using **`TextUtils.split_with_spans`** (rule-based).
+  - Compute per-sentence token length using DeepSeek tokenizer.
+  - Pack sentences in order to target `chunk_size = 1200 tokens`.
+- Overlap:
+  - Target `overlap_tokens ≈ 100` using sentence backtracking: after emitting a chunk [i, j), backtrack whole sentences from j-1 until overlap tokens ≥ 100, then start next chunk at that sentence.
+- Tail handling:
+  - **Keep the final tail chunk** even if <1200 tokens (do not drop remaining sentences).
 - Chunk ID: `"{doc_id}::t{start}_{end}"` where `start/end` are token offsets.
 - Validation:
-  - Max chunk length <= 1200 tokens.
-  - Fewer than 1% chunks with token_count < 200 (expected near 0 due to full-size policy).
+  - Max chunk length <= 1200 tokens (except rare single-sentence overflow).
+  - Fewer than 1% chunks with token_count < 200 (tail chunks may contribute).
   - `chunk_id` is stable and idempotent across runs.
 
 ## 4) Question Generation (Frozen, 125 per domain)

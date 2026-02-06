@@ -3,7 +3,8 @@ from __future__ import annotations
 import argparse
 import json
 import re
-from typing import Any, Dict, List
+import time
+from typing import Any, Dict, List, Tuple
 
 from relrag.utils.openai_client import chat_completion
 from scripts.ultradomain.common import (
@@ -85,6 +86,32 @@ def _call_judge(messages: List[Dict[str, str]], *, model: str, base_url: str, ap
         max_tokens=1024,
         extra_body={"top_p": 1.0},
     )
+
+
+def _call_json_object(
+    messages: List[Dict[str, str]],
+    *,
+    model: str,
+    base_url: str,
+    api_key: str,
+    retries: int = 2,
+    backoff_sec: float = 1.0,
+) -> Tuple[Dict[str, Any] | None, str | None, str | None]:
+    last_err: str | None = None
+    last_content: str | None = None
+    for attempt in range(retries + 1):
+        try:
+            content = _call_judge(messages, model=model, base_url=base_url, api_key=api_key)
+            last_content = content
+            obj = extract_json_object(content)
+            return obj, content, None
+        except Exception as exc:  # noqa: PERF203
+            last_err = str(exc)
+            if attempt < retries:
+                time.sleep(backoff_sec * (2 ** attempt))
+                continue
+            break
+    return None, last_content, last_err
 
 
 def _compute_win_rates(rows: List[Dict[str, Any]], system_left: str) -> Dict[str, Any]:
@@ -177,7 +204,7 @@ def main() -> None:
                     answer_b = b.get("answer_final") or b.get("answer_raw")
 
                 prompt = USER_PROMPT_TEMPLATE.format(question=question, answer_a=answer_a, answer_b=answer_b)
-                content = _call_judge(
+                obj, content, err = _call_json_object(
                     [
                         {"role": "system", "content": SYSTEM_PROMPT},
                         {"role": "user", "content": prompt},
@@ -186,16 +213,16 @@ def main() -> None:
                     base_url=args.base_url,
                     api_key=api_key,
                 )
-                obj = extract_json_object(content)
                 rows.append(
                     {
                         "question_id": qid,
                         "domain": domain,
                         "order": order,
-                        "winner": obj.get("winner"),
-                        "reason": obj.get("reason"),
+                        "winner": obj.get("winner") if obj else None,
+                        "reason": obj.get("reason") if obj else None,
                         "order_flag": "swap" if flip else "normal",
                         "raw_output": content,
+                        "error": err,
                         "generated_at": now_iso(),
                     }
                 )

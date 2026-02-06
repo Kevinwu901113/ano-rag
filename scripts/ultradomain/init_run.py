@@ -18,12 +18,19 @@ from scripts.ultradomain.common import (
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Initialize UltraDomain run metadata.")
-    parser.add_argument("--dataset_id", default="TBD_ULTRADOMAIN_DATASET_ID")
+    parser.add_argument(
+        "--dataset_id",
+        default="TBD_ULTRADOMAIN_DATASET_ID",
+        help="HuggingFace dataset id for UltraDomain (must be set explicitly).",
+    )
     parser.add_argument("--split", default="train")
     parser.add_argument("--base_url", default="https://api.deepseek.com/v1")
     parser.add_argument("--model", default="deepseek-chat")
     parser.add_argument("--protocol_version", default="v1")
     args = parser.parse_args()
+
+    if str(args.dataset_id).startswith("TBD_") or "TBD" in str(args.dataset_id):
+        raise SystemExit("Please provide a real --dataset_id (placeholder TBD_* is not allowed).")
 
     ensure_dirs()
     cfg = config_loader.load_config()

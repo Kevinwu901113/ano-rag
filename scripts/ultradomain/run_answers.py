@@ -64,7 +64,10 @@ def _build_bm25_client(domain: str, base_cfg: Dict[str, Any]) -> BM25Client:
     cfg["enabled"] = True
     cfg["store_path"] = str(INDEX_DIR / f"chunk_bm25_{domain}")
     cfg["topn"] = 40
-    return BM25Client(cfg)
+    client = BM25Client(cfg)
+    if not getattr(client, "enabled", False):
+        raise RuntimeError(f"BM25 disabled for domain={domain}. Check rank_bm25 install and notes.jsonl.")
+    return client
 
 
 def _build_dense_client(domain: str, base_cfg: Dict[str, Any]) -> EmbeddingClient:
@@ -73,21 +76,30 @@ def _build_dense_client(domain: str, base_cfg: Dict[str, Any]) -> EmbeddingClien
     cfg["offline_index_path"] = str(INDEX_DIR / f"chunk_faiss_{domain}" / "notes.faiss")
     cfg["meta_path"] = str(INDEX_DIR / f"chunk_faiss_{domain}" / "notes.meta.parquet")
     cfg["topn"] = 40
-    return EmbeddingClient(cfg)
+    client = EmbeddingClient(cfg)
+    if not getattr(client, "enabled", False):
+        raise RuntimeError(f"Dense embedding disabled for domain={domain}. Check faiss/pandas/numpy and index files.")
+    return client
 
 
 def _retrieve_chunk_system(
     question: str,
     system: str,
     chunk_map: Dict[str, Dict[str, Any]],
-    bm25: BM25Client,
-    dense: EmbeddingClient,
+    bm25: BM25Client | None,
+    dense: EmbeddingClient | None,
 ) -> List[Dict[str, Any]]:
     if system == "BM25-only":
+        if bm25 is None:
+            raise RuntimeError("BM25 client missing.")
         results = bm25.search(question, topn=40)
     elif system == "Dense-only":
+        if dense is None:
+            raise RuntimeError("Dense client missing.")
         results = dense.search(question, topn=40)
     elif system == "Hybrid-only":
+        if bm25 is None or dense is None:
+            raise RuntimeError("Hybrid requires both BM25 and Dense clients.")
         bm25_results = bm25.search(question, topn=40)
         dense_results = dense.search(question, topn=40)
         fused = fuse_rankings(
@@ -200,8 +212,10 @@ def main() -> None:
             continue
         questions = _load_questions(domain)
         chunk_map = _load_chunk_map(domain)
-        bm25 = _build_bm25_client(domain, base_cfg)
-        dense = _build_dense_client(domain, base_cfg)
+        need_bm25 = any(sys_name in {"BM25-only", "Hybrid-only"} for sys_name in systems)
+        need_dense = any(sys_name in {"Dense-only", "Hybrid-only"} for sys_name in systems)
+        bm25 = _build_bm25_client(domain, base_cfg) if need_bm25 else None
+        dense = _build_dense_client(domain, base_cfg) if need_dense else None
 
         relrag_indexes = None
         relrag_notes = None
@@ -242,6 +256,10 @@ def main() -> None:
                     )
                     evidences = result.get("evidence") or []
                 else:
+                    if system in {"BM25-only", "Hybrid-only"} and bm25 is None:
+                        raise RuntimeError("BM25 client not initialized.")
+                    if system in {"Dense-only", "Hybrid-only"} and dense is None:
+                        raise RuntimeError("Dense client not initialized.")
                     evidences = _retrieve_chunk_system(question, system, chunk_map, bm25, dense)
 
                 selected, used_tokens = assemble_budgeted_items(evidences, args.budget_tokens)

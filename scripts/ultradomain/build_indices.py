@@ -3,10 +3,12 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 from typing import Any, Dict, List
+import json
 
 from relrag.api import build_index
 from relrag.config.config_loader import config as config_loader
 from relrag.indexer.embedding_index import EmbeddingIndexBuilder
+from relrag.retriever.bm25_client import BM25Client
 from scripts.ultradomain.common import (
     CHUNKS_DIR,
     DOMAIN_LABELS,
@@ -46,6 +48,20 @@ def _write_chunk_notes(domain: str, out_dir: Path) -> Path:
         )
     write_jsonl(notes_path, notes)
     return notes_path
+
+
+def _build_chunk_bm25_stats(domain: str, base_cfg: Dict[str, Any]) -> Dict[str, Any]:
+    cfg = dict((base_cfg.get("retriever") or {}).get("bm25") or {})
+    cfg["enabled"] = True
+    cfg["store_path"] = str(INDEX_DIR / f"chunk_bm25_{domain}")
+    cfg["topn"] = 40
+    client = BM25Client(cfg)
+    return {
+        "enabled": bool(getattr(client, "enabled", False)),
+        "backend": cfg.get("backend"),
+        "doc_count": len(getattr(client, "_doc_ids", []) or []),
+        "store_path": cfg["store_path"],
+    }
 
 
 def _build_chunk_faiss(notes_path: Path, index_dir: Path, base_cfg: Dict[str, Any], embed_overrides: Dict[str, Any]) -> None:
@@ -143,6 +159,9 @@ def main() -> None:
             faiss_dir.mkdir(parents=True, exist_ok=True)
             bm25_notes = _write_chunk_notes(domain, bm25_dir)
             faiss_notes = _write_chunk_notes(domain, faiss_dir)
+            bm25_stats = _build_chunk_bm25_stats(domain, base_cfg)
+            with (bm25_dir / "bm25_status.json").open("w", encoding="utf-8") as handle:
+                handle.write(json.dumps(bm25_stats, ensure_ascii=False, indent=2))
             embed_cfg = _prepare_embed_cfg(base_cfg, faiss_dir, embed_overrides)
             _build_chunk_faiss(faiss_notes, faiss_dir, base_cfg, embed_cfg)
             print(f"Chunk indices ready for {domain}: {bm25_notes} / {faiss_dir}")

@@ -49,12 +49,19 @@ def _doc_record(row: Dict[str, Any], domain: str, fallback_id: str) -> Dict[str,
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Prepare UltraDomain docs for Mix/Legal.")
-    parser.add_argument("--dataset_id", default="TBD_ULTRADOMAIN_DATASET_ID")
+    parser.add_argument(
+        "--dataset_id",
+        default="TBD_ULTRADOMAIN_DATASET_ID",
+        help="HuggingFace dataset id for UltraDomain (must be set explicitly).",
+    )
     parser.add_argument("--split", default="train")
     parser.add_argument("--config_name", default=None)
     parser.add_argument("--cache_dir", default=None)
     parser.add_argument("--limit", type=int, default=0, help="Optional per-domain limit")
     args = parser.parse_args()
+
+    if str(args.dataset_id).startswith("TBD_") or "TBD" in str(args.dataset_id):
+        raise SystemExit("Please provide a real --dataset_id (placeholder TBD_* is not allowed).")
 
     ensure_dirs()
     dataset = _load_dataset(args.dataset_id, args.split, args.cache_dir, args.config_name)

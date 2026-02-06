@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import time
 from typing import Any, Dict, List, Tuple
 
 from relrag.utils.openai_client import chat_completion
@@ -94,6 +95,43 @@ def _call_llm(messages: List[Dict[str, str]], *, model: str, base_url: str, api_
     )
 
 
+def _call_json_object(
+    messages: List[Dict[str, str]],
+    *,
+    model: str,
+    base_url: str,
+    api_key: str,
+    temperature: float,
+    top_p: float,
+    max_tokens: int,
+    retries: int = 2,
+    backoff_sec: float = 1.0,
+) -> Tuple[Dict[str, Any] | None, str | None, str | None]:
+    last_err: str | None = None
+    last_content: str | None = None
+    for attempt in range(retries + 1):
+        try:
+            content = _call_llm(
+                messages,
+                model=model,
+                base_url=base_url,
+                api_key=api_key,
+                temperature=temperature,
+                top_p=top_p,
+                max_tokens=max_tokens,
+            )
+            last_content = content
+            obj = extract_json_object(content)
+            return obj, content, None
+        except Exception as exc:  # noqa: PERF203
+            last_err = str(exc)
+            if attempt < retries:
+                time.sleep(backoff_sec * (2 ** attempt))
+                continue
+            break
+    return None, last_content, last_err
+
+
 def _validate_structure(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
     users = payload.get("users")
     if not isinstance(users, list) or len(users) != 5:
@@ -146,12 +184,13 @@ def _validate_questions(
     api_key: str,
 ) -> Tuple[List[str], float]:
     labels: List[str] = []
+    errors: List[str] = []
     batch_size = 25
     for start in range(0, len(questions), batch_size):
         batch = questions[start : start + batch_size]
         block = "\n".join([f"{i+1}. {q['question']}" for i, q in enumerate(batch)])
         user_prompt = VALIDATOR_USER_TEMPLATE.format(dataset_desc=dataset_desc, questions_block=block)
-        content = _call_llm(
+        obj, content, err = _call_json_object(
             [
                 {"role": "system", "content": VALIDATOR_SYSTEM},
                 {"role": "user", "content": user_prompt},
@@ -163,10 +202,15 @@ def _validate_questions(
             top_p=1.0,
             max_tokens=1024,
         )
-        obj = extract_json_object(content)
+        if obj is None:
+            errors.append(err or "validator_parse_failed")
+            labels.extend(["unknown"] * len(batch))
+            continue
         batch_labels = obj.get("labels") if isinstance(obj, dict) else None
         if not isinstance(batch_labels, list) or len(batch_labels) != len(batch):
-            raise ValueError("validator returned invalid labels")
+            errors.append("validator_invalid_labels")
+            labels.extend(["unknown"] * len(batch))
+            continue
         labels.extend([str(label).strip().lower() for label in batch_labels])
     pass_count = sum(1 for label in labels if label == "multi-doc")
     pass_rate = pass_count / max(1, len(labels))
@@ -185,7 +229,7 @@ def _rewrite_failed(
         return []
     block = "\n".join([f"{i+1}. {q['question']}" for i, q in enumerate(failed)])
     user_prompt = REWRITE_USER_TEMPLATE.format(dataset_desc=dataset_desc, questions_block=block)
-    content = _call_llm(
+    obj, content, err = _call_json_object(
         [
             {"role": "system", "content": REWRITE_SYSTEM},
             {"role": "user", "content": user_prompt},
@@ -197,7 +241,8 @@ def _rewrite_failed(
         top_p=1.0,
         max_tokens=2048,
     )
-    obj = extract_json_object(content)
+    if obj is None:
+        return []
     rewritten = obj.get("questions") if isinstance(obj, dict) else None
     if not isinstance(rewritten, list) or len(rewritten) != len(failed):
         raise ValueError("rewrite output invalid")
@@ -232,7 +277,7 @@ def main() -> None:
         dataset_desc = _build_dataset_desc(domain)
         user_prompt = USER_PROMPT_TEMPLATE.format(dataset_desc=dataset_desc, summary="")
         prompt_hash = sha256_text(SYSTEM_PROMPT + "\n" + user_prompt)
-        content = _call_llm(
+        payload, content, err = _call_json_object(
             [
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user", "content": user_prompt},
@@ -244,7 +289,30 @@ def main() -> None:
             top_p=1.0,
             max_tokens=4096,
         )
-        payload = extract_json_object(content)
+        if payload is None:
+            out_path = QUESTIONS_DIR / f"questions_{domain}.json"
+            error_payload = {
+                "domain": domain,
+                "generated_at": now_iso(),
+                "prompt_hash": prompt_hash,
+                "error": {
+                    "stage": "generate_questions",
+                    "message": err or "json_parse_failed",
+                    "raw_output": content,
+                },
+                "users": [],
+                "questions": [],
+                "quality_gate": {"pass_rate": 0.0, "regen_attempted": False},
+            }
+            write_json(out_path, error_payload)
+            manifest["domains"][domain] = {
+                "questions_path": str(out_path),
+                "prompt_hash": prompt_hash,
+                "pass_rate": 0.0,
+                "regen_attempted": False,
+                "error": err or "json_parse_failed",
+            }
+            continue
         users = _validate_structure(payload)
         flat = _flatten_questions(domain, users)
         labels, pass_rate = _validate_questions(flat, dataset_desc, model=args.model, base_url=args.base_url, api_key=api_key)

@@ -1,0 +1,1794 @@
+From 3e513646275ebc125603fd4f49bde2af767ff3e7 Mon Sep 17 00:00:00 2001
+From: EiAx <919231551@qq.com>
+Date: Wed, 4 Feb 2026 07:59:25 +0000
+Subject: [PATCH] =?UTF-8?q?feat(ultradomain):=20=E6=96=B0=E5=A2=9E?=
+ =?UTF-8?q?=E5=AE=9E=E9=AA=8C=E8=84=9A=E6=9C=AC=E5=A5=97=E4=BB=B6=E4=BB=A5?=
+ =?UTF-8?q?=E6=94=AF=E6=8C=81=20UltraDomain=20Mix/Legal=20=E5=8D=8F?=
+ =?UTF-8?q?=E8=AE=AE?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+添加完整的脚本集来初始化、准备文档、构建分块和索引、生成问题、运行答案并进行两两评判。
+此实现严格遵循冻结的实验协议 v1，确保 Mix 和 Legal 域的可复现性。
+---
+ experiment_protocol.md                    |  99 +++++++
+ scripts/ultradomain/__init__.py           |   1 +
+ scripts/ultradomain/build_chunks.py       | 171 ++++++++++++
+ scripts/ultradomain/build_indices.py      | 156 +++++++++++
+ scripts/ultradomain/common.py             | 248 ++++++++++++++++++
+ scripts/ultradomain/generate_questions.py | 288 ++++++++++++++++++++
+ scripts/ultradomain/init_run.py           |  80 ++++++
+ scripts/ultradomain/judge_pairwise.py     | 229 ++++++++++++++++
+ scripts/ultradomain/prepare_docs.py       | 117 +++++++++
+ scripts/ultradomain/run_answers.py        | 306 ++++++++++++++++++++++
+ 10 files changed, 1695 insertions(+)
+ create mode 100644 experiment_protocol.md
+ create mode 100644 scripts/ultradomain/__init__.py
+ create mode 100644 scripts/ultradomain/build_chunks.py
+ create mode 100644 scripts/ultradomain/build_indices.py
+ create mode 100644 scripts/ultradomain/common.py
+ create mode 100644 scripts/ultradomain/generate_questions.py
+ create mode 100644 scripts/ultradomain/init_run.py
+ create mode 100644 scripts/ultradomain/judge_pairwise.py
+ create mode 100644 scripts/ultradomain/prepare_docs.py
+ create mode 100644 scripts/ultradomain/run_answers.py
+
+diff --git a/experiment_protocol.md b/experiment_protocol.md
+new file mode 100644
+index 0000000..cce32d0
+--- /dev/null
++++ b/experiment_protocol.md
+@@ -0,0 +1,99 @@
++# UltraDomain LightRAG-Style Experiment Protocol (v1)
++
++This protocol freezes the experimental setup for UltraDomain Mix + Legal replication. Any change requires a new protocol version file (e.g. `experiment_protocol_v2.md`) and updating `result/ultradomain/lightrag_protocol_v1_mix_legal/run_meta/protocol_version`.
++
++## 0) Scope
++- Domains: **Mix** and **Legal** only.
++- Output root: `result/ultradomain/lightrag_protocol_v1_mix_legal/`
++- All runs must follow this protocol exactly.
++
++## 1) Dataset Selection (MVP)
++- Selected domains: **Mix + Legal**.
++- Rationale: Mix is smaller and Legal is larger, creating a scale gradient. This makes it easy to observe whether structured retrieval benefits persist as corpus size increases. Legal also tends to be more structurally dense, providing a second axis of difference beyond size.
++
++## 2) UltraDomain Data Schema (HF)
++- Use HuggingFace UltraDomain dataset.
++- Fields used:
++  - `label` as domain (Mix/Legal).
++  - `context_id` as `doc_id`.
++  - `context` as document text.
++  - `meta.title` as document title (if present).
++- Document record stored as:
++  - `doc_id`, `title`, `text`, `dataset`, `meta`.
++
++## 3) Chunking (Frozen)
++- Tokenizer: **DeepSeek tokenizer** (`deepseek-ai/DeepSeek-V3.2`), `add_special_tokens=False`.
++- Chunking:
++  - `chunk_size = 1200 tokens`
++  - `chunk_overlap = 100 tokens` (step = 1100)
++  - **No partial truncation**: only full 1200-token chunks are kept. The tail shorter than 1200 is dropped.
++- Chunk ID: `"{doc_id}::t{start}_{end}"` where `start/end` are token offsets.
++- Validation:
++  - Max chunk length <= 1200 tokens.
++  - Fewer than 1% chunks with token_count < 200 (expected near 0 due to full-size policy).
++  - `chunk_id` is stable and idempotent across runs.
++
++## 4) Question Generation (Frozen, 125 per domain)
++- Target: **125 questions per domain** via the LightRAG Persona→Task→Question procedure.
++- Process:
++  - Generate 5 users.
++  - For each user, generate 5 tasks.
++  - For each (user, task), generate 5 questions.
++- Prompt (JSON output):
++  - System: 你是一个评测集生成器。你的任务是为给定语料库生成高层次“sensemaking”问题集合。
++  - User: 给你一段“数据集描述 + 语料库摘要（可选）”。请生成：
++    - 五个 RAG 用户（每个含：name/背景/专长/动机/提问风格）
++    - 每个用户五个任务（每个任务含：目标/约束/关心点）
++    - 每个（用户，任务）生成五个问题：必须需要跨文档/跨段落综合，避免单段 factoid；问题应可用语料回答但需要全局理解。
++    - 输出严格 JSON：users[5]{profile,tasks[5]{task_desc,questions[5]}}。
++- Generation params (frozen): `temperature=0.7`, `top_p=1.0`, `max_output_tokens=4096`.
++- Quality gate:
++  - LLM validator labels each question as `multi-doc` or `single-factoid`.
++  - If pass rate < 95%, regenerate failed questions once.
++
++## 5) Answer LLM (Frozen)
++- Provider: DeepSeek API (OpenAI-compatible).
++- Base URL: `https://api.deepseek.com/v1`.
++- Model: `deepseek-chat`.
++- Answer params: `temperature=0.2`, `top_p=1.0`, `max_output_tokens=1024`.
++- Context length: 128K.
++- Same model for **all systems**.
++
++## 6) Judge LLM (Frozen)
++- Model: `deepseek-chat` (same as answer LLM).
++- Base URL: `https://api.deepseek.com/v1`.
++- Params: `temperature=0`, `top_p=1.0`.
++- Dimensions: Comprehensiveness, Diversity, Empowerment, Overall.
++- A/B bias control: alternate order by question_id parity.
++- Tie handling: **0.5** to each side.
++
++## 7) Systems (MVP 4)
++- RelRAG-full: structured + hybrid, **reranker enabled**.
++- BM25-only: chunk BM25 only, reranker disabled.
++- Dense-only: chunk FAISS only, reranker disabled.
++- Hybrid-only: chunk BM25 + dense fusion, reranker disabled.
++
++## 8) Retrieval Budget Alignment (Frozen)
++- Prefilter: top-k=40 per retrieval channel.
++- Final context selection: **12,000 tokens** (DeepSeek tokenizer), concatenated in rank order, no chunk splitting.
++- Token budget applies to retrieved evidence only (system prompt not counted).
++
++## 9) Outputs (Frozen)
++All outputs live under:
++`result/ultradomain/lightrag_protocol_v1_mix_legal/`
++
++Required files:
++- `chunks/chunks_mix.jsonl`, `chunks/chunks_legal.jsonl`
++- `chunks/chunk_stats.json`
++- `questions/questions_mix.json`, `questions/questions_legal.json`
++- `questions/questions_manifest.json`
++- `answers/{dataset}/{system}.jsonl`
++- `judge/{dataset}/{pair}.jsonl`
++- `summary/summary_winrate.md`
++- `run_meta/system_configs.json`, `run_meta/run_config.json`
++
++## 10) Acceptance Criteria
++- This protocol is frozen for v1. Any modification requires a new protocol file and version update.
++- Chunking and question generation must pass their validation rules.
++- All questions must have answers for all 4 systems.
++- Judge outputs must be valid JSON lines with all required fields.
+diff --git a/scripts/ultradomain/__init__.py b/scripts/ultradomain/__init__.py
+new file mode 100644
+index 0000000..67c6c61
+--- /dev/null
++++ b/scripts/ultradomain/__init__.py
+@@ -0,0 +1 @@
++"""UltraDomain experiment scripts."""
+diff --git a/scripts/ultradomain/build_chunks.py b/scripts/ultradomain/build_chunks.py
+new file mode 100644
+index 0000000..04a4626
+--- /dev/null
++++ b/scripts/ultradomain/build_chunks.py
+@@ -0,0 +1,171 @@
++from __future__ import annotations
++
++import argparse
++import math
++from pathlib import Path
++from typing import Any, Dict, List
++
++from scripts.ultradomain.common import (
++    CHUNKS_DIR,
++    DOMAIN_LABELS,
++    RUN_META_DIR,
++    assemble_budgeted_items,
++    count_tokens,
++    decode_tokens,
++    encode_with_offsets,
++    ensure_dirs,
++    normalize_domain,
++    now_iso,
++    read_json,
++    read_jsonl,
++    write_json,
++    write_jsonl,
++)
++
++DEFAULT_BINS = [0, 200, 400, 600, 800, 1000, 1200]
++
++
++def _iter_docs(domain: str) -> List[Dict[str, Any]]:
++    docs_path = RUN_META_DIR / f"docs_{domain}.jsonl"
++    docs = list(read_jsonl(docs_path))
++    docs.sort(key=lambda item: str(item.get("doc_id")))
++    return docs
++
++
++def _slice_text_by_offsets(text: str, offsets: List[tuple[int, int]], start: int, end: int) -> str:
++    if not offsets or start >= len(offsets) or end - 1 >= len(offsets):
++        return ""
++    start_char = offsets[start][0]
++    end_char = offsets[end - 1][1]
++    return text[start_char:end_char]
++
++
++def _build_chunks_for_doc(doc: Dict[str, Any], chunk_size: int, overlap: int) -> List[Dict[str, Any]]:
++    text = (doc.get("text") or "").strip()
++    if not text:
++        return []
++    token_ids, offsets = encode_with_offsets(text)
++    if not token_ids:
++        return []
++    step = max(1, chunk_size - overlap)
++    chunks: List[Dict[str, Any]] = []
++    for start in range(0, len(token_ids) - chunk_size + 1, step):
++        end = start + chunk_size
++        if end > len(token_ids):
++            break
++        if offsets:
++            chunk_text = _slice_text_by_offsets(text, offsets, start, end)
++        else:
++            chunk_text = decode_tokens(token_ids[start:end])
++        chunk_text = chunk_text.strip()
++        if not chunk_text:
++            continue
++        chunk_id = f"{doc.get('doc_id')}::t{start}_{end}"
++        chunks.append(
++            {
++                "chunk_id": chunk_id,
++                "doc_id": doc.get("doc_id"),
++                "dataset": doc.get("dataset"),
++                "text": chunk_text,
++                "token_count": end - start,
++                "start_token": start,
++                "end_token": end,
++            }
++        )
++    return chunks
++
++
++def _histogram(lengths: List[int]) -> Dict[str, int]:
++    bins = DEFAULT_BINS
++    counts = {f"{bins[i]}-{bins[i+1]-1}": 0 for i in range(len(bins) - 1)}
++    counts[f">={bins[-1]}"] = 0
++    for length in lengths:
++        placed = False
++        for i in range(len(bins) - 1):
++            if bins[i] <= length < bins[i + 1]:
++                counts[f"{bins[i]}-{bins[i+1]-1}"] += 1
++                placed = True
++                break
++        if not placed:
++            counts[f">={bins[-1]}"] += 1
++    return counts
++
++
++def _describe_lengths(lengths: List[int]) -> Dict[str, Any]:
++    if not lengths:
++        return {
++            "count": 0,
++            "min": 0,
++            "max": 0,
++            "mean": 0.0,
++            "median": 0.0,
++            "p90": 0.0,
++            "p95": 0.0,
++            "histogram": _histogram([]),
++            "short_chunks": 0,
++            "short_ratio": 0.0,
++        }
++    sorted_lengths = sorted(lengths)
++    count = len(sorted_lengths)
++    mean = sum(sorted_lengths) / count
++    median = sorted_lengths[count // 2]
++    p90 = sorted_lengths[int(math.floor(0.9 * (count - 1)))]
++    p95 = sorted_lengths[int(math.floor(0.95 * (count - 1)))]
++    short_chunks = sum(1 for x in sorted_lengths if x < 200)
++    return {
++        "count": count,
++        "min": sorted_lengths[0],
++        "max": sorted_lengths[-1],
++        "mean": round(mean, 2),
++        "median": float(median),
++        "p90": float(p90),
++        "p95": float(p95),
++        "histogram": _histogram(sorted_lengths),
++        "short_chunks": short_chunks,
++        "short_ratio": round(short_chunks / count, 6) if count else 0.0,
++    }
++
++
++def main() -> None:
++    parser = argparse.ArgumentParser(description="Build DeepSeek-tokenized chunks for UltraDomain.")
++    parser.add_argument("--domain", default="all", help="mix|legal|all")
++    parser.add_argument("--chunk_size", type=int, default=1200)
++    parser.add_argument("--overlap", type=int, default=100)
++    args = parser.parse_args()
++
++    ensure_dirs()
++    domain_arg = args.domain.lower()
++    domains = list(DOMAIN_LABELS.keys()) if domain_arg == "all" else [normalize_domain(domain_arg)]
++    domains = [d for d in domains if d in DOMAIN_LABELS]
++    if not domains:
++        raise SystemExit("No valid domain provided.")
++
++    stats_path = CHUNKS_DIR / "chunk_stats.json"
++    stats = read_json(stats_path) if stats_path.exists() else {"generated_at": now_iso(), "domains": {}}
++
++    for domain in domains:
++        docs = _iter_docs(domain)
++        all_chunks: List[Dict[str, Any]] = []
++        lengths: List[int] = []
++        for doc in docs:
++            chunks = _build_chunks_for_doc(doc, args.chunk_size, args.overlap)
++            for chunk in chunks:
++                all_chunks.append(chunk)
++                lengths.append(int(chunk.get("token_count") or 0))
++        out_path = CHUNKS_DIR / f"chunks_{domain}.jsonl"
++        write_jsonl(out_path, all_chunks)
++        stats["domains"][domain] = {
++            "chunk_size": args.chunk_size,
++            "overlap": args.overlap,
++            "output": str(out_path),
++            "tokenizer": "deepseek-ai/DeepSeek-V3.2",
++            "generated_at": now_iso(),
++            "stats": _describe_lengths(lengths),
++        }
++
++    write_json(stats_path, stats)
++    print(f"Wrote chunks to {CHUNKS_DIR}")
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/scripts/ultradomain/build_indices.py b/scripts/ultradomain/build_indices.py
+new file mode 100644
+index 0000000..f340dea
+--- /dev/null
++++ b/scripts/ultradomain/build_indices.py
+@@ -0,0 +1,156 @@
++from __future__ import annotations
++
++import argparse
++from pathlib import Path
++from typing import Any, Dict, List
++
++from relrag.api import build_index
++from relrag.config.config_loader import config as config_loader
++from relrag.indexer.embedding_index import EmbeddingIndexBuilder
++from scripts.ultradomain.common import (
++    CHUNKS_DIR,
++    DOMAIN_LABELS,
++    INDEX_DIR,
++    RUN_META_DIR,
++    chunk_note_id,
++    ensure_dirs,
++    read_jsonl,
++    write_jsonl,
++)
++
++
++def _write_chunk_notes(domain: str, out_dir: Path) -> Path:
++    chunks_path = CHUNKS_DIR / f"chunks_{domain}.jsonl"
++    notes_path = out_dir / "notes.jsonl"
++    notes: List[Dict[str, Any]] = []
++    for chunk in read_jsonl(chunks_path):
++        doc_id = str(chunk.get("doc_id") or "")
++        chunk_id = str(chunk.get("chunk_id") or "")
++        text = chunk.get("text") or ""
++        if not doc_id or not chunk_id or not text:
++            continue
++        note_id = chunk_note_id(doc_id, chunk_id)
++        notes.append(
++            {
++                "note_id": note_id,
++                "doc_id": doc_id,
++                "chunk_id": chunk_id,
++                "dataset": domain,
++                "text": text,
++                "evidence": text,
++                "subj": doc_id,
++                "pred": "chunk",
++                "obj": "",
++                "fields": {"ctx": text},
++            }
++        )
++    write_jsonl(notes_path, notes)
++    return notes_path
++
++
++def _build_chunk_faiss(notes_path: Path, index_dir: Path, base_cfg: Dict[str, Any], embed_overrides: Dict[str, Any]) -> None:
++    cfg = {
++        "notes": {"out_path": str(notes_path)},
++        "system": base_cfg.get("system") or {},
++        "retriever": {"embedding": embed_overrides},
++    }
++    builder = EmbeddingIndexBuilder(cfg)
++    builder.build()
++
++
++def _prepare_embed_cfg(base_cfg: Dict[str, Any], index_dir: Path, overrides: Dict[str, Any]) -> Dict[str, Any]:
++    embed_cfg = (base_cfg.get("retriever") or {}).get("embedding") or {}
++    embed_cfg = dict(embed_cfg)
++    embed_cfg.update(overrides)
++    embed_cfg["enabled"] = True
++    embed_cfg["offline_index_path"] = str(index_dir / "notes.faiss")
++    embed_cfg["meta_path"] = str(index_dir / "notes.meta.parquet")
++    return embed_cfg
++
++
++def _build_relrag_index(domain: str, args: argparse.Namespace, base_cfg: Dict[str, Any]) -> None:
++    docs_path = RUN_META_DIR / f"docs_{domain}.jsonl"
++    out_dir = INDEX_DIR / f"relrag_{domain}"
++    out_dir.mkdir(parents=True, exist_ok=True)
++    llm_endpoint = args.llm_endpoint or (base_cfg.get("vllm") or {}).get("endpoint")
++    llm_model = args.llm_model or (base_cfg.get("vllm") or {}).get("model")
++    llm_provider = args.llm_provider
++    build_index(
++        docs_input=str(docs_path),
++        output_dir=str(out_dir),
++        llm_endpoint=llm_endpoint,
++        llm_model=llm_model,
++        temperature=args.llm_temperature,
++        max_tokens=args.llm_max_tokens,
++        llm_provider=llm_provider,
++        llm_api_key=args.llm_api_key,
++    )
++
++
++def _build_relrag_faiss(domain: str, base_cfg: Dict[str, Any], overrides: Dict[str, Any]) -> None:
++    out_dir = INDEX_DIR / f"relrag_{domain}"
++    notes_path = out_dir / "notes.jsonl"
++    index_dir = out_dir / "faiss"
++    index_dir.mkdir(parents=True, exist_ok=True)
++    embed_cfg = _prepare_embed_cfg(base_cfg, index_dir, overrides)
++    cfg = {
++        "notes": {"out_path": str(notes_path)},
++        "system": base_cfg.get("system") or {},
++        "retriever": {"embedding": embed_cfg},
++    }
++    builder = EmbeddingIndexBuilder(cfg)
++    builder.build()
++
++
++def main() -> None:
++    parser = argparse.ArgumentParser(description="Build UltraDomain indices for Mix/Legal.")
++    parser.add_argument("--domain", default="all")
++    parser.add_argument("--skip_relrag", action="store_true")
++    parser.add_argument("--skip_chunk", action="store_true")
++    parser.add_argument("--llm_provider", default="vllm", choices=["vllm", "openai"])
++    parser.add_argument("--llm_endpoint", default=None)
++    parser.add_argument("--llm_model", default=None)
++    parser.add_argument("--llm_api_key", default=None)
++    parser.add_argument("--llm_temperature", type=float, default=0.0)
++    parser.add_argument("--llm_max_tokens", type=int, default=None)
++    parser.add_argument("--embed_provider", default=None)
++    parser.add_argument("--embed_model", default=None)
++    parser.add_argument("--embed_endpoint", default=None)
++    parser.add_argument("--embed_api_key", default=None)
++    args = parser.parse_args()
++
++    ensure_dirs()
++    base_cfg = config_loader.load_config()
++    domains = list(DOMAIN_LABELS.keys()) if args.domain == "all" else [args.domain]
++
++    embed_overrides: Dict[str, Any] = {}
++    if args.embed_provider:
++        embed_overrides["provider"] = args.embed_provider
++    if args.embed_model:
++        embed_overrides["model"] = args.embed_model
++    if args.embed_endpoint:
++        embed_overrides["endpoint"] = args.embed_endpoint
++    if args.embed_api_key:
++        embed_overrides["api_key"] = args.embed_api_key
++
++    for domain in domains:
++        if domain not in DOMAIN_LABELS:
++            continue
++        if not args.skip_chunk:
++            bm25_dir = INDEX_DIR / f"chunk_bm25_{domain}"
++            faiss_dir = INDEX_DIR / f"chunk_faiss_{domain}"
++            bm25_dir.mkdir(parents=True, exist_ok=True)
++            faiss_dir.mkdir(parents=True, exist_ok=True)
++            bm25_notes = _write_chunk_notes(domain, bm25_dir)
++            faiss_notes = _write_chunk_notes(domain, faiss_dir)
++            embed_cfg = _prepare_embed_cfg(base_cfg, faiss_dir, embed_overrides)
++            _build_chunk_faiss(faiss_notes, faiss_dir, base_cfg, embed_cfg)
++            print(f"Chunk indices ready for {domain}: {bm25_notes} / {faiss_dir}")
++        if not args.skip_relrag:
++            _build_relrag_index(domain, args, base_cfg)
++            _build_relrag_faiss(domain, base_cfg, embed_overrides)
++            print(f"RelRAG indices ready for {domain}")
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/scripts/ultradomain/common.py b/scripts/ultradomain/common.py
+new file mode 100644
+index 0000000..f29ad22
+--- /dev/null
++++ b/scripts/ultradomain/common.py
+@@ -0,0 +1,248 @@
++from __future__ import annotations
++
++import hashlib
++import json
++import os
++import re
++import subprocess
++import time
++from pathlib import Path
++from typing import Any, Dict, Iterable, Iterator, List, Optional, Tuple
++
++OUTPUT_ROOT = Path("result/ultradomain/lightrag_protocol_v1_mix_legal")
++RUN_META_DIR = OUTPUT_ROOT / "run_meta"
++CHUNKS_DIR = OUTPUT_ROOT / "chunks"
++QUESTIONS_DIR = OUTPUT_ROOT / "questions"
++ANSWERS_DIR = OUTPUT_ROOT / "answers"
++JUDGE_DIR = OUTPUT_ROOT / "judge"
++SUMMARY_DIR = OUTPUT_ROOT / "summary"
++INDEX_DIR = OUTPUT_ROOT / "indexes"
++
++TOKENIZER_ID = "deepseek-ai/DeepSeek-V3.2"
++
++DOMAIN_LABELS = {
++    "mix": "Mix",
++    "legal": "Legal",
++}
++
++_DOMAIN_ALIASES = {
++    "mix": "mix",
++    "mixed": "mix",
++    "legal": "legal",
++}
++
++_TOKENIZER = None
++
++
++def ensure_dirs() -> None:
++    for path in (
++        OUTPUT_ROOT,
++        RUN_META_DIR,
++        CHUNKS_DIR,
++        QUESTIONS_DIR,
++        ANSWERS_DIR,
++        JUDGE_DIR,
++        SUMMARY_DIR,
++        INDEX_DIR,
++    ):
++        path.mkdir(parents=True, exist_ok=True)
++
++
++def normalize_domain(label: str) -> Optional[str]:
++    if not label:
++        return None
++    key = _DOMAIN_ALIASES.get(str(label).strip().lower())
++    if key in DOMAIN_LABELS:
++        return key
++    return None
++
++
++def domain_label(domain: str) -> str:
++    return DOMAIN_LABELS.get(domain, domain)
++
++
++def chunk_note_id(doc_id: str, chunk_id: str) -> str:
++    return f"{doc_id}#{chunk_id}"
++
++
++def sha256_text(text: str) -> str:
++    return hashlib.sha256(text.encode("utf-8")).hexdigest()
++
++
++def now_iso() -> str:
++    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
++
++
++def read_json(path: Path) -> Any:
++    with path.open("r", encoding="utf-8") as handle:
++        return json.load(handle)
++
++
++def write_json(path: Path, payload: Any) -> None:
++    path.parent.mkdir(parents=True, exist_ok=True)
++    with path.open("w", encoding="utf-8") as handle:
++        json.dump(payload, handle, ensure_ascii=False, indent=2)
++
++
++def read_jsonl(path: Path) -> Iterator[Dict[str, Any]]:
++    if not path.exists():
++        return iter(())
++    def _iter() -> Iterator[Dict[str, Any]]:
++        with path.open("r", encoding="utf-8") as handle:
++            for line in handle:
++                line = line.strip()
++                if not line:
++                    continue
++                try:
++                    obj = json.loads(line)
++                except json.JSONDecodeError:
++                    continue
++                if isinstance(obj, dict):
++                    yield obj
++    return _iter()
++
++
++def write_jsonl(path: Path, rows: Iterable[Dict[str, Any]]) -> None:
++    path.parent.mkdir(parents=True, exist_ok=True)
++    with path.open("w", encoding="utf-8") as handle:
++        for row in rows:
++            handle.write(json.dumps(row, ensure_ascii=False))
++            handle.write("\n")
++
++
++def get_api_key(env_name: str = "DEEPSEEK_API_KEY") -> str:
++    value = os.environ.get(env_name)
++    if value:
++        return value
++    fallback = os.environ.get("OPENAI_API_KEY")
++    if fallback:
++        return fallback
++    raise RuntimeError(f"Missing API key: set {env_name} (or OPENAI_API_KEY).")
++
++
++def get_git_commit() -> Optional[str]:
++    try:
++        raw = subprocess.check_output(["git", "rev-parse", "HEAD"], stderr=subprocess.DEVNULL)
++        return raw.decode("utf-8").strip()
++    except Exception:
++        return None
++
++
++def get_tokenizer():
++    global _TOKENIZER
++    if _TOKENIZER is not None:
++        return _TOKENIZER
++    from transformers import AutoTokenizer  # type: ignore
++
++    try:
++        _TOKENIZER = AutoTokenizer.from_pretrained(
++            TOKENIZER_ID,
++            trust_remote_code=True,
++            use_fast=True,
++        )
++    except Exception:
++        _TOKENIZER = AutoTokenizer.from_pretrained(
++            TOKENIZER_ID,
++            trust_remote_code=True,
++            use_fast=False,
++        )
++    return _TOKENIZER
++
++
++def encode_with_offsets(text: str) -> Tuple[List[int], Optional[List[Tuple[int, int]]]]:
++    tokenizer = get_tokenizer()
++    try:
++        encoded = tokenizer(
++            text,
++            add_special_tokens=False,
++            return_offsets_mapping=True,
++        )
++        input_ids = list(encoded.get("input_ids") or [])
++        offsets = encoded.get("offset_mapping")
++        if offsets is None:
++            return input_ids, None
++        return input_ids, [(int(s), int(e)) for s, e in offsets]
++    except Exception:
++        input_ids = tokenizer.encode(text, add_special_tokens=False)
++        return list(input_ids), None
++
++
++def decode_tokens(token_ids: List[int]) -> str:
++    tokenizer = get_tokenizer()
++    return tokenizer.decode(token_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False)
++
++
++def count_tokens(text: str) -> int:
++    tokenizer = get_tokenizer()
++    return len(tokenizer.encode(text, add_special_tokens=False))
++
++
++def assemble_budgeted_items(
++    items: List[Dict[str, Any]],
++    budget_tokens: int,
++) -> Tuple[List[Dict[str, Any]], int]:
++    selected: List[Dict[str, Any]] = []
++    used = 0
++    for item in items:
++        text = item.get("text") or item.get("evidence") or item.get("canonical") or ""
++        if not text:
++            continue
++        token_count = item.get("token_count")
++        if token_count is None:
++            token_count = count_tokens(str(text))
++        token_count = int(token_count)
++        if used + token_count > budget_tokens:
++            break
++        cloned = dict(item)
++        cloned["token_count"] = token_count
++        selected.append(cloned)
++        used += token_count
++    return selected, used
++
++
++def extract_json_object(text: str) -> Dict[str, Any]:
++    if not text:
++        raise ValueError("empty response")
++    cleaned = _strip_code_fence(text)
++    start = cleaned.find("{")
++    if start == -1:
++        raise ValueError("no JSON object found")
++    depth = 0
++    for idx in range(start, len(cleaned)):
++        ch = cleaned[idx]
++        if ch == "{":
++            depth += 1
++        elif ch == "}":
++            depth -= 1
++            if depth == 0:
++                candidate = cleaned[start : idx + 1]
++                return json.loads(candidate)
++    raise ValueError("unterminated JSON object")
++
++
++def _strip_code_fence(text: str) -> str:
++    cleaned = text.strip()
++    if cleaned.startswith("```"):
++        cleaned = re.sub(r"^```[a-zA-Z0-9]*", "", cleaned).strip()
++    if cleaned.endswith("```"):
++        cleaned = cleaned[: cleaned.rfind("```")].strip()
++    return cleaned
++
++
++def extract_json_list(text: str) -> List[Any]:
++    cleaned = _strip_code_fence(text)
++    start = cleaned.find("[")
++    if start == -1:
++        raise ValueError("no JSON list found")
++    depth = 0
++    for idx in range(start, len(cleaned)):
++        ch = cleaned[idx]
++        if ch == "[":
++            depth += 1
++        elif ch == "]":
++            depth -= 1
++            if depth == 0:
++                candidate = cleaned[start : idx + 1]
++                return json.loads(candidate)
++    raise ValueError("unterminated JSON list")
++
+diff --git a/scripts/ultradomain/generate_questions.py b/scripts/ultradomain/generate_questions.py
+new file mode 100644
+index 0000000..5187190
+--- /dev/null
++++ b/scripts/ultradomain/generate_questions.py
+@@ -0,0 +1,288 @@
++from __future__ import annotations
++
++import argparse
++from typing import Any, Dict, List, Tuple
++
++from relrag.utils.openai_client import chat_completion
++from scripts.ultradomain.common import (
++    DOMAIN_LABELS,
++    QUESTIONS_DIR,
++    RUN_META_DIR,
++    TOKENIZER_ID,
++    ensure_dirs,
++    extract_json_list,
++    extract_json_object,
++    get_api_key,
++    now_iso,
++    read_json,
++    sha256_text,
++    write_json,
++)
++
++SYSTEM_PROMPT = "你是一个评测集生成器。你的任务是为给定语料库生成高层次\u201csensemaking\u201d问题集合。"
++
++USER_PROMPT_TEMPLATE = """给你一段“数据集描述 + 语料库摘要（可选）”。请生成：
++
++五个 RAG 用户（每个含：name/背景/专长/动机/提问风格）
++
++每个用户五个任务（每个任务含：目标/约束/关心点）
++
++每个（用户，任务）生成五个问题：必须需要跨文档/跨段落综合，避免单段 factoid；问题应可用语料回答但需要全局理解。
++
++输出严格 JSON：users[5]{profile,tasks[5]{task_desc,questions[5]}}。
++
++数据集描述：
++{dataset_desc}
++
++语料库摘要（可选）：
++{summary}
++"""
++
++VALIDATOR_SYSTEM = "你是一个严格的评测集质量检查器。"
++VALIDATOR_USER_TEMPLATE = """判断每个问题是否需要跨文档/跨段落综合（multi-doc），还是单段事实问题（single-factoid）。
++
++数据集描述：
++{dataset_desc}
++
++问题列表：
++{questions_block}
++
++输出严格 JSON：{{\"labels\": [\"multi-doc\"|\"single-factoid\", ...]}}，长度必须与问题数量一致。"""
++
++REWRITE_SYSTEM = "你是一个评测集生成器，负责把问题改写为需要跨文档综合的高层次问题。"
++REWRITE_USER_TEMPLATE = """请将以下问题改写为 multi-doc 问题，仍可由该语料库回答，但需要跨文档/跨段落综合。保持原意方向，避免变成单句事实。
++
++数据集描述：
++{dataset_desc}
++
++问题列表：
++{questions_block}
++
++输出严格 JSON：{{\"questions\": [\"...\", \"...\"]}}，长度必须与问题数量一致。"""
++
++
++def _build_dataset_desc(domain: str) -> str:
++    doc_stats_path = RUN_META_DIR / "doc_stats.json"
++    chunk_stats_path = QUESTIONS_DIR.parent / "chunks" / "chunk_stats.json"
++    desc_lines: List[str] = [f"Domain: {DOMAIN_LABELS.get(domain, domain)} ({domain})"]
++    if doc_stats_path.exists():
++        stats = read_json(doc_stats_path)
++        dom = (stats.get("domains") or {}).get(domain) or {}
++        if dom:
++            desc_lines.append(f"Documents: {dom.get('doc_count', 0)}")
++            desc_lines.append(f"Avg doc chars: {dom.get('avg_chars', 0)}")
++    if chunk_stats_path.exists():
++        stats = read_json(chunk_stats_path)
++        dom = (stats.get("domains") or {}).get(domain) or {}
++        cstats = dom.get("stats") or {}
++        if cstats:
++            desc_lines.append(f"Chunks: {cstats.get('count', 0)}")
++            desc_lines.append(f"Avg chunk tokens: {cstats.get('mean', 0)}")
++    desc_lines.append(f"Tokenizer: {TOKENIZER_ID}")
++    return "\n".join(desc_lines)
++
++
++def _call_llm(messages: List[Dict[str, str]], *, model: str, base_url: str, api_key: str, temperature: float, top_p: float, max_tokens: int) -> str:
++    return chat_completion(
++        messages,
++        model=model,
++        api_key=api_key,
++        base_url=base_url,
++        temperature=temperature,
++        max_tokens=max_tokens,
++        extra_body={"top_p": top_p},
++    )
++
++
++def _validate_structure(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
++    users = payload.get("users")
++    if not isinstance(users, list) or len(users) != 5:
++        raise ValueError("users must be a list of length 5")
++    for user in users:
++        tasks = user.get("tasks") if isinstance(user, dict) else None
++        if not isinstance(tasks, list) or len(tasks) != 5:
++            raise ValueError("each user must have 5 tasks")
++        for task in tasks:
++            questions = task.get("questions") if isinstance(task, dict) else None
++            if not isinstance(questions, list) or len(questions) != 5:
++                raise ValueError("each task must have 5 questions")
++    return users
++
++
++def _flatten_questions(domain: str, users: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
++    flat: List[Dict[str, Any]] = []
++    idx = 1
++    for ui, user in enumerate(users):
++        tasks = user.get("tasks") or []
++        for ti, task in enumerate(tasks):
++            questions = task.get("questions") or []
++            for qi, q in enumerate(questions):
++                if isinstance(q, dict):
++                    q_text = q.get("question") or q.get("text") or ""
++                else:
++                    q_text = str(q)
++                q_text = q_text.strip()
++                if not q_text:
++                    q_text = ""
++                flat.append(
++                    {
++                        "question_id": f"{domain}-{idx:03d}",
++                        "question": q_text,
++                        "user_idx": ui,
++                        "task_idx": ti,
++                        "question_idx": qi,
++                    }
++                )
++                idx += 1
++    return flat
++
++
++def _validate_questions(
++    questions: List[Dict[str, Any]],
++    dataset_desc: str,
++    *,
++    model: str,
++    base_url: str,
++    api_key: str,
++) -> Tuple[List[str], float]:
++    labels: List[str] = []
++    batch_size = 25
++    for start in range(0, len(questions), batch_size):
++        batch = questions[start : start + batch_size]
++        block = "\n".join([f"{i+1}. {q['question']}" for i, q in enumerate(batch)])
++        user_prompt = VALIDATOR_USER_TEMPLATE.format(dataset_desc=dataset_desc, questions_block=block)
++        content = _call_llm(
++            [
++                {"role": "system", "content": VALIDATOR_SYSTEM},
++                {"role": "user", "content": user_prompt},
++            ],
++            model=model,
++            base_url=base_url,
++            api_key=api_key,
++            temperature=0.0,
++            top_p=1.0,
++            max_tokens=1024,
++        )
++        obj = extract_json_object(content)
++        batch_labels = obj.get("labels") if isinstance(obj, dict) else None
++        if not isinstance(batch_labels, list) or len(batch_labels) != len(batch):
++            raise ValueError("validator returned invalid labels")
++        labels.extend([str(label).strip().lower() for label in batch_labels])
++    pass_count = sum(1 for label in labels if label == "multi-doc")
++    pass_rate = pass_count / max(1, len(labels))
++    return labels, pass_rate
++
++
++def _rewrite_failed(
++    failed: List[Dict[str, Any]],
++    dataset_desc: str,
++    *,
++    model: str,
++    base_url: str,
++    api_key: str,
++) -> List[str]:
++    if not failed:
++        return []
++    block = "\n".join([f"{i+1}. {q['question']}" for i, q in enumerate(failed)])
++    user_prompt = REWRITE_USER_TEMPLATE.format(dataset_desc=dataset_desc, questions_block=block)
++    content = _call_llm(
++        [
++            {"role": "system", "content": REWRITE_SYSTEM},
++            {"role": "user", "content": user_prompt},
++        ],
++        model=model,
++        base_url=base_url,
++        api_key=api_key,
++        temperature=0.7,
++        top_p=1.0,
++        max_tokens=2048,
++    )
++    obj = extract_json_object(content)
++    rewritten = obj.get("questions") if isinstance(obj, dict) else None
++    if not isinstance(rewritten, list) or len(rewritten) != len(failed):
++        raise ValueError("rewrite output invalid")
++    return [str(q).strip() for q in rewritten]
++
++
++def main() -> None:
++    parser = argparse.ArgumentParser(description="Generate UltraDomain questions for Mix/Legal.")
++    parser.add_argument("--domain", default="all")
++    parser.add_argument("--base_url", default="https://api.deepseek.com/v1")
++    parser.add_argument("--model", default="deepseek-chat")
++    parser.add_argument("--api_key_env", default="DEEPSEEK_API_KEY")
++    args = parser.parse_args()
++
++    ensure_dirs()
++    api_key = get_api_key(args.api_key_env)
++    domains = list(DOMAIN_LABELS.keys()) if args.domain == "all" else [args.domain]
++
++    manifest: Dict[str, Any] = {
++        "base_url": args.base_url,
++        "model": args.model,
++        "tokenizer": TOKENIZER_ID,
++        "generated_at": now_iso(),
++        "generation_params": {"temperature": 0.7, "top_p": 1.0, "max_output_tokens": 4096},
++        "validator_params": {"temperature": 0.0, "top_p": 1.0},
++        "domains": {},
++    }
++
++    for domain in domains:
++        if domain not in DOMAIN_LABELS:
++            continue
++        dataset_desc = _build_dataset_desc(domain)
++        user_prompt = USER_PROMPT_TEMPLATE.format(dataset_desc=dataset_desc, summary="")
++        prompt_hash = sha256_text(SYSTEM_PROMPT + "\n" + user_prompt)
++        content = _call_llm(
++            [
++                {"role": "system", "content": SYSTEM_PROMPT},
++                {"role": "user", "content": user_prompt},
++            ],
++            model=args.model,
++            base_url=args.base_url,
++            api_key=api_key,
++            temperature=0.7,
++            top_p=1.0,
++            max_tokens=4096,
++        )
++        payload = extract_json_object(content)
++        users = _validate_structure(payload)
++        flat = _flatten_questions(domain, users)
++        labels, pass_rate = _validate_questions(flat, dataset_desc, model=args.model, base_url=args.base_url, api_key=api_key)
++        regen_attempted = False
++        if pass_rate < 0.95:
++            regen_attempted = True
++            failed = [q for q, label in zip(flat, labels) if label != "multi-doc"]
++            rewritten = _rewrite_failed(failed, dataset_desc, model=args.model, base_url=args.base_url, api_key=api_key)
++            for q, new_text in zip(failed, rewritten):
++                q["question"] = new_text
++                # update nested structure
++                ui, ti, qi = q["user_idx"], q["task_idx"], q["question_idx"]
++                users[ui]["tasks"][ti]["questions"][qi] = new_text
++            labels, pass_rate = _validate_questions(flat, dataset_desc, model=args.model, base_url=args.base_url, api_key=api_key)
++
++        out_payload = {
++            "domain": domain,
++            "generated_at": now_iso(),
++            "prompt_hash": prompt_hash,
++            "users": users,
++            "questions": flat,
++            "quality_gate": {
++                "pass_rate": round(pass_rate, 4),
++                "regen_attempted": regen_attempted,
++            },
++        }
++        out_path = QUESTIONS_DIR / f"questions_{domain}.json"
++        write_json(out_path, out_payload)
++        manifest["domains"][domain] = {
++            "questions_path": str(out_path),
++            "prompt_hash": prompt_hash,
++            "pass_rate": round(pass_rate, 4),
++            "regen_attempted": regen_attempted,
++        }
++
++    write_json(QUESTIONS_DIR / "questions_manifest.json", manifest)
++    print(f"Wrote questions to {QUESTIONS_DIR}")
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/scripts/ultradomain/init_run.py b/scripts/ultradomain/init_run.py
+new file mode 100644
+index 0000000..7cd02a0
+--- /dev/null
++++ b/scripts/ultradomain/init_run.py
+@@ -0,0 +1,80 @@
++from __future__ import annotations
++
++import argparse
++from typing import Any, Dict
++
++from relrag.config.config_loader import config as config_loader
++from scripts.ultradomain.common import (
++    INDEX_DIR,
++    OUTPUT_ROOT,
++    RUN_META_DIR,
++    TOKENIZER_ID,
++    ensure_dirs,
++    get_git_commit,
++    now_iso,
++    write_json,
++)
++
++
++def main() -> None:
++    parser = argparse.ArgumentParser(description="Initialize UltraDomain run metadata.")
++    parser.add_argument("--dataset_id", default="TBD_ULTRADOMAIN_DATASET_ID")
++    parser.add_argument("--split", default="train")
++    parser.add_argument("--base_url", default="https://api.deepseek.com/v1")
++    parser.add_argument("--model", default="deepseek-chat")
++    parser.add_argument("--protocol_version", default="v1")
++    args = parser.parse_args()
++
++    ensure_dirs()
++    cfg = config_loader.load_config()
++    embed_cfg = (cfg.get("retriever") or {}).get("embedding") or {}
++
++    system_configs: Dict[str, Any] = {
++        "retrieval_budget_tokens": 12000,
++        "prefilter_top_k": 40,
++        "reranker": {"relrag_full": True, "others": False},
++        "systems": {
++            "RelRAG-full": {"structured": True, "hybrid": True, "bm25": True, "dense": True, "reranker": True},
++            "BM25-only": {"structured": False, "hybrid": False, "bm25": True, "dense": False, "reranker": False},
++            "Dense-only": {"structured": False, "hybrid": False, "bm25": False, "dense": True, "reranker": False},
++            "Hybrid-only": {"structured": False, "hybrid": False, "bm25": True, "dense": True, "reranker": False},
++        },
++    }
++
++    run_config: Dict[str, Any] = {
++        "protocol_version": args.protocol_version,
++        "dataset_id": args.dataset_id,
++        "split": args.split,
++        "output_root": str(OUTPUT_ROOT),
++        "answer_llm": {
++            "model": args.model,
++            "base_url": args.base_url,
++            "temperature": 0.2,
++            "top_p": 1.0,
++            "max_output_tokens": 1024,
++            "context_length": 128000,
++        },
++        "judge_llm": {
++            "model": args.model,
++            "base_url": args.base_url,
++            "temperature": 0.0,
++            "top_p": 1.0,
++        },
++        "tokenizer": TOKENIZER_ID,
++        "embedding": {
++            "provider": embed_cfg.get("provider"),
++            "model": embed_cfg.get("model"),
++            "endpoint": embed_cfg.get("endpoint"),
++        },
++        "git_commit": get_git_commit(),
++        "generated_at": now_iso(),
++    }
++
++    write_json(RUN_META_DIR / "system_configs.json", system_configs)
++    write_json(RUN_META_DIR / "run_config.json", run_config)
++    (RUN_META_DIR / "protocol_version").write_text(args.protocol_version, encoding="utf-8")
++    print(f"Initialized run metadata in {RUN_META_DIR}")
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/scripts/ultradomain/judge_pairwise.py b/scripts/ultradomain/judge_pairwise.py
+new file mode 100644
+index 0000000..93278bf
+--- /dev/null
++++ b/scripts/ultradomain/judge_pairwise.py
+@@ -0,0 +1,229 @@
++from __future__ import annotations
++
++import argparse
++import json
++import re
++from typing import Any, Dict, List
++
++from relrag.utils.openai_client import chat_completion
++from scripts.ultradomain.common import (
++    ANSWERS_DIR,
++    DOMAIN_LABELS,
++    JUDGE_DIR,
++    QUESTIONS_DIR,
++    SUMMARY_DIR,
++    ensure_dirs,
++    extract_json_object,
++    get_api_key,
++    now_iso,
++    read_json,
++    read_jsonl,
++)
++
++PAIRS = [
++    ("RelRAG-full", "BM25-only"),
++    ("RelRAG-full", "Dense-only"),
++    ("RelRAG-full", "Hybrid-only"),
++]
++
++DIMENSIONS = ["comprehensiveness", "diversity", "empowerment", "overall"]
++
++SYSTEM_PROMPT = "你是一个严格的RAG回答评估员。"
++
++USER_PROMPT_TEMPLATE = """请比较以下两份答案，分别在四个维度上判断更好者：
++- Comprehensiveness: 覆盖面
++- Diversity: 信息多样性/角度
++- Empowerment: 是否有助于用户理解和后续行动
++- Overall: 综合
++
++如果两者表现相当，请判为 tie。
++
++问题：
++{question}
++
++答案A：
++{answer_a}
++
++答案B：
++{answer_b}
++
++输出严格 JSON：{{
++  "winner": {{
++    "comprehensiveness": "A"|"B"|"tie",
++    "diversity": "A"|"B"|"tie",
++    "empowerment": "A"|"B"|"tie",
++    "overall": "A"|"B"|"tie"
++  }},
++  "reason": "简短理由"
++}}"""
++
++
++def _load_answers(domain: str, system: str) -> Dict[str, Dict[str, Any]]:
++    path = ANSWERS_DIR / domain / f"{system}.jsonl"
++    answers: Dict[str, Dict[str, Any]] = {}
++    for row in read_jsonl(path):
++        qid = row.get("question_id")
++        if qid:
++            answers[qid] = row
++    return answers
++
++
++def _question_parity(qid: str) -> int:
++    nums = re.findall(r"\d+", str(qid))
++    if not nums:
++        return 0
++    return int(nums[-1]) % 2
++
++
++def _call_judge(messages: List[Dict[str, str]], *, model: str, base_url: str, api_key: str) -> str:
++    return chat_completion(
++        messages,
++        model=model,
++        api_key=api_key,
++        base_url=base_url,
++        temperature=0.0,
++        max_tokens=1024,
++        extra_body={"top_p": 1.0},
++    )
++
++
++def _compute_win_rates(rows: List[Dict[str, Any]], system_left: str) -> Dict[str, Any]:
++    totals = {dim: {"wins": 0, "ties": 0, "total": 0} for dim in DIMENSIONS}
++    for row in rows:
++        winner = row.get("winner") or {}
++        order = row.get("order") or {}
++        a_sys = order.get("A")
++        b_sys = order.get("B")
++        for dim in DIMENSIONS:
++            decision = (winner.get(dim) or "").strip()
++            if decision not in {"A", "B", "tie"}:
++                continue
++            totals[dim]["total"] += 1
++            if decision == "tie":
++                totals[dim]["ties"] += 1
++            elif decision == "A" and a_sys == system_left:
++                totals[dim]["wins"] += 1
++            elif decision == "B" and b_sys == system_left:
++                totals[dim]["wins"] += 1
++
++    summary = {}
++    for dim, values in totals.items():
++        total = values["total"]
++        wins = values["wins"]
++        ties = values["ties"]
++        win_rate = (wins + 0.5 * ties) / total if total else 0.0
++        summary[dim] = {
++            "wins": wins,
++            "ties": ties,
++            "total": total,
++            "win_rate": round(win_rate, 4),
++        }
++    return summary
++
++
++def main() -> None:
++    parser = argparse.ArgumentParser(description="Judge UltraDomain pairwise comparisons.")
++    parser.add_argument("--domain", default="all")
++    parser.add_argument("--base_url", default="https://api.deepseek.com/v1")
++    parser.add_argument("--model", default="deepseek-chat")
++    parser.add_argument("--api_key_env", default="DEEPSEEK_API_KEY")
++    parser.add_argument("--resume", action="store_true")
++    args = parser.parse_args()
++
++    ensure_dirs()
++    api_key = get_api_key(args.api_key_env)
++    domains = list(DOMAIN_LABELS.keys()) if args.domain == "all" else [args.domain]
++
++    summary_lines: List[str] = ["# Win-Rate Summary", ""]
++
++    for domain in domains:
++        if domain not in DOMAIN_LABELS:
++            continue
++        questions = read_json(QUESTIONS_DIR / f"questions_{domain}.json").get("questions") or []
++        for left, right in PAIRS:
++            out_dir = JUDGE_DIR / domain
++            out_dir.mkdir(parents=True, exist_ok=True)
++            out_path = out_dir / f"{left}_vs_{right}.jsonl"
++            existing = set()
++            if args.resume and out_path.exists():
++                for row in read_jsonl(out_path):
++                    key = row.get("question_id")
++                    if key:
++                        existing.add(key)
++
++            answers_left = _load_answers(domain, left)
++            answers_right = _load_answers(domain, right)
++
++            rows: List[Dict[str, Any]] = []
++            for q in questions:
++                qid = q.get("question_id")
++                question = q.get("question")
++                if not qid or not question:
++                    continue
++                if qid in existing:
++                    continue
++                a = answers_left.get(qid)
++                b = answers_right.get(qid)
++                if not a or not b:
++                    continue
++                flip = _question_parity(qid) == 0
++                if flip:
++                    order = {"A": right, "B": left}
++                    answer_a = b.get("answer_final") or b.get("answer_raw")
++                    answer_b = a.get("answer_final") or a.get("answer_raw")
++                else:
++                    order = {"A": left, "B": right}
++                    answer_a = a.get("answer_final") or a.get("answer_raw")
++                    answer_b = b.get("answer_final") or b.get("answer_raw")
++
++                prompt = USER_PROMPT_TEMPLATE.format(question=question, answer_a=answer_a, answer_b=answer_b)
++                content = _call_judge(
++                    [
++                        {"role": "system", "content": SYSTEM_PROMPT},
++                        {"role": "user", "content": prompt},
++                    ],
++                    model=args.model,
++                    base_url=args.base_url,
++                    api_key=api_key,
++                )
++                obj = extract_json_object(content)
++                rows.append(
++                    {
++                        "question_id": qid,
++                        "domain": domain,
++                        "order": order,
++                        "winner": obj.get("winner"),
++                        "reason": obj.get("reason"),
++                        "order_flag": "swap" if flip else "normal",
++                        "raw_output": content,
++                        "generated_at": now_iso(),
++                    }
++                )
++
++            if rows:
++                mode = "a" if args.resume and out_path.exists() else "w"
++                with out_path.open(mode, encoding="utf-8") as handle:
++                    for row in rows:
++                        handle.write(json.dumps(row, ensure_ascii=False))
++                        handle.write("\n")
++
++            all_rows = list(read_jsonl(out_path)) if out_path.exists() else []
++            stats = _compute_win_rates(all_rows, left)
++            summary_lines.append(f"## {domain} - {left} vs {right}")
++            summary_lines.append("")
++            summary_lines.append("| Dimension | Wins | Ties | Total | Win Rate |")
++            summary_lines.append("| --- | --- | --- | --- | --- |")
++            for dim in DIMENSIONS:
++                entry = stats.get(dim) or {}
++                summary_lines.append(
++                    f"| {dim} | {entry.get('wins', 0)} | {entry.get('ties', 0)} | {entry.get('total', 0)} | {entry.get('win_rate', 0.0)} |"
++                )
++            summary_lines.append("")
++
++    summary_path = SUMMARY_DIR / "summary_winrate.md"
++    summary_path.write_text("\n".join(summary_lines), encoding="utf-8")
++    print(f"Wrote summary to {summary_path}")
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/scripts/ultradomain/prepare_docs.py b/scripts/ultradomain/prepare_docs.py
+new file mode 100644
+index 0000000..6705989
+--- /dev/null
++++ b/scripts/ultradomain/prepare_docs.py
+@@ -0,0 +1,117 @@
++from __future__ import annotations
++
++import argparse
++from collections import defaultdict
++from pathlib import Path
++from typing import Any, Dict, List
++
++from scripts.ultradomain.common import (
++    DOMAIN_LABELS,
++    OUTPUT_ROOT,
++    RUN_META_DIR,
++    ensure_dirs,
++    normalize_domain,
++    now_iso,
++    write_json,
++    write_jsonl,
++)
++
++
++def _load_dataset(dataset_id: str, split: str, cache_dir: str | None, config_name: str | None):
++    try:
++        from datasets import load_dataset  # type: ignore
++    except Exception as exc:
++        raise RuntimeError("datasets is required. Install with: pip install datasets") from exc
++    kwargs: Dict[str, Any] = {}
++    if cache_dir:
++        kwargs["cache_dir"] = cache_dir
++    if config_name:
++        kwargs["name"] = config_name
++    return load_dataset(dataset_id, split=split, **kwargs)
++
++
++def _doc_record(row: Dict[str, Any], domain: str, fallback_id: str) -> Dict[str, Any] | None:
++    text = row.get("context") or ""
++    if not isinstance(text, str) or not text.strip():
++        return None
++    doc_id = row.get("context_id") or row.get("_id") or fallback_id
++    doc_id = str(doc_id)
++    meta = row.get("meta") if isinstance(row.get("meta"), dict) else {}
++    title = meta.get("title") if isinstance(meta.get("title"), str) else None
++    return {
++        "doc_id": doc_id,
++        "title": title,
++        "text": text,
++        "dataset": domain,
++        "meta": meta or {},
++    }
++
++
++def main() -> None:
++    parser = argparse.ArgumentParser(description="Prepare UltraDomain docs for Mix/Legal.")
++    parser.add_argument("--dataset_id", default="TBD_ULTRADOMAIN_DATASET_ID")
++    parser.add_argument("--split", default="train")
++    parser.add_argument("--config_name", default=None)
++    parser.add_argument("--cache_dir", default=None)
++    parser.add_argument("--limit", type=int, default=0, help="Optional per-domain limit")
++    args = parser.parse_args()
++
++    ensure_dirs()
++    dataset = _load_dataset(args.dataset_id, args.split, args.cache_dir, args.config_name)
++
++    docs_by_domain: Dict[str, Dict[str, Dict[str, Any]]] = defaultdict(dict)
++    dup_counts = defaultdict(int)
++    counts = defaultdict(int)
++
++    for idx, row in enumerate(dataset):
++        label = row.get("label")
++        domain = normalize_domain(label)
++        if domain not in DOMAIN_LABELS:
++            continue
++        if args.limit and counts[domain] >= args.limit:
++            continue
++        record = _doc_record(row, domain, fallback_id=f"{domain}_{idx}")
++        if record is None:
++            continue
++        doc_id = record["doc_id"]
++        if doc_id in docs_by_domain[domain]:
++            dup_counts[domain] += 1
++            continue
++        docs_by_domain[domain][doc_id] = record
++        counts[domain] += 1
++
++    stats: Dict[str, Any] = {
++        "dataset_id": args.dataset_id,
++        "split": args.split,
++        "config_name": args.config_name,
++        "generated_at": now_iso(),
++        "domains": {},
++    }
++
++    for domain in DOMAIN_LABELS:
++        docs = list(docs_by_domain[domain].values())
++        docs.sort(key=lambda item: item["doc_id"])
++        out_path = RUN_META_DIR / f"docs_{domain}.jsonl"
++        write_jsonl(out_path, docs)
++        lengths = [len(doc.get("text") or "") for doc in docs]
++        if lengths:
++            avg_len = sum(lengths) / len(lengths)
++            min_len = min(lengths)
++            max_len = max(lengths)
++        else:
++            avg_len = min_len = max_len = 0
++        stats["domains"][domain] = {
++            "doc_count": len(docs),
++            "avg_chars": round(avg_len, 2),
++            "min_chars": min_len,
++            "max_chars": max_len,
++            "duplicate_docs": dup_counts.get(domain, 0),
++            "output": str(out_path),
++        }
++
++    write_json(RUN_META_DIR / "doc_stats.json", stats)
++    print(f"Wrote docs to {RUN_META_DIR}")
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/scripts/ultradomain/run_answers.py b/scripts/ultradomain/run_answers.py
+new file mode 100644
+index 0000000..89ecb8c
+--- /dev/null
++++ b/scripts/ultradomain/run_answers.py
+@@ -0,0 +1,306 @@
++from __future__ import annotations
++
++import argparse
++import json
++from copy import deepcopy
++from pathlib import Path
++from typing import Any, Dict, List, Tuple
++
++from relrag.config.config_loader import config as config_loader
++from relrag.retriever.bm25_client import BM25Client
++from relrag.retriever.embedding_client import EmbeddingClient
++from relrag.retriever.fusion import fuse_rankings
++from relrag.retriever.operators import Indexes
++from relrag.retriever.note_store import NoteStore
++from relrag.retriever.pipeline import retrieve_answer
++from relrag.utils.context_budget import budget_answer_prompt
++from relrag.utils.output_eval import extract_final_answer, has_final_tag
++from relrag.utils.openai_client import chat_completion
++
++from scripts.ultradomain.common import (
++    ANSWERS_DIR,
++    CHUNKS_DIR,
++    DOMAIN_LABELS,
++    INDEX_DIR,
++    QUESTIONS_DIR,
++    TOKENIZER_ID,
++    assemble_budgeted_items,
++    chunk_note_id,
++    count_tokens,
++    ensure_dirs,
++    get_api_key,
++    now_iso,
++    read_json,
++    read_jsonl,
++    write_jsonl,
++)
++
++SYSTEMS = ["RelRAG-full", "BM25-only", "Dense-only", "Hybrid-only"]
++
++
++def _load_questions(domain: str) -> List[Dict[str, Any]]:
++    data = read_json(QUESTIONS_DIR / f"questions_{domain}.json")
++    questions = data.get("questions") if isinstance(data, dict) else None
++    if not isinstance(questions, list):
++        raise ValueError("questions file missing questions list")
++    return questions
++
++
++def _load_chunk_map(domain: str) -> Dict[str, Dict[str, Any]]:
++    path = CHUNKS_DIR / f"chunks_{domain}.jsonl"
++    mapping: Dict[str, Dict[str, Any]] = {}
++    for chunk in read_jsonl(path):
++        doc_id = str(chunk.get("doc_id") or "")
++        chunk_id = str(chunk.get("chunk_id") or "")
++        if not doc_id or not chunk_id:
++            continue
++        note_id = chunk_note_id(doc_id, chunk_id)
++        mapping[note_id] = chunk
++    return mapping
++
++
++def _build_bm25_client(domain: str, base_cfg: Dict[str, Any]) -> BM25Client:
++    cfg = deepcopy((base_cfg.get("retriever") or {}).get("bm25") or {})
++    cfg["enabled"] = True
++    cfg["store_path"] = str(INDEX_DIR / f"chunk_bm25_{domain}")
++    cfg["topn"] = 40
++    return BM25Client(cfg)
++
++
++def _build_dense_client(domain: str, base_cfg: Dict[str, Any]) -> EmbeddingClient:
++    cfg = deepcopy((base_cfg.get("retriever") or {}).get("embedding") or {})
++    cfg["enabled"] = True
++    cfg["offline_index_path"] = str(INDEX_DIR / f"chunk_faiss_{domain}" / "notes.faiss")
++    cfg["meta_path"] = str(INDEX_DIR / f"chunk_faiss_{domain}" / "notes.meta.parquet")
++    cfg["topn"] = 40
++    return EmbeddingClient(cfg)
++
++
++def _retrieve_chunk_system(
++    question: str,
++    system: str,
++    chunk_map: Dict[str, Dict[str, Any]],
++    bm25: BM25Client,
++    dense: EmbeddingClient,
++) -> List[Dict[str, Any]]:
++    if system == "BM25-only":
++        results = bm25.search(question, topn=40)
++    elif system == "Dense-only":
++        results = dense.search(question, topn=40)
++    elif system == "Hybrid-only":
++        bm25_results = bm25.search(question, topn=40)
++        dense_results = dense.search(question, topn=40)
++        fused = fuse_rankings(
++            {"bm25": bm25_results, "emb": dense_results},
++            weights={"bm25": 1.0, "emb": 1.0},
++            rrf_k=60,
++        )
++        results = fused
++    else:
++        raise ValueError(f"unsupported system: {system}")
++
++    evidences: List[Dict[str, Any]] = []
++    for item in results:
++        note_id = item.get("note_id")
++        if not note_id:
++            continue
++        chunk = chunk_map.get(note_id)
++        if not chunk:
++            continue
++        text = chunk.get("text") or ""
++        if not text:
++            continue
++        evidences.append(
++            {
++                "note_id": note_id,
++                "evidence": text,
++                "canonical": text,
++                "score": item.get("score"),
++                "token_count": chunk.get("token_count") or count_tokens(text),
++            }
++        )
++    return evidences
++
++
++def _build_relrag_cfg(domain: str, base_cfg: Dict[str, Any], base_url: str, api_key_env: str, model: str) -> Dict[str, Any]:
++    cfg = deepcopy(base_cfg)
++    retr = cfg.setdefault("retriever", {})
++    retr.setdefault("structured", {})
++    retr.setdefault("embedding", {})
++    retr.setdefault("bm25", {})
++    retr.setdefault("hybrid", {})
++    retr.setdefault("fusion", {})
++    retr["structured"]["enabled"] = True
++    retr["structured"]["top_k"] = 40
++    retr["embedding"]["enabled"] = True
++    retr["embedding"]["offline_index_path"] = str(INDEX_DIR / f"relrag_{domain}" / "faiss" / "notes.faiss")
++    retr["embedding"]["meta_path"] = str(INDEX_DIR / f"relrag_{domain}" / "faiss" / "notes.meta.parquet")
++    retr["embedding"]["topn"] = 40
++    retr["bm25"]["enabled"] = True
++    retr["bm25"]["store_path"] = str(INDEX_DIR / f"relrag_{domain}")
++    retr["bm25"]["topn"] = 40
++    retr["hybrid"]["enabled"] = True
++
++    reranker = cfg.setdefault("reranker", {})
++    reranker["enabled"] = True
++    reranker["provider"] = "openai"
++    reranker["openai"] = {
++        "model": model,
++        "base_url": base_url,
++        "api_key_env": api_key_env,
++        "timeout_sec": 60.0,
++        "max_retries": 2,
++        "retry_backoff_sec": 1.0,
++        "retry_backoff_max_sec": 20.0,
++    }
++    return cfg
++
++
++def _build_answer_budget_cfg() -> Dict[str, Any]:
++    return {
++        "llm": {"max_context_len": 128000, "safety_margin_tokens": 256},
++        "answer": {"max_evidence_items": 10000, "max_evidence_tokens": None},
++    }
++
++
++def _call_answer_llm(messages: List[Dict[str, str]], *, model: str, base_url: str, api_key: str, temperature: float, top_p: float, max_tokens: int) -> str:
++    return chat_completion(
++        messages,
++        model=model,
++        api_key=api_key,
++        base_url=base_url,
++        temperature=temperature,
++        max_tokens=max_tokens,
++        extra_body={"top_p": top_p},
++    )
++
++
++def main() -> None:
++    parser = argparse.ArgumentParser(description="Run UltraDomain answers for Mix/Legal.")
++    parser.add_argument("--domain", default="all")
++    parser.add_argument("--system", default="all")
++    parser.add_argument("--base_url", default="https://api.deepseek.com/v1")
++    parser.add_argument("--model", default="deepseek-chat")
++    parser.add_argument("--api_key_env", default="DEEPSEEK_API_KEY")
++    parser.add_argument("--temperature", type=float, default=0.2)
++    parser.add_argument("--top_p", type=float, default=1.0)
++    parser.add_argument("--max_output_tokens", type=int, default=1024)
++    parser.add_argument("--budget_tokens", type=int, default=12000)
++    parser.add_argument("--resume", action="store_true")
++    args = parser.parse_args()
++
++    ensure_dirs()
++    api_key = get_api_key(args.api_key_env)
++    base_cfg = config_loader.load_config()
++    domains = list(DOMAIN_LABELS.keys()) if args.domain == "all" else [args.domain]
++    systems = SYSTEMS if args.system == "all" else [args.system]
++
++    for domain in domains:
++        if domain not in DOMAIN_LABELS:
++            continue
++        questions = _load_questions(domain)
++        chunk_map = _load_chunk_map(domain)
++        bm25 = _build_bm25_client(domain, base_cfg)
++        dense = _build_dense_client(domain, base_cfg)
++
++        relrag_indexes = None
++        relrag_notes = None
++        relrag_cfg = None
++        if "RelRAG-full" in systems:
++            relrag_indexes = Indexes(str(INDEX_DIR / f"relrag_{domain}" / "indexes"))
++            relrag_notes = NoteStore(str(INDEX_DIR / f"relrag_{domain}" / "notes.jsonl"))
++            relrag_cfg = _build_relrag_cfg(domain, base_cfg, args.base_url, args.api_key_env, args.model)
++
++        for system in systems:
++            out_dir = ANSWERS_DIR / domain
++            out_dir.mkdir(parents=True, exist_ok=True)
++            out_path = out_dir / f"{system}.jsonl"
++            existing = set()
++            if args.resume and out_path.exists():
++                for row in read_jsonl(out_path):
++                    qid = row.get("question_id")
++                    if qid:
++                        existing.add(qid)
++
++            rows: List[Dict[str, Any]] = []
++            for q in questions:
++                qid = q.get("question_id")
++                question = q.get("question")
++                if not qid or not question:
++                    continue
++                if qid in existing:
++                    continue
++
++                if system == "RelRAG-full":
++                    if relrag_indexes is None or relrag_notes is None or relrag_cfg is None:
++                        raise RuntimeError("RelRAG indexes not initialized")
++                    result = retrieve_answer(
++                        question=question,
++                        indexes=relrag_indexes,
++                        note_store=relrag_notes,
++                        cfg=relrag_cfg,
++                    )
++                    evidences = result.get("evidence") or []
++                else:
++                    evidences = _retrieve_chunk_system(question, system, chunk_map, bm25, dense)
++
++                selected, used_tokens = assemble_budgeted_items(evidences, args.budget_tokens)
++                budget_cfg = _build_answer_budget_cfg()
++                budgeted = budget_answer_prompt(
++                    question,
++                    selected,
++                    prompt_name="answerer_openai.txt",
++                    label_instruction="",
++                    system_prompt=None,
++                    cfg=budget_cfg,
++                    llm_cfg={"max_context_len": 128000},
++                    requested_max_tokens=args.max_output_tokens,
++                    max_items_override=10000,
++                    max_item_tokens_override=None,
++                    include_raw_evidence=False,
++                )
++                answer_raw = _call_answer_llm(
++                    budgeted.messages,
++                    model=args.model,
++                    base_url=args.base_url,
++                    api_key=api_key,
++                    temperature=args.temperature,
++                    top_p=args.top_p,
++                    max_tokens=args.max_output_tokens,
++                )
++                answer_final = extract_final_answer(answer_raw)
++                rows.append(
++                    {
++                        "question_id": qid,
++                        "question": question,
++                        "answer_raw": answer_raw,
++                        "answer_final": answer_final,
++                        "has_final": has_final_tag(answer_raw),
++                        "retrieved_context_ids": [item.get("note_id") for item in selected if item.get("note_id")],
++                        "token_budget_used": used_tokens,
++                        "run_meta": {
++                            "system": system,
++                            "domain": domain,
++                            "model": args.model,
++                            "base_url": args.base_url,
++                            "temperature": args.temperature,
++                            "top_p": args.top_p,
++                            "max_output_tokens": args.max_output_tokens,
++                            "budget_tokens": args.budget_tokens,
++                            "prefilter_top_k": 40,
++                            "generated_at": now_iso(),
++                        },
++                    }
++                )
++
++            if rows:
++                mode = "a" if args.resume and out_path.exists() else "w"
++                with out_path.open(mode, encoding="utf-8") as handle:
++                    for row in rows:
++                        handle.write(json.dumps(row, ensure_ascii=False))
++                        handle.write("\n")
++            print(f"Wrote answers for {domain} {system} -> {out_path}")
++
++
++if __name__ == "__main__":
++    main()
+-- 
+2.43.0
+

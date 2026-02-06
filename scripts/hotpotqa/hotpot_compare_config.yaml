@@ -1,0 +1,21 @@
+data: data/hotpot_dev_distractor_500_jsonl.jsonl
+out_dir: result/hotpot_compare_distractor
+method: all
+mode: strict
+limit: 50
+
+llm_base_url: http://127.0.0.1:8000/v1
+llm_model: qwen3-30b-a3b
+embed_base_url: http://127.0.0.1:8001/v1
+embed_model: qwen3-embedding
+tokenizer_model: /home/wjk/.cache/hf/models--cyankiwi--Qwen3-30B-A3B-Instruct-2507-AWQ-4bit/snapshots/8a38c871d6fa1829ca89184c151ed0cdfe9571fb
+
+max_context_len: 8192
+safety_margin_tokens: 256
+max_tokens: 256
+temperature: 0.0
+embed_max_tokens: 8192
+
+# Optional:
+# api_key: EMPTY
+# raptor_python: /path/to/python3.9
