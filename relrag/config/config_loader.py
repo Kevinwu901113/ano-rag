@@ -216,6 +216,72 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "stall_abort_sec": 900.0,
         "force_build": False,
     },
+    "ultradomain": {
+        "protocol": {
+            "version": "v1",
+            "output_root": "result/ultradomain/lightrag_protocol_v1_mix_legal",
+        },
+        "dataset": {
+            "dataset_id": "TBD_ULTRADOMAIN_DATASET_ID",
+            "split": "train",
+            "config_name": None,
+            "cache_dir": None,
+            "limit": 0,
+            "domain": "all",
+        },
+        "llm": {
+            "base_url": "http://127.0.0.1:8000/v1",
+            "model": "qwen3-30b-a3b",
+            "api_key_env": "OPENAI_API_KEY",
+        },
+        "tokenizer": {
+            "local_path": None,
+            "model": "${vllm.model}",
+            "fallback_model": "deepseek-ai/DeepSeek-V3.2",
+            "local_only": True,
+            "trust_remote_code": True,
+        },
+        "chunking": {
+            "chunk_size": 1200,
+            "overlap": 100,
+        },
+        "retrieval": {
+            "prefilter_top_k": 40,
+            "budget_tokens": 12000,
+        },
+        "answer": {
+            "temperature": 0.2,
+            "top_p": 1.0,
+            "max_output_tokens": 1024,
+        },
+        "judge": {
+            "temperature": 0.0,
+            "top_p": 1.0,
+            "max_output_tokens": 1024,
+        },
+        "indexing": {
+            "skip_relrag": False,
+            "skip_chunk": False,
+            "llm_provider": "vllm",
+            "llm_endpoint": "${vllm.endpoint}",
+            "llm_model": "${vllm.model}",
+            "llm_api_key": None,
+            "llm_temperature": 0.0,
+            "llm_max_tokens": None,
+            "embed_provider": "${retriever.embedding.provider}",
+            "embed_model": "${retriever.embedding.model}",
+            "embed_endpoint": "${retriever.embedding.endpoint}",
+            "embed_api_key": "${retriever.embedding.api_key}",
+        },
+        "pipeline": {
+            "resume": False,
+            "skip_validate": False,
+        },
+        "validation": {
+            "expected_questions_per_domain": 125,
+            "strict": True,
+        },
+    },
     "parsing": {
         "allow_jsonl": True,
         "enable_array_packer": True,
@@ -368,6 +434,9 @@ def _normalize_path_fields(config: Dict[str, Any], *, base_dir: Path) -> None:
         "narrativeqa_entry.stories_dir",
         "narrativeqa_entry.cache_dir",
         "narrativeqa_entry.output_dir",
+        "ultradomain.protocol.output_root",
+        "ultradomain.dataset.cache_dir",
+        "ultradomain.tokenizer.local_path",
     ]
     for key in dotted_keys:
         current = _get_nested(config, key)

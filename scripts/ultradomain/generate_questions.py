@@ -17,6 +17,7 @@ from scripts.ultradomain.common import (
     now_iso,
     read_json,
     sha256_text,
+    ultradomain_get,
     write_json,
 )
 
@@ -250,11 +251,16 @@ def _rewrite_failed(
 
 
 def main() -> None:
+    domain_default = ultradomain_get("dataset.domain", "all")
+    base_url_default = ultradomain_get("llm.base_url", "https://api.deepseek.com/v1")
+    model_default = ultradomain_get("llm.model", "deepseek-chat")
+    api_key_env_default = ultradomain_get("llm.api_key_env", "DEEPSEEK_API_KEY")
+
     parser = argparse.ArgumentParser(description="Generate UltraDomain questions for Mix/Legal.")
-    parser.add_argument("--domain", default="all")
-    parser.add_argument("--base_url", default="https://api.deepseek.com/v1")
-    parser.add_argument("--model", default="deepseek-chat")
-    parser.add_argument("--api_key_env", default="DEEPSEEK_API_KEY")
+    parser.add_argument("--domain", default=domain_default)
+    parser.add_argument("--base_url", default=base_url_default)
+    parser.add_argument("--model", default=model_default)
+    parser.add_argument("--api_key_env", default=api_key_env_default)
     args = parser.parse_args()
 
     ensure_dirs()

@@ -294,7 +294,7 @@ def retrieve_answer(
         return _finalize_result(result, ir_override=ir, intent_override=intent)
 
     candidates.sort(key=lambda c: c.score, reverse=True)
-    top_candidates = candidates[: ir.fanout]
+    top_candidates = _select_top_candidates(candidates, ir.fanout, seed_entities)
 
     support_note_ids: List[str] = []
     for cand in top_candidates:
@@ -1164,6 +1164,57 @@ def _maybe_run_hybrid(
     return hybrid_inst.retrieve(question, ir, intent, candidates, note_store, alias_lookup=alias_lookup)
 
 
+def _candidate_root_entity(candidate: Candidate) -> Optional[str]:
+    if not candidate.path:
+        return None
+    first = candidate.path[0]
+    if not isinstance(first, dict):
+        return None
+    subj = first.get("subj")
+    return str(subj) if subj else None
+
+
+def _select_top_candidates(
+    candidates: List[Candidate],
+    fanout: int,
+    seed_entities: Sequence[str],
+) -> List[Candidate]:
+    if fanout <= 0 or not candidates:
+        return []
+    if len(seed_entities) <= 1:
+        return candidates[:fanout]
+
+    selected: List[Candidate] = []
+    used_indices: set[int] = set()
+    seed_set = {seed for seed in seed_entities if seed}
+
+    # Ensure each seed entity can contribute at least one top candidate when available.
+    for seed in seed_entities:
+        if not seed:
+            continue
+        for idx, cand in enumerate(candidates):
+            if idx in used_indices:
+                continue
+            if _candidate_root_entity(cand) == seed:
+                selected.append(cand)
+                used_indices.add(idx)
+                break
+        if len(selected) >= fanout:
+            return selected[:fanout]
+
+    # Fill the remaining slots with global best-scoring candidates.
+    for idx, cand in enumerate(candidates):
+        if idx in used_indices:
+            continue
+        root = _candidate_root_entity(cand)
+        if root and seed_set and root not in seed_set and len(selected) < min(len(seed_set), fanout):
+            continue
+        selected.append(cand)
+        if len(selected) >= fanout:
+            break
+    return selected[:fanout]
+
+
 def _rerank_candidates(candidates: List[Candidate], attribute: Optional[str]) -> List[Candidate]:
     if not attribute or not candidates:
         return candidates
@@ -1425,6 +1476,89 @@ def _get_chunk_store(path: str) -> ChunkStore:
     return store
 
 
+def _merge_evidence_items(
+    existing: List[Dict[str, Any]],
+    extras: List[Dict[str, Any]],
+) -> Tuple[List[Dict[str, Any]], int]:
+    merged: List[Dict[str, Any]] = []
+    seen = set()
+    for ev in existing:
+        key = (ev.get("note_id"), ev.get("evidence"))
+        if key in seen:
+            continue
+        seen.add(key)
+        merged.append(ev)
+    added = 0
+    for ev in extras:
+        key = (ev.get("note_id"), ev.get("evidence"))
+        if key in seen:
+            continue
+        seen.add(key)
+        merged.append(ev)
+        added += 1
+    return merged, added
+
+
+def _load_all_notes(note_store: NoteStore) -> List[Dict[str, Any]]:
+    try:
+        note_store._ensure_loaded()  # type: ignore[attr-defined]
+    except Exception:
+        return []
+    cache = getattr(note_store, "_cache", None) or {}
+    if not isinstance(cache, dict):
+        return []
+    return [note for note in cache.values() if isinstance(note, dict)]
+
+
+def _vector_fallback_search(
+    *,
+    question: str,
+    note_store: NoteStore,
+    doc_hint: Optional[str],
+    embedding_cfg: Dict[str, Any],
+    top_k: int,
+) -> List[Dict[str, Any]]:
+    if top_k <= 0:
+        return []
+    notes = _load_all_notes(note_store)
+    if not notes:
+        return []
+    normalized_hint = _normalize_doc_hint(doc_hint)
+    if normalized_hint:
+        notes = [note for note in notes if _note_matches_source(note, normalized_hint)]
+    if not notes:
+        return []
+    try:
+        ranked = VectorSearcher(embedding_cfg=embedding_cfg).search_in_notes(
+            question,
+            notes,
+            top_k=top_k,
+        )
+    except Exception as exc:
+        logger.warning("vector fallback search failed: {}", exc)
+        return []
+    if not ranked:
+        return []
+    evidences: List[Dict[str, Any]] = []
+    for note, score in ranked:
+        meta = (note.get("meta", {}) or {})
+        evidences.append(
+            {
+                "note_id": note.get("note_id"),
+                "evidence": note.get("evidence", ""),
+                "canonical": meta.get("evidence_canonical") or note.get("evidence", ""),
+                "quality": meta.get("quality_score"),
+                "subj": note.get("subj"),
+                "pred": note.get("pred"),
+                "obj": note.get("obj"),
+                "weak": bool(meta.get("weak", False)),
+                "score": float(score),
+                "source": "vector_fallback",
+            }
+        )
+    return evidences
+
+
 def _should_chunk_fallback(result: Dict[str, Any], intent: AnswerIntent, ir: Optional[QueryIR]) -> bool:
     evidence = result.get("evidence") or []
     reason = result.get("reason")
@@ -1462,9 +1596,6 @@ def _apply_chunk_fallback(
 ) -> Dict[str, Any]:
     if not _should_chunk_fallback(result, intent, ir):
         return result
-    chunks_path = _resolve_chunks_path(note_store)
-    if not chunks_path:
-        return result
     retr_cfg = (cfg or {}).get("retriever") or {}
     chunk_cfg = retr_cfg.get("chunk_fallback") or {}
     top_k = chunk_cfg.get("top_k")
@@ -1478,36 +1609,61 @@ def _apply_chunk_fallback(
     top_k = int(top_k)
     if top_k <= 0:
         return result
+    chunks_path = _resolve_chunks_path(note_store)
     seeds: List[str] = []
     if ir:
         seeds.extend(seed.text for seed in ir.seeds if seed.text)
     if intent.entity and intent.entity not in seeds:
         seeds.append(intent.entity)
-    chunk_store = _get_chunk_store(chunks_path)
-    chunk_evs = chunk_store.search(question, seeds=seeds, top_k=top_k, doc_hint=doc_hint)
-    if not chunk_evs:
-        result.setdefault("chunk_fallback", {})["used"] = False
-        return result
-
     existing = result.get("evidence") or []
-    merged: List[Dict[str, Any]] = []
-    seen = set()
-    for ev in existing:
-        key = (ev.get("note_id"), ev.get("evidence"))
-        seen.add(key)
-        merged.append(ev)
-    for ev in chunk_evs:
-        key = (ev.get("note_id"), ev.get("evidence"))
-        if key in seen:
-            continue
-        merged.append(ev)
-        seen.add(key)
-    if merged:
-        result["evidence"] = merged[: max(len(existing), top_k)]
+    merged = list(existing)
+    chunk_evs: List[Dict[str, Any]] = []
+    if chunks_path:
+        chunk_store = _get_chunk_store(chunks_path)
+        chunk_evs = chunk_store.search(question, seeds=seeds, top_k=top_k, doc_hint=doc_hint)
+    if chunk_evs:
+        merged, _ = _merge_evidence_items(merged, chunk_evs)
         result.setdefault("chunk_fallback", {})["used"] = True
         result["chunk_fallback"]["hits"] = len(chunk_evs)
+    else:
+        result.setdefault("chunk_fallback", {})["used"] = False
+        result["chunk_fallback"]["hits"] = 0
+
+    vector_cfg = chunk_cfg.get("vector") or {}
+    vector_enabled = bool(vector_cfg.get("enabled", True))
+    vector_hits = 0
+    if vector_enabled and len(merged) < top_k:
+        vector_top_k = int(vector_cfg.get("top_k", top_k))
+        vector_top_k = max(vector_top_k, top_k)
+        query_for_vector = question
+        if seeds:
+            query_for_vector = f"{question}\nSeeds: {'; '.join(seeds[:6])}"
+        vector_evs = _vector_fallback_search(
+            question=query_for_vector,
+            note_store=note_store,
+            doc_hint=doc_hint,
+            embedding_cfg=(retr_cfg.get("embedding") or {}),
+            top_k=vector_top_k,
+        )
+        if vector_evs:
+            merged, vector_hits = _merge_evidence_items(merged, vector_evs)
+    result.setdefault("vector_fallback", {})["used"] = vector_hits > 0
+    result["vector_fallback"]["hits"] = vector_hits
+    result["vector_fallback"]["enabled"] = vector_enabled
+
+    if merged:
+        result["evidence"] = merged[: max(len(existing), top_k)]
         if not existing:
             result["reason"] = None
+        support_ids = list(result.get("support_note_ids") or [])
+        seen_ids = set(support_ids)
+        for ev in result["evidence"]:
+            nid = ev.get("note_id")
+            if nid and nid not in seen_ids:
+                support_ids.append(nid)
+                seen_ids.add(nid)
+        if support_ids:
+            result["support_note_ids"] = support_ids
     return result
 
 

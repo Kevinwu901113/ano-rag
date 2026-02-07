@@ -448,6 +448,7 @@ def _prepare_retriever_config(index_root: Path, base_cfg: Dict[str, Any], mode: 
         embed_cfg["enabled"] = False
     if bm25_cfg.get("enabled") and not bm25_corpus.exists():
         bm25_cfg["enabled"] = False
+    hybrid_cfg["require_seed_match"] = False
 
     return cfg
 

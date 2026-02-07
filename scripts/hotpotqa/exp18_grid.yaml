@@ -1,0 +1,48 @@
+common:
+  reader: openai
+  retriever: bm25
+  split: dev
+  top_k: 10
+  shortage_refill_enabled: true
+  shortage_refill_max_candidates: 48
+  shortage_refill_prefer_new_titles: true
+  pred_sp_policy: high_confidence
+  pred_sp_drop_weak: true
+  pred_sp_prefer_new_titles: true
+
+runs:
+  - name: e17_baseline
+    pred_sp_max_facts: 4
+    pred_sp_min_score: 0.0
+    shortage_refill_min_score: 0.35
+
+  - name: facts_3
+    pred_sp_max_facts: 3
+    pred_sp_min_score: 0.0
+    shortage_refill_min_score: 0.35
+
+  - name: facts_5
+    pred_sp_max_facts: 5
+    pred_sp_min_score: 0.0
+    shortage_refill_min_score: 0.35
+
+  - name: sp_min_005
+    pred_sp_max_facts: 4
+    pred_sp_min_score: 0.05
+    shortage_refill_min_score: 0.35
+
+  - name: refill_min_025
+    pred_sp_max_facts: 4
+    pred_sp_min_score: 0.0
+    shortage_refill_min_score: 0.25
+
+  - name: refill_min_045
+    pred_sp_max_facts: 4
+    pred_sp_min_score: 0.0
+    shortage_refill_min_score: 0.45
+
+  - name: topk_policy_ablation
+    pred_sp_policy: topk
+    pred_sp_max_facts: 10
+    pred_sp_min_score: 0.0
+    shortage_refill_min_score: 0.35

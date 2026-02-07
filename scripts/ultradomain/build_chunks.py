@@ -16,6 +16,7 @@ from scripts.ultradomain.common import (
     now_iso,
     read_json,
     read_jsonl,
+    ultradomain_get,
     write_json,
     write_jsonl,
 )
@@ -213,10 +214,14 @@ def _describe_token_lengths(lengths: List[int]) -> Dict[str, Any]:
 
 
 def main() -> None:
+    domain_default = ultradomain_get("dataset.domain", "all")
+    chunk_size_default = int(ultradomain_get("chunking.chunk_size", 1200) or 1200)
+    overlap_default = int(ultradomain_get("chunking.overlap", 100) or 100)
+
     parser = argparse.ArgumentParser(description="Build sentence-aware DeepSeek chunks for UltraDomain.")
-    parser.add_argument("--domain", default="all", help="mix|legal|all")
-    parser.add_argument("--chunk_size", type=int, default=1200)
-    parser.add_argument("--overlap", type=int, default=100)
+    parser.add_argument("--domain", default=domain_default, help="mix|legal|all")
+    parser.add_argument("--chunk_size", type=int, default=chunk_size_default)
+    parser.add_argument("--overlap", type=int, default=overlap_default)
     args = parser.parse_args()
 
     ensure_dirs()

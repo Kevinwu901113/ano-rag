@@ -225,6 +225,20 @@ hotpot_entry:
   cache_dir: result/cache
   output_dir: result
   top_k: 10
+  overfetch: 2.0
+  min_overfetch: 2.0
+  backfill_max_overfetch: 4.0
+  backfill_step: 1.5
+  backfill_rounds: 3
+  shortage_refill_enabled: true
+  shortage_refill_max_candidates: 48
+  shortage_refill_min_score: 0.35
+  shortage_refill_prefer_new_titles: true
+  pred_sp_policy: high_confidence
+  pred_sp_max_facts: 4
+  pred_sp_min_score: 0.0
+  pred_sp_drop_weak: true
+  pred_sp_prefer_new_titles: true
   limit: 0
   workers: 1
   debug_dir: result/debug
@@ -261,6 +275,62 @@ narrativeqa_entry:
   stall_warn_sec: 300.0
   stall_abort_sec: 900.0
   force_build: false
+ultradomain:
+  protocol:
+    version: v1
+    output_root: result/ultradomain/lightrag_protocol_v1_mix_legal
+  dataset:
+    dataset_id: TommyChien/UltraDomain
+    split: train
+    config_name: null
+    cache_dir: null
+    limit: 0
+    domain: all
+  llm:
+    base_url: http://127.0.0.1:8000/v1
+    model: qwen3-30b-a3b
+    api_key_env: OPENAI_API_KEY
+  tokenizer:
+    # 本地优先：优先读取 local_path / ULTRADOMAIN_TOKENIZER_PATH。
+    # 如果你用 vLLM 从本地目录启动 qwen3-30b-a3b，请把该目录填到 local_path。
+    local_path: /home/wjk/.cache/huggingface/hub/models--Qwen--Qwen3-30B-A3B/snapshots/ad44e777bcd18fa416d9da3bd8f70d33ebb85d39
+    model: ${vllm.model}
+    fallback_model: deepseek-ai/DeepSeek-V3.2
+    local_only: true
+    trust_remote_code: true
+  chunking:
+    chunk_size: 1200
+    overlap: 100
+  retrieval:
+    prefilter_top_k: 40
+    budget_tokens: 12000
+  answer:
+    temperature: 0.2
+    top_p: 1.0
+    max_output_tokens: 1024
+  judge:
+    temperature: 0.0
+    top_p: 1.0
+    max_output_tokens: 1024
+  indexing:
+    skip_relrag: false
+    skip_chunk: false
+    llm_provider: vllm
+    llm_endpoint: ${vllm.endpoint}
+    llm_model: ${vllm.model}
+    llm_api_key: null
+    llm_temperature: 0.0
+    llm_max_tokens: null
+    embed_provider: ${retriever.embedding.provider}
+    embed_model: ${retriever.embedding.model}
+    embed_endpoint: ${retriever.embedding.endpoint}
+    embed_api_key: ${retriever.embedding.api_key}
+  pipeline:
+    resume: false
+    skip_validate: false
+  validation:
+    expected_questions_per_domain: 125
+    strict: true
 parsing:
   allow_jsonl: true
   enable_array_packer: true

@@ -60,7 +60,7 @@ python run_vllm_dual_gpu.py \
   --embed-port 8001 \
   --llm-gpu 0 \
   --embed-gpu 1 \
-  --llm-gpu-mem 0.85 \
+  --llm-gpu-mem 0.9 \
   --llm-max-model-len 8192 \
   --llm-max-num-seqs 24 \
   --llm-max-num-batched-tokens 1024 \

@@ -13,16 +13,26 @@ This protocol freezes the experimental setup for UltraDomain Mix + Legal replica
 
 ## 2) UltraDomain Data Schema (HF)
 - Use HuggingFace UltraDomain dataset.
+- Loader policy (frozen):
+  - First try `datasets.load_dataset`.
+  - If it fails (e.g., schema mismatch or network issues), fallback to direct JSON/JSONL reading via `huggingface_hub`.
+  - If Hub listing is unavailable, fallback again to latest local snapshot under HF cache.
+- Domain mapping:
+  - Normalize from first available candidate in order: `label`, `dataset`, `domain`, `__domain_hint`.
+  - `__domain_hint` is injected from source filename stem when fallback loader reads raw files.
 - Fields used:
-  - `label` as domain (Mix/Legal).
-  - `context_id` as `doc_id`.
   - `context` as document text.
+  - `context_id` or `_id` as `doc_id` (fallback: `{domain}_{row_index}`).
   - `meta.title` as document title (if present).
 - Document record stored as:
   - `doc_id`, `title`, `text`, `dataset`, `meta`.
 
 ## 3) Chunking (Frozen)
-- Tokenizer: **DeepSeek tokenizer** (`deepseek-ai/DeepSeek-V3.2`), `add_special_tokens=False`.
+- Tokenizer (local-first):
+  - Prefer local tokenizer path from `ultradomain.tokenizer.local_path` or env `ULTRADOMAIN_TOKENIZER_PATH`.
+  - Preferred model id: `qwen3-30b-a3b` (via `${vllm.model}`).
+  - Fallback model id: `deepseek-ai/DeepSeek-V3.2`.
+  - Default behavior uses `local_files_only=true` to avoid online dependency.
 - Sentence-aware chunking (sentence as atomic unit):
   - Split text into sentences using **`TextUtils.split_with_spans`** (rule-based).
   - Compute per-sentence token length using DeepSeek tokenizer.
@@ -56,16 +66,17 @@ This protocol freezes the experimental setup for UltraDomain Mix + Legal replica
   - If pass rate < 95%, regenerate failed questions once.
 
 ## 5) Answer LLM (Frozen)
-- Provider: DeepSeek API (OpenAI-compatible).
-- Base URL: `https://api.deepseek.com/v1`.
-- Model: `deepseek-chat`.
+- Provider: OpenAI-compatible local service.
+- Base URL: `http://127.0.0.1:8000/v1`.
+- Model: `qwen3-30b-a3b`.
+- API key env: `OPENAI_API_KEY` (set to `sk-no-key-required` when keyless service is used).
 - Answer params: `temperature=0.2`, `top_p=1.0`, `max_output_tokens=1024`.
 - Context length: 128K.
 - Same model for **all systems**.
 
 ## 6) Judge LLM (Frozen)
-- Model: `deepseek-chat` (same as answer LLM).
-- Base URL: `https://api.deepseek.com/v1`.
+- Model: `qwen3-30b-a3b` (same as answer LLM).
+- Base URL: `http://127.0.0.1:8000/v1`.
 - Params: `temperature=0`, `top_p=1.0`.
 - Dimensions: Comprehensiveness, Diversity, Empowerment, Overall.
 - A/B bias control: alternate order by question_id parity.

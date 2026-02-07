@@ -679,7 +679,10 @@ def _prepare_retriever_config(
     mode = mode.lower()
     if mode == "structured":
         structured_cfg["enabled"] = True
-        structured_cfg["vector_fallback_enabled"] = False
+        # Keep vector fallback on for structured mode unless caller explicitly disables it.
+        structured_cfg["vector_fallback_enabled"] = bool(
+            structured_cfg.get("vector_fallback_enabled", True)
+        )
         embed_cfg["enabled"] = False
         bm25_cfg["enabled"] = False
         hybrid_cfg["enabled"] = False
@@ -709,6 +712,7 @@ def _prepare_retriever_config(
         embed_cfg["enabled"] = False
     if bm25_cfg.get("enabled") and not bm25_corpus.exists():
         bm25_cfg["enabled"] = False
+    hybrid_cfg["require_seed_match"] = False
 
     return cfg
 

@@ -9,7 +9,39 @@ import time
 from pathlib import Path
 from typing import Any, Dict, Iterable, Iterator, List, Optional, Tuple
 
-OUTPUT_ROOT = Path("result/ultradomain/lightrag_protocol_v1_mix_legal")
+from relrag.config.config_loader import config as config_loader
+
+
+def _nested_get(mapping: Dict[str, Any], path: str, default: Any = None) -> Any:
+    current: Any = mapping
+    for part in path.split("."):
+        if not isinstance(current, dict) or part not in current:
+            return default
+        current = current[part]
+    return current
+
+
+def ultradomain_config() -> Dict[str, Any]:
+    try:
+        cfg = config_loader.load_config()
+    except Exception:
+        return {}
+    section = cfg.get("ultradomain")
+    return section if isinstance(section, dict) else {}
+
+
+def ultradomain_get(path: str, default: Any = None) -> Any:
+    return _nested_get(ultradomain_config(), path, default)
+
+
+def _resolve_output_root() -> Path:
+    value = ultradomain_get("protocol.output_root")
+    if isinstance(value, str) and value.strip():
+        return Path(value.strip())
+    return Path("result/ultradomain/lightrag_protocol_v1_mix_legal")
+
+
+OUTPUT_ROOT = _resolve_output_root()
 RUN_META_DIR = OUTPUT_ROOT / "run_meta"
 CHUNKS_DIR = OUTPUT_ROOT / "chunks"
 QUESTIONS_DIR = OUTPUT_ROOT / "questions"
@@ -18,7 +50,27 @@ JUDGE_DIR = OUTPUT_ROOT / "judge"
 SUMMARY_DIR = OUTPUT_ROOT / "summary"
 INDEX_DIR = OUTPUT_ROOT / "indexes"
 
-TOKENIZER_ID = "deepseek-ai/DeepSeek-V3.2"
+DEFAULT_TOKENIZER_ID = "deepseek-ai/DeepSeek-V3.2"
+
+
+def _resolve_preferred_tokenizer_id() -> str:
+    preferred = ultradomain_get("tokenizer.model")
+    if isinstance(preferred, str) and preferred.strip():
+        return preferred.strip()
+    llm_model = ultradomain_get("llm.model")
+    if isinstance(llm_model, str) and llm_model.strip():
+        return llm_model.strip()
+    try:
+        cfg = config_loader.load_config()
+        vllm_model = ((cfg.get("vllm") or {}).get("model") or "").strip()
+        if vllm_model:
+            return vllm_model
+    except Exception:
+        pass
+    return DEFAULT_TOKENIZER_ID
+
+
+TOKENIZER_ID = _resolve_preferred_tokenizer_id()
 
 DOMAIN_LABELS = {
     "mix": "Mix",
@@ -32,6 +84,7 @@ _DOMAIN_ALIASES = {
 }
 
 _TOKENIZER = None
+_TOKENIZER_SOURCE: Optional[str] = None
 
 
 def ensure_dirs() -> None:
@@ -130,23 +183,65 @@ def get_git_commit() -> Optional[str]:
 
 def get_tokenizer():
     global _TOKENIZER
+    global _TOKENIZER_SOURCE
     if _TOKENIZER is not None:
         return _TOKENIZER
     from transformers import AutoTokenizer  # type: ignore
 
-    try:
-        _TOKENIZER = AutoTokenizer.from_pretrained(
-            TOKENIZER_ID,
-            trust_remote_code=True,
-            use_fast=True,
-        )
-    except Exception:
-        _TOKENIZER = AutoTokenizer.from_pretrained(
-            TOKENIZER_ID,
-            trust_remote_code=True,
-            use_fast=False,
-        )
-    return _TOKENIZER
+    local_only = bool(ultradomain_get("tokenizer.local_only", True))
+    trust_remote_code = bool(ultradomain_get("tokenizer.trust_remote_code", True))
+    configured_local_path = ultradomain_get("tokenizer.local_path")
+    fallback_tokenizer = ultradomain_get("tokenizer.fallback_model", DEFAULT_TOKENIZER_ID)
+    env_tokenizer_path = os.environ.get("ULTRADOMAIN_TOKENIZER_PATH")
+
+    candidates: List[str] = []
+    for value in (
+        configured_local_path,
+        env_tokenizer_path,
+        TOKENIZER_ID,
+        fallback_tokenizer,
+        DEFAULT_TOKENIZER_ID,
+    ):
+        text = str(value or "").strip()
+        if not text or text in candidates:
+            continue
+        candidates.append(text)
+
+    errors: List[str] = []
+    for candidate in candidates:
+        for use_fast in (True, False):
+            # Always try local cache/path first to avoid network dependency.
+            try:
+                _TOKENIZER = AutoTokenizer.from_pretrained(
+                    candidate,
+                    trust_remote_code=trust_remote_code,
+                    use_fast=use_fast,
+                    local_files_only=True,
+                )
+                _TOKENIZER_SOURCE = candidate
+                return _TOKENIZER
+            except Exception as exc:
+                errors.append(f"{candidate} [fast={use_fast}, local_only=True]: {exc}")
+
+            if local_only:
+                continue
+            try:
+                _TOKENIZER = AutoTokenizer.from_pretrained(
+                    candidate,
+                    trust_remote_code=trust_remote_code,
+                    use_fast=use_fast,
+                )
+                _TOKENIZER_SOURCE = candidate
+                return _TOKENIZER
+            except Exception as exc:
+                errors.append(f"{candidate} [fast={use_fast}, local_only=False]: {exc}")
+
+    raise RuntimeError(
+        "Failed to load tokenizer from local-first candidates. "
+        f"candidates={candidates}. "
+        "Set ultradomain.tokenizer.local_path or env ULTRADOMAIN_TOKENIZER_PATH "
+        "to the local model directory used by vLLM."
+    )
 
 
 def encode_with_offsets(text: str) -> Tuple[List[int], Optional[List[Tuple[int, int]]]]:
@@ -245,4 +340,3 @@ def extract_json_list(text: str) -> List[Any]:
                 candidate = cleaned[start : idx + 1]
                 return json.loads(candidate)
     raise ValueError("unterminated JSON list")
-

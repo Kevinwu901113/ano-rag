@@ -191,7 +191,7 @@ ATTRIBUTE_HINTS = [
         "regex": [
             re.compile(r"who\s+(?:starred|acted)\s+in\s+(?P<entity>.+?)(?:\?|$)", re.I),
         ],
-        "keywords": ["starred in", "acted in", "starred", "starring", "features", "featuring"],
+        "keywords": ["starred in", "acted in", "starred", "starring"],
     },
 ]
 

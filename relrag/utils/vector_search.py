@@ -14,11 +14,26 @@ except Exception as exc:  # pragma: no cover - optional dependency
 from .text_builders import build_note_text_for_embed
 from .embedding_utils import get_shared_encoder
 
-try:
-    from sentence_transformers import SentenceTransformer
-except Exception as exc:
-    SentenceTransformer = None  # type: ignore
-    logger.warning("sentence_transformers not available: {}. Vector search disabled.", exc)
+_SentenceTransformer = None  # type: ignore
+_SENTENCE_TRANSFORMER_IMPORT_ERROR: Optional[Exception] = None
+_SENTENCE_TRANSFORMER_IMPORT_TRIED = False
+
+
+def _load_sentence_transformer():
+    global _SentenceTransformer
+    global _SENTENCE_TRANSFORMER_IMPORT_ERROR
+    global _SENTENCE_TRANSFORMER_IMPORT_TRIED
+    if _SENTENCE_TRANSFORMER_IMPORT_TRIED:
+        return _SentenceTransformer
+    _SENTENCE_TRANSFORMER_IMPORT_TRIED = True
+    try:
+        from sentence_transformers import SentenceTransformer as _ST  # type: ignore
+        _SentenceTransformer = _ST
+        _SENTENCE_TRANSFORMER_IMPORT_ERROR = None
+    except Exception as exc:
+        _SentenceTransformer = None
+        _SENTENCE_TRANSFORMER_IMPORT_ERROR = exc
+    return _SentenceTransformer
 
 
 class VectorSearcher:
@@ -46,7 +61,7 @@ class VectorSearcher:
         self._encoder_max_len = 256
         self._encoder_normalize = True
         self._resolved_device: Optional[str] = None
-        self._model: Optional[SentenceTransformer] = None
+        self._model: Optional[Any] = None
 
     @staticmethod
     def _is_cuda_oom(exc: BaseException) -> bool:
@@ -80,34 +95,40 @@ class VectorSearcher:
             return
         if self.embedding_cfg:
             return
-        if SentenceTransformer is None:
+        st_cls = _load_sentence_transformer()
+        if _SentenceTransformer is None:
+            if _SENTENCE_TRANSFORMER_IMPORT_ERROR is not None:
+                logger.warning(
+                    "sentence_transformers unavailable for provider='st': {}",
+                    _SENTENCE_TRANSFORMER_IMPORT_ERROR,
+                )
             raise RuntimeError("sentence_transformers is not available")
         try:
             logger.info("Loading vector model: {}", self.model_name)
             st_kwargs = {}
             if self.device:
                 st_kwargs["device"] = self.device
-            self._model = SentenceTransformer(self.model_name, **st_kwargs)
+            self._model = st_cls(self.model_name, **st_kwargs)
             self._resolved_device = str(getattr(self._model, "device", self.device) or "")
         except Exception as e:
             if self.fallback_to_cpu_on_oom and self._is_cuda_oom(e) and (self.device is None or (self.device or "").startswith("cuda")):
                 logger.warning("CUDA OOM in vector model init; retrying on CPU")
                 self._switch_to_cpu()
-                self._model = SentenceTransformer(self.model_name, device="cpu")
+                self._model = st_cls(self.model_name, device="cpu")
                 return
             logger.warning("Failed to load model {}: {}. Trying fallback.", self.model_name, e)
             try:
                 fb_kwargs = {}
                 if self.device:
                     fb_kwargs["device"] = self.device
-                self._model = SentenceTransformer("paraphrase-MiniLM-L3-v2", **fb_kwargs)
+                self._model = st_cls("paraphrase-MiniLM-L3-v2", **fb_kwargs)
                 self._resolved_device = str(getattr(self._model, "device", self.device) or "")
                 logger.info("Loaded fallback vector model: paraphrase-MiniLM-L3-v2")
             except Exception as e2:
                 if self.fallback_to_cpu_on_oom and self._is_cuda_oom(e2) and (self.device is None or (self.device or "").startswith("cuda")):
                     logger.warning("CUDA OOM in fallback vector model init; retrying on CPU")
                     self._switch_to_cpu()
-                    self._model = SentenceTransformer("paraphrase-MiniLM-L3-v2", device="cpu")
+                    self._model = st_cls("paraphrase-MiniLM-L3-v2", device="cpu")
                     logger.info("Loaded fallback vector model on CPU: paraphrase-MiniLM-L3-v2")
                     return
                 logger.error("Failed to load fallback vector model: {}", e2)

@@ -837,7 +837,12 @@ def _parse_modes(value: Any) -> List[str]:
     if isinstance(value, str):
         parts = [p for p in re.split(r"[,\s]+", value.strip()) if p]
     elif isinstance(value, (list, tuple)):
-        parts = [str(p) for p in value if str(p)]
+        parts: List[str] = []
+        for item in value:
+            item_text = str(item).strip()
+            if not item_text:
+                continue
+            parts.extend([p for p in re.split(r"[,\s]+", item_text) if p])
     else:
         parts = [str(value)]
     normalized: List[str] = []
@@ -918,7 +923,10 @@ def _resolve_readers(
     dataset_cfg: Dict[str, Any],
 ) -> List[str]:
     if args.reader:
-        readers = [resolve_reader(args.reader, dataset_cfg)]
+        if isinstance(args.reader, list):
+            readers = [resolve_reader(str(r), dataset_cfg) for r in args.reader]
+        else:
+            readers = [resolve_reader(args.reader, dataset_cfg)]
     else:
         if dataset_cfg.get("readers") is not None:
             raw = dataset_cfg.get("readers")
@@ -1144,7 +1152,10 @@ def _prepare_retriever_config(
     mode = mode.lower()
     if mode == "structured":
         structured_cfg["enabled"] = True
-        structured_cfg["vector_fallback_enabled"] = False
+        # Keep vector fallback on for structured mode unless caller explicitly disables it.
+        structured_cfg["vector_fallback_enabled"] = bool(
+            structured_cfg.get("vector_fallback_enabled", True)
+        )
         embed_cfg["enabled"] = False
         bm25_cfg["enabled"] = False
         hybrid_cfg["enabled"] = False
@@ -1206,6 +1217,82 @@ def _classify_topk_shortage(
     return "capacity_shortage"
 
 
+def _evidence_merge_key(ev: Dict[str, Any]) -> Tuple[str, str]:
+    note_id = ev.get("note_id")
+    if note_id:
+        return "note_id", str(note_id)
+    text = ev.get("canonical") or ev.get("evidence") or ""
+    if text:
+        return "text", sha1_text(str(text))
+    return "payload", sha1_text(json.dumps(ev, ensure_ascii=False, sort_keys=True))
+
+
+def _merge_evidences(
+    base_evidences: List[Dict[str, Any]],
+    extra_evidences: List[Dict[str, Any]],
+) -> Tuple[List[Dict[str, Any]], int]:
+    merged: List[Dict[str, Any]] = []
+    seen: set[Tuple[str, str]] = set()
+    for ev in base_evidences:
+        key = _evidence_merge_key(ev)
+        if key in seen:
+            continue
+        seen.add(key)
+        merged.append(ev)
+    added = 0
+    for ev in extra_evidences:
+        key = _evidence_merge_key(ev)
+        if key in seen:
+            continue
+        seen.add(key)
+        merged.append(ev)
+        added += 1
+    return merged, added
+
+
+def _run_dense_vector_fallback(
+    *,
+    question: str,
+    index_dir: Path,
+    notes_path: Path,
+    doc_index: Dict[str, Dict[str, Any]],
+    note_store: NoteStore,
+    base_cfg: Dict[str, Any],
+    requested: int,
+    top_k: int,
+) -> Tuple[Dict[str, Any], List[Dict[str, Any]], Dict[str, Any]]:
+    fallback_cfg, retriever_paths = _prepare_retriever_config(index_dir.parent, base_cfg, "dense")
+    retriever_cfg = fallback_cfg.setdefault("retriever", {})
+    scheduler_cfg = retriever_cfg.setdefault("scheduler", {})
+    scheduler_cfg["keep_at_least"] = top_k
+    scheduler_cfg["min_confidence"] = 0.0
+    scheduler_cfg["dedup_subject"] = False
+    retriever_cfg.setdefault("chunk_fallback", {})["top_k"] = requested
+    retriever_cfg.setdefault("hybrid", {})["agreement_threshold"] = 1
+    retriever_cfg.setdefault("hybrid", {})["require_seed_match"] = False
+
+    retrieve_result = retrieve(
+        question=question,
+        index_dir=str(index_dir),
+        notes_path=str(notes_path),
+        top_k=max(1, int(requested)),
+        cfg=fallback_cfg,
+    )
+    evidences = retrieve_result.get("evidence") or []
+    retrieved_context_raw = _build_retrieved_context(evidences, note_store, doc_index)
+    info = {
+        "attempted": True,
+        "used": False,
+        "mode": "dense",
+        "requested": int(requested),
+        "added": 0,
+        "fallback_raw": len(retrieved_context_raw),
+        "embedding_enabled": bool(((fallback_cfg.get("retriever") or {}).get("embedding") or {}).get("enabled")),
+        "retriever_paths": retriever_paths,
+    }
+    return retrieve_result, retrieved_context_raw, info
+
+
 def _retrieve_with_backfill(
     *,
     question: str,
@@ -1220,7 +1307,16 @@ def _retrieve_with_backfill(
     backfill_max_overfetch: float,
     backfill_step: float,
     backfill_rounds: int,
-) -> Tuple[Dict[str, Any], List[Dict[str, Any]], List[Dict[str, Any]], Dict[str, Any], Dict[str, Any], Optional[str], int]:
+) -> Tuple[
+    Dict[str, Any],
+    List[Dict[str, Any]],
+    List[Dict[str, Any]],
+    Dict[str, Any],
+    Dict[str, Any],
+    Optional[str],
+    int,
+    Dict[str, Any],
+]:
     requested = max(1, int(top_k_raw))
     max_raw = requested
     if top_k > 0:
@@ -1234,6 +1330,13 @@ def _retrieve_with_backfill(
     retrieved_context_raw: List[Dict[str, Any]] = []
     retrieved_context_topk: List[Dict[str, Any]] = []
     dedup_stats: Dict[str, Any] = {}
+    vector_fallback_info: Dict[str, Any] = {
+        "attempted": False,
+        "used": False,
+        "mode": "dense",
+        "requested": int(requested),
+        "added": 0,
+    }
 
     while True:
         retriever_cfg, retriever_paths = _prepare_retriever_config(index_dir.parent, base_cfg, mode)
@@ -1279,6 +1382,44 @@ def _retrieve_with_backfill(
             requested = raw_count + max(1, int(math.ceil(top_k * 0.5)))
         requested = min(requested, max_raw)
 
+    if top_k > 0 and len(retrieved_context_topk) < top_k:
+        dense_result, dense_raw, vector_fallback_info = _run_dense_vector_fallback(
+            question=question,
+            index_dir=index_dir,
+            notes_path=notes_path,
+            doc_index=doc_index,
+            note_store=note_store,
+            base_cfg=base_cfg,
+            requested=max(requested, top_k),
+            top_k=top_k,
+        )
+        base_evidences = list(retrieve_result.get("evidence") or [])
+        dense_evidences = list(dense_result.get("evidence") or [])
+        merged_evidences, added = _merge_evidences(base_evidences, dense_evidences)
+        vector_fallback_info["added"] = int(added)
+        if added > 0:
+            merged_result = dict(retrieve_result)
+            merged_result["evidence"] = merged_evidences
+            merged_result["vector_fallback"] = {
+                "used": True,
+                "mode": "dense",
+                "added": int(added),
+                "requested": int(vector_fallback_info.get("requested") or requested),
+                "fallback_raw": int(vector_fallback_info.get("fallback_raw") or len(dense_raw)),
+            }
+            retrieve_result = merged_result
+            retrieved_context_raw = _build_retrieved_context(merged_evidences, note_store, doc_index)
+            retrieved_context_topk, dedup_stats = _dedup_retrieved_context(retrieved_context_raw, top_k=top_k)
+            dedup_stats["top_k_raw_requested"] = int(vector_fallback_info.get("requested") or requested)
+            vector_fallback_info["used"] = True
+            if len(retrieved_context_topk) >= top_k:
+                backfill_reason = None
+            else:
+                backfill_reason = _classify_topk_shortage(
+                    retrieved_context_raw,
+                    int(vector_fallback_info.get("requested") or requested),
+                )
+
     return (
         retrieve_result,
         retrieved_context_raw,
@@ -1287,6 +1428,7 @@ def _retrieve_with_backfill(
         retriever_paths,
         backfill_reason,
         attempt,
+        vector_fallback_info,
     )
 
 
@@ -1342,6 +1484,7 @@ def _process_example(
         retriever_paths,
         top_k_fill_reason,
         backfill_attempts,
+        vector_fallback_info,
     ) = _retrieve_with_backfill(
         question=question,
         index_dir=index_dir,
@@ -1465,6 +1608,10 @@ def _process_example(
     top_k_raw_source_final = top_k_raw_source
     if backfill_attempts > 0:
         top_k_raw_source_final = "backfill"
+    if vector_fallback_info.get("used"):
+        top_k_raw_source_final = (
+            "backfill+vector_fallback" if top_k_raw_source_final == "backfill" else "vector_fallback"
+        )
 
     top_k_final_value = dedup_stats.get("top_k_final")
     top_k_hit = 1.0 if top_k_final_value == top_k else 0.0
@@ -1544,6 +1691,7 @@ def _process_example(
             "top_k_raw_source": top_k_raw_source_final,
             "top_k_backfill_rounds": backfill_attempts,
             "top_k_fill_reason": top_k_fill_reason,
+            "top_k_vector_fallback": vector_fallback_info,
             "chunk_fallback_top_k": dedup_stats.get("top_k_raw_requested"),
             "chunk_fallback_top_k_source": top_k_raw_source_final,
             "prompt_name": prompt_meta.get("prompt_name"),
@@ -1594,6 +1742,7 @@ def _write_retrieval_payloads(
             "overfetch_factor": record.get("overfetch_factor"),
             "top_k_backfill_rounds": (record.get("intermediate") or {}).get("top_k_backfill_rounds"),
             "top_k_fill_reason": record.get("top_k_fill_reason"),
+            "top_k_vector_fallback": (record.get("intermediate") or {}).get("top_k_vector_fallback"),
         }
         raw_handle.write(json.dumps(raw_payload, ensure_ascii=False) + "\n")
         raw_handle.flush()
@@ -1920,8 +2069,8 @@ def main() -> None:
     )
     parser.add_argument("--endpoint", help="vLLM endpoint (defaults to config)")
     parser.add_argument("--model", help="LLM model name (defaults to config)")
-    parser.add_argument("--reader", help="Reader backend: vllm or openai (fallback to config)")
-    parser.add_argument("--retriever", help="Retriever mode: bm25, dense, or hybrid (fallback to config)")
+    parser.add_argument("--reader", nargs="+", help="Reader backend: vllm or openai (fallback to config)")
+    parser.add_argument("--retriever", nargs="+", help="Retriever mode: bm25, dense, or hybrid (fallback to config)")
     parser.add_argument("--split", help="Dataset split label for output naming (fallback to config)")
     parser.add_argument("--openai_model", help="OpenAI model name (fallback to config)")
     parser.add_argument("--openai_api_key", help="OpenAI API key (reads env if omitted)")

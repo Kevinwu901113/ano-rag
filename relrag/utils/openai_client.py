@@ -24,6 +24,10 @@ def _normalize_base_url(base_url: Optional[str]) -> str:
     return raw.rstrip("/")
 
 
+def _is_local_url(url: str) -> bool:
+    return "127.0.0.1" in url or "localhost" in url
+
+
 def _extract_error_message(response: requests.Response) -> str:
     try:
         data = response.json()
@@ -110,7 +114,8 @@ def chat_completion(
                 prompt_tokens += TextUtils.rough_token_len(content)
         start = time.time()
         try:
-            resp = requests.post(url, headers=headers, json=payload, timeout=timeout_sec)
+            proxies = {"http": None, "https": None} if _is_local_url(url) else None
+            resp = requests.post(url, headers=headers, json=payload, timeout=timeout_sec, proxies=proxies)
             if resp.status_code in _RETRY_STATUS:
                 message = _extract_error_message(resp)
                 logger.warning("OpenAI {} (attempt {}): {}", resp.status_code, attempt + 1, message)

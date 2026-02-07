@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import ast
 import re
+import warnings
 from typing import Any, Dict, List, Optional, Tuple
 import threading
 
@@ -12,6 +13,15 @@ from relrag.telemetry.metrics import record_attribute_guard
 
 
 class NoteParsingPipeline:
+    @staticmethod
+    def _safe_literal_eval(text: str) -> Any:
+        # LLM outputs may contain backslash sequences like "\m" or "\i".
+        # Python 3.12 emits SyntaxWarning for such escapes in literal_eval input.
+        # Keep behavior but silence noisy warnings.
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", SyntaxWarning)
+            return ast.literal_eval(text)
+
     _BARE_KEY = re.compile(r'([\{\s,])(\w+)(\s*:)')
     _TRAILING_COMMA = re.compile(r',(\s*[}\]])')
     _BAD_ESCAPE = re.compile(r'\\(?!["\\/bfnrtu])')
@@ -247,7 +257,7 @@ class NoteParsingPipeline:
         except Exception as exc:
             json_err = exc
             try:
-                data = ast.literal_eval(text)
+                data = NoteParsingPipeline._safe_literal_eval(text)
             except Exception:
                 return None, json_err
         if isinstance(data, dict):
@@ -362,7 +372,7 @@ class NoteParsingPipeline:
                 escaped = inner.replace("\\" + quote, quote)
                 if quote == '"':
                     return json.loads(f'"{escaped}"')
-                return ast.literal_eval(f"{quote}{escaped}{quote}")
+                return NoteParsingPipeline._safe_literal_eval(f"{quote}{escaped}{quote}")
             except Exception:
                 return inner.replace('\\"', '"').replace("\\'", "'")
         if value.startswith('{') and value.endswith('}'):

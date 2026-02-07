@@ -75,3 +75,35 @@ python scripts/hotpotqa/run_hotpot_compare.py \
 **注意**
 - GraphRAG/LightRAG 默认不输出 sentence-level supporting facts，本脚本预测 `sp=[]`，因此 sp/joint 指标会非常低（通常为 0）。如需 sp/joint，请实现证据句对齐与抽取。
 - `--mode merged` 不是严格闭集设定，仅用于快速 sanity check。
+
+## Hotpot Exp18 参数网格（RelRAG）
+
+用于复现实验 17 的改动并做小网格调参（仅变更 `pred_sp` 策略参数与 shortage refill 质量阈值）。
+
+**默认网格文件**
+- `scripts/hotpotqa/exp18_grid.yaml`
+
+**先查看命令（不执行）**
+```bash
+python scripts/hotpotqa/run_exp18_grid.py --dry_run
+```
+
+**执行全部网格（默认输出到 `result/experiment_18/`）**
+```bash
+python scripts/hotpotqa/run_exp18_grid.py
+```
+
+**只执行部分 run**
+```bash
+python scripts/hotpotqa/run_exp18_grid.py --only e17_baseline,facts_3,refill_min_045
+```
+
+**快速烟测**
+```bash
+python scripts/hotpotqa/run_exp18_grid.py --limit 50 --only e17_baseline,facts_3
+```
+
+**结果产物**
+- `result/experiment_18/<run_name>/`：每个 run 的预测与 alignment 产物
+- `result/experiment_18/grid_results.json`：机器可读汇总
+- `result/experiment_18/grid_results.md`：按 `f1` 排序的对比表（含 `sp_f1` / `joint_f1` / `topk_sp_f1`）

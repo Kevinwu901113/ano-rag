@@ -204,6 +204,9 @@ class LLMChatClient:
         self.stop = stop or []
         self.api_key = api_key
 
+    def _is_local_url(self, url: str) -> bool:
+        return "127.0.0.1" in url or "localhost" in url
+
     def _headers(self) -> Dict[str, str]:
         return {
             "Authorization": f"Bearer {self.api_key}",
@@ -311,11 +314,12 @@ class LLMChatClient:
         last_exc: Optional[Exception] = None
         for attempt in range(self.retries + 1):
             start = time.time()
+            proxies = {"http": None, "https": None} if self._is_local_url(url) else None
             try:
                 if session is not None:
-                    resp = session.post(url, json=payload, headers=self._headers(), timeout=req_timeout)
+                    resp = session.post(url, json=payload, headers=self._headers(), timeout=req_timeout, proxies=proxies)
                 else:
-                    resp = requests.post(url, json=payload, headers=self._headers(), timeout=req_timeout)
+                    resp = requests.post(url, json=payload, headers=self._headers(), timeout=req_timeout, proxies=proxies)
                 resp.raise_for_status()
                 data = resp.json()
                 content = self._extract_content(data)
@@ -433,9 +437,10 @@ class LLMChatClient:
             profile=profile,
         )
         req_timeout = timeout if timeout is not None else self.timeout
+        proxies = {"http": None, "https": None} if self._is_local_url(url) else None
         if session is not None:
-            return session.post(url, json=payload, headers=self._headers(), timeout=req_timeout)
-        return requests.post(url, json=payload, headers=self._headers(), timeout=req_timeout)
+            return session.post(url, json=payload, headers=self._headers(), timeout=req_timeout, proxies=proxies)
+        return requests.post(url, json=payload, headers=self._headers(), timeout=req_timeout, proxies=proxies)
 
     async def chat_async(
         self,
@@ -471,7 +476,8 @@ class LLMChatClient:
         last_exc: Optional[Exception] = None
         for attempt in range(self.retries + 1):
             try:
-                async with aiohttp.ClientSession(timeout=timeout_obj) as session:
+                trust_env = not self._is_local_url(url)
+                async with aiohttp.ClientSession(timeout=timeout_obj, trust_env=trust_env) as session:
                     async with session.post(url, json=payload, headers=self._headers()) as resp:
                         resp.raise_for_status()
                         data = await resp.json()

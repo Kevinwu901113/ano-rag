@@ -29,6 +29,61 @@ QUESTION_TYPE_PATTERNS = {
     "capital_of": [re.compile(r"^\s*capital\s+of\b", re.I), re.compile(r"\bcapital\s+of\b", re.I)],
 }
 
+COMPARE_CUE_RE = re.compile(
+    r"\b(same\s+number|more|higher|lower|larger|smaller|older|younger|earlier|later|first|before|after|wider)\b",
+    re.I,
+)
+
+PAIRWISE_COMMA_RE = re.compile(r",\s*(?P<a>[^?]+?)\s+(?:or|and)\s+(?P<b>[^?]+?)\?\s*$", re.I)
+PAIRWISE_SAME_NUMBER_RE = re.compile(
+    r"\b(?P<a>[^,?]+?)\s+and\s+(?P<b>[^,?]+?)\s+have\s+the\s+same\s+number\s+of\s+(?P<unit>members|species)\b",
+    re.I,
+)
+JOINT_RELATION_RE = re.compile(
+    r"(?P<a>[^?]+?)\s+and\s+(?P<b>[^?]+?)\s+(?:were|was|are|is)\s+both\s+(?P<rel>directed by|written by|authored by|founded by)\b",
+    re.I,
+)
+
+JOINT_RELATION_TO_PRED = {
+    "directed by": "directed_by",
+    "written by": "authored_by",
+    "authored by": "authored_by",
+    "founded by": "founded_by",
+}
+
+PAIRWISE_LEADING_NOISE = {
+    "which",
+    "who",
+    "what",
+    "do",
+    "does",
+    "did",
+    "is",
+    "are",
+    "was",
+    "were",
+    "of",
+    "the",
+    "a",
+    "an",
+    "retired",
+    "tennis",
+    "player",
+    "players",
+    "band",
+    "bands",
+    "city",
+    "cities",
+    "composer",
+    "composers",
+    "magazine",
+    "magazines",
+    "mountain",
+    "mountains",
+    "genus",
+    "genera",
+}
+
 
 PREDICATE_LIBRARY = [
     {
@@ -133,6 +188,7 @@ PREDICATE_LIBRARY = [
         "target_type": "ORG",
         "seed_type": "PERSON",
         "aliases": [
+            {"regex": r"\b(?:was|is|were)\s+(?:an?\s+)?member\s+of\b", "entity_side": "left"},
             {"text": "member of", "entity_side": "right"},
             {"text": "belonged to", "entity_side": "right"},
             {"regex": r"\bmember\s+of\b", "entity_side": "right"},
@@ -229,11 +285,9 @@ PREDICATE_LIBRARY = [
         "target_type": "WORK",
         "seed_type": "PERSON",
         "aliases": [
-            {"text": "acted in", "entity_side": "left"},
-            {"text": "starred in", "entity_side": "left"},
             {"text": "played", "entity_side": "left"},
             {"text": "portrayed", "entity_side": "left"},
-            {"regex": r"\b(acted\s+in|starred\s+in|played|portrayed)\b", "entity_side": "left"},
+            {"regex": r"\b(played|portrayed)\b", "entity_side": "left"},
         ],
     },
     {
@@ -246,9 +300,7 @@ PREDICATE_LIBRARY = [
             {"text": "starred in", "entity_side": "right"},
             {"text": "starred", "entity_side": "right"},
             {"text": "starring", "entity_side": "right"},
-            {"text": "features", "entity_side": "right"},
-            {"text": "featuring", "entity_side": "right"},
-            {"regex": r"\b(acted\s+in|starred\s+in|starred|starring|features|featuring)\b", "entity_side": "right"},
+            {"regex": r"\b(acted\s+in|starred\s+in|starred|starring)\b", "entity_side": "right"},
         ],
     },
     {
@@ -412,6 +464,53 @@ def parse_question(question: str) -> Optional[QueryIR]:
             raw=question,
         )
 
+    pairwise_compare = _match_pairwise_compare(text)
+    if pairwise_compare:
+        seeds = [Seed(text=entity, type_hint=None) for entity in pairwise_compare["entities"]]
+        attribute = pairwise_compare.get("attribute")
+        chain: List[PredicateStep] = []
+        if attribute:
+            chain.append(PredicateStep(pred=attribute, direction="out", target_hint=None))
+        return QueryIR(
+            intent="relation_query" if chain else "open_entity_query",
+            seeds=seeds,
+            pred_chain=chain,
+            target_type=None,
+            question_type=question_type,
+            max_hops=max(_DEFAULT_MAX_HOPS, len(chain)),
+            fanout=15,
+            raw=question,
+            fallback=not chain,
+        )
+
+    joint_relation = _match_joint_relation(text)
+    if joint_relation:
+        seeds = [Seed(text=entity, type_hint=None) for entity in joint_relation["entities"]]
+        chain = [PredicateStep(pred=joint_relation["attribute"], direction="out", target_hint="PERSON")]
+        return QueryIR(
+            intent="relation_query",
+            seeds=seeds,
+            pred_chain=chain,
+            target_type="PERSON",
+            question_type=question_type,
+            max_hops=max(_DEFAULT_MAX_HOPS, len(chain)),
+            fanout=15,
+            raw=question,
+        )
+
+    member_of_query = _match_member_of_query(text)
+    if member_of_query:
+        return QueryIR(
+            intent="relation_query",
+            seeds=[Seed(text=member_of_query, type_hint="ORG")],
+            pred_chain=[PredicateStep(pred="member_of", direction="in", target_hint="PERSON")],
+            target_type="PERSON",
+            question_type=question_type,
+            max_hops=_DEFAULT_MAX_HOPS,
+            fanout=15,
+            raw=question,
+        )
+
     between_entities = _match_between_entities(text)
     if between_entities:
         seeds = [Seed(text=entity, type_hint=None) for entity in between_entities]
@@ -456,18 +555,31 @@ def parse_question(question: str) -> Optional[QueryIR]:
     detected = intent_detector.detect(question)
     canonical_attr = detected.attribute
 
-    seeds = [Seed(text=entity, type_hint=(pred_match.get("seed_type") if pred_match else detected.entity_type))]
+    seed_type_hint = pred_match.get("seed_type") if pred_match else detected.entity_type
+    seeds = [Seed(text=entity, type_hint=seed_type_hint)]
     chain: List[PredicateStep] = []
     target_type = None
     if pred_match:
+        pred_name = pred_match["pred"]
+        pred_direction = pred_match.get("direction", "out")
+        pred_target_type = pred_match.get("target_type")
+        # For "who/which member of X" style questions, start from the organization and walk inverse edge.
+        if (
+            pred_name == "member_of"
+            and question_type in {"who", "which"}
+            and re.search(r"\bmember\s+of\b", text, re.I)
+        ):
+            pred_direction = "in"
+            pred_target_type = "PERSON"
+            seeds = [Seed(text=entity, type_hint="ORG")]
         chain.append(
             PredicateStep(
-                pred=pred_match["pred"],
-                direction=pred_match.get("direction", "out"),
-                target_hint=pred_match.get("target_type"),
+                pred=pred_name,
+                direction=pred_direction,
+                target_hint=pred_target_type,
             )
         )
-        target_type = pred_match.get("target_type")
+        target_type = pred_target_type
     elif canonical_attr and canonical_attr in ALLOWED_PREDICATES:
         # 基于属性推断，构造单跳链，避免空链
         default_direction = "out"
@@ -612,6 +724,93 @@ def _match_between_compare(question: str) -> Optional[dict]:
     return {"entities": [a, b], "attribute": attribute}
 
 
+def _match_pairwise_compare(question: str) -> Optional[dict]:
+    if not COMPARE_CUE_RE.search(question):
+        return None
+
+    match = PAIRWISE_SAME_NUMBER_RE.search(question)
+    if match:
+        a = _clean_pair_entity(match.group("a"))
+        b = _clean_pair_entity(match.group("b"))
+        unit = (match.group("unit") or "").strip().lower()
+        if a and b and a != b:
+            attribute = "has_species_count" if "species" in unit else "has_member_count"
+            return {"entities": [a, b], "attribute": attribute}
+
+    match = PAIRWISE_COMMA_RE.search(question)
+    if match:
+        a = _clean_pair_entity(match.group("a"))
+        b = _clean_pair_entity(match.group("b"))
+        if a and b and a != b:
+            return {"entities": [a, b], "attribute": _infer_compare_attribute(question)}
+    return None
+
+
+def _infer_compare_attribute(question: str) -> Optional[str]:
+    lowered = (question or "").lower()
+    if "member" in lowered and "number" in lowered:
+        return "has_member_count"
+    if "species" in lowered:
+        return "has_species_count"
+    if "founded" in lowered or "established" in lowered:
+        return "founded_on"
+    if "born" in lowered or "older" in lowered or "younger" in lowered:
+        return "born_on"
+    return None
+
+
+def _clean_pair_entity(text: Optional[str]) -> Optional[str]:
+    if not text:
+        return None
+    cleaned = text.strip(" ?.,;:")
+    cleaned = re.sub(
+        r"\s+(?:have|has|had|is|are|was|were|do|does|did)\b.*$",
+        "",
+        cleaned,
+        flags=re.I,
+    ).strip(" ?.,;:")
+    tokens = cleaned.split()
+    while tokens and tokens[0].lower().strip(" ?.,;:") in PAIRWISE_LEADING_NOISE:
+        tokens = tokens[1:]
+    cleaned = " ".join(tokens).strip(" ?.,;:")
+    return cleaned or None
+
+
+def _match_joint_relation(question: str) -> Optional[dict]:
+    match = JOINT_RELATION_RE.search(question)
+    if not match:
+        return None
+    a = _clean_joint_entity(match.group("a"))
+    b = _clean_joint_entity(match.group("b"))
+    relation = (match.group("rel") or "").strip().lower()
+    pred = JOINT_RELATION_TO_PRED.get(relation)
+    if not a or not b or a == b or not pred:
+        return None
+    return {"entities": [a, b], "attribute": pred}
+
+
+def _clean_joint_entity(text: Optional[str]) -> Optional[str]:
+    if not text:
+        return None
+    cleaned = text.strip(" ?.,;:")
+    cleaned = re.sub(r"^(?:both|the)\s+", "", cleaned, flags=re.I).strip(" ?.,;:")
+    return cleaned or None
+
+
+def _match_member_of_query(question: str) -> Optional[str]:
+    match = re.search(r"\bwhich\s+member\s+of\s+(?P<entity>.+)$", question, re.I)
+    if not match:
+        return None
+    span = match.group("entity")
+    span = re.sub(r'["“”\'].*?["“”\']', "", span)
+    span = re.split(r"\b(?:released|who|that|which|with|where|when)\b", span, maxsplit=1, flags=re.I)[0]
+    capital = re.findall(r"([A-Z][A-Za-z0-9'&\-]+(?:\s+[A-Z][A-Za-z0-9'&\-]+)*)", span)
+    if capital:
+        return capital[-1].strip(" ?.,;:")
+    cleaned = _clean_entity_span(span, take_tail=False)
+    return cleaned
+
+
 def _extract_heritage_work(question: str) -> Optional[str]:
     quoted = re.search(r'["“”\']([^"“”\']+)["“”\']', question)
     if quoted:
@@ -688,6 +887,23 @@ def _extract_entity(question: str, pred_match: Optional[dict]) -> Optional[str]:
     side = pred_match.get("entity_side", "right")
     if side == "right":
         span = question[pred_match["end"] :]
+        if pred_match.get("pred") == "member_of":
+            span = re.sub(r'["“”\'].*?["“”\']', "", span)
+            span = re.split(r"\b(?:released|who|that|which|with|where|when)\b", span, maxsplit=1, flags=re.I)[0]
+            capital = re.findall(r"([A-Z][A-Za-z0-9'&\-]+(?:\s+[A-Z][A-Za-z0-9'&\-]+)*)", span)
+            if capital:
+                candidate = capital[-1].strip()
+                candidate = re.sub(r"(’s|'s)\b$", "", candidate).strip()
+                if candidate:
+                    return candidate
+        if pred_match.get("pred") == "acted_in":
+            span = re.split(r"\b(?:alongside|with|featuring|starring)\b", span, maxsplit=1, flags=re.I)[0]
+            span = re.sub(
+                r"^\s*(?:the\s+)?(?:\d{4}\s+)?(?:[a-z]+\s+){0,6}(?:film|movie|novel|album|song)\s+",
+                "",
+                span,
+                flags=re.I,
+            )
         cleaned = _clean_entity_span(span, take_tail=False)
         if cleaned:
             return cleaned
@@ -695,6 +911,13 @@ def _extract_entity(question: str, pred_match: Optional[dict]) -> Optional[str]:
         span_left = question[: pred_match["start"]]
         return _clean_entity_span(span_left, take_tail=True)
     span = question[: pred_match["start"]]
+    if pred_match.get("pred") == "member_of":
+        capital = re.findall(r"([A-Z][A-Za-z0-9'&\-]+(?:\s+[A-Z][A-Za-z0-9'&\-]+)*)", span)
+        if capital:
+            candidate = capital[-1].strip()
+            candidate = re.sub(r"(’s|'s)\b$", "", candidate).strip()
+            if candidate and candidate.lower() not in {"who", "what", "which", "whom", "whose"}:
+                return candidate
     cleaned = _clean_entity_span(span, take_tail=True)
     if cleaned:
         return cleaned
@@ -757,7 +980,8 @@ def _clean_entity_span(span: str, take_tail: bool) -> Optional[str]:
     leading_stops = {"is", "was", "are", "do", "does", "did"}
     while tokens and tokens[0].lower().strip("?.,") in leading_stops:
         tokens = tokens[1:]
-    window = 8 if not take_tail else 6
+    # Right-span entities in Hotpot often include qualifiers before the title; keep a slightly larger window.
+    window = 12 if not take_tail else 6
     tokens = tokens[-window:] if take_tail else tokens[:window]
     # 去尾随动词/虚词
     trailing_stop = {"born", "located", "written", "wrote", "write", "called", "named"}
@@ -780,7 +1004,11 @@ def _tokenize_with_stops(text: str) -> List[str]:
         tt = t.strip()
         if not tt:
             continue
-        if tt.lower().strip("?.,") in stops:
-            break
+        token_norm = tt.lower().strip("?.,")
+        if token_norm in stops:
+            # Skip leading stop words but keep stop-as-boundary behavior once content starts.
+            if tokens:
+                break
+            continue
         tokens.append(tt)
     return tokens

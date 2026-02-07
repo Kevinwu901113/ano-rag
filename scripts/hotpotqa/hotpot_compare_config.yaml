@@ -6,6 +6,15 @@ limit: 50
 
 llm_base_url: http://127.0.0.1:8000/v1
 llm_model: qwen3-30b-a3b
+# Optional GraphRAG-only model override for schema quality:
+# graphrag_llm_base_url: https://api.openai.com/v1
+# graphrag_llm_model: gpt-4o-mini
+# graphrag_cli: /home/wjk/miniconda3/envs/rag310/bin/graphrag
+graphrag_schema_strategy: force
+graphrag_index_method: fast
+graphrag_retry_standard_on_failure: false
+graphrag_fail_fast: true
+graphrag_relaxed_pruning: true
 embed_base_url: http://127.0.0.1:8001/v1
 embed_model: qwen3-embedding
 tokenizer_model: /home/wjk/.cache/hf/models--cyankiwi--Qwen3-30B-A3B-Instruct-2507-AWQ-4bit/snapshots/8a38c871d6fa1829ca89184c151ed0cdfe9571fb
@@ -13,8 +22,17 @@ tokenizer_model: /home/wjk/.cache/hf/models--cyankiwi--Qwen3-30B-A3B-Instruct-25
 max_context_len: 8192
 safety_margin_tokens: 256
 max_tokens: 256
+lightrag_extract_max_tokens: 6144
+lightrag_max_gleaning: 1
+lightrag_chunk_token_size: 600
+lightrag_chunk_overlap_token_size: 80
 temperature: 0.0
 embed_max_tokens: 8192
+# question_workers: 0  # 0=auto; when --parallel is set, auto uses up to 8 workers per method
+# raptor_workers: 0    # 0=follow question_workers
+raptor_threads: 1      # cap BLAS/OMP threads per RAPTOR worker to avoid CPU oversubscription
+raptor_per_example_retries: 1
+raptor_fail_on_example_error: false
 
 # Optional:
 # api_key: EMPTY

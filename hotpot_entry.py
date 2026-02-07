@@ -27,6 +27,7 @@ from relrag.generator import answerer as answerer_module
 from relrag.indexer import IndexBuilder
 from relrag.indexer.bm25_index import BM25IndexBuilder
 from relrag.indexer.embedding_index import EmbeddingIndexBuilder
+from relrag.retriever.chunk_store import ChunkStore
 from relrag.retriever.note_store import NoteStore
 from relrag.prompt import load_prompt
 from relrag.utils.answer_source import resolve_short_answer, sha1_text
@@ -52,6 +53,40 @@ DEFAULT_BACKFILL_STEP = 1.5
 DEFAULT_BACKFILL_ROUNDS = 3
 DEFAULT_LLM_RETRY_ON_EMPTY = 1
 DEFAULT_LLM_RETRY_EVIDENCE = 6
+DEFAULT_SHORTAGE_REFILL_ENABLED = True
+DEFAULT_SHORTAGE_REFILL_MAX_CANDIDATES = 48
+DEFAULT_SHORTAGE_REFILL_MIN_SCORE = 0.35
+DEFAULT_SHORTAGE_REFILL_PREFER_NEW_TITLES = True
+DEFAULT_PRED_SP_POLICY = "high_confidence"
+DEFAULT_PRED_SP_MAX_FACTS = 4
+DEFAULT_PRED_SP_MIN_SCORE = 0.0
+DEFAULT_PRED_SP_DROP_WEAK = True
+DEFAULT_PRED_SP_PREFER_NEW_TITLES = True
+
+_REFILL_STOPWORDS = {
+    "the",
+    "a",
+    "an",
+    "of",
+    "and",
+    "in",
+    "on",
+    "for",
+    "to",
+    "is",
+    "are",
+    "was",
+    "were",
+    "does",
+    "do",
+    "did",
+    "which",
+    "who",
+    "what",
+    "when",
+    "where",
+    "how",
+}
 
 
 def _load_jsonl(path: Path) -> Iterable[Dict[str, Any]]:
@@ -213,6 +248,39 @@ def _write_sentence_notes_for_example(
     return written
 
 
+def _write_chunks_for_example(
+    doc_index: Dict[str, Dict[str, Any]],
+    chunks_path: Path,
+    overwrite: bool = False,
+) -> int:
+    if chunks_path.exists() and not overwrite:
+        return 0
+    chunks_path.parent.mkdir(parents=True, exist_ok=True)
+    written = 0
+    with chunks_path.open("w", encoding="utf-8") as handle:
+        for idx, (doc_id, meta) in enumerate(doc_index.items()):
+            title = str(meta.get("title") or doc_id)
+            sentences = [str(s).strip() for s in (meta.get("sentences") or []) if str(s).strip()]
+            if not sentences:
+                continue
+            chunk_id = f"c{idx:04d}_{doc_id}"
+            text = " ".join(sentences)
+            sent_spans = [{"idx": sent_idx, "text": sentence} for sent_idx, sentence in enumerate(sentences)]
+            chunk = {
+                "chunk_id": chunk_id,
+                "doc_id": str(doc_id),
+                "text": text,
+                "meta": {
+                    "title": title,
+                    "doc_title": title,
+                    "sent_spans": sent_spans,
+                },
+            }
+            handle.write(json.dumps(chunk, ensure_ascii=False) + "\n")
+            written += 1
+    return written
+
+
 def _resolve_doc_id_from_source(source: Optional[str]) -> Optional[str]:
     if not source:
         return None
@@ -314,20 +382,437 @@ def _extract_gold_sp(example: Dict[str, Any]) -> List[List[Any]]:
     return []
 
 
-def _build_pred_sp(retrieved_context: List[Dict[str, Any]]) -> List[List[Any]]:
-    facts: List[List[Any]] = []
+def _normalize_pred_sp_policy(policy: Any) -> str:
+    key = str(policy or "").strip().lower().replace("-", "_")
+    if key in {"", "topk", "legacy", "legacy_topk"}:
+        return "topk"
+    if key in {"high_confidence", "highconf", "confidence"}:
+        return "high_confidence"
+    raise ValueError(f"Unsupported pred_sp policy: {policy}")
+
+
+def _safe_score(value: Any) -> float:
+    try:
+        if value is None:
+            return 0.0
+        return float(value)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _collect_pred_sp_candidates(retrieved_context: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    rows: List[Dict[str, Any]] = []
     seen = set()
-    for ctx in retrieved_context:
+    for order, ctx in enumerate(retrieved_context):
         title = ctx.get("title")
-        idx = ctx.get("sentence_idx")
+        idx = _coerce_sentence_idx(ctx.get("sentence_idx"))
         if title is None or idx is None:
             continue
-        key = (title, int(idx))
+        title_str = str(title)
+        key = (title_str, int(idx))
         if key in seen:
             continue
-        facts.append([title, int(idx)])
         seen.add(key)
-    return facts
+        rows.append(
+            {
+                "fact": [title_str, int(idx)],
+                "title": title_str,
+                "score": _safe_score(ctx.get("score")),
+                "weak": bool(ctx.get("weak", False)),
+                "order": order,
+            }
+        )
+    return rows
+
+
+def _build_pred_sp(
+    retrieved_context: List[Dict[str, Any]],
+    *,
+    policy: str,
+    max_facts: int,
+    min_score: float,
+    drop_weak: bool,
+    prefer_new_titles: bool,
+) -> Tuple[List[List[Any]], List[List[Any]], Dict[str, Any]]:
+    normalized_policy = _normalize_pred_sp_policy(policy)
+    candidates = _collect_pred_sp_candidates(retrieved_context)
+    pred_sp_topk = [row["fact"] for row in candidates]
+    cap = max(0, int(max_facts))
+    threshold = max(0.0, float(min_score))
+
+    meta: Dict[str, Any] = {
+        "policy": normalized_policy,
+        "max_facts": cap,
+        "min_score": threshold,
+        "drop_weak": bool(drop_weak),
+        "prefer_new_titles": bool(prefer_new_titles),
+        "candidate_count": len(candidates),
+        "dropped_weak": 0,
+        "dropped_score": 0,
+        "fallback_to_topk": False,
+    }
+    if normalized_policy == "topk":
+        selected = pred_sp_topk[:cap] if cap > 0 else pred_sp_topk
+        meta["selected_count"] = len(selected)
+        return selected, pred_sp_topk, meta
+
+    filtered: List[Dict[str, Any]] = []
+    for row in candidates:
+        if drop_weak and row["weak"]:
+            meta["dropped_weak"] += 1
+            continue
+        if row["score"] < threshold:
+            meta["dropped_score"] += 1
+            continue
+        filtered.append(row)
+    filtered.sort(key=lambda row: (-row["score"], row["order"]))
+
+    selected_rows: List[Dict[str, Any]] = []
+    selected_titles = set()
+    if prefer_new_titles:
+        for row in filtered:
+            title_key = row["title"].strip().lower()
+            if title_key in selected_titles:
+                continue
+            selected_rows.append(row)
+            selected_titles.add(title_key)
+            if cap > 0 and len(selected_rows) >= cap:
+                break
+    if cap <= 0 or len(selected_rows) < cap:
+        selected_keys = {
+            (row["fact"][0], row["fact"][1])
+            for row in selected_rows
+        }
+        for row in filtered:
+            fact_key = (row["fact"][0], row["fact"][1])
+            if fact_key in selected_keys:
+                continue
+            selected_rows.append(row)
+            selected_keys.add(fact_key)
+            if cap > 0 and len(selected_rows) >= cap:
+                break
+
+    selected = [row["fact"] for row in selected_rows]
+    if not selected and pred_sp_topk:
+        selected = pred_sp_topk[:cap] if cap > 0 else pred_sp_topk
+        meta["fallback_to_topk"] = True
+    meta["selected_count"] = len(selected)
+    return selected, pred_sp_topk, meta
+
+
+def _tokenize_for_refill(text: str) -> List[str]:
+    tokens = re.findall(r"[A-Za-z0-9]+", (text or "").lower())
+    return [token for token in tokens if token and token not in _REFILL_STOPWORDS]
+
+
+def _seed_texts_for_refill(question: str, retrieved_context_topk: List[Dict[str, Any]]) -> List[str]:
+    seeds: List[str] = []
+    seen = set()
+    for token in _tokenize_for_refill(question):
+        if token in seen:
+            continue
+        seeds.append(token)
+        seen.add(token)
+    for ctx in retrieved_context_topk:
+        title = str(ctx.get("title") or "").strip()
+        if title and title.lower() not in seen:
+            seeds.append(title)
+            seen.add(title.lower())
+        if len(seeds) >= 16:
+            break
+    return seeds
+
+
+def _score_sentence_for_refill(
+    sentence: str,
+    *,
+    q_tokens: set[str],
+    seed_tokens: set[str],
+    title_tokens: set[str],
+) -> float:
+    sent_tokens = set(_tokenize_for_refill(sentence))
+    if not sent_tokens:
+        return 0.0
+    overlap = len(sent_tokens & q_tokens) / max(1, len(q_tokens))
+    seed_overlap = len(sent_tokens & seed_tokens) / max(1, len(seed_tokens)) if seed_tokens else 0.0
+    title_overlap = len(sent_tokens & title_tokens) / max(1, len(title_tokens)) if title_tokens else 0.0
+    digit_bonus = 0.1 if any(tok.isdigit() for tok in sent_tokens) and any(tok.isdigit() for tok in q_tokens) else 0.0
+    return overlap + (0.35 * seed_overlap) + (0.15 * title_overlap) + digit_bonus
+
+
+def _collect_sentence_refill_candidates(
+    *,
+    question: str,
+    doc_index: Dict[str, Dict[str, Any]],
+    max_candidates: int,
+    min_score: float,
+    seed_texts: List[str],
+) -> List[Dict[str, Any]]:
+    q_tokens = set(_tokenize_for_refill(question))
+    seed_tokens = set()
+    for seed in seed_texts:
+        seed_tokens.update(_tokenize_for_refill(seed))
+    candidates: List[Dict[str, Any]] = []
+    for doc_id, meta in doc_index.items():
+        title = str(meta.get("title") or doc_id)
+        title_tokens = set(_tokenize_for_refill(title))
+        for sent_idx, sentence in enumerate(meta.get("sentences") or []):
+            text = str(sentence).strip()
+            if not text:
+                continue
+            score = _score_sentence_for_refill(
+                text,
+                q_tokens=q_tokens,
+                seed_tokens=seed_tokens,
+                title_tokens=title_tokens,
+            )
+            if score < min_score:
+                continue
+            note_id = f"{doc_id}#s{int(sent_idx):04d}"
+            candidates.append(
+                {
+                    "note_id": note_id,
+                    "doc_id": doc_id,
+                    "chunk_id": _make_chunk_id(doc_id, sent_idx, note_id),
+                    "title": title,
+                    "sentence_idx": int(sent_idx),
+                    "text": text,
+                    "evidence": text,
+                    "canonical": text,
+                    "weak": False,
+                    "score": round(score, 4),
+                    "source": "shortage_refill_sentence_pool",
+                }
+            )
+    candidates.sort(
+        key=lambda row: (
+            -_safe_score(row.get("score")),
+            str(row.get("doc_id") or ""),
+            int(row.get("sentence_idx") or 0),
+        )
+    )
+    if max_candidates <= 0:
+        return candidates
+    return candidates[: int(max_candidates)]
+
+
+def _collect_chunk_refill_candidates(
+    *,
+    question: str,
+    notes_path: Path,
+    doc_index: Dict[str, Dict[str, Any]],
+    max_candidates: int,
+    min_score: float,
+    seed_texts: List[str],
+) -> List[Dict[str, Any]]:
+    chunks_path = notes_path.parent / "chunks.jsonl"
+    if not chunks_path.exists() or max_candidates <= 0:
+        return []
+    chunk_store = ChunkStore(str(chunks_path))
+    hits = chunk_store.search(question, seeds=seed_texts, top_k=max(1, int(max_candidates)))
+    candidates: List[Dict[str, Any]] = []
+    for hit in hits:
+        score = _safe_score(hit.get("score"))
+        if score < min_score:
+            continue
+        doc_id = str(hit.get("doc_id") or "").strip()
+        doc_meta = doc_index.get(doc_id) if doc_id else None
+        title = str((doc_meta or {}).get("title") or doc_id or "")
+        sentences = (doc_meta or {}).get("sentences") or []
+        text = str(hit.get("evidence") or hit.get("canonical") or "").strip()
+        if not text:
+            continue
+        sentence_idx = _coerce_sentence_idx(hit.get("sentence_idx"))
+        if sentence_idx is None and sentences:
+            sentence_idx = _find_sentence_index(text, sentences)
+        if sentence_idx is not None and doc_id:
+            note_id = f"{doc_id}#s{int(sentence_idx):04d}"
+        else:
+            note_id = str(hit.get("note_id") or "")
+        chunk_id = _make_chunk_id(doc_id or None, sentence_idx, note_id or None)
+        if not chunk_id:
+            chunk_id = str(hit.get("chunk_id") or note_id or "")
+        candidates.append(
+            {
+                "note_id": note_id or None,
+                "doc_id": doc_id or None,
+                "chunk_id": chunk_id or None,
+                "title": title or None,
+                "sentence_idx": sentence_idx,
+                "text": text,
+                "evidence": text,
+                "canonical": text,
+                "weak": False,
+                "score": round(score, 4),
+                "source": "shortage_refill_chunk_store",
+            }
+        )
+    candidates.sort(
+        key=lambda row: (
+            -_safe_score(row.get("score")),
+            str(row.get("doc_id") or ""),
+            int(row.get("sentence_idx") or 0),
+        )
+    )
+    return candidates
+
+
+def _select_refill_candidates(
+    *,
+    existing_context: List[Dict[str, Any]],
+    candidates: List[Dict[str, Any]],
+    need: int,
+    prefer_new_titles: bool,
+) -> List[Dict[str, Any]]:
+    if need <= 0:
+        return []
+    existing_keys = set()
+    existing_titles = set()
+    for idx, ctx in enumerate(existing_context):
+        key, _ = _dedup_key(ctx, idx)
+        existing_keys.add(key)
+        title = str(ctx.get("title") or "").strip().lower()
+        if title:
+            existing_titles.add(title)
+
+    ordered = sorted(
+        candidates,
+        key=lambda row: (
+            -_safe_score(row.get("score")),
+            0 if row.get("source") == "shortage_refill_chunk_store" else 1,
+            str(row.get("doc_id") or ""),
+            int(row.get("sentence_idx") or 0),
+        ),
+    )
+    new_title_rows: List[Dict[str, Any]] = []
+    other_rows: List[Dict[str, Any]] = []
+    selected_keys = set()
+    for idx, row in enumerate(ordered):
+        key, _ = _dedup_key(row, idx)
+        if key in existing_keys or key in selected_keys:
+            continue
+        selected_keys.add(key)
+        title = str(row.get("title") or "").strip().lower()
+        if prefer_new_titles and title and title not in existing_titles:
+            new_title_rows.append(row)
+        else:
+            other_rows.append(row)
+    merged = new_title_rows + other_rows if prefer_new_titles else other_rows + new_title_rows
+    return merged[: int(need)]
+
+
+def _ctx_to_evidence(ctx: Dict[str, Any]) -> Dict[str, Any]:
+    text = str(ctx.get("text") or ctx.get("evidence") or ctx.get("canonical") or "")
+    note_id = ctx.get("note_id")
+    doc_id = ctx.get("doc_id")
+    return {
+        "note_id": note_id,
+        "doc_id": doc_id,
+        "source": doc_id,
+        "evidence": text,
+        "canonical": text,
+        "weak": bool(ctx.get("weak", False)),
+        "score": _safe_score(ctx.get("score")),
+        "subj": ctx.get("title") or doc_id,
+        "pred": "sentence",
+        "obj": text,
+    }
+
+
+def _apply_shortage_refill(
+    *,
+    question: str,
+    top_k: int,
+    requested: int,
+    retrieve_result: Dict[str, Any],
+    retrieved_context_raw: List[Dict[str, Any]],
+    retrieved_context_topk: List[Dict[str, Any]],
+    dedup_stats: Dict[str, Any],
+    note_store: NoteStore,
+    notes_path: Path,
+    doc_index: Dict[str, Dict[str, Any]],
+    max_candidates: int,
+    min_score: float,
+    prefer_new_titles: bool,
+) -> Tuple[Dict[str, Any], List[Dict[str, Any]], List[Dict[str, Any]], Dict[str, Any], Dict[str, Any]]:
+    info: Dict[str, Any] = {
+        "enabled": True,
+        "triggered": False,
+        "needed": 0,
+        "added": 0,
+        "before_top_k_raw": len(retrieved_context_raw),
+        "before_top_k_final": len(retrieved_context_topk),
+        "after_top_k_raw": len(retrieved_context_raw),
+        "after_top_k_final": len(retrieved_context_topk),
+        "chunk_candidates": 0,
+        "sentence_candidates": 0,
+        "selected_from_chunk_store": 0,
+        "selected_from_sentence_pool": 0,
+        "max_candidates": int(max_candidates),
+        "min_score": float(min_score),
+        "prefer_new_titles": bool(prefer_new_titles),
+    }
+    if top_k <= 0:
+        return retrieve_result, retrieved_context_raw, retrieved_context_topk, dedup_stats, info
+    needed = max(0, int(top_k) - len(retrieved_context_topk))
+    info["needed"] = needed
+    if needed <= 0:
+        return retrieve_result, retrieved_context_raw, retrieved_context_topk, dedup_stats, info
+
+    info["triggered"] = True
+    limit = max(needed, int(max_candidates))
+    seed_texts = _seed_texts_for_refill(question, retrieved_context_topk)
+    chunk_candidates = _collect_chunk_refill_candidates(
+        question=question,
+        notes_path=notes_path,
+        doc_index=doc_index,
+        max_candidates=limit,
+        min_score=float(min_score),
+        seed_texts=seed_texts,
+    )
+    sentence_candidates = _collect_sentence_refill_candidates(
+        question=question,
+        doc_index=doc_index,
+        max_candidates=limit,
+        min_score=float(min_score),
+        seed_texts=seed_texts,
+    )
+    info["chunk_candidates"] = len(chunk_candidates)
+    info["sentence_candidates"] = len(sentence_candidates)
+    selected = _select_refill_candidates(
+        existing_context=retrieved_context_raw,
+        candidates=chunk_candidates + sentence_candidates,
+        need=needed,
+        prefer_new_titles=bool(prefer_new_titles),
+    )
+    if not selected:
+        return retrieve_result, retrieved_context_raw, retrieved_context_topk, dedup_stats, info
+
+    refill_evidences = [_ctx_to_evidence(row) for row in selected]
+    existing_evidences = list(retrieve_result.get("evidence") or [])
+    merged_evidences = existing_evidences + refill_evidences
+    merged_result = dict(retrieve_result)
+    merged_result["evidence"] = merged_evidences
+    merged_result["shortage_refill"] = {
+        "added": len(refill_evidences),
+        "chunk_added": sum(1 for row in selected if row.get("source") == "shortage_refill_chunk_store"),
+        "sentence_added": sum(1 for row in selected if row.get("source") == "shortage_refill_sentence_pool"),
+    }
+
+    new_raw = _build_retrieved_context(merged_evidences, note_store, doc_index)
+    new_topk, new_dedup = _dedup_retrieved_context(new_raw, top_k=top_k)
+    new_dedup["top_k_raw_requested"] = requested
+
+    info["added"] = len(refill_evidences)
+    info["after_top_k_raw"] = len(new_raw)
+    info["after_top_k_final"] = len(new_topk)
+    info["selected_from_chunk_store"] = sum(
+        1 for row in selected if row.get("source") == "shortage_refill_chunk_store"
+    )
+    info["selected_from_sentence_pool"] = sum(
+        1 for row in selected if row.get("source") == "shortage_refill_sentence_pool"
+    )
+    return merged_result, new_raw, new_topk, new_dedup, info
 
 
 def _dedup_key(ctx: Dict[str, Any], idx: int) -> Tuple[Tuple[Any, ...], str]:
@@ -582,6 +1067,21 @@ def _coerce_float(value: Any, default: float) -> float:
         return float(default)
 
 
+def _coerce_bool(value: Any, default: bool) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return bool(default)
+    if isinstance(value, (int, float)):
+        return bool(value)
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "y", "on"}:
+        return True
+    if text in {"0", "false", "no", "n", "off"}:
+        return False
+    return bool(default)
+
+
 def _resolve_top_k_raw(
     top_k: int,
     top_k_raw: Optional[Any],
@@ -819,21 +1319,31 @@ def _ensure_index(
     force_build: bool,
 ) -> Dict[str, Any]:
     notes_path = index_root / "notes.jsonl"
+    chunks_path = index_root / "chunks.jsonl"
     indexes_dir = index_root / "indexes"
     lock_path = index_root / "build.lock"
     
     with FileLock(str(lock_path)):
-        if not force_build and notes_path.exists() and indexes_dir.exists():
+        notes_ready = notes_path.exists()
+        indexes_ready = indexes_dir.exists()
+        chunks_ready = chunks_path.exists()
+        if not force_build and notes_ready and indexes_ready and chunks_ready:
             return {"status": "reused"}
+        if not force_build and notes_ready and indexes_ready and not chunks_ready:
+            chunks_written = _write_chunks_for_example(doc_index, chunks_path, overwrite=True)
+            return {"status": "reused_chunks", "chunks": chunks_written}
         
         index_root.mkdir(parents=True, exist_ok=True)
         notes_written = 0
+        chunks_written = 0
         if force_build or not notes_path.exists():
             notes_written = _write_sentence_notes_for_example(doc_index, notes_path, overwrite=True)
+        if force_build or not chunks_path.exists():
+            chunks_written = _write_chunks_for_example(doc_index, chunks_path, overwrite=True)
         builder = IndexBuilder()
         builder.build_from_jsonl(str(notes_path))
         builder.dump(str(indexes_dir))
-        return {"status": "ok", "notes": notes_written}
+        return {"status": "ok", "notes": notes_written, "chunks": chunks_written}
 
 
 def _prepare_aux_config(example_root: Path, base_cfg: Dict[str, Any]) -> Dict[str, Any]:
@@ -924,7 +1434,10 @@ def _prepare_retriever_config(
     mode = mode.lower()
     if mode == "structured":
         structured_cfg["enabled"] = True
-        structured_cfg["vector_fallback_enabled"] = False
+        # Keep vector fallback on for structured mode unless caller explicitly disables it.
+        structured_cfg["vector_fallback_enabled"] = bool(
+            structured_cfg.get("vector_fallback_enabled", True)
+        )
         embed_cfg["enabled"] = False
         bm25_cfg["enabled"] = False
         hybrid_cfg["enabled"] = False
@@ -957,6 +1470,7 @@ def _prepare_retriever_config(
         embed_cfg["enabled"] = False
     if bm25_cfg.get("enabled") and not bm25_ready:
         bm25_cfg["enabled"] = False
+    hybrid_cfg["require_seed_match"] = False
 
     return cfg, {
         "mode": mode,
@@ -998,7 +1512,20 @@ def _retrieve_with_backfill(
     backfill_max_overfetch: float,
     backfill_step: float,
     backfill_rounds: int,
-) -> Tuple[Dict[str, Any], List[Dict[str, Any]], List[Dict[str, Any]], Dict[str, Any], Dict[str, Any], Optional[str], int]:
+    shortage_refill_enabled: bool,
+    shortage_refill_max_candidates: int,
+    shortage_refill_min_score: float,
+    shortage_refill_prefer_new_titles: bool,
+) -> Tuple[
+    Dict[str, Any],
+    List[Dict[str, Any]],
+    List[Dict[str, Any]],
+    Dict[str, Any],
+    Dict[str, Any],
+    Optional[str],
+    int,
+    Dict[str, Any],
+]:
     requested = max(1, int(top_k_raw))
     max_raw = requested
     if top_k > 0:
@@ -1012,6 +1539,11 @@ def _retrieve_with_backfill(
     retrieved_context_raw: List[Dict[str, Any]] = []
     retrieved_context_topk: List[Dict[str, Any]] = []
     dedup_stats: Dict[str, Any] = {}
+    shortage_refill_info: Dict[str, Any] = {
+        "enabled": bool(shortage_refill_enabled),
+        "triggered": False,
+        "added": 0,
+    }
 
     while True:
         retriever_cfg, retriever_paths = _prepare_retriever_config(index_dir.parent, base_cfg, mode)
@@ -1057,6 +1589,37 @@ def _retrieve_with_backfill(
             requested = raw_count + max(1, int(math.ceil(top_k * 0.5)))
         requested = min(requested, max_raw)
 
+    if (
+        bool(shortage_refill_enabled)
+        and top_k > 0
+        and len(retrieved_context_topk) < top_k
+    ):
+        (
+            retrieve_result,
+            retrieved_context_raw,
+            retrieved_context_topk,
+            dedup_stats,
+            shortage_refill_info,
+        ) = _apply_shortage_refill(
+            question=question,
+            top_k=top_k,
+            requested=requested,
+            retrieve_result=retrieve_result,
+            retrieved_context_raw=retrieved_context_raw,
+            retrieved_context_topk=retrieved_context_topk,
+            dedup_stats=dedup_stats,
+            note_store=note_store,
+            notes_path=notes_path,
+            doc_index=doc_index,
+            max_candidates=max(1, int(shortage_refill_max_candidates)),
+            min_score=float(shortage_refill_min_score),
+            prefer_new_titles=bool(shortage_refill_prefer_new_titles),
+        )
+        if len(retrieved_context_topk) >= top_k:
+            backfill_reason = None
+        elif not backfill_reason:
+            backfill_reason = _classify_topk_shortage(retrieved_context_raw, requested)
+
     return (
         retrieve_result,
         retrieved_context_raw,
@@ -1065,6 +1628,7 @@ def _retrieve_with_backfill(
         retriever_paths,
         backfill_reason,
         attempt,
+        shortage_refill_info,
     )
 
 
@@ -1083,6 +1647,15 @@ def _process_example(
     backfill_max_overfetch: float,
     backfill_step: float,
     backfill_rounds: int,
+    shortage_refill_enabled: bool,
+    shortage_refill_max_candidates: int,
+    shortage_refill_min_score: float,
+    shortage_refill_prefer_new_titles: bool,
+    pred_sp_policy: str,
+    pred_sp_max_facts: int,
+    pred_sp_min_score: float,
+    pred_sp_drop_weak: bool,
+    pred_sp_prefer_new_titles: bool,
     llm_retry_on_empty: int,
     llm_retry_max_evidence: int,
     force_build: bool,
@@ -1116,6 +1689,7 @@ def _process_example(
         retriever_paths,
         top_k_fill_reason,
         backfill_attempts,
+        shortage_refill_info,
     ) = _retrieve_with_backfill(
         question=question,
         index_dir=index_dir,
@@ -1129,6 +1703,10 @@ def _process_example(
         backfill_max_overfetch=backfill_max_overfetch,
         backfill_step=backfill_step,
         backfill_rounds=backfill_rounds,
+        shortage_refill_enabled=shortage_refill_enabled,
+        shortage_refill_max_candidates=shortage_refill_max_candidates,
+        shortage_refill_min_score=shortage_refill_min_score,
+        shortage_refill_prefer_new_titles=shortage_refill_prefer_new_titles,
     )
 
     evidences = retrieve_result.get("evidence") or []
@@ -1221,7 +1799,14 @@ def _process_example(
         references = [str(raw_reference).strip()]
     metrics = score_metrics(short_answer, references)
 
-    pred_sp = _build_pred_sp(retrieved_context_topk)
+    pred_sp, pred_sp_topk, pred_sp_meta = _build_pred_sp(
+        retrieved_context_topk,
+        policy=pred_sp_policy,
+        max_facts=pred_sp_max_facts,
+        min_score=pred_sp_min_score,
+        drop_weak=pred_sp_drop_weak,
+        prefer_new_titles=pred_sp_prefer_new_titles,
+    )
     gold_sp = _extract_gold_sp(example)
     llm_input_hash = prompt_meta.get("llm_input_hash") or ""
     top_k_raw_value = dedup_stats.get("top_k_raw")
@@ -1231,6 +1816,11 @@ def _process_example(
     top_k_raw_source_final = top_k_raw_source
     if backfill_attempts > 0:
         top_k_raw_source_final = "backfill"
+    if shortage_refill_info.get("added", 0) > 0:
+        if top_k_raw_source_final == "backfill":
+            top_k_raw_source_final = "backfill+shortage_refill"
+        else:
+            top_k_raw_source_final = "shortage_refill"
 
     output_record = {
         "_id": qid,
@@ -1241,6 +1831,9 @@ def _process_example(
         "answer_source_detail": answer_source_detail,
         "gold_sp": gold_sp,
         "pred_sp": pred_sp,
+        "pred_sp_topk": pred_sp_topk,
+        "pred_sp_policy": pred_sp_meta.get("policy"),
+        "pred_sp_policy_meta": pred_sp_meta,
         "sp": pred_sp,
         "generated_answer": short_answer,
         "supporting_facts": gold_sp,
@@ -1261,6 +1854,7 @@ def _process_example(
         "fallback_reason": fallback_reason,
         "llm_error": llm_error,
         "top_k_fill_reason": top_k_fill_reason,
+        "top_k_shortage_refill": shortage_refill_info,
         "llm_input_hash": llm_input_hash,
         "intermediate": {
             "build_stats": build_stats,
@@ -1284,8 +1878,13 @@ def _process_example(
             "top_k_raw_source": top_k_raw_source_final,
             "top_k_backfill_rounds": backfill_attempts,
             "top_k_fill_reason": top_k_fill_reason,
+            "top_k_shortage_refill": shortage_refill_info,
             "chunk_fallback_top_k": dedup_stats.get("top_k_raw_requested"),
             "chunk_fallback_top_k_source": top_k_raw_source_final,
+            "pred_sp_policy": pred_sp_meta.get("policy"),
+            "pred_sp_topk_count": len(pred_sp_topk),
+            "pred_sp_selected_count": len(pred_sp),
+            "pred_sp_policy_meta": pred_sp_meta,
             "prompt_name": prompt_meta.get("prompt_name"),
             "prompt_template_hash": prompt_meta.get("prompt_template_hash"),
             "system_prompt_name": prompt_meta.get("system_prompt_name"),
@@ -1447,6 +2046,8 @@ def _run_alignment(
         str(align_dir),
         "--pred_official_out",
         str(align_dir / "official_pred.json"),
+        "--pred_official_topk_out",
+        str(align_dir / "official_pred_topk.json"),
         "--gold_official_out",
         str(align_dir / "official_gold.json"),
         "--split",
@@ -1481,6 +2082,15 @@ def run_experiment_task(
     backfill_max_overfetch: float,
     backfill_step: float,
     backfill_rounds: int,
+    shortage_refill_enabled: bool,
+    shortage_refill_max_candidates: int,
+    shortage_refill_min_score: float,
+    shortage_refill_prefer_new_titles: bool,
+    pred_sp_policy: str,
+    pred_sp_max_facts: int,
+    pred_sp_min_score: float,
+    pred_sp_drop_weak: bool,
+    pred_sp_prefer_new_titles: bool,
     llm_retry_on_empty: int,
     llm_retry_max_evidence: int,
     limit: int,
@@ -1544,6 +2154,15 @@ def run_experiment_task(
                         backfill_max_overfetch=backfill_max_overfetch,
                         backfill_step=backfill_step,
                         backfill_rounds=backfill_rounds,
+                        shortage_refill_enabled=shortage_refill_enabled,
+                        shortage_refill_max_candidates=shortage_refill_max_candidates,
+                        shortage_refill_min_score=shortage_refill_min_score,
+                        shortage_refill_prefer_new_titles=shortage_refill_prefer_new_titles,
+                        pred_sp_policy=pred_sp_policy,
+                        pred_sp_max_facts=pred_sp_max_facts,
+                        pred_sp_min_score=pred_sp_min_score,
+                        pred_sp_drop_weak=pred_sp_drop_weak,
+                        pred_sp_prefer_new_titles=pred_sp_prefer_new_titles,
                         llm_retry_on_empty=llm_retry_on_empty,
                         llm_retry_max_evidence=llm_retry_max_evidence,
                         force_build=force_build,
@@ -1587,6 +2206,15 @@ def run_experiment_task(
                         backfill_max_overfetch,
                         backfill_step,
                         backfill_rounds,
+                        shortage_refill_enabled,
+                        shortage_refill_max_candidates,
+                        shortage_refill_min_score,
+                        shortage_refill_prefer_new_titles,
+                        pred_sp_policy,
+                        pred_sp_max_facts,
+                        pred_sp_min_score,
+                        pred_sp_drop_weak,
+                        pred_sp_prefer_new_titles,
                         llm_retry_on_empty,
                         llm_retry_max_evidence,
                         force_build,
@@ -1680,6 +2308,15 @@ def main() -> None:
     parser.add_argument("--backfill_max_overfetch", type=float, help="Max overfetch multiplier for backfill (fallback to config)")
     parser.add_argument("--backfill_step", type=float, help="Backfill growth factor per retry (fallback to config)")
     parser.add_argument("--backfill_rounds", type=int, help="Max backfill attempts (fallback to config)")
+    parser.add_argument("--shortage_refill_enabled", help="Enable quality refill when top-k remains short (fallback to config)")
+    parser.add_argument("--shortage_refill_max_candidates", type=int, help="Max refill candidates scanned per query (fallback to config)")
+    parser.add_argument("--shortage_refill_min_score", type=float, help="Min lexical score for refill candidates (fallback to config)")
+    parser.add_argument("--shortage_refill_prefer_new_titles", help="Prefer refill from unseen titles first (fallback to config)")
+    parser.add_argument("--pred_sp_policy", help="Supporting fact policy: topk or high_confidence (fallback to config)")
+    parser.add_argument("--pred_sp_max_facts", type=int, help="Max supporting facts for high-confidence policy (fallback to config)")
+    parser.add_argument("--pred_sp_min_score", type=float, help="Min score for supporting facts under high-confidence policy (fallback to config)")
+    parser.add_argument("--pred_sp_drop_weak", help="Drop weak evidences for high-confidence pred_sp (fallback to config)")
+    parser.add_argument("--pred_sp_prefer_new_titles", help="Prefer diverse titles in high-confidence pred_sp (fallback to config)")
     parser.add_argument("--llm_retry_on_empty", type=int, help="Retry LLM on empty/parse fallback (fallback to config)")
     parser.add_argument("--llm_retry_max_evidence", type=int, help="Max evidences on retry (fallback to config)")
     parser.add_argument("--limit", type=int, help="Process only first N examples (fallback to config)")
@@ -1734,6 +2371,58 @@ def main() -> None:
     args.backfill_rounds = _coerce_int(
         _pick_arg(args, entry_cfg, dataset_cfg, "backfill_rounds", DEFAULT_BACKFILL_ROUNDS),
         DEFAULT_BACKFILL_ROUNDS,
+    )
+    args.shortage_refill_enabled = _coerce_bool(
+        _pick_arg(args, entry_cfg, dataset_cfg, "shortage_refill_enabled", DEFAULT_SHORTAGE_REFILL_ENABLED),
+        DEFAULT_SHORTAGE_REFILL_ENABLED,
+    )
+    args.shortage_refill_max_candidates = _coerce_int(
+        _pick_arg(
+            args,
+            entry_cfg,
+            dataset_cfg,
+            "shortage_refill_max_candidates",
+            DEFAULT_SHORTAGE_REFILL_MAX_CANDIDATES,
+        ),
+        DEFAULT_SHORTAGE_REFILL_MAX_CANDIDATES,
+    )
+    args.shortage_refill_min_score = _coerce_float(
+        _pick_arg(args, entry_cfg, dataset_cfg, "shortage_refill_min_score", DEFAULT_SHORTAGE_REFILL_MIN_SCORE),
+        DEFAULT_SHORTAGE_REFILL_MIN_SCORE,
+    )
+    args.shortage_refill_prefer_new_titles = _coerce_bool(
+        _pick_arg(
+            args,
+            entry_cfg,
+            dataset_cfg,
+            "shortage_refill_prefer_new_titles",
+            DEFAULT_SHORTAGE_REFILL_PREFER_NEW_TITLES,
+        ),
+        DEFAULT_SHORTAGE_REFILL_PREFER_NEW_TITLES,
+    )
+    pred_sp_policy_raw = _pick_arg(args, entry_cfg, dataset_cfg, "pred_sp_policy", DEFAULT_PRED_SP_POLICY)
+    args.pred_sp_policy = _normalize_pred_sp_policy(pred_sp_policy_raw)
+    args.pred_sp_max_facts = _coerce_int(
+        _pick_arg(args, entry_cfg, dataset_cfg, "pred_sp_max_facts", DEFAULT_PRED_SP_MAX_FACTS),
+        DEFAULT_PRED_SP_MAX_FACTS,
+    )
+    args.pred_sp_min_score = _coerce_float(
+        _pick_arg(args, entry_cfg, dataset_cfg, "pred_sp_min_score", DEFAULT_PRED_SP_MIN_SCORE),
+        DEFAULT_PRED_SP_MIN_SCORE,
+    )
+    args.pred_sp_drop_weak = _coerce_bool(
+        _pick_arg(args, entry_cfg, dataset_cfg, "pred_sp_drop_weak", DEFAULT_PRED_SP_DROP_WEAK),
+        DEFAULT_PRED_SP_DROP_WEAK,
+    )
+    args.pred_sp_prefer_new_titles = _coerce_bool(
+        _pick_arg(
+            args,
+            entry_cfg,
+            dataset_cfg,
+            "pred_sp_prefer_new_titles",
+            DEFAULT_PRED_SP_PREFER_NEW_TITLES,
+        ),
+        DEFAULT_PRED_SP_PREFER_NEW_TITLES,
     )
     args.llm_retry_on_empty = _coerce_int(
         _pick_arg(args, entry_cfg, dataset_cfg, "llm_retry_on_empty", DEFAULT_LLM_RETRY_ON_EMPTY),
@@ -1854,6 +2543,15 @@ def main() -> None:
                 "backfill_max_overfetch": args.backfill_max_overfetch,
                 "backfill_step": args.backfill_step,
                 "backfill_rounds": args.backfill_rounds,
+                "shortage_refill_enabled": args.shortage_refill_enabled,
+                "shortage_refill_max_candidates": args.shortage_refill_max_candidates,
+                "shortage_refill_min_score": args.shortage_refill_min_score,
+                "shortage_refill_prefer_new_titles": args.shortage_refill_prefer_new_titles,
+                "pred_sp_policy": args.pred_sp_policy,
+                "pred_sp_max_facts": args.pred_sp_max_facts,
+                "pred_sp_min_score": args.pred_sp_min_score,
+                "pred_sp_drop_weak": args.pred_sp_drop_weak,
+                "pred_sp_prefer_new_titles": args.pred_sp_prefer_new_titles,
                 "llm_retry_on_empty": args.llm_retry_on_empty,
                 "llm_retry_max_evidence": args.llm_retry_max_evidence,
                 "limit": args.limit,
