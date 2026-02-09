@@ -112,6 +112,8 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "retriever": {
         "structured": {
             "enabled": True,
+            "walk_enabled": True,
+            "multihop_rescue_enabled": True,
             "fanout": 8,
             "entity_match_threshold": 0.5,
             "path_consistency_threshold": 0.9,
@@ -177,6 +179,8 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "cache_dir": "result/cache",
         "output_dir": "result",
         "top_k": 10,
+        "query_title_promotion_enabled": True,
+        "query_title_promotion_window": 5,
         "limit": 0,
         "workers": 1,
         "debug_dir": "result/debug",

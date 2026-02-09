@@ -13,3 +13,7 @@ narrativeqa/
 musique
 narrativeqa
 mirage/
+!scripts/musique/
+scripts/musique/*
+!scripts/musique/hop_study.py
+!scripts/musique/HOP_STUDY.md

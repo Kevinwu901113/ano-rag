@@ -147,6 +147,8 @@ answer:
 retriever:
   structured:
     enabled: true
+    walk_enabled: true
+    multihop_rescue_enabled: true
     fanout: 8
     entity_match_threshold: 0.5
     path_consistency_threshold: 0.9
@@ -234,8 +236,13 @@ hotpot_entry:
   shortage_refill_max_candidates: 48
   shortage_refill_min_score: 0.35
   shortage_refill_prefer_new_titles: true
+  title_diversity_enabled: true
+  title_diversity_top_n: 5
+  title_diversity_keep_first: true
+  query_title_promotion_enabled: true
+  query_title_promotion_window: 5
   pred_sp_policy: high_confidence
-  pred_sp_max_facts: 4
+  pred_sp_max_facts: 3
   pred_sp_min_score: 0.0
   pred_sp_drop_weak: true
   pred_sp_prefer_new_titles: true

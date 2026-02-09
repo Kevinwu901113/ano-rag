@@ -1,7 +1,7 @@
 import json
 import os
 from collections import defaultdict
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 import re
 import unicodedata
 
@@ -180,7 +180,7 @@ def BIND(indexes: Indexes, alias: str, type_candidates: List[str], limit: int = 
 def EXPAND_from(
     indexes: Indexes,
     entity: str,
-    predicate: str,
+    predicate: Optional[str],
     direction: str = "out",
     limit: int = 200,
 ) -> List[Tuple[str, str, float]]:
@@ -198,7 +198,7 @@ def EXPAND_from(
                 conf = 0.0
             else:
                 continue
-            if pred_val != predicate:
+            if predicate and pred_val != predicate:
                 continue
             output.append((subj, note_id, conf))
             if len(output) >= limit:
@@ -216,7 +216,7 @@ def EXPAND_from(
             conf = 0.0
         else:
             continue
-        if pred_val != predicate:
+        if predicate and pred_val != predicate:
             continue
         output.append((obj, note_id, conf))
         if len(output) >= limit:

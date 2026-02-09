@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import hashlib
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Sequence, Tuple
 from loguru import logger
@@ -104,9 +105,20 @@ def retrieve_answer(
     structured_cfg = retr_cfg.get("structured") or {}
     embedding_cfg = retr_cfg.get("embedding") or {}
     structured_enabled = bool(structured_cfg.get("enabled", True))
+    walk_enabled = bool(structured_cfg.get("walk_enabled", True))
+    multihop_rescue_enabled = bool(structured_cfg.get("multihop_rescue_enabled", True))
     entity_match_threshold = float(structured_cfg.get("entity_match_threshold", 0.5))
     path_consistency_threshold = float(structured_cfg.get("path_consistency_threshold", 0.9))
     vector_fallback_enabled = bool(structured_cfg.get("vector_fallback_enabled", True))
+    predicate_mode = str(structured_cfg.get("predicate_mode", "on") or "on").strip().lower()
+    if predicate_mode not in {"on", "off", "random"}:
+        predicate_mode = "on"
+    if not bool(structured_cfg.get("predicate_constraint_enabled", True)) and predicate_mode == "on":
+        predicate_mode = "off"
+    try:
+        predicate_random_seed = int(structured_cfg.get("random_predicate_seed", 2026))
+    except (TypeError, ValueError):
+        predicate_random_seed = 2026
     normalized_doc_hint = _normalize_doc_hint(doc_hint)
     relaxed_path_used = False
     rescue_used = False
@@ -121,6 +133,11 @@ def retrieve_answer(
         active_intent = intent_override if intent_override is not None else intent
         result_meta = result.setdefault("meta", {})
         result_meta["multihop_rescue"] = rescue_used
+        result_meta["walk_enabled"] = walk_enabled
+        result_meta["multihop_rescue_enabled"] = multihop_rescue_enabled
+        result_meta["predicate_mode"] = predicate_mode
+        result_meta["predicate_constraint_enabled"] = predicate_mode != "off"
+        result_meta["predicate_random_seed"] = predicate_random_seed
         if normalized_doc_hint:
             _apply_doc_filter_to_result(result, note_store, normalized_doc_hint)
         result = _apply_chunk_fallback(
@@ -148,6 +165,20 @@ def retrieve_answer(
         result = _fallback_lookup(intent, indexes, note_store, None, "parse_failed", normalized_doc_hint, cfg=cfg)
         result.setdefault("meta", {})["relaxed_path_retry"] = False
         return _finalize_result(result, ir_override=ir, intent_override=intent)
+
+    walk_ir = ir
+    if structured_enabled and not walk_enabled and ir.pred_chain:
+        walk_ir = QueryIR(
+            intent=ir.intent,
+            seeds=list(ir.seeds or []),
+            pred_chain=[],
+            target_type=ir.target_type,
+            question_type=ir.question_type,
+            max_hops=0,
+            fanout=ir.fanout,
+            raw=ir.raw,
+            fallback=ir.fallback,
+        )
 
     seed_entities = _bind_seeds(ir.seeds, indexes, ir.fanout)
     # 注入 doc_name 别名约束：若检测到实体名称，作为强别名参与绑定
@@ -184,7 +215,7 @@ def retrieve_answer(
     if structured_enabled:
         candidates = _walk_chain(
             seed_entities,
-            ir,
+            walk_ir,
             indexes,
             note_store,
             doc_name,
@@ -192,7 +223,9 @@ def retrieve_answer(
             seed_texts=seed_texts,
             alias_lookup=alias_lookup,
             entity_match_threshold=entity_match_threshold,
-            path_match_threshold=path_consistency_threshold if ir.pred_chain else -1.0,
+            path_match_threshold=path_consistency_threshold if walk_ir.pred_chain else -1.0,
+            predicate_mode=predicate_mode,
+            predicate_random_seed=predicate_random_seed,
         )
         pre_doc_candidates = len(candidates or [])
         candidates = _filter_candidates_by_doc(candidates, normalized_doc_hint)
@@ -203,14 +236,14 @@ def retrieve_answer(
                 logger.info("structured candidates filtered by doc_hint: {} -> {}", pre_doc_candidates, len(candidates or []))
         except Exception:
             pass
-        if not candidates and ir.pred_chain:
+        if not candidates and walk_ir.pred_chain:
             try:
                 logger.info("no structured path; retrying with relaxed thresholds")
             except Exception:
                 pass
             relaxed_candidates = _walk_chain(
                 seed_entities,
-                ir,
+                walk_ir,
                 indexes,
                 note_store,
                 doc_name,
@@ -219,6 +252,8 @@ def retrieve_answer(
                 alias_lookup=alias_lookup,
                 entity_match_threshold=max(0.25, entity_match_threshold * 0.6),
                 path_match_threshold=0.25,
+                predicate_mode=predicate_mode,
+                predicate_random_seed=predicate_random_seed,
             )
             relaxed_candidates = _filter_candidates_by_doc(relaxed_candidates, normalized_doc_hint)
             if relaxed_candidates:
@@ -228,17 +263,24 @@ def retrieve_answer(
                     logger.info("relaxed retry yielded {} candidates", len(relaxed_candidates))
                 except Exception:
                     pass
-        if not candidates and ir.pred_chain and len(ir.pred_chain) >= 2:
+        if (
+            multihop_rescue_enabled
+            and not candidates
+            and walk_ir.pred_chain
+            and len(walk_ir.pred_chain) >= 2
+        ):
             rescued = _rescue_multihop(
                 seed_entities,
-                ir,
+                walk_ir,
                 indexes,
                 note_store,
                 seed_texts=seed_texts,
                 alias_lookup=alias_lookup,
                 attribute=intent.attribute,
                 entity_match_threshold=0.0,
-                path_match_threshold=path_consistency_threshold if ir.pred_chain else -1.0,
+                path_match_threshold=path_consistency_threshold if walk_ir.pred_chain else -1.0,
+                predicate_mode=predicate_mode,
+                predicate_random_seed=predicate_random_seed,
             )
             rescued = _filter_candidates_by_doc(rescued, normalized_doc_hint)
             if rescued:
@@ -259,7 +301,7 @@ def retrieve_answer(
     # Hybrid retrieval path (structured + embedding + BM25)
     hybrid_result = _maybe_run_hybrid(
         question,
-        ir,
+        walk_ir,
         intent,
         candidates,
         note_store,
@@ -317,7 +359,11 @@ def retrieve_answer(
         pass
     weak_evidences: List[Dict[str, Any]] = []
     if not support_note_ids or len(evidences) < max(3, ir.fanout // 2):
-        predicate_hints = [step.pred for step in (ir.pred_chain or [])] if ir and ir.pred_chain else []
+        predicate_hints = (
+            [step.pred for step in (walk_ir.pred_chain or [])]
+            if walk_ir and walk_ir.pred_chain
+            else []
+        )
         weak_evidences = _collect_weak_evidences(
             seed_entities,
             predicate_hints,
@@ -367,6 +413,39 @@ def _bind_seeds(seeds: Sequence[Seed], indexes: Indexes, limit: int) -> List[str
     return collected
 
 
+def _resolve_expand_predicate(
+    requested_predicate: str,
+    indexes: Indexes,
+    *,
+    predicate_mode: str,
+    predicate_random_seed: int,
+    step_idx: int,
+    entity: str,
+) -> Optional[str]:
+    mode = str(predicate_mode or "on").strip().lower()
+    if mode == "off":
+        return None
+    if mode != "random":
+        return requested_predicate
+    predicates = [
+        str(name).strip()
+        for name in (indexes.predicate_to_notes or {}).keys()
+        if str(name).strip()
+    ]
+    if not predicates:
+        return requested_predicate
+    predicates = sorted(dict.fromkeys(predicates))
+    if len(predicates) == 1:
+        return predicates[0]
+    material = f"{predicate_random_seed}|{step_idx}|{entity}|{requested_predicate}"
+    digest = hashlib.sha1(material.encode("utf-8")).hexdigest()
+    selected_idx = int(digest[:12], 16) % len(predicates)
+    selected = predicates[selected_idx]
+    if selected == requested_predicate:
+        selected = predicates[(selected_idx + 1) % len(predicates)]
+    return selected
+
+
 def _walk_chain(
     entities: Sequence[str],
     ir: QueryIR,
@@ -379,6 +458,8 @@ def _walk_chain(
     alias_lookup: Optional[Dict[str, str]] = None,
     entity_match_threshold: float = 0.0,
     path_match_threshold: float = -1.0,
+    predicate_mode: str = "on",
+    predicate_random_seed: int = 2026,
 ) -> List[Candidate]:
     if not ir.pred_chain:
         return _collect_entity_mentions(
@@ -398,10 +479,18 @@ def _walk_chain(
         for state in states:
             # 关系同义归一：确保检索入口与图关系名对齐
             canon_pred = _canonical_predicate(step.pred) or step.pred
+            expand_pred = _resolve_expand_predicate(
+                canon_pred,
+                indexes,
+                predicate_mode=predicate_mode,
+                predicate_random_seed=predicate_random_seed,
+                step_idx=step_idx,
+                entity=str(state["entity"]),
+            )
             expanded = EXPAND_from(
                 indexes,
                 state["entity"],
-                predicate=canon_pred,
+                predicate=expand_pred,
                 direction=step.direction,
                 limit=ir.fanout,
             )
@@ -463,6 +552,8 @@ def _rescue_multihop(
     attribute: Optional[str] = None,
     entity_match_threshold: float = 0.0,
     path_match_threshold: float = -1.0,
+    predicate_mode: str = "on",
+    predicate_random_seed: int = 2026,
 ) -> List[Candidate]:
     if not ir.pred_chain or len(ir.pred_chain) < 2:
         return []
@@ -474,7 +565,15 @@ def _rescue_multihop(
     intermediates: List[Tuple[str, str, str, float]] = []
     seen_intermediate = set()
     for subj in entities:
-        expanded = EXPAND_from(indexes, subj, hop1_pred, direction=hop1.direction, limit=ir.fanout)
+        hop1_expand_pred = _resolve_expand_predicate(
+            hop1_pred,
+            indexes,
+            predicate_mode=predicate_mode,
+            predicate_random_seed=predicate_random_seed,
+            step_idx=0,
+            entity=str(subj),
+        )
+        expanded = EXPAND_from(indexes, subj, hop1_expand_pred, direction=hop1.direction, limit=ir.fanout)
         for mid, nid, conf in expanded:
             key = (subj, mid, nid)
             if key in seen_intermediate:
@@ -489,7 +588,15 @@ def _rescue_multihop(
 
     candidates: List[Candidate] = []
     for subj0, mid, nid1, conf1 in intermediates:
-        expanded2 = EXPAND_from(indexes, mid, hop2_pred, direction=hop2.direction, limit=ir.fanout)
+        hop2_expand_pred = _resolve_expand_predicate(
+            hop2_pred,
+            indexes,
+            predicate_mode=predicate_mode,
+            predicate_random_seed=predicate_random_seed,
+            step_idx=1,
+            entity=str(mid),
+        )
+        expanded2 = EXPAND_from(indexes, mid, hop2_expand_pred, direction=hop2.direction, limit=ir.fanout)
         for obj2, nid2, conf2 in expanded2:
             path = [
                 {"subj": subj0, "pred": hop1_pred, "obj": mid, "note_id": nid1, "conf": conf1},
@@ -1584,6 +1691,35 @@ def _should_chunk_fallback(result: Dict[str, Any], intent: AnswerIntent, ir: Opt
     return False
 
 
+def _evidence_doc_key(ev: Dict[str, Any]) -> str:
+    for key in ("doc_id", "source_doc_id"):
+        value = str(ev.get(key) or "").strip()
+        if value:
+            return value
+    note_id = str(ev.get("note_id") or "").strip()
+    if note_id:
+        if "#c" in note_id:
+            return note_id.split("#c", 1)[0].strip()
+        if "#" in note_id:
+            return note_id.split("#", 1)[0].strip()
+        return note_id
+    subj = str(ev.get("subj") or "").strip()
+    if subj:
+        return subj
+    return ""
+
+
+def _unique_doc_count(evidence: List[Dict[str, Any]], probe_k: int) -> int:
+    if probe_k <= 0:
+        return 0
+    seen: set[str] = set()
+    for ev in evidence[:probe_k]:
+        doc_key = _evidence_doc_key(ev)
+        if doc_key:
+            seen.add(doc_key)
+    return len(seen)
+
+
 def _apply_chunk_fallback(
     result: Dict[str, Any],
     *,
@@ -1632,7 +1768,20 @@ def _apply_chunk_fallback(
     vector_cfg = chunk_cfg.get("vector") or {}
     vector_enabled = bool(vector_cfg.get("enabled", True))
     vector_hits = 0
-    if vector_enabled and len(merged) < top_k:
+    vector_reason = "none"
+    need_vector = len(merged) < top_k
+    if need_vector:
+        vector_reason = "insufficient_count"
+    elif vector_enabled:
+        probe_k = int(vector_cfg.get("diversity_probe_k", min(top_k, 5)))
+        probe_k = max(2, probe_k)
+        min_unique_docs = int(vector_cfg.get("min_unique_docs", 2 if top_k >= 5 else 1))
+        min_unique_docs = max(1, min_unique_docs)
+        if min_unique_docs > 1 and _unique_doc_count(merged, probe_k) < min_unique_docs:
+            need_vector = True
+            vector_reason = "low_doc_diversity"
+
+    if vector_enabled and need_vector:
         vector_top_k = int(vector_cfg.get("top_k", top_k))
         vector_top_k = max(vector_top_k, top_k)
         query_for_vector = question
@@ -1650,9 +1799,13 @@ def _apply_chunk_fallback(
     result.setdefault("vector_fallback", {})["used"] = vector_hits > 0
     result["vector_fallback"]["hits"] = vector_hits
     result["vector_fallback"]["enabled"] = vector_enabled
+    result["vector_fallback"]["trigger_reason"] = vector_reason
 
     if merged:
-        result["evidence"] = merged[: max(len(existing), top_k)]
+        keep_cap = max(len(existing), top_k)
+        if len(merged) > keep_cap and (chunk_evs or vector_hits > 0):
+            keep_cap = len(merged)
+        result["evidence"] = merged[:keep_cap]
         if not existing:
             result["reason"] = None
         support_ids = list(result.get("support_note_ids") or [])

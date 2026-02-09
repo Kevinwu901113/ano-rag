@@ -82,6 +82,16 @@ def resolve_short_answer(
     question: str | None = None,
 ) -> Tuple[str, str, Dict[str, Any]]:
     detail: Dict[str, Any] = {}
+    raw_text = str(llm_raw or "")
+    has_final = has_final_tag(raw_text)
+    detail["llm_has_final"] = has_final
+    if has_final:
+        final = extract_final_answer(raw_text, max_tokens=max_tokens)
+        if final:
+            final = _maybe_normalize_yes_no(final, question, raw_text, detail)
+            detail["source"] = "llm_raw:FINAL"
+            return final, "llm_final", detail
+
     structured_text = str(structured_answer).strip() if structured_answer is not None else ""
     if structured_text:
         if structured_text.strip().lower() == "insufficient evidence":
@@ -98,16 +108,6 @@ def resolve_short_answer(
         else:
             detail["source"] = "intermediate.structured_answer"
             return structured_text, "structured_answer", detail
-
-    raw_text = str(llm_raw or "")
-    has_final = has_final_tag(raw_text)
-    detail["llm_has_final"] = has_final
-    if has_final:
-        final = extract_final_answer(raw_text, max_tokens=max_tokens)
-        if final:
-            final = _maybe_normalize_yes_no(final, question, raw_text, detail)
-            detail["source"] = "llm_raw:FINAL"
-            return final, "llm_final", detail
 
     fallback = extract_final_answer(raw_text, max_tokens=max_tokens)
     if fallback:

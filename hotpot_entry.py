@@ -2,6 +2,8 @@ import argparse
 import json
 import math
 import os
+import platform
+import socket
 import subprocess
 import re
 import shutil
@@ -12,7 +14,18 @@ from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, ProcessPoolE
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, TextIO, Tuple
 
-from filelock import FileLock
+try:
+    from filelock import FileLock
+except Exception:  # pragma: no cover - optional dependency fallback
+    class FileLock:  # type: ignore[no-redef]
+        def __init__(self, _path: str) -> None:
+            self.path = _path
+
+        def __enter__(self) -> "FileLock":
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> bool:
+            return False
 from loguru import logger
 
 from relrag.api import retrieve, answer
@@ -62,6 +75,14 @@ DEFAULT_PRED_SP_MAX_FACTS = 4
 DEFAULT_PRED_SP_MIN_SCORE = 0.0
 DEFAULT_PRED_SP_DROP_WEAK = True
 DEFAULT_PRED_SP_PREFER_NEW_TITLES = True
+DEFAULT_TITLE_DIVERSITY_ENABLED = True
+DEFAULT_TITLE_DIVERSITY_TOP_N = 5
+DEFAULT_TITLE_DIVERSITY_KEEP_FIRST = True
+DEFAULT_QUERY_TITLE_PROMOTION_ENABLED = True
+DEFAULT_QUERY_TITLE_PROMOTION_WINDOW = 5
+DEFAULT_PREDICATE_MODE = "on"
+DEFAULT_PREDICATE_RANDOM_SEED = 2026
+DEFAULT_EXPORT_TOP_K_MAX = 50
 
 _REFILL_STOPWORDS = {
     "the",
@@ -130,6 +151,14 @@ def _count_examples(path: Path, limit: int) -> int:
             if limit and total >= limit:
                 break
     return total
+
+
+def normalize_title(title: Any) -> str:
+    """Normalize title conservatively for Hotpot title matching."""
+    text = str(title or "").strip()
+    if not text:
+        return ""
+    return re.sub(r"\s+", " ", text)
 
 
 class ProgressBar:
@@ -282,9 +311,36 @@ def _write_chunks_for_example(
 
 
 def _resolve_doc_id_from_source(source: Optional[str]) -> Optional[str]:
-    if not source:
+    text = str(source or "").strip()
+    if not text:
         return None
-    return source.split("#", 1)[0].strip() or None
+    return text.split("#", 1)[0].strip() or None
+
+
+def _resolve_preferred_doc_id(
+    *,
+    evidence: Dict[str, Any],
+    note_id: Optional[str],
+    source: Optional[str],
+    doc_index: Dict[str, Dict[str, Any]],
+) -> Optional[str]:
+    candidates: List[str] = []
+
+    def _append(raw: Any) -> None:
+        text = str(raw or "").strip()
+        if text and text not in candidates:
+            candidates.append(text)
+
+    _append(evidence.get("doc_id"))
+    _append(_resolve_doc_id_from_source(source))
+    _append(_resolve_doc_id_from_source(evidence.get("chunk_id")))
+    _append(_resolve_doc_id_from_source(note_id))
+    _append(_resolve_doc_id_from_source(evidence.get("note_id")))
+
+    for candidate in candidates:
+        if candidate in doc_index:
+            return candidate
+    return candidates[0] if candidates else None
 
 
 def _normalize_for_match(text: str) -> str:
@@ -316,17 +372,34 @@ def _build_retrieved_context(
     note_store: NoteStore,
     doc_index: Dict[str, Dict[str, Any]],
 ) -> List[Dict[str, Any]]:
+    def _first_non_empty(*values: Any) -> Optional[str]:
+        for value in values:
+            text = str(value or "").strip()
+            if text:
+                return text
+        return None
+
     contexts: List[Dict[str, Any]] = []
     for ev in evidences:
         note_id = ev.get("note_id")
         note = note_store.get_weak(note_id) if note_id else None
         meta = (note or {}).get("meta") or {}
         source = meta.get("source") or ev.get("source")
-        doc_id = _resolve_doc_id_from_source(source) if source else None
-        if not doc_id:
-            doc_id = ev.get("doc_id") or _resolve_doc_id_from_source(note_id)
+        doc_id = _resolve_preferred_doc_id(
+            evidence=ev,
+            note_id=note_id,
+            source=source,
+            doc_index=doc_index,
+        )
         doc_meta = doc_index.get(doc_id) if doc_id else None
-        title = doc_meta.get("title") if doc_meta else None
+        title = _first_non_empty(
+            (doc_meta or {}).get("title"),
+            meta.get("doc_title"),
+            meta.get("title"),
+            ev.get("doc_title"),
+            ev.get("title"),
+        )
+        title = normalize_title(title) if title else None
         sentences = doc_meta.get("sentences") if doc_meta else []
         evidence_text = ev.get("canonical") or ev.get("evidence") or ""
         sentence_idx = _coerce_sentence_idx(meta.get("sentence_idx"))
@@ -342,6 +415,7 @@ def _build_retrieved_context(
                 "doc_id": doc_id,
                 "chunk_id": _make_chunk_id(doc_id, sentence_idx, note_id),
                 "title": title,
+                "doc_title": title,
                 "sentence_idx": sentence_idx,
                 "text": text,
                 "text_hash": sha1_text(text) if text else None,
@@ -719,6 +793,88 @@ def _ctx_to_evidence(ctx: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def _normalize_title_key(value: Any) -> str:
+    return normalize_title(value).strip().lower()
+
+
+def _promote_title_diversity(
+    rows: List[Dict[str, Any]],
+    *,
+    top_n: int,
+    keep_first: bool,
+) -> Tuple[List[Dict[str, Any]], bool]:
+    """Promote unique titles in early ranks to improve low-k document recall."""
+    cap = max(0, int(top_n))
+    if cap <= 1 or len(rows) <= 1:
+        return rows, False
+    cap = min(cap, len(rows))
+
+    head_size = 1 if keep_first else 0
+    head_size = min(head_size, len(rows))
+    promoted: List[Dict[str, Any]] = list(rows[:head_size])
+    delayed: List[Dict[str, Any]] = []
+    seen_titles = set()
+    for item in promoted:
+        title_key = _normalize_title_key(item.get("title") or item.get("doc_title"))
+        if title_key:
+            seen_titles.add(title_key)
+
+    for item in rows[head_size:]:
+        title_key = _normalize_title_key(item.get("title") or item.get("doc_title"))
+        if not title_key or title_key in seen_titles or len(promoted) >= cap:
+            delayed.append(item)
+            continue
+        promoted.append(item)
+        seen_titles.add(title_key)
+
+    reordered = promoted + delayed
+    return reordered, reordered != rows
+
+
+def _promote_second_title_by_question(
+    rows: List[Dict[str, Any]],
+    *,
+    question: str,
+    window_n: int,
+) -> Tuple[List[Dict[str, Any]], bool]:
+    """Promote one title that best matches question tokens into rank-2."""
+    cap = max(0, int(window_n))
+    if cap < 2 or len(rows) < 2:
+        return rows, False
+    cap = min(cap, len(rows))
+
+    q_tokens = set(_tokenize_for_refill(question))
+    question_text = " ".join(str(question or "").strip().lower().split())
+    rank1_title = _normalize_title_key(rows[0].get("title") or rows[0].get("doc_title"))
+
+    best_idx = 1
+    best_score = (-1, -1, -1)
+    for idx in range(1, len(rows)):
+        row = rows[idx]
+        title_raw = row.get("title") or row.get("doc_title")
+        title_key = _normalize_title_key(title_raw)
+        if not title_key or title_key == rank1_title:
+            continue
+        title_tokens = set(_tokenize_for_refill(title_key))
+        overlap = len(title_tokens & q_tokens) if q_tokens else 0
+        exact_phrase = 1 if title_key and title_key in question_text else 0
+        in_window_bonus = 1 if idx < cap else 0
+        cand = (exact_phrase, overlap, in_window_bonus)
+        if cand > best_score:
+            best_score = cand
+            best_idx = idx
+
+    if best_idx == 1:
+        return rows, False
+    if best_score[0] <= 0 and best_score[1] <= 0:
+        return rows, False
+
+    reordered = list(rows)
+    promoted = reordered.pop(best_idx)
+    reordered.insert(1, promoted)
+    return reordered, True
+
+
 def _apply_shortage_refill(
     *,
     question: str,
@@ -734,6 +890,11 @@ def _apply_shortage_refill(
     max_candidates: int,
     min_score: float,
     prefer_new_titles: bool,
+    title_diversity_enabled: bool,
+    title_diversity_top_n: int,
+    title_diversity_keep_first: bool,
+    query_title_promotion_enabled: bool,
+    query_title_promotion_window: int,
 ) -> Tuple[Dict[str, Any], List[Dict[str, Any]], List[Dict[str, Any]], Dict[str, Any], Dict[str, Any]]:
     info: Dict[str, Any] = {
         "enabled": True,
@@ -800,7 +961,16 @@ def _apply_shortage_refill(
     }
 
     new_raw = _build_retrieved_context(merged_evidences, note_store, doc_index)
-    new_topk, new_dedup = _dedup_retrieved_context(new_raw, top_k=top_k)
+    new_topk, new_dedup = _dedup_retrieved_context(
+        new_raw,
+        top_k=top_k,
+        title_diversity_enabled=title_diversity_enabled,
+        title_diversity_top_n=title_diversity_top_n,
+        title_diversity_keep_first=title_diversity_keep_first,
+        question=question,
+        query_title_promotion_enabled=query_title_promotion_enabled,
+        query_title_promotion_window=query_title_promotion_window,
+    )
     new_dedup["top_k_raw_requested"] = requested
 
     info["added"] = len(refill_evidences)
@@ -836,6 +1006,12 @@ def _dedup_retrieved_context(
     retrieved_context: List[Dict[str, Any]],
     *,
     top_k: int,
+    title_diversity_enabled: bool = DEFAULT_TITLE_DIVERSITY_ENABLED,
+    title_diversity_top_n: int = DEFAULT_TITLE_DIVERSITY_TOP_N,
+    title_diversity_keep_first: bool = DEFAULT_TITLE_DIVERSITY_KEEP_FIRST,
+    question: str = "",
+    query_title_promotion_enabled: bool = DEFAULT_QUERY_TITLE_PROMOTION_ENABLED,
+    query_title_promotion_window: int = DEFAULT_QUERY_TITLE_PROMOTION_WINDOW,
 ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
     raw_count = len(retrieved_context)
     seen: set[Tuple[Any, ...]] = set()
@@ -848,6 +1024,20 @@ def _dedup_retrieved_context(
             continue
         seen.add(key)
         deduped.append(ctx)
+    title_diversity_applied = False
+    if bool(title_diversity_enabled):
+        deduped, title_diversity_applied = _promote_title_diversity(
+            deduped,
+            top_n=max(0, int(title_diversity_top_n)),
+            keep_first=bool(title_diversity_keep_first),
+        )
+    query_title_promotion_applied = False
+    if bool(query_title_promotion_enabled):
+        deduped, query_title_promotion_applied = _promote_second_title_by_question(
+            deduped,
+            question=str(question or ""),
+            window_n=max(0, int(query_title_promotion_window)),
+        )
     unique_count = len(deduped)
     if top_k > 0:
         deduped = deduped[:top_k]
@@ -857,6 +1047,13 @@ def _dedup_retrieved_context(
         "top_k_final": len(deduped),
         "unique_count": unique_count,
         "duplicate_rate": duplicate_rate,
+        "title_diversity_enabled": bool(title_diversity_enabled),
+        "title_diversity_applied": bool(title_diversity_applied),
+        "title_diversity_top_n": max(0, int(title_diversity_top_n)),
+        "title_diversity_keep_first": bool(title_diversity_keep_first),
+        "query_title_promotion_enabled": bool(query_title_promotion_enabled),
+        "query_title_promotion_applied": bool(query_title_promotion_applied),
+        "query_title_promotion_window": max(0, int(query_title_promotion_window)),
     }
 
 
@@ -1082,6 +1279,102 @@ def _coerce_bool(value: Any, default: bool) -> bool:
     return bool(default)
 
 
+def _sanitize_config(cfg: Dict[str, Any]) -> Dict[str, Any]:
+    sanitized = deepcopy(cfg)
+    openai_cfg = sanitized.get("openai")
+    if isinstance(openai_cfg, dict) and openai_cfg.get("api_key"):
+        openai_cfg["api_key"] = "***"
+    vllm_cfg = sanitized.get("vllm")
+    if isinstance(vllm_cfg, dict) and vllm_cfg.get("api_key"):
+        vllm_cfg["api_key"] = "***"
+    retriever_cfg = sanitized.get("retriever")
+    if isinstance(retriever_cfg, dict):
+        embedding_cfg = retriever_cfg.get("embedding")
+        if isinstance(embedding_cfg, dict) and embedding_cfg.get("api_key"):
+            embedding_cfg["api_key"] = "***"
+    reranker_cfg = sanitized.get("reranker")
+    if isinstance(reranker_cfg, dict):
+        rerank_openai = reranker_cfg.get("openai")
+        if isinstance(rerank_openai, dict) and rerank_openai.get("api_key"):
+            rerank_openai["api_key"] = "***"
+    return sanitized
+
+
+def _sanitize_argv(argv: List[str]) -> List[str]:
+    sanitized: List[str] = []
+    skip_next = False
+    for arg in argv:
+        if skip_next:
+            sanitized.append("***")
+            skip_next = False
+            continue
+        if arg.startswith("--openai_api_key="):
+            sanitized.append("--openai_api_key=***")
+            continue
+        if arg == "--openai_api_key":
+            sanitized.append(arg)
+            skip_next = True
+            continue
+        sanitized.append(arg)
+    return sanitized
+
+
+def _git_info(repo_root: Path) -> Dict[str, Any]:
+    info: Dict[str, Any] = {}
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=str(repo_root),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if result.returncode == 0:
+            info["commit"] = result.stdout.strip()
+    except Exception:
+        info["commit"] = None
+    try:
+        status = subprocess.run(
+            ["git", "status", "--porcelain"],
+            cwd=str(repo_root),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if status.returncode == 0:
+            info["dirty"] = bool(status.stdout.strip())
+    except Exception:
+        info["dirty"] = None
+    return info
+
+
+def _env_snapshot() -> Dict[str, Optional[str]]:
+    keys = [
+        "CUDA_VISIBLE_DEVICES",
+        "OPENAI_API_KEY",
+        "RELRAG_ALLOW_CUSTOM_LLM",
+        "EMB_ENDPOINT",
+        "VLLM_ENDPOINT",
+        "HF_ENDPOINT",
+        "HF_HOME",
+        "HF_HUB_CACHE",
+        "TRANSFORMERS_CACHE",
+    ]
+    snapshot: Dict[str, Optional[str]] = {}
+    for key in keys:
+        value = os.environ.get(key)
+        if value and key == "OPENAI_API_KEY":
+            snapshot[key] = "***"
+        else:
+            snapshot[key] = value
+    return snapshot
+
+
+def _write_json(path: Path, payload: Dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
 def _resolve_top_k_raw(
     top_k: int,
     top_k_raw: Optional[Any],
@@ -1108,6 +1401,54 @@ def _resolve_top_k_raw(
     factor = max(factor, min_factor)
     raw = int(math.ceil(top_k * factor))
     return max(min_raw, raw), "overfetch"
+
+
+def _resolve_title_diversity_policy(base_cfg: Dict[str, Any]) -> Tuple[bool, int, bool]:
+    entry_cfg = base_cfg.get("hotpot_entry") or {}
+    if not isinstance(entry_cfg, dict):
+        entry_cfg = {}
+    retriever_cfg = base_cfg.get("retriever") or {}
+    if not isinstance(retriever_cfg, dict):
+        retriever_cfg = {}
+    policy_cfg = retriever_cfg.get("title_diversity") or {}
+    if not isinstance(policy_cfg, dict):
+        policy_cfg = {}
+
+    enabled = _coerce_bool(
+        policy_cfg.get("enabled", entry_cfg.get("title_diversity_enabled", DEFAULT_TITLE_DIVERSITY_ENABLED)),
+        DEFAULT_TITLE_DIVERSITY_ENABLED,
+    )
+    top_n = _coerce_int(
+        policy_cfg.get("top_n", entry_cfg.get("title_diversity_top_n", DEFAULT_TITLE_DIVERSITY_TOP_N)),
+        DEFAULT_TITLE_DIVERSITY_TOP_N,
+    )
+    keep_first = _coerce_bool(
+        policy_cfg.get("keep_first", entry_cfg.get("title_diversity_keep_first", DEFAULT_TITLE_DIVERSITY_KEEP_FIRST)),
+        DEFAULT_TITLE_DIVERSITY_KEEP_FIRST,
+    )
+    return bool(enabled), max(0, int(top_n)), bool(keep_first)
+
+
+def _resolve_query_title_promotion_policy(base_cfg: Dict[str, Any]) -> Tuple[bool, int]:
+    entry_cfg = base_cfg.get("hotpot_entry") or {}
+    if not isinstance(entry_cfg, dict):
+        entry_cfg = {}
+    retriever_cfg = base_cfg.get("retriever") or {}
+    if not isinstance(retriever_cfg, dict):
+        retriever_cfg = {}
+    policy_cfg = retriever_cfg.get("query_title_promotion") or {}
+    if not isinstance(policy_cfg, dict):
+        policy_cfg = {}
+
+    enabled = _coerce_bool(
+        policy_cfg.get("enabled", entry_cfg.get("query_title_promotion_enabled", DEFAULT_QUERY_TITLE_PROMOTION_ENABLED)),
+        DEFAULT_QUERY_TITLE_PROMOTION_ENABLED,
+    )
+    window = _coerce_int(
+        policy_cfg.get("window_n", entry_cfg.get("query_title_promotion_window", DEFAULT_QUERY_TITLE_PROMOTION_WINDOW)),
+        DEFAULT_QUERY_TITLE_PROMOTION_WINDOW,
+    )
+    return bool(enabled), max(0, int(window))
 
 
 def _deep_merge(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any]:
@@ -1423,6 +1764,9 @@ def _prepare_retriever_config(
     example_root: Path,
     base_cfg: Dict[str, Any],
     mode: str,
+    *,
+    predicate_mode: str = DEFAULT_PREDICATE_MODE,
+    predicate_random_seed: int = DEFAULT_PREDICATE_RANDOM_SEED,
 ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     cfg = _prepare_aux_config(example_root, base_cfg)
     retriever_cfg = cfg.setdefault("retriever", {})
@@ -1471,6 +1815,13 @@ def _prepare_retriever_config(
     if bm25_cfg.get("enabled") and not bm25_ready:
         bm25_cfg["enabled"] = False
     hybrid_cfg["require_seed_match"] = False
+    normalized_predicate_mode = str(predicate_mode or DEFAULT_PREDICATE_MODE).strip().lower()
+    if normalized_predicate_mode not in {"on", "off", "random"}:
+        normalized_predicate_mode = DEFAULT_PREDICATE_MODE
+    structured_cfg["predicate_mode"] = normalized_predicate_mode
+    structured_cfg["predicate_constraint_enabled"] = normalized_predicate_mode != "off"
+    structured_cfg["random_predicate_enabled"] = normalized_predicate_mode == "random"
+    structured_cfg["random_predicate_seed"] = int(predicate_random_seed)
 
     return cfg, {
         "mode": mode,
@@ -1479,6 +1830,9 @@ def _prepare_retriever_config(
         "embedding_index": str(embed_index),
         "embedding_meta": str(embed_meta),
         "bm25_corpus": str(bm25_corpus),
+        "predicate_mode": normalized_predicate_mode,
+        "predicate_constraint_enabled": normalized_predicate_mode != "off",
+        "random_predicate_seed": int(predicate_random_seed),
     }
 
 
@@ -1516,6 +1870,8 @@ def _retrieve_with_backfill(
     shortage_refill_max_candidates: int,
     shortage_refill_min_score: float,
     shortage_refill_prefer_new_titles: bool,
+    predicate_mode: str,
+    predicate_random_seed: int,
 ) -> Tuple[
     Dict[str, Any],
     List[Dict[str, Any]],
@@ -1527,6 +1883,10 @@ def _retrieve_with_backfill(
     Dict[str, Any],
 ]:
     requested = max(1, int(top_k_raw))
+    title_diversity_enabled, title_diversity_top_n, title_diversity_keep_first = _resolve_title_diversity_policy(
+        base_cfg
+    )
+    query_title_promotion_enabled, query_title_promotion_window = _resolve_query_title_promotion_policy(base_cfg)
     max_raw = requested
     if top_k > 0:
         max_raw = max(requested, int(math.ceil(top_k * float(backfill_max_overfetch))))
@@ -1546,7 +1906,13 @@ def _retrieve_with_backfill(
     }
 
     while True:
-        retriever_cfg, retriever_paths = _prepare_retriever_config(index_dir.parent, base_cfg, mode)
+        retriever_cfg, retriever_paths = _prepare_retriever_config(
+            index_dir.parent,
+            base_cfg,
+            mode,
+            predicate_mode=predicate_mode,
+            predicate_random_seed=predicate_random_seed,
+        )
         scheduler_cfg = retriever_cfg.setdefault("retriever", {}).setdefault("scheduler", {})
         scheduler_cfg["keep_at_least"] = top_k
         scheduler_cfg["min_confidence"] = 0.0
@@ -1562,7 +1928,16 @@ def _retrieve_with_backfill(
         )
         evidences = retrieve_result.get("evidence") or []
         retrieved_context_raw = _build_retrieved_context(evidences, note_store, doc_index)
-        retrieved_context_topk, dedup_stats = _dedup_retrieved_context(retrieved_context_raw, top_k=top_k)
+        retrieved_context_topk, dedup_stats = _dedup_retrieved_context(
+            retrieved_context_raw,
+            top_k=top_k,
+            title_diversity_enabled=title_diversity_enabled,
+            title_diversity_top_n=title_diversity_top_n,
+            title_diversity_keep_first=title_diversity_keep_first,
+            question=question,
+            query_title_promotion_enabled=query_title_promotion_enabled,
+            query_title_promotion_window=query_title_promotion_window,
+        )
         dedup_stats["top_k_raw_requested"] = requested
 
         if top_k <= 0 or len(retrieved_context_topk) >= top_k:
@@ -1614,6 +1989,11 @@ def _retrieve_with_backfill(
             max_candidates=max(1, int(shortage_refill_max_candidates)),
             min_score=float(shortage_refill_min_score),
             prefer_new_titles=bool(shortage_refill_prefer_new_titles),
+            title_diversity_enabled=title_diversity_enabled,
+            title_diversity_top_n=title_diversity_top_n,
+            title_diversity_keep_first=title_diversity_keep_first,
+            query_title_promotion_enabled=query_title_promotion_enabled,
+            query_title_promotion_window=query_title_promotion_window,
         )
         if len(retrieved_context_topk) >= top_k:
             backfill_reason = None
@@ -1651,11 +2031,14 @@ def _process_example(
     shortage_refill_max_candidates: int,
     shortage_refill_min_score: float,
     shortage_refill_prefer_new_titles: bool,
+    predicate_mode: str,
+    predicate_random_seed: int,
     pred_sp_policy: str,
     pred_sp_max_facts: int,
     pred_sp_min_score: float,
     pred_sp_drop_weak: bool,
     pred_sp_prefer_new_titles: bool,
+    retrieval_only: bool,
     llm_retry_on_empty: int,
     llm_retry_max_evidence: int,
     force_build: bool,
@@ -1707,45 +2090,65 @@ def _process_example(
         shortage_refill_max_candidates=shortage_refill_max_candidates,
         shortage_refill_min_score=shortage_refill_min_score,
         shortage_refill_prefer_new_titles=shortage_refill_prefer_new_titles,
+        predicate_mode=predicate_mode,
+        predicate_random_seed=predicate_random_seed,
     )
 
     evidences = retrieve_result.get("evidence") or []
     structured_answer = retrieve_result.get("answer")
-    raw_answer, prompt_meta, llm_error, llm_error_reason = generate_answer(
-        question=question,
-        evidences=evidences,
-        reader=reader,
-        llm_endpoint=llm_endpoint,
-        llm_model=llm_model,
-        openai_cfg=openai_cfg,
-        base_cfg=base_cfg,
-        run_dir=run_dir,
-    )
-    short_answer, answer_source, answer_source_detail = resolve_short_answer(
-        structured_answer,
-        raw_answer,
-        question=question,
-    )
-    if answer_source == "empty":
-        answer_source = "llm_fallback"
-        answer_source_detail["fallback_override"] = "empty"
+    raw_answer = ""
+    prompt_meta: Dict[str, Any] = {}
+    llm_error: Optional[str] = None
+    llm_error_reason: Optional[str] = None
+    if retrieval_only:
+        short_answer = str(structured_answer or "").strip()
+        answer_source = "retrieval_only"
+        answer_source_detail = {
+            "source": "retrieval_only",
+            "structured_answer_used": bool(short_answer),
+        }
+    else:
+        raw_answer, prompt_meta, llm_error, llm_error_reason = generate_answer(
+            question=question,
+            evidences=evidences,
+            reader=reader,
+            llm_endpoint=llm_endpoint,
+            llm_model=llm_model,
+            openai_cfg=openai_cfg,
+            base_cfg=base_cfg,
+            run_dir=run_dir,
+        )
+        short_answer, answer_source, answer_source_detail = resolve_short_answer(
+            structured_answer,
+            raw_answer,
+            question=question,
+        )
+        if answer_source == "empty":
+            answer_source = "llm_fallback"
+            answer_source_detail["fallback_override"] = "empty"
     fallback_reason = None
-    if llm_error_reason:
-        fallback_reason = llm_error_reason
-    elif answer_source == "llm_fallback":
-        if not str(raw_answer or "").strip():
-            fallback_reason = "empty_output"
-            if not llm_error:
-                llm_error = "empty_output"
-        elif not has_final_tag(str(raw_answer)):
-            fallback_reason = "parse_error"
-            if not llm_error:
-                llm_error = "missing_final_tag"
+    if not retrieval_only:
+        if llm_error_reason:
+            fallback_reason = llm_error_reason
+        elif answer_source == "llm_fallback":
+            if not str(raw_answer or "").strip():
+                fallback_reason = "empty_output"
+                if not llm_error:
+                    llm_error = "empty_output"
+            elif not has_final_tag(str(raw_answer)):
+                fallback_reason = "parse_error"
+                if not llm_error:
+                    llm_error = "missing_final_tag"
 
     llm_retry_used = False
     llm_retry_source = None
     llm_retry_reason = None
-    if (reader == "vllm" or reader == "openai") and llm_retry_on_empty > 0 and answer_source == "llm_fallback":
+    if (
+        not retrieval_only
+        and (reader == "vllm" or reader == "openai")
+        and llm_retry_on_empty > 0
+        and answer_source == "llm_fallback"
+    ):
         retry_evidences = evidences
         if llm_retry_max_evidence > 0:
             retry_evidences = evidences[: int(llm_retry_max_evidence)]
@@ -1843,6 +2246,8 @@ def _process_example(
         "mode": mode,
         "reader": reader,
         "model": answer_model,
+        "retrieval_only": bool(retrieval_only),
+        "predicate_mode": str(predicate_mode),
         "retrieved_context_raw": retrieved_context_raw,
         "retrieved_context_topk": retrieved_context_topk,
         "retrieved_context": retrieved_context_topk,
@@ -1850,6 +2255,10 @@ def _process_example(
         "top_k_raw": dedup_stats.get("top_k_raw"),
         "top_k_final": dedup_stats.get("top_k_final"),
         "duplicate_rate": dedup_stats.get("duplicate_rate"),
+        "title_diversity_applied": bool(dedup_stats.get("title_diversity_applied", False)),
+        "title_diversity_top_n": dedup_stats.get("title_diversity_top_n"),
+        "query_title_promotion_applied": bool(dedup_stats.get("query_title_promotion_applied", False)),
+        "query_title_promotion_window": dedup_stats.get("query_title_promotion_window"),
         "overfetch_factor": overfetch_factor,
         "fallback_reason": fallback_reason,
         "llm_error": llm_error,
@@ -1872,6 +2281,11 @@ def _process_example(
             "retrieval_mode": mode,
             "reader": reader,
             "model": answer_model,
+            "retrieval_only": bool(retrieval_only),
+            "predicate_mode": str(predicate_mode),
+            "predicate_constraint_enabled": str(predicate_mode).strip().lower() != "off",
+            "predicate_random_seed": int(predicate_random_seed),
+            "predicate_random_mode": "per_state_hash" if str(predicate_mode).strip().lower() == "random" else "none",
             "top_k": top_k,
             "top_k_raw": dedup_stats.get("top_k_raw"),
             "top_k_raw_requested": dedup_stats.get("top_k_raw_requested"),
@@ -1879,6 +2293,13 @@ def _process_example(
             "top_k_backfill_rounds": backfill_attempts,
             "top_k_fill_reason": top_k_fill_reason,
             "top_k_shortage_refill": shortage_refill_info,
+            "title_diversity_enabled": bool(dedup_stats.get("title_diversity_enabled", False)),
+            "title_diversity_applied": bool(dedup_stats.get("title_diversity_applied", False)),
+            "title_diversity_top_n": dedup_stats.get("title_diversity_top_n"),
+            "title_diversity_keep_first": bool(dedup_stats.get("title_diversity_keep_first", True)),
+            "query_title_promotion_enabled": bool(dedup_stats.get("query_title_promotion_enabled", False)),
+            "query_title_promotion_applied": bool(dedup_stats.get("query_title_promotion_applied", False)),
+            "query_title_promotion_window": dedup_stats.get("query_title_promotion_window"),
             "chunk_fallback_top_k": dedup_stats.get("top_k_raw_requested"),
             "chunk_fallback_top_k_source": top_k_raw_source_final,
             "pred_sp_policy": pred_sp_meta.get("policy"),
@@ -1916,10 +2337,98 @@ def _accumulate_metrics(totals: Dict[str, float], metrics: Dict[str, float]) -> 
         totals[key] = totals.get(key, 0.0) + float(value)
 
 
+def _iter_final_ranked_rows(record: Dict[str, Any], top_k_export: int) -> Iterable[Dict[str, Any]]:
+    qid = str(record.get("_id") or "")
+    contexts = record.get("retrieved_context_topk") or []
+    if not qid or not isinstance(contexts, list):
+        return
+    cap = max(0, int(top_k_export))
+    if cap <= 0:
+        return
+    for idx, ctx in enumerate(contexts[:cap], start=1):
+        if not isinstance(ctx, dict):
+            continue
+        dedup_key, dedup_source = _dedup_key(ctx, idx - 1)
+        doc_title = normalize_title(ctx.get("doc_title") or ctx.get("title"))
+        yield {
+            "qid": qid,
+            "rank": idx,
+            "doc_title": doc_title,
+            "chunk_id": str(ctx.get("chunk_id") or ""),
+            "score": _safe_score(ctx.get("score")),
+            "source": str(ctx.get("source") or ""),
+            "dedup_key": f"{dedup_source}:{json.dumps(dedup_key, ensure_ascii=True)}",
+            "text_hash": str(ctx.get("text_hash") or ""),
+            "note_id": str(ctx.get("note_id") or ""),
+            "doc_id": str(ctx.get("doc_id") or ""),
+        }
+
+
+def _write_final_ranked_rows(record: Dict[str, Any], handle: Optional[TextIO], top_k_export: int) -> None:
+    if handle is None:
+        return
+    for row in _iter_final_ranked_rows(record, top_k_export):
+        handle.write(json.dumps(row, ensure_ascii=False) + "\n")
+    handle.flush()
+
+
+def _collect_retrieval_stats(predictions_path: Path) -> Dict[str, Any]:
+    count = 0
+    top_k_raw_sum = 0.0
+    top_k_final_sum = 0.0
+    duplicate_rate_sum = 0.0
+    shortage_count = 0
+    title_diversity_applied_count = 0
+    query_title_promotion_applied_count = 0
+    pred_modes: Dict[str, int] = {}
+    with predictions_path.open("r", encoding="utf-8") as handle:
+        for line in handle:
+            line = line.strip()
+            if not line:
+                continue
+            row = json.loads(line)
+            count += 1
+            top_k_raw_sum += _safe_score(row.get("top_k_raw"))
+            top_k_final_sum += _safe_score(row.get("top_k_final"))
+            duplicate_rate_sum += _safe_score(row.get("duplicate_rate"))
+            if row.get("top_k_fill_reason"):
+                shortage_count += 1
+            if bool(row.get("title_diversity_applied")):
+                title_diversity_applied_count += 1
+            if bool(row.get("query_title_promotion_applied")):
+                query_title_promotion_applied_count += 1
+            mode = str(row.get("predicate_mode") or "").strip().lower()
+            if mode:
+                pred_modes[mode] = pred_modes.get(mode, 0) + 1
+    if count <= 0:
+        return {
+            "count": 0,
+            "top_k_raw_mean": 0.0,
+            "top_k_final_mean": 0.0,
+            "duplicate_rate_mean": 0.0,
+            "shortage_ratio": 0.0,
+            "title_diversity_applied_ratio": 0.0,
+            "query_title_promotion_applied_ratio": 0.0,
+            "predicate_mode_counts": pred_modes,
+        }
+    return {
+        "count": count,
+        "top_k_raw_mean": round(top_k_raw_sum / count, 4),
+        "top_k_final_mean": round(top_k_final_sum / count, 4),
+        "duplicate_rate_mean": round(duplicate_rate_sum / count, 6),
+        "shortage_ratio": round(shortage_count / count, 6),
+        "title_diversity_applied_ratio": round(title_diversity_applied_count / count, 6),
+        "query_title_promotion_applied_ratio": round(query_title_promotion_applied_count / count, 6),
+        "predicate_mode_counts": pred_modes,
+    }
+
+
 def _drain_futures(
     future_map: Dict[Any, str],
     handle,
     totals: Dict[str, float],
+    final_topk_handle: Optional[TextIO] = None,
+    final_topk_export: int = DEFAULT_EXPORT_TOP_K_MAX,
     progress: Optional[ProgressBar] = None,
     stall_warn_sec: float = DEFAULT_STALL_WARN_SEC,
     stall_abort_sec: float = DEFAULT_STALL_ABORT_SEC,
@@ -1970,6 +2479,11 @@ def _drain_futures(
             else:
                 handle.write(json.dumps(record, ensure_ascii=False) + "\n")
                 handle.flush()
+                _write_final_ranked_rows(
+                    record,
+                    handle=final_topk_handle,
+                    top_k_export=final_topk_export,
+                )
                 _accumulate_metrics(totals, record.get("metrics") or {})
                 succeeded += 1
             completed += 1
@@ -2079,6 +2593,11 @@ def run_experiment_task(
     top_k_raw: Optional[int],
     overfetch: Optional[float],
     min_overfetch: float,
+    export_top_k_max: int,
+    predicate_mode: str,
+    predicate_random_seed: int,
+    retrieval_only: bool,
+    disable_retriever_llm: bool,
     backfill_max_overfetch: float,
     backfill_step: float,
     backfill_rounds: int,
@@ -2086,6 +2605,11 @@ def run_experiment_task(
     shortage_refill_max_candidates: int,
     shortage_refill_min_score: float,
     shortage_refill_prefer_new_titles: bool,
+    title_diversity_enabled: bool,
+    title_diversity_top_n: int,
+    title_diversity_keep_first: bool,
+    query_title_promotion_enabled: bool,
+    query_title_promotion_window: int,
     pred_sp_policy: str,
     pred_sp_max_facts: int,
     pred_sp_min_score: float,
@@ -2104,155 +2628,349 @@ def run_experiment_task(
 ) -> Dict[str, Any]:
     reader_openai_cfg = openai_runtime_cfg if reader == "openai" else None
     answer_model = reader_openai_cfg.get("model") if reader == "openai" and reader_openai_cfg else llm_model
-    
-    mode_top_k = _resolve_mode_top_k(mode, base_cfg, top_k)
+    effective_base_cfg = deepcopy(base_cfg)
+    if retrieval_only and disable_retriever_llm:
+        effective_base_cfg.setdefault("reranker", {})["enabled"] = False
+    effective_entry_cfg = effective_base_cfg.setdefault("hotpot_entry", {})
+    if isinstance(effective_entry_cfg, dict):
+        effective_entry_cfg["title_diversity_enabled"] = bool(title_diversity_enabled)
+        effective_entry_cfg["title_diversity_top_n"] = int(title_diversity_top_n)
+        effective_entry_cfg["title_diversity_keep_first"] = bool(title_diversity_keep_first)
+        effective_entry_cfg["query_title_promotion_enabled"] = bool(query_title_promotion_enabled)
+        effective_entry_cfg["query_title_promotion_window"] = int(query_title_promotion_window)
+
+    single_task = readers_count == 1 and modes_count == 1
+    output_base = Path(run_dir) if run_dir else output_dir
+    output_base.mkdir(parents=True, exist_ok=True)
+    suffix = "" if single_task else f".{reader}.{mode}"
+
+    mode_top_k = _resolve_mode_top_k(mode, effective_base_cfg, top_k)
     mode_top_k_raw, top_k_raw_source = _resolve_top_k_raw(
         mode_top_k,
         top_k_raw,
         overfetch,
         min_overfetch,
     )
-    
-    output_name = _pred_filename(split, reader, mode, readers_count, modes_count)
-    output_path = output_dir / output_name
-    
+    output_name = "predictions.jsonl" if run_dir else _pred_filename(split, reader, mode, readers_count, modes_count)
+    output_path = output_base / output_name
+
+    retrieval_dir = output_base / "retrieval"
+    if single_task:
+        final_topk_path = retrieval_dir / "final_top50.jsonl"
+    else:
+        final_topk_path = retrieval_dir / f"{reader}_{mode}" / "final_top50.jsonl"
+    final_topk_path.parent.mkdir(parents=True, exist_ok=True)
+
     run_debug_dir = debug_dir
     if debug_dir and (readers_count > 1 or modes_count > 1):
         run_debug_dir = debug_dir / f"{reader}_{mode}"
         run_debug_dir.mkdir(parents=True, exist_ok=True)
-        
+
+    run_started_at = time.time()
+    resolved_cfg = deepcopy(effective_base_cfg)
+    if llm_endpoint:
+        resolved_cfg.setdefault("vllm", {})["endpoint"] = llm_endpoint
+    if llm_model:
+        resolved_cfg.setdefault("vllm", {})["model"] = llm_model
+    if reader_openai_cfg:
+        resolved_cfg["openai"] = deepcopy(reader_openai_cfg)
+    entry_snapshot = resolved_cfg.setdefault("hotpot_entry", {})
+    entry_snapshot.update(
+        {
+            "data": str(data_path),
+            "cache_dir": str(cache_root),
+            "output_dir": str(output_base),
+            "split": split,
+            "reader": reader,
+            "retriever": mode,
+            "top_k": mode_top_k,
+            "top_k_raw": mode_top_k_raw,
+            "top_k_raw_source": top_k_raw_source,
+            "export_top_k_max": int(export_top_k_max),
+            "predicate_mode": str(predicate_mode),
+            "predicate_random_seed": int(predicate_random_seed),
+            "retrieval_only": bool(retrieval_only),
+            "disable_retriever_llm": bool(disable_retriever_llm),
+            "overfetch": overfetch,
+            "min_overfetch": min_overfetch,
+            "backfill_max_overfetch": backfill_max_overfetch,
+            "backfill_step": backfill_step,
+            "backfill_rounds": backfill_rounds,
+            "shortage_refill_enabled": shortage_refill_enabled,
+            "shortage_refill_max_candidates": shortage_refill_max_candidates,
+            "shortage_refill_min_score": shortage_refill_min_score,
+            "shortage_refill_prefer_new_titles": shortage_refill_prefer_new_titles,
+            "title_diversity_enabled": bool(title_diversity_enabled),
+            "title_diversity_top_n": int(title_diversity_top_n),
+            "title_diversity_keep_first": bool(title_diversity_keep_first),
+            "query_title_promotion_enabled": bool(query_title_promotion_enabled),
+            "query_title_promotion_window": int(query_title_promotion_window),
+            "pred_sp_policy": pred_sp_policy,
+            "pred_sp_max_facts": pred_sp_max_facts,
+            "pred_sp_min_score": pred_sp_min_score,
+            "pred_sp_drop_weak": pred_sp_drop_weak,
+            "pred_sp_prefer_new_titles": pred_sp_prefer_new_titles,
+            "llm_retry_on_empty": llm_retry_on_empty,
+            "llm_retry_max_evidence": llm_retry_max_evidence,
+            "limit": limit,
+            "workers": workers,
+        }
+    )
+    config_path = output_base / f"config.resolved{suffix}.json"
+    _write_json(config_path, _sanitize_config(resolved_cfg))
+
+    answer_cfg = (effective_base_cfg.get("answer") or {})
+    llm_cfg = (effective_base_cfg.get("llm") or {})
+    retriever_cfg = (effective_base_cfg.get("retriever") or {})
+    random_mode = "none"
+    if str(predicate_mode).strip().lower() == "random":
+        random_mode = "per_state_hash"
+    postprocess_signature = {
+        "version": "v1",
+        "dedup_key": "chunk_id->doc_id+sentence_idx->title+sentence_idx->title_hash->fallback",
+        "top_k_fill_policy": "missing_as_zero_in_eval",
+        "overfetch": overfetch,
+        "min_overfetch": min_overfetch,
+        "backfill_max_overfetch": backfill_max_overfetch,
+        "backfill_step": backfill_step,
+        "backfill_rounds": backfill_rounds,
+        "shortage_refill_enabled": bool(shortage_refill_enabled),
+        "title_diversity_enabled": bool(title_diversity_enabled),
+        "title_diversity_top_n": int(title_diversity_top_n),
+        "title_diversity_keep_first": bool(title_diversity_keep_first),
+        "query_title_promotion_enabled": bool(query_title_promotion_enabled),
+        "query_title_promotion_window": int(query_title_promotion_window),
+    }
+    run_meta = {
+        "run_dir": str(output_base),
+        "dataset": "hotpotqa",
+        "data_path": str(data_path),
+        "sample_count": _count_examples(data_path, limit),
+        "split": split,
+        "reader": reader,
+        "retriever": mode,
+        "cache_dir": str(cache_root),
+        "output_path": str(output_path),
+        "final_top50_path": str(final_topk_path),
+        "config_snapshot_path": str(config_path),
+        "llm_endpoint": llm_endpoint,
+        "llm_model": llm_model,
+        "openai": {
+            "base_url": (reader_openai_cfg or {}).get("base_url"),
+            "model": (reader_openai_cfg or {}).get("model"),
+            "temperature": (reader_openai_cfg or {}).get("temperature"),
+            "max_tokens": (reader_openai_cfg or {}).get("max_tokens"),
+        }
+        if reader == "openai"
+        else None,
+        "retrieval_only": bool(retrieval_only),
+        "disable_retriever_llm": bool(disable_retriever_llm),
+        "llm_calls": 0 if (retrieval_only and disable_retriever_llm) else None,
+        "top_k": mode_top_k,
+        "top_k_raw": mode_top_k_raw,
+        "top_k_raw_source": top_k_raw_source,
+        "export_top_k_max": int(export_top_k_max),
+        "overfetch": overfetch,
+        "min_overfetch": min_overfetch,
+        "backfill_max_overfetch": backfill_max_overfetch,
+        "backfill_step": backfill_step,
+        "backfill_rounds": backfill_rounds,
+        "shortage_refill": {
+            "enabled": bool(shortage_refill_enabled),
+            "max_candidates": int(shortage_refill_max_candidates),
+            "min_score": float(shortage_refill_min_score),
+            "prefer_new_titles": bool(shortage_refill_prefer_new_titles),
+        },
+        "title_diversity": {
+            "enabled": bool(title_diversity_enabled),
+            "top_n": int(title_diversity_top_n),
+            "keep_first": bool(title_diversity_keep_first),
+        },
+        "query_title_promotion": {
+            "enabled": bool(query_title_promotion_enabled),
+            "window_n": int(query_title_promotion_window),
+        },
+        "predicate_mode": str(predicate_mode),
+        "predicate_constraint_enabled": str(predicate_mode).strip().lower() != "off",
+        "predicate_random_seed": int(predicate_random_seed),
+        "predicate_random_mode": random_mode,
+        "pred_sp_policy": {
+            "policy": pred_sp_policy,
+            "max_facts": int(pred_sp_max_facts),
+            "min_score": float(pred_sp_min_score),
+            "drop_weak": bool(pred_sp_drop_weak),
+            "prefer_new_titles": bool(pred_sp_prefer_new_titles),
+        },
+        "dedup_strategy": "chunk_id -> (doc_id,sentence_idx) -> (title,sentence_idx) -> title_hash -> fallback_index",
+        "postprocess_signature": postprocess_signature,
+        "budget_tokens": {
+            "answer_max_evidence_tokens": answer_cfg.get("max_evidence_tokens"),
+            "answer_max_evidence_items": answer_cfg.get("max_evidence_items"),
+            "llm_max_context_len": llm_cfg.get("max_context_len"),
+            "llm_safety_margin_tokens": llm_cfg.get("safety_margin_tokens"),
+        },
+        "rerank_enabled": bool((effective_base_cfg.get("reranker") or {}).get("enabled", False)),
+        "hybrid_enabled": bool((retriever_cfg.get("hybrid") or {}).get("enabled", False)),
+        "command": _sanitize_argv(sys.argv),
+        "started_at": int(run_started_at),
+        "host": socket.gethostname(),
+        "platform": platform.platform(),
+        "python": sys.version,
+        "git": _git_info(repo_root),
+        "env": _env_snapshot(),
+    }
+    run_meta_path = output_base / f"run_meta{suffix}.json"
+    _write_json(run_meta_path, run_meta)
+
     logger.info("Starting run: reader={} mode={} output={}", reader, mode, output_path)
-    
     totals = {"bleu1": 0.0, "bleu4": 0.0, "rougeL": 0.0, "meteor": 0.0}
-    total_examples = _count_examples(data_path, limit)
-    
-    # Only show progress bar if running alone, otherwise it messes up stdout
-    show_progress = (readers_count == 1 and modes_count == 1)
+    total_examples = run_meta["sample_count"]
+    show_progress = single_task
     progress = ProgressBar(total_examples) if show_progress else None
-    
     processed = 0
     completed = 0
-    
-    with output_path.open("w", encoding="utf-8") as handle:
-        if workers <= 1:
-            for example in _load_jsonl(data_path):
-                if limit and completed >= limit:
-                    break
-                try:
-                    record = _process_example(
-                        example,
-                        cache_root=cache_root,
-                        base_cfg=base_cfg,
-                        llm_endpoint=llm_endpoint,
-                        llm_model=llm_model,
-                        mode=mode,
-                        reader=reader,
-                        openai_cfg=reader_openai_cfg,
-                        top_k=mode_top_k,
-                        top_k_raw=mode_top_k_raw,
-                        top_k_raw_source=top_k_raw_source,
-                        backfill_max_overfetch=backfill_max_overfetch,
-                        backfill_step=backfill_step,
-                        backfill_rounds=backfill_rounds,
-                        shortage_refill_enabled=shortage_refill_enabled,
-                        shortage_refill_max_candidates=shortage_refill_max_candidates,
-                        shortage_refill_min_score=shortage_refill_min_score,
-                        shortage_refill_prefer_new_titles=shortage_refill_prefer_new_titles,
-                        pred_sp_policy=pred_sp_policy,
-                        pred_sp_max_facts=pred_sp_max_facts,
-                        pred_sp_min_score=pred_sp_min_score,
-                        pred_sp_drop_weak=pred_sp_drop_weak,
-                        pred_sp_prefer_new_titles=pred_sp_prefer_new_titles,
-                        llm_retry_on_empty=llm_retry_on_empty,
-                        llm_retry_max_evidence=llm_retry_max_evidence,
-                        force_build=force_build,
-                        debug_dir=run_debug_dir,
-                        debug_max_notes=debug_max_notes,
-                        run_dir=run_dir,
-                    )
-                    handle.write(json.dumps(record, ensure_ascii=False) + "\n")
-                    handle.flush()
-                    _accumulate_metrics(totals, record.get("metrics") or {})
-                    processed += 1
-                except Exception as exc:
-                    qid = example.get("_id")
-                    logger.error("Failed example {}: {}", qid, exc)
-                finally:
-                    completed += 1
-                    if progress: progress.update(1)
-        else:
-            max_workers = max(1, int(workers))
-            future_map: Dict[Any, str] = {}
-            scheduled = 0
-            buffer_cap = max_workers * 2
-            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+
+    final_topk_handle = final_topk_path.open("w", encoding="utf-8")
+    try:
+        with output_path.open("w", encoding="utf-8") as handle:
+            if workers <= 1:
                 for example in _load_jsonl(data_path):
-                    if limit and scheduled >= limit:
+                    if limit and completed >= limit:
                         break
-                    qid = str(example.get("_id") or "unknown")
-                    future = executor.submit(
-                        _process_example,
-                        example,
-                        cache_root,
-                        base_cfg,
-                        llm_endpoint,
-                        llm_model,
-                        mode,
-                        reader,
-                        reader_openai_cfg,
-                        mode_top_k,
-                        mode_top_k_raw,
-                        top_k_raw_source,
-                        backfill_max_overfetch,
-                        backfill_step,
-                        backfill_rounds,
-                        shortage_refill_enabled,
-                        shortage_refill_max_candidates,
-                        shortage_refill_min_score,
-                        shortage_refill_prefer_new_titles,
-                        pred_sp_policy,
-                        pred_sp_max_facts,
-                        pred_sp_min_score,
-                        pred_sp_drop_weak,
-                        pred_sp_prefer_new_titles,
-                        llm_retry_on_empty,
-                        llm_retry_max_evidence,
-                        force_build,
-                        run_debug_dir,
-                        debug_max_notes,
-                        run_dir,
-                    )
-                    future_map[future] = qid
-                    scheduled += 1
-                    if len(future_map) >= buffer_cap:
+                    try:
+                        record = _process_example(
+                            example,
+                            cache_root=cache_root,
+                            base_cfg=effective_base_cfg,
+                            llm_endpoint=llm_endpoint,
+                            llm_model=llm_model,
+                            mode=mode,
+                            reader=reader,
+                            openai_cfg=reader_openai_cfg,
+                            top_k=mode_top_k,
+                            top_k_raw=mode_top_k_raw,
+                            top_k_raw_source=top_k_raw_source,
+                            backfill_max_overfetch=backfill_max_overfetch,
+                            backfill_step=backfill_step,
+                            backfill_rounds=backfill_rounds,
+                            shortage_refill_enabled=shortage_refill_enabled,
+                            shortage_refill_max_candidates=shortage_refill_max_candidates,
+                            shortage_refill_min_score=shortage_refill_min_score,
+                            shortage_refill_prefer_new_titles=shortage_refill_prefer_new_titles,
+                            predicate_mode=predicate_mode,
+                            predicate_random_seed=predicate_random_seed,
+                            pred_sp_policy=pred_sp_policy,
+                            pred_sp_max_facts=pred_sp_max_facts,
+                            pred_sp_min_score=pred_sp_min_score,
+                            pred_sp_drop_weak=pred_sp_drop_weak,
+                            pred_sp_prefer_new_titles=pred_sp_prefer_new_titles,
+                            retrieval_only=retrieval_only,
+                            llm_retry_on_empty=llm_retry_on_empty,
+                            llm_retry_max_evidence=llm_retry_max_evidence,
+                            force_build=force_build,
+                            debug_dir=run_debug_dir,
+                            debug_max_notes=debug_max_notes,
+                            run_dir=str(output_base),
+                        )
+                        handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+                        handle.flush()
+                        _write_final_ranked_rows(
+                            record,
+                            handle=final_topk_handle,
+                            top_k_export=export_top_k_max,
+                        )
+                        _accumulate_metrics(totals, record.get("metrics") or {})
+                        processed += 1
+                    except Exception as exc:
+                        qid = example.get("_id")
+                        logger.error("Failed example {}: {}", qid, exc)
+                    finally:
+                        completed += 1
+                        if progress:
+                            progress.update(1)
+            else:
+                max_workers = max(1, int(workers))
+                future_map: Dict[Any, str] = {}
+                scheduled = 0
+                buffer_cap = max_workers * 2
+                with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                    for example in _load_jsonl(data_path):
+                        if limit and scheduled >= limit:
+                            break
+                        qid = str(example.get("_id") or "unknown")
+                        future = executor.submit(
+                            _process_example,
+                            example,
+                            cache_root,
+                            effective_base_cfg,
+                            llm_endpoint,
+                            llm_model,
+                            mode,
+                            reader,
+                            reader_openai_cfg,
+                            mode_top_k,
+                            mode_top_k_raw,
+                            top_k_raw_source,
+                            backfill_max_overfetch,
+                            backfill_step,
+                            backfill_rounds,
+                            shortage_refill_enabled,
+                            shortage_refill_max_candidates,
+                            shortage_refill_min_score,
+                            shortage_refill_prefer_new_titles,
+                            predicate_mode,
+                            predicate_random_seed,
+                            pred_sp_policy,
+                            pred_sp_max_facts,
+                            pred_sp_min_score,
+                            pred_sp_drop_weak,
+                            pred_sp_prefer_new_titles,
+                            retrieval_only,
+                            llm_retry_on_empty,
+                            llm_retry_max_evidence,
+                            force_build,
+                            run_debug_dir,
+                            debug_max_notes,
+                            str(output_base),
+                        )
+                        future_map[future] = qid
+                        scheduled += 1
+                        if len(future_map) >= buffer_cap:
+                            done_count, ok_count = _drain_futures(
+                                future_map,
+                                handle,
+                                totals,
+                                final_topk_handle=final_topk_handle,
+                                final_topk_export=export_top_k_max,
+                                progress=progress,
+                                stall_warn_sec=stall_warn_sec,
+                                stall_abort_sec=stall_abort_sec,
+                            )
+                            completed += done_count
+                            processed += ok_count
+                            future_map = {}
+                    if future_map:
                         done_count, ok_count = _drain_futures(
                             future_map,
                             handle,
                             totals,
+                            final_topk_handle=final_topk_handle,
+                            final_topk_export=export_top_k_max,
                             progress=progress,
                             stall_warn_sec=stall_warn_sec,
                             stall_abort_sec=stall_abort_sec,
                         )
                         completed += done_count
                         processed += ok_count
-                        future_map = {}
-                if future_map:
-                    done_count, ok_count = _drain_futures(
-                        future_map,
-                        handle,
-                        totals,
-                        progress=progress,
-                        stall_warn_sec=stall_warn_sec,
-                        stall_abort_sec=stall_abort_sec,
-                    )
-                    completed += done_count
-                    processed += ok_count
+    finally:
+        final_topk_handle.close()
+        if progress:
+            progress.close()
 
-    if progress: progress.close()
-    
     failed = completed - processed
+    duration_sec = max(0.0, time.time() - run_started_at)
     logger.info("Reader {} mode {} completed {} examples (failed {})", reader, mode, processed, failed)
-    
+
     denom = processed if processed > 0 else 1
     stats = {
         "bleu1": round(totals["bleu1"] / denom, 4),
@@ -2260,31 +2978,61 @@ def run_experiment_task(
         "rougeL": round(totals["rougeL"] / denom, 4),
         "meteor": round(totals["meteor"] / denom, 4),
         "count": processed,
+        "failed": failed,
+        "duration_sec": round(duration_sec, 2),
         "model": answer_model,
         "top_k": mode_top_k,
+        "top_k_raw": mode_top_k_raw,
+        "top_k_raw_source": top_k_raw_source,
+        "retrieval_only": bool(retrieval_only),
     }
-    
-    if readers_count == 1 and modes_count == 1:
-        official_path = _write_official_output(output_path, output_dir, timestamp)
-        logger.info("Official-format output written to {}", official_path)
+    retrieval_stats = _collect_retrieval_stats(output_path) if output_path.exists() else {}
 
-    try:
-        _run_alignment(
-            repo_root=repo_root,
-            pred_path=output_path,
-            gold_path=data_path,
-            output_dir=output_dir,
-            split=split,
-        )
-        logger.info("Alignment artifacts written for {}", output_path)
-    except Exception as exc:
-        logger.error("Alignment generation failed for {}: {}", output_path, exc)
+    metrics_path = output_base / f"metrics{suffix}.json"
+    _write_json(
+        metrics_path,
+        {
+            "reader": reader,
+            "retriever": mode,
+            "split": split,
+            "stats": stats,
+            "retrieval_stats": retrieval_stats,
+            "output_path": str(output_path),
+            "final_top50_path": str(final_topk_path),
+            "timestamp": int(time.time()),
+        },
+    )
+
+    if not retrieval_only and single_task:
+        official_path = _write_official_output(output_path, output_base, timestamp)
+        logger.info("Official-format output written to {}", official_path)
+        try:
+            _run_alignment(
+                repo_root=repo_root,
+                pred_path=output_path,
+                gold_path=data_path,
+                output_dir=output_base,
+                split=split,
+            )
+            logger.info("Alignment artifacts written for {}", output_path)
+        except Exception as exc:
+            logger.error("Alignment generation failed for {}: {}", output_path, exc)
+
+    run_meta["ended_at"] = int(time.time())
+    run_meta["duration_sec"] = round(duration_sec, 2)
+    run_meta["status"] = "ok" if failed == 0 else "partial"
+    run_meta["stats_path"] = str(metrics_path)
+    run_meta["retrieval_stats"] = retrieval_stats
+    _write_json(run_meta_path, run_meta)
 
     return {
         "reader": reader,
         "mode": mode,
         "stats": stats,
-        "output_path": str(output_path)
+        "output_path": str(output_path),
+        "final_top50_path": str(final_topk_path),
+        "run_meta_path": str(run_meta_path),
+        "config_snapshot_path": str(config_path),
     }
 
 
@@ -2303,6 +3051,11 @@ def main() -> None:
     parser.add_argument("--openai_max_tokens", type=int, help="OpenAI max tokens (fallback to config)")
     parser.add_argument("--top_k", type=int, help="Top-k retrieval fanout (fallback to config)")
     parser.add_argument("--top_k_raw", type=int, help="Raw top-k before dedup (fallback to config/overfetch)")
+    parser.add_argument("--export_top_k_max", type=int, help="Export top-K retrieval ranks to retrieval/final_top50.jsonl (fallback to config)")
+    parser.add_argument("--retrieval_only", help="Run retrieval/export only (skip answer generation and reader calls)")
+    parser.add_argument("--disable_retriever_llm", help="Disable LLM-based retriever stages (e.g., LLM reranker) for retrieval-only runs")
+    parser.add_argument("--predicate_mode", help="Predicate constraint mode for structured walk: on, off, or random")
+    parser.add_argument("--predicate_random_seed", type=int, help="Random seed for predicate_mode=random")
     parser.add_argument("--overfetch", type=float, help="Overfetch multiplier before dedup (fallback to config)")
     parser.add_argument("--min_overfetch", type=float, help="Minimum overfetch multiplier (fallback to config)")
     parser.add_argument("--backfill_max_overfetch", type=float, help="Max overfetch multiplier for backfill (fallback to config)")
@@ -2312,6 +3065,11 @@ def main() -> None:
     parser.add_argument("--shortage_refill_max_candidates", type=int, help="Max refill candidates scanned per query (fallback to config)")
     parser.add_argument("--shortage_refill_min_score", type=float, help="Min lexical score for refill candidates (fallback to config)")
     parser.add_argument("--shortage_refill_prefer_new_titles", help="Prefer refill from unseen titles first (fallback to config)")
+    parser.add_argument("--title_diversity_enabled", help="Promote unique document titles in early retrieval ranks (fallback to config)")
+    parser.add_argument("--title_diversity_top_n", type=int, help="Apply title diversity within first N ranks (fallback to config)")
+    parser.add_argument("--title_diversity_keep_first", help="Keep rank-1 fixed when applying title diversity (fallback to config)")
+    parser.add_argument("--query_title_promotion_enabled", help="Promote a second title that overlaps question tokens (fallback to config)")
+    parser.add_argument("--query_title_promotion_window", type=int, help="Scan this many early ranks when promoting second title (fallback to config)")
     parser.add_argument("--pred_sp_policy", help="Supporting fact policy: topk or high_confidence (fallback to config)")
     parser.add_argument("--pred_sp_max_facts", type=int, help="Max supporting facts for high-confidence policy (fallback to config)")
     parser.add_argument("--pred_sp_min_score", type=float, help="Min score for supporting facts under high-confidence policy (fallback to config)")
@@ -2355,6 +3113,26 @@ def main() -> None:
         DEFAULT_TOP_K,
     )
     args.top_k_raw = _pick_arg(args, entry_cfg, dataset_cfg, "top_k_raw", None)
+    args.export_top_k_max = _coerce_int(
+        _pick_arg(args, entry_cfg, dataset_cfg, "export_top_k_max", DEFAULT_EXPORT_TOP_K_MAX),
+        DEFAULT_EXPORT_TOP_K_MAX,
+    )
+    predicate_mode_raw = _pick_arg(args, entry_cfg, dataset_cfg, "predicate_mode", DEFAULT_PREDICATE_MODE)
+    args.predicate_mode = str(predicate_mode_raw or DEFAULT_PREDICATE_MODE).strip().lower()
+    if args.predicate_mode not in {"on", "off", "random"}:
+        raise ValueError("predicate_mode must be one of: on, off, random")
+    args.predicate_random_seed = _coerce_int(
+        _pick_arg(args, entry_cfg, dataset_cfg, "predicate_random_seed", DEFAULT_PREDICATE_RANDOM_SEED),
+        DEFAULT_PREDICATE_RANDOM_SEED,
+    )
+    args.retrieval_only = _coerce_bool(
+        _pick_arg(args, entry_cfg, dataset_cfg, "retrieval_only", False),
+        False,
+    )
+    args.disable_retriever_llm = _coerce_bool(
+        _pick_arg(args, entry_cfg, dataset_cfg, "disable_retriever_llm", False),
+        False,
+    )
     args.overfetch = _pick_arg(args, entry_cfg, dataset_cfg, "overfetch", None)
     args.min_overfetch = _coerce_float(
         _pick_arg(args, entry_cfg, dataset_cfg, "min_overfetch", MIN_OVERFETCH),
@@ -2400,6 +3178,40 @@ def main() -> None:
         ),
         DEFAULT_SHORTAGE_REFILL_PREFER_NEW_TITLES,
     )
+    args.title_diversity_enabled = _coerce_bool(
+        _pick_arg(args, entry_cfg, dataset_cfg, "title_diversity_enabled", DEFAULT_TITLE_DIVERSITY_ENABLED),
+        DEFAULT_TITLE_DIVERSITY_ENABLED,
+    )
+    args.title_diversity_top_n = _coerce_int(
+        _pick_arg(args, entry_cfg, dataset_cfg, "title_diversity_top_n", DEFAULT_TITLE_DIVERSITY_TOP_N),
+        DEFAULT_TITLE_DIVERSITY_TOP_N,
+    )
+    args.title_diversity_top_n = max(0, int(args.title_diversity_top_n))
+    args.title_diversity_keep_first = _coerce_bool(
+        _pick_arg(args, entry_cfg, dataset_cfg, "title_diversity_keep_first", DEFAULT_TITLE_DIVERSITY_KEEP_FIRST),
+        DEFAULT_TITLE_DIVERSITY_KEEP_FIRST,
+    )
+    args.query_title_promotion_enabled = _coerce_bool(
+        _pick_arg(
+            args,
+            entry_cfg,
+            dataset_cfg,
+            "query_title_promotion_enabled",
+            DEFAULT_QUERY_TITLE_PROMOTION_ENABLED,
+        ),
+        DEFAULT_QUERY_TITLE_PROMOTION_ENABLED,
+    )
+    args.query_title_promotion_window = _coerce_int(
+        _pick_arg(
+            args,
+            entry_cfg,
+            dataset_cfg,
+            "query_title_promotion_window",
+            DEFAULT_QUERY_TITLE_PROMOTION_WINDOW,
+        ),
+        DEFAULT_QUERY_TITLE_PROMOTION_WINDOW,
+    )
+    args.query_title_promotion_window = max(0, int(args.query_title_promotion_window))
     pred_sp_policy_raw = _pick_arg(args, entry_cfg, dataset_cfg, "pred_sp_policy", DEFAULT_PRED_SP_POLICY)
     args.pred_sp_policy = _normalize_pred_sp_policy(pred_sp_policy_raw)
     args.pred_sp_max_facts = _coerce_int(
@@ -2450,6 +3262,16 @@ def main() -> None:
         _pick_arg(args, entry_cfg, dataset_cfg, "stall_abort_sec", DEFAULT_STALL_ABORT_SEC),
         DEFAULT_STALL_ABORT_SEC,
     )
+    if args.top_k > 0 and args.top_k < args.export_top_k_max:
+        logger.warning(
+            "top_k ({}) is smaller than export_top_k_max ({}); exported ranked list will be shorter than requested cap",
+            args.top_k,
+            args.export_top_k_max,
+        )
+    if args.retrieval_only and not args.disable_retriever_llm:
+        logger.warning(
+            "retrieval_only is enabled but disable_retriever_llm=false; retrieval pipeline may still invoke LLM reranker",
+        )
     if entry_cfg.get("force_build"):
         args.force_build = True
 
@@ -2538,6 +3360,11 @@ def main() -> None:
                 "llm_model": llm_model,
                 "top_k": args.top_k,
                 "top_k_raw": args.top_k_raw,
+                "export_top_k_max": args.export_top_k_max,
+                "predicate_mode": args.predicate_mode,
+                "predicate_random_seed": args.predicate_random_seed,
+                "retrieval_only": args.retrieval_only,
+                "disable_retriever_llm": args.disable_retriever_llm,
                 "overfetch": args.overfetch,
                 "min_overfetch": args.min_overfetch,
                 "backfill_max_overfetch": args.backfill_max_overfetch,
@@ -2547,6 +3374,11 @@ def main() -> None:
                 "shortage_refill_max_candidates": args.shortage_refill_max_candidates,
                 "shortage_refill_min_score": args.shortage_refill_min_score,
                 "shortage_refill_prefer_new_titles": args.shortage_refill_prefer_new_titles,
+                "title_diversity_enabled": args.title_diversity_enabled,
+                "title_diversity_top_n": args.title_diversity_top_n,
+                "title_diversity_keep_first": args.title_diversity_keep_first,
+                "query_title_promotion_enabled": args.query_title_promotion_enabled,
+                "query_title_promotion_window": args.query_title_promotion_window,
                 "pred_sp_policy": args.pred_sp_policy,
                 "pred_sp_max_facts": args.pred_sp_max_facts,
                 "pred_sp_min_score": args.pred_sp_min_score,
