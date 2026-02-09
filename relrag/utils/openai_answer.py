@@ -89,6 +89,21 @@ def build_answer_prompt(
     )
 
 
+def _resolve_label_instruction(
+    *,
+    attribute_name: str | None = None,
+    override: str | None = None,
+) -> str:
+    if override and str(override).strip():
+        return str(override).strip()
+    if attribute_name and str(attribute_name).strip():
+        return (
+            f"Question focus attribute: {str(attribute_name).strip()}. "
+            "Output only the attribute value as a short answer span copied from evidence."
+        )
+    return "If you can answer, output the canonical label only."
+
+
 def generate_openai_answer(
     question: str,
     evidences: List[Dict[str, Any]],
@@ -97,6 +112,8 @@ def generate_openai_answer(
     prompt_capture: Dict[str, Any] | None = None,
     run_dir: str | None = None,
     cfg: Dict[str, Any] | None = None,
+    attribute_name: str | None = None,
+    label_instruction_override: str | None = None,
 ) -> str:
     prompt_name = openai_cfg.get("answer_prompt_name") or ANSWER_PROMPT_NAME
     system_prompt = _resolve_system_prompt(openai_cfg)
@@ -113,6 +130,10 @@ def generate_openai_answer(
             normalized_stop = [str(item) for item in stop_sequences if str(item).strip()]
     runtime_cfg = resolved_cfg.get("runtime") if isinstance(resolved_cfg.get("runtime"), dict) else {}
     run_dir = run_dir or runtime_cfg.get("run_dir")
+    label_instruction = _resolve_label_instruction(
+        attribute_name=attribute_name,
+        override=label_instruction_override,
+    )
     base_limits = resolved_cfg.get("answer") if isinstance(resolved_cfg.get("answer"), dict) else {}
     base_max_items = int(base_limits.get("max_evidence_items", 8))
     base_max_item_tokens = base_limits.get("max_evidence_tokens")
@@ -139,7 +160,7 @@ def generate_openai_answer(
             question,
             evidences,
             prompt_name=prompt_name,
-            label_instruction="If you can answer, output the canonical label only.",
+            label_instruction=label_instruction,
             system_prompt=system_prompt,
             cfg=resolved_cfg,
             llm_cfg=openai_cfg,

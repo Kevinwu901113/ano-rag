@@ -107,6 +107,8 @@ def retrieve_answer(
     structured_enabled = bool(structured_cfg.get("enabled", True))
     walk_enabled = bool(structured_cfg.get("walk_enabled", True))
     multihop_rescue_enabled = bool(structured_cfg.get("multihop_rescue_enabled", True))
+    use_alias_binding = bool(structured_cfg.get("use_alias_binding", True))
+    use_alias_lookup = bool(structured_cfg.get("use_alias_lookup", True))
     entity_match_threshold = float(structured_cfg.get("entity_match_threshold", 0.5))
     path_consistency_threshold = float(structured_cfg.get("path_consistency_threshold", 0.9))
     vector_fallback_enabled = bool(structured_cfg.get("vector_fallback_enabled", True))
@@ -122,6 +124,9 @@ def retrieve_answer(
     normalized_doc_hint = _normalize_doc_hint(doc_hint)
     relaxed_path_used = False
     rescue_used = False
+    seed_entities: List[str] = []
+    bind_candidates_count: int = 0
+    alias_hit: bool = False
 
     def _finalize_result(
         result: Dict[str, Any],
@@ -138,6 +143,14 @@ def retrieve_answer(
         result_meta["predicate_mode"] = predicate_mode
         result_meta["predicate_constraint_enabled"] = predicate_mode != "off"
         result_meta["predicate_random_seed"] = predicate_random_seed
+        result_meta["ablation"] = {
+            "bind_used_alias_index": alias_hit,
+            "bind_candidates_count": bind_candidates_count,
+            "seed_entities": list(seed_entities),
+            "scoring_used_alias_lookup": use_alias_lookup,
+            "structured_hit": (result.get("fallback") or {}).get("status") == "structured_hit"
+            or bool(result.get("paths")),
+        }
         if normalized_doc_hint:
             _apply_doc_filter_to_result(result, note_store, normalized_doc_hint)
         result = _apply_chunk_fallback(
@@ -180,7 +193,9 @@ def retrieve_answer(
             fallback=ir.fallback,
         )
 
-    seed_entities = _bind_seeds(ir.seeds, indexes, ir.fanout)
+    seed_entities, bind_candidates_count, alias_hit = _bind_seeds(
+        ir.seeds, indexes, ir.fanout, use_alias_binding=use_alias_binding
+    )
     # 注入 doc_name 别名约束：若检测到实体名称，作为强别名参与绑定
     try:
         if intent.entity and isinstance(intent.entity, str) and intent.entity.strip():
@@ -210,7 +225,9 @@ def retrieve_answer(
     doc_name = intent.entity if isinstance(intent.entity, str) else None
     normalized_doc_hint = _normalize_doc_hint(doc_hint)
     seed_texts = [seed.text for seed in ir.seeds if seed.text]
-    alias_lookup = _build_seed_alias_lookup(indexes, seed_entities, seed_texts, doc_name)
+    alias_lookup = {}
+    if use_alias_lookup:
+        alias_lookup = _build_seed_alias_lookup(indexes, seed_entities, seed_texts, doc_name)
     candidates: List[Candidate] = []
     if structured_enabled:
         candidates = _walk_chain(
@@ -397,20 +414,37 @@ def retrieve_answer(
     return _finalize_result(result, ir_override=ir, intent_override=intent)
 
 
-def _bind_seeds(seeds: Sequence[Seed], indexes: Indexes, limit: int) -> List[str]:
+def _bind_seeds(
+    seeds: Sequence[Seed],
+    indexes: Indexes,
+    limit: int,
+    use_alias_binding: bool = True,
+) -> Tuple[List[str], int, bool]:
     collected: List[str] = []
     seen = set()
+    total_candidates = 0
+    alias_hit = False
     for seed in seeds:
         type_candidates = [seed.type_hint] if seed.type_hint else []
-        matches = BIND(indexes, seed.text, type_candidates, limit=limit)
+        matches = BIND(
+            indexes,
+            seed.text,
+            type_candidates,
+            limit=limit,
+            use_alias_index=use_alias_binding,
+        )
+        reason = getattr(matches, "bind_reason", None)
+        if reason and "alias" in str(reason):
+            alias_hit = True
+        total_candidates += len(matches)
         for entity in matches:
             if entity in seen:
                 continue
             collected.append(entity)
             seen.add(entity)
             if len(collected) >= limit:
-                return collected
-    return collected
+                return collected, total_candidates, alias_hit
+    return collected, total_candidates, alias_hit
 
 
 def _resolve_expand_predicate(

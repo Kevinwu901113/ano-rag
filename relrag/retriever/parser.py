@@ -4,6 +4,8 @@ import re
 from typing import List, Optional
 
 from .ir import PredicateStep, QueryIR, Seed
+from relrag.config.config_loader import config as global_config
+from relrag.retriever.llm_parser import LLMQueryParser
 
 
 _DEFAULT_MAX_HOPS = QueryIR.__dataclass_fields__.get("max_hops").default
@@ -446,6 +448,25 @@ def parse_question(question: str) -> Optional[QueryIR]:
     text = (question or "").strip()
     if not text:
         return None
+
+    # Check config for parser type
+    cfg = global_config.load_config()
+    parser_cfg = cfg.get("retriever", {}).get("parser", {})
+    parser_type = parser_cfg.get("type", "regex")
+
+    if parser_type == "llm":
+        llm_parser = LLMQueryParser()
+        result = llm_parser.parse(text)
+        # If LLM returns a valid result (and not a fallback/empty chain unless intended), use it.
+        # However, if LLM failed to find a chain (fallback=True), we might want to try Regex 
+        # as it has specific heuristic patterns that might catch things LLM missed.
+        # For now, if LLM returns ANY result, we use it, unless it's strictly None.
+        if result:
+            # Check if we should fallback to regex on empty chain
+            if result.fallback and parser_cfg.get("fallback_to_regex", True):
+                pass # Fall through to regex
+            else:
+                return result
 
     question_type = _detect_question_type(text)
 

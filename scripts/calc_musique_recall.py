@@ -53,6 +53,7 @@ def calculate_recall(
     *,
     context_field: str = "retrieved_context_raw",
     k_list: List[int] = None,
+    filter_func=None,
 ) -> Tuple[Dict[str, float], int]:
     ks = list(k_list or DEFAULT_K_LIST)
     recalls: Dict[int, List[float]] = {k: [] for k in ks}
@@ -60,6 +61,9 @@ def calculate_recall(
 
     try:
         for row in _iter_jsonl(file_path):
+            if filter_func and not filter_func(row):
+                continue
+
             gold_sp = row.get("gold_sp") or []
             gold_titles = {
                 str(item[0]).strip()
@@ -98,19 +102,28 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    print("| File | Context | R@1 | R@2 | R@3 | R@5 | R@10 | Count (with SP) |")
-    print("|---|---|---|---|---|---|---|---|")
-    for file_path in args.files:
-        metrics, count = calculate_recall(file_path, context_field=args.context_field)
-        if not metrics:
-            print(f"| {_basename(file_path)} | {args.context_field} | N/A | N/A | N/A | N/A | N/A | 0 |")
+    print(f"{'File':<40} | {'Subset':<12} | {'Count':<5} | {'R@1':<6} | {'R@2':<6} | {'R@5':<6} | {'R@10':<6}")
+    print("-" * 105)
+
+    for fpath in args.files:
+        if not os.path.exists(fpath):
+            print(f"File not found: {fpath}")
             continue
-        print(
-            f"| {_basename(file_path)} | {args.context_field} | "
-            f"{metrics.get('R@1', 0.0):.4f} | {metrics.get('R@2', 0.0):.4f} | "
-            f"{metrics.get('R@3', 0.0):.4f} | {metrics.get('R@5', 0.0):.4f} | "
-            f"{metrics.get('R@10', 0.0):.4f} | {count} |"
-        )
+
+        name = _basename(fpath)
+        
+        # All
+        res_all, cnt_all = calculate_recall(fpath, context_field=args.context_field)
+        print(f"{name:<40} | {'All':<12} | {cnt_all:<5} | {res_all.get('R@1',0):.4f} | {res_all.get('R@2',0):.4f} | {res_all.get('R@5',0):.4f} | {res_all.get('R@10',0):.4f}")
+        
+        # Answerable
+        res_ans, cnt_ans = calculate_recall(fpath, context_field=args.context_field, filter_func=lambda r: r.get("answerable") is not False)
+        print(f"{'':<40} | {'Answerable':<12} | {cnt_ans:<5} | {res_ans.get('R@1',0):.4f} | {res_ans.get('R@2',0):.4f} | {res_ans.get('R@5',0):.4f} | {res_ans.get('R@10',0):.4f}")
+
+        # Unanswerable
+        res_un, cnt_un = calculate_recall(fpath, context_field=args.context_field, filter_func=lambda r: r.get("answerable") is False)
+        print(f"{'':<40} | {'Unanswerable':<12} | {cnt_un:<5} | {res_un.get('R@1',0):.4f} | {res_un.get('R@2',0):.4f} | {res_un.get('R@5',0):.4f} | {res_un.get('R@10',0):.4f}")
+        print("-" * 105)
 
 
 if __name__ == "__main__":

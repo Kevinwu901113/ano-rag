@@ -1244,7 +1244,7 @@ def generate_answer(
 
 
 def _load_entry_config(cfg: Dict[str, Any]) -> Dict[str, Any]:
-    entry_cfg = cfg.get("hotpot_entry") or cfg.get("entry") or {}
+    entry_cfg = cfg.get("twowiki_entry") or cfg.get("entry") or {}
     if not isinstance(entry_cfg, dict):
         return {}
     return entry_cfg
@@ -1404,7 +1404,7 @@ def _resolve_top_k_raw(
 
 
 def _resolve_title_diversity_policy(base_cfg: Dict[str, Any]) -> Tuple[bool, int, bool]:
-    entry_cfg = base_cfg.get("hotpot_entry") or {}
+    entry_cfg = base_cfg.get("twowiki_entry") or {}
     if not isinstance(entry_cfg, dict):
         entry_cfg = {}
     retriever_cfg = base_cfg.get("retriever") or {}
@@ -1430,7 +1430,7 @@ def _resolve_title_diversity_policy(base_cfg: Dict[str, Any]) -> Tuple[bool, int
 
 
 def _resolve_query_title_promotion_policy(base_cfg: Dict[str, Any]) -> Tuple[bool, int]:
-    entry_cfg = base_cfg.get("hotpot_entry") or {}
+    entry_cfg = base_cfg.get("twowiki_entry") or {}
     if not isinstance(entry_cfg, dict):
         entry_cfg = {}
     retriever_cfg = base_cfg.get("retriever") or {}
@@ -1767,8 +1767,6 @@ def _prepare_retriever_config(
     *,
     predicate_mode: str = DEFAULT_PREDICATE_MODE,
     predicate_random_seed: int = DEFAULT_PREDICATE_RANDOM_SEED,
-    use_alias_binding: bool = True,
-    use_alias_lookup: bool = True,
 ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     cfg = _prepare_aux_config(example_root, base_cfg)
     retriever_cfg = cfg.setdefault("retriever", {})
@@ -1824,8 +1822,6 @@ def _prepare_retriever_config(
     structured_cfg["predicate_constraint_enabled"] = normalized_predicate_mode != "off"
     structured_cfg["random_predicate_enabled"] = normalized_predicate_mode == "random"
     structured_cfg["random_predicate_seed"] = int(predicate_random_seed)
-    structured_cfg["use_alias_binding"] = use_alias_binding
-    structured_cfg["use_alias_lookup"] = use_alias_lookup
 
     return cfg, {
         "mode": mode,
@@ -1837,8 +1833,6 @@ def _prepare_retriever_config(
         "predicate_mode": normalized_predicate_mode,
         "predicate_constraint_enabled": normalized_predicate_mode != "off",
         "random_predicate_seed": int(predicate_random_seed),
-        "use_alias_binding": use_alias_binding,
-        "use_alias_lookup": use_alias_lookup,
     }
 
 
@@ -1878,8 +1872,6 @@ def _retrieve_with_backfill(
     shortage_refill_prefer_new_titles: bool,
     predicate_mode: str,
     predicate_random_seed: int,
-    use_alias_binding: bool = True,
-    use_alias_lookup: bool = True,
 ) -> Tuple[
     Dict[str, Any],
     List[Dict[str, Any]],
@@ -1920,8 +1912,6 @@ def _retrieve_with_backfill(
             mode,
             predicate_mode=predicate_mode,
             predicate_random_seed=predicate_random_seed,
-            use_alias_binding=use_alias_binding,
-            use_alias_lookup=use_alias_lookup,
         )
         scheduler_cfg = retriever_cfg.setdefault("retriever", {}).setdefault("scheduler", {})
         scheduler_cfg["keep_at_least"] = top_k
@@ -2043,8 +2033,6 @@ def _process_example(
     shortage_refill_prefer_new_titles: bool,
     predicate_mode: str,
     predicate_random_seed: int,
-    use_alias_binding: bool,
-    use_alias_lookup: bool,
     pred_sp_policy: str,
     pred_sp_max_facts: int,
     pred_sp_min_score: float,
@@ -2104,8 +2092,6 @@ def _process_example(
         shortage_refill_prefer_new_titles=shortage_refill_prefer_new_titles,
         predicate_mode=predicate_mode,
         predicate_random_seed=predicate_random_seed,
-        use_alias_binding=use_alias_binding,
-        use_alias_lookup=use_alias_lookup,
     )
 
     evidences = retrieve_result.get("evidence") or []
@@ -2610,8 +2596,6 @@ def run_experiment_task(
     export_top_k_max: int,
     predicate_mode: str,
     predicate_random_seed: int,
-    use_alias_binding: bool,
-    use_alias_lookup: bool,
     retrieval_only: bool,
     disable_retriever_llm: bool,
     backfill_max_overfetch: float,
@@ -2647,7 +2631,7 @@ def run_experiment_task(
     effective_base_cfg = deepcopy(base_cfg)
     if retrieval_only and disable_retriever_llm:
         effective_base_cfg.setdefault("reranker", {})["enabled"] = False
-    effective_entry_cfg = effective_base_cfg.setdefault("hotpot_entry", {})
+    effective_entry_cfg = effective_base_cfg.setdefault("twowiki_entry", {})
     if isinstance(effective_entry_cfg, dict):
         effective_entry_cfg["title_diversity_enabled"] = bool(title_diversity_enabled)
         effective_entry_cfg["title_diversity_top_n"] = int(title_diversity_top_n)
@@ -2690,7 +2674,7 @@ def run_experiment_task(
         resolved_cfg.setdefault("vllm", {})["model"] = llm_model
     if reader_openai_cfg:
         resolved_cfg["openai"] = deepcopy(reader_openai_cfg)
-    entry_snapshot = resolved_cfg.setdefault("hotpot_entry", {})
+    entry_snapshot = resolved_cfg.setdefault("twowiki_entry", {})
     entry_snapshot.update(
         {
             "data": str(data_path),
@@ -2705,8 +2689,6 @@ def run_experiment_task(
             "export_top_k_max": int(export_top_k_max),
             "predicate_mode": str(predicate_mode),
             "predicate_random_seed": int(predicate_random_seed),
-            "use_alias_binding": bool(use_alias_binding),
-            "use_alias_lookup": bool(use_alias_lookup),
             "retrieval_only": bool(retrieval_only),
             "disable_retriever_llm": bool(disable_retriever_llm),
             "overfetch": overfetch,
@@ -2761,7 +2743,7 @@ def run_experiment_task(
     }
     run_meta = {
         "run_dir": str(output_base),
-        "dataset": "hotpotqa",
+        "dataset": "2wiki",
         "data_path": str(data_path),
         "sample_count": _count_examples(data_path, limit),
         "split": split,
@@ -2877,8 +2859,6 @@ def run_experiment_task(
                             shortage_refill_prefer_new_titles=shortage_refill_prefer_new_titles,
                             predicate_mode=predicate_mode,
                             predicate_random_seed=predicate_random_seed,
-                            use_alias_binding=use_alias_binding,
-                            use_alias_lookup=use_alias_lookup,
                             pred_sp_policy=pred_sp_policy,
                             pred_sp_max_facts=pred_sp_max_facts,
                             pred_sp_min_score=pred_sp_min_score,
@@ -2940,8 +2920,6 @@ def run_experiment_task(
                             shortage_refill_prefer_new_titles,
                             predicate_mode,
                             predicate_random_seed,
-                            use_alias_binding,
-                            use_alias_lookup,
                             pred_sp_policy,
                             pred_sp_max_facts,
                             pred_sp_min_score,
@@ -3028,17 +3006,18 @@ def run_experiment_task(
     if not retrieval_only and single_task:
         official_path = _write_official_output(output_path, output_base, timestamp)
         logger.info("Official-format output written to {}", official_path)
-        try:
-            _run_alignment(
-                repo_root=repo_root,
-                pred_path=output_path,
-                gold_path=data_path,
-                output_dir=output_base,
-                split=split,
-            )
-            logger.info("Alignment artifacts written for {}", output_path)
-        except Exception as exc:
-            logger.error("Alignment generation failed for {}: {}", output_path, exc)
+        # Alignment is disabled for 2Wiki to avoid Hotpot-specific assumptions
+        # try:
+        #     _run_alignment(
+        #         repo_root=repo_root,
+        #         pred_path=output_path,
+        #         gold_path=data_path,
+        #         output_dir=output_base,
+        #         split=split,
+        #     )
+        #     logger.info("Alignment artifacts written for {}", output_path)
+        # except Exception as exc:
+        #     logger.error("Alignment generation failed for {}: {}", output_path, exc)
 
     run_meta["ended_at"] = int(time.time())
     run_meta["duration_sec"] = round(duration_sec, 2)
@@ -3059,9 +3038,9 @@ def run_experiment_task(
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="HotpotQA JSONL entry for RelRAG")
+    parser = argparse.ArgumentParser(description="2WikiMultihopQA JSONL entry for RelRAG")
     parser.add_argument("--config", help="Path to YAML config file (defaults to relrag/config/config.yaml)")
-    parser.add_argument("--data", help="Path to HotpotQA JSONL dataset (fallback to config)")
+    parser.add_argument("--data", help="Path to 2Wiki JSONL dataset (fallback to config)")
     parser.add_argument("--endpoint", help="vLLM endpoint (defaults to config)")
     parser.add_argument("--model", help="LLM model name (defaults to config)")
     parser.add_argument("--reader", nargs="+", help="Reader backend: vllm or openai (fallback to config)")
@@ -3078,8 +3057,6 @@ def main() -> None:
     parser.add_argument("--disable_retriever_llm", help="Disable LLM-based retriever stages (e.g., LLM reranker) for retrieval-only runs")
     parser.add_argument("--predicate_mode", help="Predicate constraint mode for structured walk: on, off, or random")
     parser.add_argument("--predicate_random_seed", type=int, help="Random seed for predicate_mode=random")
-    parser.add_argument("--use_alias_binding", help="Enable alias binding for seeds (default: true)")
-    parser.add_argument("--use_alias_lookup", help="Enable alias lookup for scoring (default: true)")
     parser.add_argument("--overfetch", type=float, help="Overfetch multiplier before dedup (fallback to config)")
     parser.add_argument("--min_overfetch", type=float, help="Minimum overfetch multiplier (fallback to config)")
     parser.add_argument("--backfill_max_overfetch", type=float, help="Max overfetch multiplier for backfill (fallback to config)")
@@ -3120,7 +3097,7 @@ def main() -> None:
         return path if path.is_absolute() else repo_root / path
 
     cfg = ConfigLoader(args.config).load_config() if args.config else global_config.load_config()
-    dataset_cfg = get_dataset_config(cfg, "hotpotqa")
+    dataset_cfg = get_dataset_config(cfg, "2wiki")
     entry_cfg = _load_entry_config(cfg)
 
     if args.output and not args.output_dir:
@@ -3128,7 +3105,7 @@ def main() -> None:
 
     args.data = _pick_arg(args, entry_cfg, dataset_cfg, "data", None)
     if not args.data:
-        raise ValueError("Dataset path missing. Provide --data or set hotpot_entry.data in config.")
+        raise ValueError("Dataset path missing. Provide --data or set twowiki_entry.data in config.")
     args.split = _pick_arg(args, entry_cfg, dataset_cfg, "split", DEFAULT_SPLIT)
     args.cache_dir = _pick_arg(args, entry_cfg, dataset_cfg, "cache_dir", DEFAULT_CACHE_DIR)
     args.output_dir = _pick_arg(args, entry_cfg, dataset_cfg, "output_dir", DEFAULT_OUTPUT_DIR)
@@ -3148,14 +3125,6 @@ def main() -> None:
     args.predicate_random_seed = _coerce_int(
         _pick_arg(args, entry_cfg, dataset_cfg, "predicate_random_seed", DEFAULT_PREDICATE_RANDOM_SEED),
         DEFAULT_PREDICATE_RANDOM_SEED,
-    )
-    args.use_alias_binding = _coerce_bool(
-        _pick_arg(args, entry_cfg, dataset_cfg, "use_alias_binding", True),
-        True,
-    )
-    args.use_alias_lookup = _coerce_bool(
-        _pick_arg(args, entry_cfg, dataset_cfg, "use_alias_lookup", True),
-        True,
     )
     args.retrieval_only = _coerce_bool(
         _pick_arg(args, entry_cfg, dataset_cfg, "retrieval_only", False),
@@ -3336,7 +3305,7 @@ def main() -> None:
     if debug_dir:
         debug_dir.mkdir(parents=True, exist_ok=True)
 
-    base_cfg = _apply_dataset_retriever(deepcopy(cfg), "hotpotqa")
+    base_cfg = _apply_dataset_retriever(deepcopy(cfg), "2wiki")
     modes = _resolve_retriever_modes(
         mode_arg=None,
         modes_arg=args.retriever,
@@ -3395,8 +3364,6 @@ def main() -> None:
                 "export_top_k_max": args.export_top_k_max,
                 "predicate_mode": args.predicate_mode,
                 "predicate_random_seed": args.predicate_random_seed,
-                "use_alias_binding": args.use_alias_binding,
-                "use_alias_lookup": args.use_alias_lookup,
                 "retrieval_only": args.retrieval_only,
                 "disable_retriever_llm": args.disable_retriever_llm,
                 "overfetch": args.overfetch,

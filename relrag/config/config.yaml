@@ -145,6 +145,9 @@ answer:
   max_evidence_items: 12
   max_evidence_tokens: 512
 retriever:
+  parser:
+    type: regex # Options: regex, llm
+    fallback_to_regex: true
   structured:
     enabled: true
     walk_enabled: true
@@ -164,7 +167,7 @@ retriever:
     download_dir: null
     device: cuda
     dtype: null
-    auto_build: false
+    auto_build: true
     offline_index_path: indexes/faiss/notes.faiss
     meta_path: indexes/faiss/notes.meta.parquet
     max_len_note: 256

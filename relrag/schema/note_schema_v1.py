@@ -259,16 +259,7 @@ ALLOWED_PREDICATES = [
 ]
 
 # 尝试从配置文件加载替换
-try:
-    _PRED_PATH = Path(__file__).resolve().parents[1] / "schema" / "predicates.json"
-    if _PRED_PATH.exists():
-        with open(_PRED_PATH, "r", encoding="utf-8") as fh:
-            _preds = json.load(fh)
-            if isinstance(_preds, list) and _preds:
-                ALLOWED_PREDICATES = [str(p).strip().lower() for p in _preds if str(p).strip()]
-except Exception:
-    # 若加载失败，保留默认集合
-    pass
+# (Moved to after PRED_SYNONYM_SETS definition)
 
 # 属性映射表：谓词到规范化属性名，用于索引层归一
 PRED2ATTR = {
@@ -391,6 +382,32 @@ PRED_SYNONYM_SETS = {
     "same_as": {"same_as", "identical_to"},
     "type": {"type", "entity_type", "category_type"},
 }
+
+# 尝试从配置文件加载替换
+try:
+    _PRED_PATH = Path(__file__).resolve().parents[1] / "schema" / "predicates.json"
+    if _PRED_PATH.exists():
+        with open(_PRED_PATH, "r", encoding="utf-8") as fh:
+            _preds = json.load(fh)
+            if isinstance(_preds, list) and _preds:
+                ALLOWED_PREDICATES = [str(p).strip().lower() for p in _preds if str(p).strip()]
+            elif isinstance(_preds, dict) and _preds:
+                # 若为字典，则 key 为 allowed predicates，values 为同义词扩充
+                ALLOWED_PREDICATES = [str(p).strip().lower() for p in _preds.keys() if str(p).strip()]
+                # 更新 PRED_SYNONYM_SETS (merge strategy: overwrite or append?)
+                # 这里采用 overwrite 策略：配置文件定义的覆盖代码内置
+                for canon, aliases in _preds.items():
+                    canon = str(canon).strip().lower()
+                    if not canon:
+                        continue
+                    if isinstance(aliases, list):
+                        new_set = {str(a).strip().lower() for a in aliases if str(a).strip()}
+                        # 确保 canon 自身也在集合中 (虽然后面 logic 会 handle，但保持一致性)
+                        new_set.add(canon)
+                        PRED_SYNONYM_SETS[canon] = new_set
+except Exception:
+    # 若加载失败，保留默认集合
+    pass
 
 CANONICAL_PREDICATES = set(ALLOWED_PREDICATES)
 

@@ -55,6 +55,14 @@ DEFAULT_LLM_RETRY_ON_EMPTY = 1
 DEFAULT_LLM_RETRY_EVIDENCE = 6
 DEFAULT_OFFICIAL_SAMPLE = "sample/sample_dev_pred.json"
 DEFAULT_UNANSWERABLE = "Insufficient evidence"
+DEFAULT_ANSWER_REPAIR = True
+DEFAULT_FORCE_ANSWERABLE = False
+DEFAULT_REPAIR_MAX_TOKENS = 12
+
+_YES_NO_PREFIX = re.compile(
+    r"^\s*(?:is|are|was|were|do|does|did|can|could|should|would|will|has|have|had|may|might|must)\b",
+    flags=re.IGNORECASE,
+)
 
 
 def _load_jsonl(path: Path) -> Iterable[Dict[str, Any]]:
@@ -614,6 +622,109 @@ def _classify_llm_exception(exc: Exception) -> Tuple[str, str]:
     return "other", message[:200]
 
 
+def _normalize_for_grounding(text: Any) -> str:
+    value = str(text or "").lower()
+    value = re.sub(r"[^0-9a-z\s]+", " ", value)
+    return " ".join(value.split())
+
+
+def _is_yes_no_question(question: str) -> bool:
+    return bool(_YES_NO_PREFIX.match(str(question or "")))
+
+
+def _token_len(text: str) -> int:
+    return len(str(text or "").split())
+
+
+def _answer_grounded_in_evidence(answer: str, evidences: List[Dict[str, Any]]) -> bool:
+    answer_norm = _normalize_for_grounding(answer)
+    if not answer_norm:
+        return False
+    if answer_norm in {"yes", "no"}:
+        return True
+    for ev in evidences or []:
+        chunks: List[str] = []
+        for key in ("canonical", "evidence", "obj", "text", "title", "subj"):
+            val = ev.get(key)
+            if val:
+                chunks.append(_normalize_for_grounding(val))
+        if not chunks:
+            continue
+        haystack = " ".join(chunks)
+        if answer_norm in haystack:
+            return True
+    return False
+
+
+def _build_repair_instruction(attribute_name: Optional[str], force_answerable: bool) -> str:
+    attr = str(attribute_name or "").strip()
+    instructions: List[str] = [
+        "Return a short answer span copied verbatim from evidence (max 8 tokens).",
+        "Do not output explanations or full sentences.",
+        "Prioritize exact entity/date/number span that directly answers the question.",
+    ]
+    if attr:
+        instructions.append(f"The requested attribute is: {attr}.")
+    if force_answerable:
+        instructions.append('Do not output "Insufficient evidence"; pick the best grounded span.')
+    else:
+        instructions.append('If evidence is truly missing, output exactly "Insufficient evidence".')
+    return " ".join(instructions)
+
+
+def _repair_needed_reason(
+    *,
+    answer: str,
+    question: str,
+    evidences: List[Dict[str, Any]],
+    force_answerable: bool,
+    repair_max_tokens: int,
+) -> Optional[str]:
+    text = str(answer or "").strip()
+    if not text:
+        return "empty"
+    lowered = text.lower()
+    if lowered == DEFAULT_UNANSWERABLE.lower():
+        return "forced_answerable_refusal" if force_answerable else None
+    if _is_yes_no_question(question):
+        return None
+    token_limit = max(1, int(repair_max_tokens))
+    if _token_len(text) > token_limit:
+        return "too_long"
+    if not _answer_grounded_in_evidence(text, evidences):
+        return "not_grounded"
+    return None
+
+
+def _should_accept_repair(
+    *,
+    original: str,
+    repaired: str,
+    question: str,
+    evidences: List[Dict[str, Any]],
+    force_answerable: bool,
+    repair_max_tokens: int,
+) -> bool:
+    old = str(original or "").strip()
+    new = str(repaired or "").strip()
+    if not new:
+        return False
+    if force_answerable and old.lower() == DEFAULT_UNANSWERABLE.lower() and new.lower() != DEFAULT_UNANSWERABLE.lower():
+        return True
+    if _is_yes_no_question(question):
+        return new.lower() in {"yes", "no"} and old.lower() not in {"yes", "no"}
+
+    old_grounded = _answer_grounded_in_evidence(old, evidences)
+    new_grounded = _answer_grounded_in_evidence(new, evidences)
+    if new_grounded and not old_grounded:
+        return True
+
+    token_limit = max(1, int(repair_max_tokens))
+    if new_grounded and _token_len(new) <= token_limit < _token_len(old):
+        return True
+    return False
+
+
 def _collect_debug_notes(
     note_store: NoteStore,
     note_ids: Iterable[str],
@@ -695,6 +806,8 @@ def generate_answer(
     llm_endpoint: str,
     llm_model: str,
     openai_cfg: Optional[Dict[str, Any]],
+    attribute_name: Optional[str] = None,
+    label_instruction_override: Optional[str] = None,
     base_cfg: Optional[Dict[str, Any]] = None,
     run_dir: Optional[str] = None,
 ) -> Tuple[str, Dict[str, Any], Optional[str], Optional[str]]:
@@ -706,6 +819,8 @@ def generate_answer(
                 evidences=evidences,
                 llm_endpoint=llm_endpoint,
                 llm_model=llm_model,
+                attribute_name=attribute_name,
+                label_instruction_override=label_instruction_override,
                 prompt_capture=prompt_capture,
                 cfg=base_cfg,
                 run_dir=run_dir,
@@ -739,6 +854,8 @@ def generate_answer(
                 prompt_capture=prompt_capture,
                 run_dir=run_dir,
                 cfg=base_cfg,
+                attribute_name=attribute_name,
+                label_instruction_override=label_instruction_override,
             )
         except Exception as exc:
             reason, message = _classify_llm_exception(exc)
@@ -1456,6 +1573,9 @@ def _process_example(
     use_structured_answer: bool,
     include_decomposition_sp: bool,
     unanswerable_token: str,
+    answer_repair: bool,
+    force_answerable: bool,
+    repair_max_tokens: int,
     run_dir: Optional[str] = None,
 ) -> Dict[str, Any]:
     qid = str(example.get("id") or "unknown")
@@ -1501,6 +1621,8 @@ def _process_example(
     )
 
     evidences = retrieve_result.get("evidence") or []
+    intent_payload = retrieve_result.get("intent") or {}
+    attribute_name = str(intent_payload.get("attribute") or "").strip() or None
     structured_answer = retrieve_result.get("answer") if use_structured_answer else None
     raw_answer, prompt_meta, llm_error, llm_error_reason = generate_answer(
         question=question,
@@ -1509,6 +1631,7 @@ def _process_example(
         llm_endpoint=llm_endpoint,
         llm_model=llm_model,
         openai_cfg=openai_cfg,
+        attribute_name=attribute_name,
         base_cfg=base_cfg,
         run_dir=run_dir,
     )
@@ -1548,6 +1671,7 @@ def _process_example(
                 llm_endpoint=llm_endpoint,
                 llm_model=llm_model,
                 openai_cfg=openai_cfg,
+                attribute_name=attribute_name,
                 base_cfg=base_cfg,
                 run_dir=run_dir,
             )
@@ -1580,6 +1704,69 @@ def _process_example(
                 answer_source_detail = retry_detail
                 fallback_reason = retry_fallback_reason
                 break
+    repair_attempted = False
+    repair_applied = False
+    repair_reason = None
+    repair_grounded_before = _answer_grounded_in_evidence(short_answer, evidences)
+    repair_grounded_after = repair_grounded_before
+    if answer_repair:
+        repair_reason = _repair_needed_reason(
+            answer=short_answer,
+            question=question,
+            evidences=evidences,
+            force_answerable=force_answerable,
+            repair_max_tokens=repair_max_tokens,
+        )
+        if repair_reason:
+            repair_attempted = True
+            repair_instruction = _build_repair_instruction(attribute_name, force_answerable)
+            repaired_raw, repaired_meta, repaired_error, repaired_error_reason = generate_answer(
+                question=question,
+                evidences=evidences,
+                reader=reader,
+                llm_endpoint=llm_endpoint,
+                llm_model=llm_model,
+                openai_cfg=openai_cfg,
+                attribute_name=attribute_name,
+                label_instruction_override=repair_instruction,
+                base_cfg=base_cfg,
+                run_dir=run_dir,
+            )
+            repaired_short, repaired_source, repaired_detail = resolve_short_answer(
+                structured_answer,
+                repaired_raw,
+                question=question,
+            )
+            repair_grounded_after = _answer_grounded_in_evidence(repaired_short, evidences)
+            if _should_accept_repair(
+                original=short_answer,
+                repaired=repaired_short,
+                question=question,
+                evidences=evidences,
+                force_answerable=force_answerable,
+                repair_max_tokens=repair_max_tokens,
+            ):
+                raw_answer = repaired_raw
+                prompt_meta = repaired_meta
+                llm_error = repaired_error
+                llm_error_reason = repaired_error_reason
+                short_answer = repaired_short
+                answer_source = "llm_repair"
+                answer_source_detail = dict(repaired_detail)
+                answer_source_detail["repair_reason"] = repair_reason
+                answer_source_detail["repair_applied"] = True
+                if repaired_error_reason:
+                    fallback_reason = repaired_error_reason
+                elif repaired_source == "llm_fallback":
+                    fallback_reason = "repair_parse_error"
+                else:
+                    fallback_reason = None
+                repair_applied = True
+            else:
+                answer_source_detail = dict(answer_source_detail)
+                answer_source_detail["repair_attempted"] = True
+                answer_source_detail["repair_reason"] = repair_reason
+                answer_source_detail["repair_applied"] = False
     answer_model = openai_cfg.get("model") if reader == "openai" and openai_cfg else llm_model
 
     gold_primary, answerable, aliases = _resolve_gold_answers(
@@ -1702,6 +1889,14 @@ def _process_example(
             "llm_retry_used": llm_retry_used,
             "llm_retry_source": llm_retry_source,
             "llm_retry_reason": llm_retry_reason,
+            "answer_repair_enabled": bool(answer_repair),
+            "answer_repair_attempted": bool(repair_attempted),
+            "answer_repair_applied": bool(repair_applied),
+            "answer_repair_reason": repair_reason,
+            "answer_repair_force_answerable": bool(force_answerable),
+            "answer_repair_attribute": attribute_name,
+            "answer_grounded_before_repair": bool(repair_grounded_before),
+            "answer_grounded_after_repair": bool(repair_grounded_after),
         },
     }
     if debug_dir:
@@ -2067,6 +2262,35 @@ def main() -> None:
         "--unanswerable_token",
         help='Gold token when answerable==false (default: "Insufficient evidence")',
     )
+    parser.add_argument(
+        "--answer_repair",
+        action="store_true",
+        help="Enable repair pass for ungrounded/overlong answers",
+    )
+    parser.add_argument(
+        "--no_answer_repair",
+        action="store_false",
+        dest="answer_repair",
+        help="Disable repair pass",
+    )
+    parser.set_defaults(answer_repair=None)
+    parser.add_argument(
+        "--force_answerable",
+        action="store_true",
+        help='Disallow "Insufficient evidence" during answer repair (useful for answerable-only splits)',
+    )
+    parser.add_argument(
+        "--no_force_answerable",
+        action="store_false",
+        dest="force_answerable",
+        help="Allow refusal token during answer repair",
+    )
+    parser.set_defaults(force_answerable=None)
+    parser.add_argument(
+        "--repair_max_tokens",
+        type=int,
+        help="Trigger answer repair when answer token length exceeds this threshold",
+    )
     parser.add_argument("--endpoint", help="vLLM endpoint (defaults to config)")
     parser.add_argument("--model", help="LLM model name (defaults to config)")
     parser.add_argument("--reader", nargs="+", help="Reader backend: vllm or openai (fallback to config)")
@@ -2179,6 +2403,34 @@ def main() -> None:
         dataset_cfg,
         "unanswerable_token",
         DEFAULT_UNANSWERABLE,
+    )
+    args.answer_repair = bool(
+        _pick_arg(
+            args,
+            entry_cfg,
+            dataset_cfg,
+            "answer_repair",
+            DEFAULT_ANSWER_REPAIR,
+        )
+    )
+    args.force_answerable = bool(
+        _pick_arg(
+            args,
+            entry_cfg,
+            dataset_cfg,
+            "force_answerable",
+            DEFAULT_FORCE_ANSWERABLE,
+        )
+    )
+    args.repair_max_tokens = _coerce_int(
+        _pick_arg(
+            args,
+            entry_cfg,
+            dataset_cfg,
+            "repair_max_tokens",
+            DEFAULT_REPAIR_MAX_TOKENS,
+        ),
+        DEFAULT_REPAIR_MAX_TOKENS,
     )
     args.official_template = _pick_arg(
         args,
@@ -2320,6 +2572,9 @@ def main() -> None:
                         "use_structured_answer": args.use_structured_answer,
                         "include_decomposition_sp": args.include_decomposition_sp,
                         "unanswerable_token": args.unanswerable_token,
+                        "answer_repair": args.answer_repair,
+                        "force_answerable": args.force_answerable,
+                        "repair_max_tokens": args.repair_max_tokens,
                         "official_template": args.official_template,
                     }
                 )
@@ -2359,6 +2614,9 @@ def main() -> None:
                     "use_structured_answer": args.use_structured_answer,
                     "include_decomposition_sp": args.include_decomposition_sp,
                     "unanswerable_token": args.unanswerable_token,
+                    "answer_repair": args.answer_repair,
+                    "force_answerable": args.force_answerable,
+                    "repair_max_tokens": args.repair_max_tokens,
                     "answer_policy_primary": f"answerable_false_as_{args.unanswerable_token}",
                     "answer_policy_secondary": "always_use_answer_field",
                     "gold_sp_policy": gold_sp_policy,
@@ -2429,6 +2687,9 @@ def main() -> None:
                                     use_structured_answer=args.use_structured_answer,
                                     include_decomposition_sp=args.include_decomposition_sp,
                                     unanswerable_token=args.unanswerable_token,
+                                    answer_repair=args.answer_repair,
+                                    force_answerable=args.force_answerable,
+                                    repair_max_tokens=args.repair_max_tokens,
                                     run_dir=str(run_dir) if run_dir else None,
                                 )
                                 handle.write(json.dumps(record, ensure_ascii=False) + "\n")
@@ -2481,6 +2742,9 @@ def main() -> None:
                                     args.use_structured_answer,
                                     args.include_decomposition_sp,
                                     args.unanswerable_token,
+                                    args.answer_repair,
+                                    args.force_answerable,
+                                    args.repair_max_tokens,
                                 )
                                 future_map[future] = cache_key
                                 scheduled += 1

@@ -109,14 +109,20 @@ class Indexes:
             self.weak_predicate_to_notes = {}
 
 
-def BIND(indexes: Indexes, alias: str, type_candidates: List[str], limit: int = 50) -> List[str]:
+def BIND(
+    indexes: Indexes,
+    alias: str,
+    type_candidates: List[str],
+    limit: int = 50,
+    use_alias_index: bool = True,
+) -> List[str]:
     matches: List[str] = []
     bind_reason = None
     target = _normalize_alias_query(alias)
     if not target:
         return matches
 
-    alias_hits = indexes.alias_to_entities.get(target, [])
+    alias_hits = indexes.alias_to_entities.get(target, []) if use_alias_index else []
     for entity in alias_hits:
         if entity not in matches:
             matches.append(entity)
@@ -125,18 +131,19 @@ def BIND(indexes: Indexes, alias: str, type_candidates: List[str], limit: int = 
                 return matches
 
     # 归一化后的精确匹配层（对索引的key进行同步归一）
-    for alias_key, entities in indexes.alias_to_entities.items():
-        norm_key = _normalize_alias_query(alias_key)
-        if norm_key == target and alias_key != target and not alias_hits:
-            for entity in entities:
-                if entity not in matches:
-                    matches.append(entity)
-                    bind_reason = bind_reason or "alias_norm_exact"
-                    if len(matches) >= limit:
-                        return matches
+    if use_alias_index:
+        for alias_key, entities in indexes.alias_to_entities.items():
+            norm_key = _normalize_alias_query(alias_key)
+            if norm_key == target and alias_key != target and not alias_hits:
+                for entity in entities:
+                    if entity not in matches:
+                        matches.append(entity)
+                        bind_reason = bind_reason or "alias_norm_exact"
+                        if len(matches) >= limit:
+                            return matches
 
     # 仅当精确匹配未命中且别名索引非空时做包含匹配
-    if not matches and indexes.alias_to_entities:
+    if use_alias_index and not matches and indexes.alias_to_entities:
         for alias_key, entities in indexes.alias_to_entities.items():
             if alias_key == target:
                 continue

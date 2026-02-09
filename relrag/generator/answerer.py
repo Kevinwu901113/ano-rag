@@ -24,6 +24,8 @@ def call_llm(
     retries: int = 2,
     allowed_labels: Optional[List[str]] = None,
     attribute_name: Optional[str] = None,
+    label_instruction_override: Optional[str] = None,
+    prompt_name: str = ANSWER_PROMPT_NAME,
     prompt_capture: Optional[Dict[str, Any]] = None,
     cfg: Optional[Dict[str, Any]] = None,
     run_dir: Optional[str] = None,
@@ -48,6 +50,11 @@ def call_llm(
 
     display_evs = compressed or evidences
     sanitized_labels = _prepare_allowed_labels(allowed_labels)
+    label_instruction = _label_instruction(
+        sanitized_labels,
+        attribute_name,
+        override=label_instruction_override,
+    )
     runtime_cfg = resolved_cfg.get("runtime") if isinstance(resolved_cfg.get("runtime"), dict) else {}
     run_dir = run_dir or runtime_cfg.get("run_dir")
     base_limits = resolved_cfg.get("answer") if isinstance(resolved_cfg.get("answer"), dict) else {}
@@ -80,8 +87,8 @@ def call_llm(
         budgeted = budget_answer_prompt(
             question,
             display_evs,
-            prompt_name=ANSWER_PROMPT_NAME,
-            label_instruction=_label_instruction(sanitized_labels, attribute_name),
+            prompt_name=prompt_name,
+            label_instruction=label_instruction,
             system_prompt=None,
             cfg=resolved_cfg,
             llm_cfg=resolved_cfg.get("vllm"),
@@ -108,7 +115,7 @@ def call_llm(
             )
         if prompt_capture is not None:
             prompt_capture["prompt"] = budgeted.prompt
-            prompt_capture["prompt_name"] = ANSWER_PROMPT_NAME
+            prompt_capture["prompt_name"] = prompt_name
         log_budget_event(
             run_dir,
             stage="answer",
@@ -199,10 +206,22 @@ def _compress_evidence(question: str, evidences: list, endpoint: str, model: str
         return []
 
 
-def _label_instruction(labels: List[str], attribute_name: Optional[str]) -> str:
+def _label_instruction(
+    labels: List[str],
+    attribute_name: Optional[str],
+    *,
+    override: Optional[str] = None,
+) -> str:
+    if override and str(override).strip():
+        return str(override).strip()
     if labels:
         joined = ", ".join(labels)
         return f"Allowed labels ({attribute_name or 'answer'}): {joined}."
+    if attribute_name and str(attribute_name).strip():
+        return (
+            f"Question focus attribute: {str(attribute_name).strip()}. "
+            "Output only the attribute value as a short answer span copied from evidence."
+        )
     return "If you can answer, output the canonical label only."
 
 

@@ -1,0 +1,1240 @@
+{
+  "acted_in": [
+    "starred in",
+    "appeared in",
+    "featured in",
+    "played a role in",
+    "acted in",
+    "with",
+    "stars in",
+    "appears in",
+    "stars_in",
+    "performs in",
+    "best known as the host of",
+    "featured_in",
+    "stars",
+    "features",
+    "starring",
+    "has actor",
+    "stars_actor",
+    "appears in video",
+    "features in",
+    "performs in video",
+    "stars_in_video"
+  ],
+  "affiliated_with": [
+    "was a professor at",
+    "held a professorship at",
+    "professor_at"
+  ],
+  "aired_at": [
+    "aired at",
+    "broadcast from",
+    "shown at",
+    "televised from"
+  ],
+  "ancestors_include": [
+    "ancestors include",
+    "descended from",
+    "has ancestry including",
+    "lineage includes"
+  ],
+  "authored_by": [
+    "script by",
+    "penned by"
+  ],
+  "based_on_comic_character_of": [
+    "based on what brand's comic character",
+    "features a song based on the comic character of",
+    "inspired by a comic character from"
+  ],
+  "based_on_technique": [
+    "based on what technique",
+    "uses the technique",
+    "founded on the method of"
+  ],
+  "based_on_work_first_published_in": [
+    "based on a novel first published in",
+    "original work published in",
+    "source material first published in"
+  ],
+  "began_playing_at_age": [
+    "began playing at the age of",
+    "started playing at age",
+    "began playing at age",
+    "started playing at the age of"
+  ],
+  "best_known_for_development_of": [
+    "best known for developing",
+    "famous for pioneering",
+    "recognized for advancing",
+    "noted for originating"
+  ],
+  "best_known_for_role_in": [
+    "best known for being in",
+    "most famous for role in",
+    "best known for starring in",
+    "most recognized for part in"
+  ],
+  "best_singles_ranking": [
+    "had the best singles ranking",
+    "achieved a higher singles ranking than",
+    "topped the singles ranking"
+  ],
+  "body_style_changed_in_year": [
+    "changed body style in",
+    "body style changed when",
+    "redesigned body style in",
+    "body style update in"
+  ],
+  "borders_on": [
+    "borders on",
+    "adjacent to",
+    "shares a border with",
+    "is bounded by",
+    "lies next to",
+    "located by",
+    "situated near",
+    "close to",
+    "in the vicinity of",
+    "located_near"
+  ],
+  "born_in": [
+    "birth place",
+    "native of",
+    "place of birth",
+    "was born in",
+    "inhabitant of",
+    "resident of",
+    "lives in",
+    "inhabitant_of"
+  ],
+  "buried_at": [
+    "place of burial of",
+    "buried at",
+    "burial site of",
+    "interred at",
+    "resting place of"
+  ],
+  "ceded_territory_to": [
+    "ceded territory to",
+    "transferred land to",
+    "gave territory to",
+    "ceded to"
+  ],
+  "chart_position_for_single": [
+    "behind the single on the album",
+    "single charted at",
+    "position on the charts for",
+    "single reached position"
+  ],
+  "coached_by": [
+    "coached by",
+    "trained by",
+    "mentored by",
+    "was a student of",
+    "instructed by"
+  ],
+  "coached_team_for_duration": [
+    "led their team for a period of time",
+    "coached for",
+    "tenure as head coach",
+    "has been head coach for"
+  ],
+  "collaborated_with_on_work": [
+    "worked with",
+    "collaborated with",
+    "co-wrote with",
+    "partnered with on"
+  ],
+  "collection_contains": [
+    "houses works by",
+    "collection includes works by",
+    "has works by",
+    "contains works by"
+  ],
+  "competed_in": [
+    "competed in",
+    "participated in",
+    "took part in",
+    "was a competitor in"
+  ],
+  "composed_music_for": [
+    "composed music for",
+    "wrote the music for",
+    "scored",
+    "created the soundtrack for"
+  ],
+  "construction_period_centuries": [
+    "built over how many centuries",
+    "construction spanned how many centuries",
+    "took how many centuries to build"
+  ],
+  "contains_boarding_school_named_after": [
+    "contains a boarding school named after",
+    "has a boarding school called after",
+    "is home to a boarding school named for"
+  ],
+  "contains_ingredient": [
+    "contains",
+    "made with",
+    "includes",
+    "has",
+    "is made from"
+  ],
+  "contains_scenes_from": [
+    "contained scenes from",
+    "used footage from",
+    "incorporated scenes from",
+    "reused material from"
+  ],
+  "contributed_to_siege": [
+    "contributed to the storming of",
+    "participated in the siege of",
+    "took part in the assault on"
+  ],
+  "controls_program": [
+    "can control",
+    "designed to interact with",
+    "operates",
+    "manages"
+  ],
+  "copies_sold_of": [
+    "copies sold of",
+    "number of copies sold",
+    "sales of",
+    "sold how many copies of"
+  ],
+  "country_of_origin": [
+    "is an american",
+    "is a british",
+    "originated in",
+    "country of origin",
+    "nationality of the work",
+    "from",
+    "hails from",
+    "formed in",
+    "origin_country"
+  ],
+  "county_seat_of": [
+    "county seat of",
+    "seat of the county containing",
+    "administrative center of the county where"
+  ],
+  "covers_subject": [
+    "covers",
+    "is about",
+    "focuses on",
+    "deals with"
+  ],
+  "crashed_at_location": [
+    "crashed at",
+    "crashed in",
+    "rammed into",
+    "impact site",
+    "crash location"
+  ],
+  "critic_of": [
+    "critic of",
+    "vocal critic of",
+    "has criticized",
+    "opponent of"
+  ],
+  "crowned_in_year": [
+    "crowned in",
+    "coronation in",
+    "crowning happened in",
+    "was crowned in"
+  ],
+  "debuted_in_year": [
+    "debuted in what year",
+    "first opened in",
+    "was launched in the year",
+    "premiered in",
+    "opened in",
+    "was opened in",
+    "inaugurated in",
+    "opened_in_year"
+  ],
+  "dedicated_to": [
+    "dedicated to",
+    "film dedicated to",
+    "in memory of",
+    "honors"
+  ],
+  "defeated": [
+    "defeated",
+    "beat",
+    "won against",
+    "was victorious over"
+  ],
+  "departed_from_place_in_month": [
+    "went away from",
+    "departed from",
+    "left",
+    "exited"
+  ],
+  "described_as": [
+    "described as a",
+    "classified as a",
+    "formally described as a"
+  ],
+  "designed_by": [
+    "designed by",
+    "was designed by",
+    "designer of",
+    "architect of"
+  ],
+  "died_at_founding_date": [
+    "founded when",
+    "founding date of the place where died",
+    "established when"
+  ],
+  "died_before": [
+    "died before",
+    "died earlier than",
+    "passed away before",
+    "predeceased",
+    "lived longer than",
+    "lived shorter than",
+    "had a longer lifespan than",
+    "died after",
+    "lifespan_compared_to",
+    "had a longer life than",
+    "outlived",
+    "survived",
+    "lived_longer_than",
+    "lifespan_longer_than",
+    "died later than",
+    "passed away after",
+    "died_later_than",
+    "was older at death than"
+  ],
+  "died_in": [
+    "place of death of",
+    "died in",
+    "passed away in",
+    "death location of",
+    "death location",
+    "where did ... die",
+    "died_in"
+  ],
+  "diplomatic_mission_with": [
+    "had a diplomatic mission with",
+    "conducted diplomacy with",
+    "engaged in diplomatic relations with",
+    "was a diplomat to"
+  ],
+  "directed_by": [
+    "directed by",
+    "directors of",
+    "directed the film",
+    "helmed by"
+  ],
+  "drafted_in_year": [
+    "drafted in",
+    "selected in",
+    "picked in",
+    "draft year"
+  ],
+  "educated_at": [
+    "educated at",
+    "went to school at",
+    "studied at",
+    "attended",
+    "graduated from",
+    "received education at"
+  ],
+  "embraces_campaign": [
+    "embrace",
+    "support",
+    "adopt",
+    "back",
+    "champion",
+    "endorse"
+  ],
+  "emigrated_refugees_to": [
+    "emigrated to",
+    "refugees emigrated to",
+    "number of refugees emigrated to"
+  ],
+  "ended_when": [
+    "ended when",
+    "concluded in",
+    "finished in",
+    "terminated in"
+  ],
+  "endorsed_by": [
+    "endorsed by",
+    "sponsored by",
+    "promoted by",
+    "has endorser"
+  ],
+  "executed_for_crime": [
+    "was hung for",
+    "was executed for",
+    "was put to death for",
+    "was hanged for",
+    "received capital punishment for"
+  ],
+  "expelled_from": [
+    "expelled from",
+    "forced out of",
+    "driven from",
+    "removed from"
+  ],
+  "expelled_from_boundary_between": [
+    "expelled from the natural boundary between",
+    "forced out from the border between",
+    "removed from the frontier separating",
+    "forced out of the border between",
+    "expelled_from_boundary_between"
+  ],
+  "experimental_satellite_forerunner_to": [
+    "experimental satellite being forerunner to communication satellite",
+    "experimental precursor to",
+    "test satellite for"
+  ],
+  "expert_on": [
+    "expert on",
+    "authority on",
+    "specialist in",
+    "known for expertise in",
+    "renowned for knowledge of"
+  ],
+  "father_in_law_of": [
+    "father-in-law of",
+    "father of spouse of",
+    "whose father-in-law is"
+  ],
+  "father_of": [
+    "father of",
+    "dad of",
+    "parent of",
+    "father_of"
+  ],
+  "featured_in": [
+    "from the book titled",
+    "featured in the book",
+    "a subject of the book",
+    "written about in"
+  ],
+  "film_made_about": [
+    "had a film made about it",
+    "film made about",
+    "movie about",
+    "featured in a film"
+  ],
+  "flows_into": [
+    "flows into",
+    "empties into",
+    "discharges into",
+    "runs into",
+    "meets"
+  ],
+  "food_served_at": [
+    "served at",
+    "food at",
+    "dishes served at",
+    "may have been served at",
+    "offered at"
+  ],
+  "founded_by": [
+    "founded by",
+    "established by",
+    "created by",
+    "was founded by",
+    "was established by",
+    "set up by"
+  ],
+  "funded_by_type_of_lottery": [
+    "funded in part by a what type of lottery",
+    "funded by a lottery",
+    "received funding from a lottery",
+    "lottery funding came from"
+  ],
+  "guest_on": [
+    "was a guest on",
+    "appeared as a guest on",
+    "guest on",
+    "guest appearance on"
+  ],
+  "had_player_with_most_league_sacks": [
+    "player had the most league sacks",
+    "team's player led the league in sacks",
+    "team with sack leader"
+  ],
+  "has_activity_type": [
+    "type of activity does",
+    "activity in common",
+    "common activity",
+    "shared activity",
+    "kind of act",
+    "type of activity",
+    "form of action",
+    "category of practice"
+  ],
+  "has_administrative_level": [
+    "same level as",
+    "level of city",
+    "administrative level",
+    "classification level"
+  ],
+  "has_anchor_store": [
+    "anchor stores for",
+    "anchor store of",
+    "major stores in",
+    "primary retailers at"
+  ],
+  "has_chemical_formula": [
+    "has the formula",
+    "chemical formula is",
+    "formula of"
+  ],
+  "has_commonality_with": [
+    "have in common with",
+    "share with",
+    "both have"
+  ],
+  "has_companion_series": [
+    "has a set of companion books",
+    "has companion series",
+    "has spin-off series",
+    "has expanded universe books"
+  ],
+  "has_fight_song": [
+    "fight song of",
+    "fight song for",
+    "whose fight song is",
+    "name of the fight song of"
+  ],
+  "has_heritage": [
+    "is of what heritage",
+    "has heritage",
+    "ethnic background",
+    "national origin"
+  ],
+  "has_mach_number": [
+    "ratio of flow velocity to speed of sound for",
+    "mach number of",
+    "speed in mach for"
+  ],
+  "has_member_count": [
+    "had more members"
+  ],
+  "has_nationality": [
+    "is of nationality",
+    "nationality is",
+    "is a citizen of",
+    "is from (nationality)",
+    "was a(n)"
+  ],
+  "has_number_of_top_albums_in_region": [
+    "has had how many top x albums in y",
+    "number of top albums in",
+    "count of top-charting albums in"
+  ],
+  "has_olympic_medal_count": [
+    "won olympic medals",
+    "has olympic medals",
+    "olympic medal count",
+    "medals at olympics"
+  ],
+  "has_relationship_with": [
+    "has relationship with",
+    "in a relationship with",
+    "partner of",
+    "married to",
+    "had a child with"
+  ],
+  "has_roud_folk_song_index": [
+    "roud folk song index of",
+    "roud index of",
+    "roud number of",
+    "has roud index"
+  ],
+  "has_species_count": [
+    "has more species than",
+    "number of species in",
+    "species count of",
+    "which has more species",
+    "contains more species",
+    "has more species"
+  ],
+  "has_won_tournaments_worldwide_count": [
+    "has won how many tournaments worldwide",
+    "worldwide tournament wins count",
+    "total tournaments won globally"
+  ],
+  "headquartered_in": [
+    "headquartered in",
+    "head office in",
+    "corporate headquarters in",
+    "headquarters in",
+    "main office in"
+  ],
+  "held_after": [
+    "held after",
+    "occurred after",
+    "took place after",
+    "following"
+  ],
+  "held_constitutional": [
+    "held that the practice of ... was constitutional",
+    "ruled that ... was constitutional",
+    "upheld the constitutionality of"
+  ],
+  "held_distinction": [
+    "distinction held by",
+    "award received by",
+    "honor held by",
+    "recognition given to"
+  ],
+  "held_government_position": [
+    "government position held by",
+    "served as",
+    "was the",
+    "held the position of"
+  ],
+  "held_in_month": [
+    "held in",
+    "takes place in",
+    "occurs in",
+    "month of"
+  ],
+  "home_stadium_location": [
+    "stadium located in",
+    "home stadium is in",
+    "plays home games at a stadium in"
+  ],
+  "hosted_event": [
+    "hosted",
+    "presented",
+    "was the host of",
+    "served as host for",
+    "hosted_event",
+    "announced",
+    "hosted the announcement of",
+    "was the announcer for"
+  ],
+  "hosted_in": [
+    "hosted in",
+    "took place in",
+    "was held in",
+    "location of"
+  ],
+  "hosts_annual_event": [
+    "hosts",
+    "holds",
+    "is the site of",
+    "is home to",
+    "hosts a ... every"
+  ],
+  "incarcerated": [
+    "was incarcerated",
+    "went to prison",
+    "was imprisoned",
+    "served time",
+    "jailed"
+  ],
+  "instrument_to_person_ratio": [
+    "instrument to person ratio",
+    "instruments per person",
+    "instrument-per-member ratio"
+  ],
+  "interviewed": [
+    "interviewed",
+    "was the only one to interview",
+    "conducted an interview with"
+  ],
+  "introduced_in_season": [
+    "introduced in season",
+    "first appears in season",
+    "debuted in season",
+    "season of introduction"
+  ],
+  "is_breed_of": [
+    "is a breed of",
+    "both breeds of",
+    "type of dog",
+    "dog breed"
+  ],
+  "is_genus_of": [
+    "is a genus",
+    "belongs to the genus",
+    "is a genus of"
+  ],
+  "is_magazine": [
+    "is a magazine",
+    "magazine named",
+    "publication is the magazine"
+  ],
+  "is_not_type_of": [
+    "was not a",
+    "is not a",
+    "is not an example of",
+    "is not categorized as"
+  ],
+  "is_type_of": [
+    "is a type of",
+    "is a kind of",
+    "is a species of",
+    "is a member of",
+    "belongs to the category",
+    "belongs to",
+    "affiliated with",
+    "is democratic or republican",
+    "political party",
+    "member_of_political_party"
+  ],
+  "is_type_of_entertainment": [
+    "is entertainment",
+    "is an entertainment",
+    "is a form of entertainment",
+    "is a type of entertainment"
+  ],
+  "known_by_stage_name": [
+    "known by his stage name",
+    "known by her stage name",
+    "stage name",
+    "performed under the name",
+    "alias"
+  ],
+  "known_for": [
+    "known for",
+    "famous for",
+    "recognized for",
+    "specializes in",
+    "works in"
+  ],
+  "known_for_song": [
+    "known for the song",
+    "famous for the track",
+    "notable for the single",
+    "recognized for the composition"
+  ],
+  "larger_than": [
+    "larger than",
+    "bigger than",
+    "greater than",
+    "which is larger",
+    "which is bigger"
+  ],
+  "lead_single_of_album": [
+    "lead single from",
+    "lead single of",
+    "first single from",
+    "primary single from"
+  ],
+  "league_established_in": [
+    "established in",
+    "founded in",
+    "created in",
+    "league was established in",
+    "league was founded in",
+    "which was founded in",
+    "founding year",
+    "founded_in_year",
+    "founded first",
+    "established earlier",
+    "founded earlier",
+    "founded on",
+    "started in",
+    "when was ... founded"
+  ],
+  "led_by": [
+    "led by",
+    "ruled by",
+    "governed by",
+    "under the leadership of"
+  ],
+  "licensed_under": [
+    "licensed under",
+    "released under the license",
+    "distributed under",
+    "uses the license"
+  ],
+  "lived_during": [
+    "live",
+    "lived during",
+    "was alive in",
+    "flourished in",
+    "existed in"
+  ],
+  "located_in": [
+    "located in",
+    "situated in",
+    "found in",
+    "based in",
+    "where is",
+    "where are",
+    "is in"
+  ],
+  "located_in_country": [
+    "is in a country",
+    "is located in",
+    "can be found in the country of",
+    "country of location"
+  ],
+  "located_in_county": [
+    "is located in what county",
+    "is in which county",
+    "county of"
+  ],
+  "located_in_neighborhood": [
+    "located in the same neighborhood as",
+    "in the neighborhood of",
+    "situated in the district of",
+    "found in the area of"
+  ],
+  "located_in_place_of_historical_event": [
+    "located in where",
+    "situated in the place where",
+    "found in the location where"
+  ],
+  "located_in_region": [
+    "is a local government area in the region of",
+    "located in the region of",
+    "situated in the region of",
+    "part of the region"
+  ],
+  "maximum_load_drawn_by": [
+    "maximum load drawn by",
+    "max load of",
+    "peak power draw of",
+    "electrical load capacity of"
+  ],
+  "member_of_armed_forces_branch": [
+    "was a member of",
+    "served in the",
+    "belonged to the",
+    "was in the"
+  ],
+  "met_with_on_date": [
+    "met with",
+    "had a meeting with",
+    "conferred with",
+    "held talks with"
+  ],
+  "middle_name_of": [
+    "middle name of",
+    "has the middle name",
+    "whose middle name is"
+  ],
+  "most_closely_related_to": [
+    "most closely related to",
+    "genetically closest to",
+    "closest modern relatives of",
+    "descended most directly from"
+  ],
+  "name_changed_on": [
+    "changed names on",
+    "renamed on",
+    "became known as on",
+    "when did ... change names"
+  ],
+  "named_after_language": [
+    "derives its name from",
+    "named after the language",
+    "gets its name from the language"
+  ],
+  "nominated_for_award": [
+    "was oscar nominated",
+    "nominated for",
+    "received a nomination for",
+    "was up for"
+  ],
+  "occupation": [
+    "is a",
+    "known as a",
+    "works as a",
+    "has_occupation",
+    "are both",
+    "was a",
+    "is an",
+    "belongs to the category of",
+    "is_a",
+    "profession is",
+    "belongs to the genre",
+    "is classified as",
+    "is in the genre of",
+    "genre is",
+    "belongs_to_genre",
+    "is a game called",
+    "is_type_of_game"
+  ],
+  "occurred_before": [
+    "fought earlier than",
+    "happened before",
+    "occurred prior to",
+    "preceded"
+  ],
+  "official_religion_of": [
+    "official religion of",
+    "state religion of",
+    "established religion of"
+  ],
+  "older_than": [
+    "older than",
+    "is older than",
+    "was born before",
+    "senior to",
+    "who is older, x or y?"
+  ],
+  "owned_by": [
+    "owned by",
+    "acquired by",
+    "purchased by",
+    "has been owned by",
+    "is a subsidiary of"
+  ],
+  "participated_in_project": [
+    "participant in",
+    "contributed to project",
+    "worked on project",
+    "involved in project",
+    "credited with project"
+  ],
+  "party_held_power_until": [
+    "was a part of a party that held power until",
+    "party held power until",
+    "was in power until"
+  ],
+  "patented_by": [
+    "patented in",
+    "patented by",
+    "patent held by",
+    "invention patented by"
+  ],
+  "percentage_change_during_historical_era": [
+    "percentage change during",
+    "fell by percentage in",
+    "rose by percentage in",
+    "percentage drop in",
+    "percentage increase during"
+  ],
+  "performed_promo_for": [
+    "performed a promo for",
+    "did promotional work for",
+    "promoted the film",
+    "had a promo for"
+  ],
+  "played_at_venue": [
+    "venue was",
+    "played at",
+    "hosted at",
+    "took place at",
+    "featured at"
+  ],
+  "played_for_team_with_rivalry_game": [
+    "played for which team that ends their regular season with the",
+    "was a member of the team whose regular season concludes with the",
+    "played for the team that finishes its regular season with the rivalry game against"
+  ],
+  "played_role_in": [
+    "played in",
+    "portrayed in",
+    "acted as in",
+    "had the role of in",
+    "appeared as in"
+  ],
+  "plays_in_area_between": [
+    "plays in the area between",
+    "located between",
+    "based between",
+    "situated between"
+  ],
+  "population_as_of": [
+    "population of",
+    "population in",
+    "population was",
+    "had a population of",
+    "census population"
+  ],
+  "project_lead_of": [
+    "had as project lead",
+    "project lead was",
+    "led by project lead",
+    "project lead for"
+  ],
+  "published_in": [
+    "published in",
+    "released in",
+    "first came out in",
+    "launched in"
+  ],
+  "rebuilt_after_destroying_count": [
+    "rebuilt after a fire that consumed how many",
+    "destroyed how many in the fire that led to its rebuilding",
+    "rebuilt after a conflagration that burned how many"
+  ],
+  "received_settlement_amount": [
+    "got a settlement of",
+    "received a settlement of",
+    "was awarded a settlement of",
+    "settlement amount was"
+  ],
+  "recorded_album": [
+    "recorded",
+    "made the album",
+    "released the album",
+    "created the album"
+  ],
+  "recurring_role_as": [
+    "had a recurring role as",
+    "recurring role as",
+    "played the recurring role of",
+    "recurring character of"
+  ],
+  "referred_to_in_media_as": [
+    "is sometimes referred to in the u.s. media as",
+    "called in media as",
+    "known in the press as"
+  ],
+  "release_date": [
+    "came out on",
+    "was released on",
+    "first released",
+    "premiered on",
+    "debuted on"
+  ],
+  "released_on": [
+    "released",
+    "released on",
+    "came out",
+    "issued on",
+    "launched on"
+  ],
+  "rendered_verdict_in": [
+    "rendered the verdict in",
+    "delivered the verdict in",
+    "judged the case",
+    "presided over the verdict in",
+    "decided the case"
+  ],
+  "research_helped_prevent_outbreak_of": [
+    "research helped prevent the outbreak of",
+    "research contributed to preventing outbreak of",
+    "work helped avert outbreak of",
+    "studies helped stop outbreak of"
+  ],
+  "resulted_from_merger_involving": [
+    "resulted from a merger involving",
+    "formed by a merger with",
+    "created from a merger that included"
+  ],
+  "season_record_in_conference": [
+    "played with a record of",
+    "had a conference record of",
+    "finished conference play with"
+  ],
+  "seating_capacity_of": [
+    "can seat",
+    "seating capacity",
+    "holds up to",
+    "accommodates"
+  ],
+  "secured_for": [
+    "secured for",
+    "won for",
+    "gained for",
+    "resulted in for",
+    "achieved for"
+  ],
+  "served_as_national_intelligence_officer_under": [
+    "was the national intelligence officer under",
+    "served as national intelligence officer for",
+    "held the national intelligence officer role under"
+  ],
+  "served_as_secretary_of_committee_under": [
+    "served as secretary of the committee on the employment of minority groups in the news media under",
+    "was secretary of committee under",
+    "secretary of committee during tenure of"
+  ],
+  "served_during_presidency_of": [
+    "during the administration of",
+    "served under the presidency of",
+    "was in the cabinet of",
+    "during the term of"
+  ],
+  "shared_military_service_with": [
+    "have in common",
+    "served with",
+    "both served in",
+    "shared military service with",
+    "were fellow soldiers in"
+  ],
+  "signed_to_label": [
+    "signed to",
+    "label for",
+    "record label of",
+    "responsible for the performer",
+    "released by",
+    "signed with",
+    "record label is",
+    "signed a deal with",
+    "contracted to",
+    "signed_to_record_label"
+  ],
+  "spent_on": [
+    "spent on",
+    "allocated funds for",
+    "expended on",
+    "funded",
+    "invested in",
+    "provided the financial backing to",
+    "financed",
+    "backed financially",
+    "was the financier of",
+    "financially_backed"
+  ],
+  "sponsored_name_of": [
+    "known as what for sponsorship reasons",
+    "sponsored name",
+    "commercially known as",
+    "sponsorship title"
+  ],
+  "spouse": [
+    "was married to",
+    "spouse of",
+    "married",
+    "husband of",
+    "wife of"
+  ],
+  "spouse_won_award_for_work": [
+    "spouse won oscar for",
+    "spouse won award for",
+    "spouse's award-winning work"
+  ],
+  "starred_by": [
+    "starred",
+    "starred by",
+    "featured the actor",
+    "had a starring role by"
+  ],
+  "stop_on_highway_before_reaching_town_on_banks_of_river": [
+    "is a stop on the [highway] before reaching the town on the banks of which river",
+    "is a stop on [highway] before the town on the river"
+  ],
+  "stopped_serving_in_year": [
+    "stopped serving in",
+    "ceased serving in",
+    "ended service in",
+    "left service in"
+  ],
+  "surpassed_in_record_by": [
+    "surpassed by",
+    "record broken by",
+    "exceeded by",
+    "overtaken by"
+  ],
+  "survived_impeachment_by_vote_margin": [
+    "survive impeachment by",
+    "impeachment survived by",
+    "votes short of impeachment",
+    "impeachment vote margin",
+    "survived impeachment by",
+    "votes to survive impeachment",
+    "survived_impeachment_by_vote_margin"
+  ],
+  "taught": [
+    "taught",
+    "was teacher of",
+    "mentored",
+    "instructed",
+    "trained",
+    "educated"
+  ],
+  "test_flew": [
+    "test-flying",
+    "test flew",
+    "test piloted",
+    "was test-flying"
+  ],
+  "translated_to_refers_to": [
+    "translated in another language refers to",
+    "means in another language",
+    "translation refers to"
+  ],
+  "used_for": [
+    "used for",
+    "used as",
+    "purpose is",
+    "functions as",
+    "serves as",
+    "primary duty of",
+    "main job of",
+    "bred for",
+    "traditional role of",
+    "primary_duty_of"
+  ],
+  "used_in_theatre": [
+    "used in",
+    "deployed in",
+    "operated in",
+    "saw service in",
+    "was used in the"
+  ],
+  "visited": [
+    "visited",
+    "went to",
+    "traveled to",
+    "came to",
+    "stopped at"
+  ],
+  "voice_actor_for_character_in_work": [
+    "is the voice of",
+    "voiced the character",
+    "provided the voice for",
+    "voice actor for"
+  ],
+  "voice_role_in": [
+    "voice role in",
+    "voiced in",
+    "voice acted in",
+    "major voice role in"
+  ],
+  "wears_during_event": [
+    "wear during",
+    "clothing for",
+    "attire for",
+    "dress in for"
+  ],
+  "won_grand_slam_titles_count": [
+    "won more grand slam titles than",
+    "has more grand slam titles than",
+    "grand slam titles count",
+    "grand slam titles won"
+  ],
+  "writer_of": [
+    "writer of",
+    "author of",
+    "composer of",
+    "written by",
+    "authored by"
+  ],
+  "written_and_directed_by": [
+    "written and directed by",
+    "directed and written by",
+    "director and writer of",
+    "director-writer of"
+  ],
+  "younger_brother_of": [
+    "younger brother of",
+    "is the younger brother of",
+    "has a younger brother named"
+  ],
+  "younger_than": [
+    "younger than",
+    "is younger than",
+    "more youthful than",
+    "more recent birth than",
+    "was younger than",
+    "who is younger",
+    "born later than",
+    "born after",
+    "born_later_than",
+    "younger",
+    "who is younger, x or y"
+  ]
+}

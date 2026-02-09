@@ -18,6 +18,7 @@ from relrag.generator.pronoun_resolver import resolve_pronouns_for_doc
 from relrag.indexer.index_builder import IndexBuilder
 from relrag.utils import FileUtils, TextUtils
 from relrag.utils.weak_notes import close_weak_note_writer, write_weak_note
+from relrag.schema.predicate_learner import PredicateLearner
 from relrag.telemetry.metrics import record_pronoun_stat
 from relrag.postprocess.notes_postprocess import (
     backfill_pronoun_subjects,
@@ -740,6 +741,18 @@ class StructuredBuilder:
         record_pronoun_stat("pronoun_subj_before", stats["pronoun_subj_before"])
         record_pronoun_stat("pronoun_resolved_strong", stats["pronoun_resolved_strong"])
         record_pronoun_stat("weak_written", stats["weak_written"])
+
+        # Auto-Learn Predicates
+        predicate_mode = global_config.load_config().get("predicate_mode", "static")
+        if predicate_mode == "auto_learn":
+            logger.info("Predicate Auto-Learn enabled. Running learner on generated notes...")
+            try:
+                learner = PredicateLearner()
+                updated = learner.learn_and_update(notes_path)
+                if updated:
+                    logger.info("Predicates updated! Ideally we should re-validate notes, but proceeding for now.")
+            except Exception as exc:
+                logger.warning("Predicate learning failed: {}", exc)
 
         weak_notes_path_str = str(weak_notes_path) if weak_notes_path.exists() else None
         if notes_written:
