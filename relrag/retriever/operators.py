@@ -6,6 +6,24 @@ import re
 import unicodedata
 
 
+class BindResult(list):
+    """List-like bind result with lightweight diagnostics."""
+
+    def __init__(
+        self,
+        items: Optional[List[str]] = None,
+        *,
+        use_alias_index: bool = True,
+    ) -> None:
+        super().__init__(items or [])
+        self.bind_reason: Optional[str] = None
+        self.alias_matched: bool = False
+        self.direct_matched: bool = False
+        self.alias_candidate_count: int = 0
+        self.direct_candidate_count: int = 0
+        self.use_alias_index: bool = bool(use_alias_index)
+
+
 class Indexes:
     def __init__(self, directory: str) -> None:
         with open(os.path.join(directory, "entity_to_notes.json"), "r", encoding="utf-8") as handle:
@@ -115,8 +133,8 @@ def BIND(
     type_candidates: List[str],
     limit: int = 50,
     use_alias_index: bool = True,
-) -> List[str]:
-    matches: List[str] = []
+) -> BindResult:
+    matches = BindResult(use_alias_index=use_alias_index)
     bind_reason = None
     target = _normalize_alias_query(alias)
     if not target:
@@ -127,7 +145,10 @@ def BIND(
         if entity not in matches:
             matches.append(entity)
             bind_reason = bind_reason or "alias_exact"
+            matches.alias_matched = True
+            matches.alias_candidate_count += 1
             if len(matches) >= limit:
+                matches.bind_reason = bind_reason
                 return matches
 
     # 归一化后的精确匹配层（对索引的key进行同步归一）
@@ -139,7 +160,10 @@ def BIND(
                     if entity not in matches:
                         matches.append(entity)
                         bind_reason = bind_reason or "alias_norm_exact"
+                        matches.alias_matched = True
+                        matches.alias_candidate_count += 1
                         if len(matches) >= limit:
+                            matches.bind_reason = bind_reason
                             return matches
 
     # 仅当精确匹配未命中且别名索引非空时做包含匹配
@@ -153,7 +177,10 @@ def BIND(
                         continue
                     matches.append(entity)
                     bind_reason = bind_reason or "alias_contains"
+                    matches.alias_matched = True
+                    matches.alias_candidate_count += 1
                     if len(matches) >= limit:
+                        matches.bind_reason = bind_reason
                         return matches
 
     exact_norm: List[str] = []
@@ -172,15 +199,13 @@ def BIND(
                 continue
             matches.append(entity)
             bind_reason = bind_reason or "entity_norm"
+            matches.direct_matched = True
+            matches.direct_candidate_count += 1
             if len(matches) >= limit:
+                matches.bind_reason = bind_reason
                 return matches
-    # 记录绑定理由（不改变返回结构，供上层日志使用）
     if bind_reason:
-        # Attach to a sentinel attribute on the list for tracing (optional usage upstream)
-        try:
-            matches.bind_reason = bind_reason  # type: ignore[attr-defined]
-        except Exception:
-            pass
+        matches.bind_reason = bind_reason
     return matches
 
 

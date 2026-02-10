@@ -40,6 +40,7 @@ from relrag.generator import answerer as answerer_module
 from relrag.indexer import IndexBuilder
 from relrag.indexer.bm25_index import BM25IndexBuilder
 from relrag.indexer.embedding_index import EmbeddingIndexBuilder
+from relrag.postprocess.notes_postprocess import build_alias_map
 from relrag.retriever.chunk_store import ChunkStore
 from relrag.retriever.note_store import NoteStore
 from relrag.prompt import load_prompt
@@ -249,15 +250,33 @@ def _write_sentence_notes_for_example(
     written = 0
     with notes_path.open("w", encoding="utf-8") as handle:
         for doc_id, meta in doc_index.items():
-            title = meta.get("title") or ""
-            sentences = meta.get("sentences") or []
-            for sent_idx, sentence in enumerate(sentences):
-                text = str(sentence).strip()
-                if not text:
+            title = str(meta.get("title") or "").strip()
+            sentences = [str(s).strip() for s in (meta.get("sentences") or []) if str(s).strip()]
+            alias_map, alias_to_canonical = build_alias_map(sentences)
+            canonical_title = title
+            if title:
+                canonical_title = alias_to_canonical.get(title.lower()) or title
+            subject_aliases: List[str] = []
+            if canonical_title and canonical_title in alias_map:
+                subject_aliases.extend([a for a in (alias_map.get(canonical_title) or []) if a and a != title])
+            if canonical_title and canonical_title != title:
+                subject_aliases.insert(0, canonical_title)
+            dedup_aliases: List[str] = []
+            seen_aliases = set()
+            for alias in subject_aliases:
+                norm = str(alias).strip()
+                if not norm:
                     continue
+                key = norm.lower()
+                if key in seen_aliases:
+                    continue
+                dedup_aliases.append(norm)
+                seen_aliases.add(key)
+            for sent_idx, sentence in enumerate(sentences):
+                text = sentence
                 note = {
                     "note_id": f"{doc_id}#s{sent_idx:04d}",
-                    "subj": str(title).strip() or str(doc_id),
+                    "subj": title or str(doc_id),
                     "pred": "sentence",
                     "obj": text,
                     "subj_type": "CONCEPT",
@@ -270,6 +289,11 @@ def _write_sentence_notes_for_example(
                         "final_conf": 1.0,
                         "quality_score": 1.0,
                         "evidence_canonical": text,
+                        "alias_map": alias_map,
+                        "subject_profile": {
+                            "type": "CONCEPT",
+                            "aliases": dedup_aliases,
+                        },
                     },
                 }
                 handle.write(json.dumps(note, ensure_ascii=False) + "\n")
@@ -472,6 +496,142 @@ def _safe_score(value: Any) -> float:
         return float(value)
     except (TypeError, ValueError):
         return 0.0
+
+
+def _score_from_stage_candidate(candidate: Dict[str, Any], keys: List[str]) -> float:
+    for key in keys:
+        if key not in candidate:
+            continue
+        value = candidate.get(key)
+        if value is None:
+            continue
+        return _safe_score(value)
+    return 0.0
+
+
+def _empty_retrieval_stage(stage_name: str, source: str) -> Dict[str, Any]:
+    return {
+        "name": stage_name,
+        "source": source,
+        "available": False,
+        "candidate_count": 0,
+        "contexts_raw": [],
+        "contexts_topk": [],
+        "pred_sp_topk": [],
+        "top_k_raw": 0,
+        "top_k_final": 0,
+        "duplicate_rate": 0.0,
+    }
+
+
+def _build_stage_context_from_candidates(
+    *,
+    stage_name: str,
+    source: str,
+    candidates: List[Dict[str, Any]],
+    score_keys: List[str],
+    top_k: int,
+    note_store: NoteStore,
+    doc_index: Dict[str, Dict[str, Any]],
+) -> Dict[str, Any]:
+    if not candidates:
+        return _empty_retrieval_stage(stage_name, source)
+
+    evidences: List[Dict[str, Any]] = []
+    for candidate in candidates:
+        note_id = candidate.get("note_id")
+        if not isinstance(note_id, str) or not note_id.strip():
+            continue
+        note = note_store.get_weak(note_id) or {}
+        meta = (note.get("meta") or {}) if isinstance(note, dict) else {}
+        evidence_text = (
+            str(note.get("evidence") or "").strip()
+            or str(meta.get("evidence_canonical") or "").strip()
+            or str(note.get("obj") or "").strip()
+        )
+        source_hint = source
+        candidate_sources = candidate.get("sources")
+        if isinstance(candidate_sources, dict) and candidate_sources:
+            source_hint = "+".join(sorted(str(key) for key in candidate_sources.keys()))
+        evidences.append(
+            {
+                "note_id": note_id,
+                "source": source_hint,
+                "evidence": evidence_text,
+                "canonical": evidence_text,
+                "weak": bool(meta.get("weak", False)),
+                "score": _score_from_stage_candidate(candidate, score_keys),
+            }
+        )
+
+    contexts_raw = _build_retrieved_context(evidences, note_store, doc_index)
+    contexts_topk, dedup_stats = _dedup_retrieved_context(
+        contexts_raw,
+        top_k=top_k,
+        title_diversity_enabled=False,
+        query_title_promotion_enabled=False,
+    )
+    pred_sp_topk = [row["fact"] for row in _collect_pred_sp_candidates(contexts_topk)]
+
+    return {
+        "name": stage_name,
+        "source": source,
+        "available": True,
+        "candidate_count": len(candidates),
+        "contexts_raw": contexts_raw,
+        "contexts_topk": contexts_topk,
+        "pred_sp_topk": pred_sp_topk,
+        "top_k_raw": dedup_stats.get("top_k_raw", 0),
+        "top_k_final": dedup_stats.get("top_k_final", 0),
+        "duplicate_rate": dedup_stats.get("duplicate_rate", 0.0),
+    }
+
+
+def _build_retrieval_stage_contexts(
+    *,
+    retrieve_result: Dict[str, Any],
+    note_store: NoteStore,
+    doc_index: Dict[str, Dict[str, Any]],
+    top_k: int,
+) -> Dict[str, Dict[str, Any]]:
+    stages = {
+        "stage1": _empty_retrieval_stage("stage1", "hybrid.pre_candidates"),
+        "stage2_no_fallback": _empty_retrieval_stage("stage2_no_fallback", "hybrid.final"),
+    }
+    hybrid = retrieve_result.get("hybrid")
+    if not isinstance(hybrid, dict):
+        return stages
+
+    stage1_candidates = [
+        row
+        for row in (hybrid.get("pre_candidates") or [])
+        if isinstance(row, dict)
+    ]
+    stage2_candidates = [
+        row
+        for row in (hybrid.get("final") or [])
+        if isinstance(row, dict)
+    ]
+
+    stages["stage1"] = _build_stage_context_from_candidates(
+        stage_name="stage1",
+        source="hybrid.pre_candidates",
+        candidates=stage1_candidates,
+        score_keys=["score"],
+        top_k=top_k,
+        note_store=note_store,
+        doc_index=doc_index,
+    )
+    stages["stage2_no_fallback"] = _build_stage_context_from_candidates(
+        stage_name="stage2_no_fallback",
+        source="hybrid.final",
+        candidates=stage2_candidates,
+        score_keys=["final_score", "pre_rrf", "llm_score", "struct_score"],
+        top_k=top_k,
+        note_store=note_store,
+        doc_index=doc_index,
+    )
+    return stages
 
 
 def _collect_pred_sp_candidates(retrieved_context: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -2224,6 +2384,27 @@ def _process_example(
         drop_weak=pred_sp_drop_weak,
         prefer_new_titles=pred_sp_prefer_new_titles,
     )
+    stage_contexts = _build_retrieval_stage_contexts(
+        retrieve_result=retrieve_result,
+        note_store=note_store,
+        doc_index=doc_index,
+        top_k=top_k,
+    )
+    final_stage = {
+        "name": "final_with_fallback",
+        "source": "retrieved_context_topk",
+        "available": True,
+        "candidate_count": len(retrieved_context_raw),
+        "contexts_raw": retrieved_context_raw,
+        "contexts_topk": retrieved_context_topk,
+        "pred_sp_topk": pred_sp_topk,
+        "top_k_raw": dedup_stats.get("top_k_raw", 0),
+        "top_k_final": dedup_stats.get("top_k_final", 0),
+        "duplicate_rate": dedup_stats.get("duplicate_rate", 0.0),
+        "fallback": retrieve_result.get("fallback"),
+        "top_k_fill_reason": top_k_fill_reason,
+        "top_k_shortage_refill": shortage_refill_info,
+    }
     gold_sp = _extract_gold_sp(example)
     llm_input_hash = prompt_meta.get("llm_input_hash") or ""
     top_k_raw_value = dedup_stats.get("top_k_raw")
@@ -2265,6 +2446,11 @@ def _process_example(
         "retrieved_context_raw": retrieved_context_raw,
         "retrieved_context_topk": retrieved_context_topk,
         "retrieved_context": retrieved_context_topk,
+        "retrieval_stages": {
+            "stage1": stage_contexts.get("stage1"),
+            "stage2_no_fallback": stage_contexts.get("stage2_no_fallback"),
+            "final_with_fallback": final_stage,
+        },
         "top_k": top_k,
         "top_k_raw": dedup_stats.get("top_k_raw"),
         "top_k_final": dedup_stats.get("top_k_final"),
@@ -2320,6 +2506,12 @@ def _process_example(
             "pred_sp_topk_count": len(pred_sp_topk),
             "pred_sp_selected_count": len(pred_sp),
             "pred_sp_policy_meta": pred_sp_meta,
+            "stage1_available": bool((stage_contexts.get("stage1") or {}).get("available", False)),
+            "stage1_topk_count": int((stage_contexts.get("stage1") or {}).get("top_k_final", 0) or 0),
+            "stage2_available": bool((stage_contexts.get("stage2_no_fallback") or {}).get("available", False)),
+            "stage2_topk_count": int((stage_contexts.get("stage2_no_fallback") or {}).get("top_k_final", 0) or 0),
+            "stage2_fallback_used": bool((retrieve_result.get("fallback") or {}).get("used", False)),
+            "stage2_fallback_status": (retrieve_result.get("fallback") or {}).get("status"),
             "prompt_name": prompt_meta.get("prompt_name"),
             "prompt_template_hash": prompt_meta.get("prompt_template_hash"),
             "system_prompt_name": prompt_meta.get("system_prompt_name"),

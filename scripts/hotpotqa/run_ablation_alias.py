@@ -162,7 +162,11 @@ def main() -> None:
                         
                         if meta.get("seed_entities"): # Non-empty list
                             ablation_stats["SeedBindRate"] += 1
-                        if meta.get("bind_used_alias_index"):
+                        bind_alias_hit = bool(meta.get("bind_alias_matched"))
+                        score_alias_hit = int(meta.get("alias_lookup_hit_count") or 0) > 0
+                        # backward compatibility for old artifacts
+                        legacy_alias_hit = bool(meta.get("bind_used_alias_index")) and "bind_alias_matched" not in meta
+                        if bind_alias_hit or score_alias_hit or legacy_alias_hit:
                             ablation_stats["AliasHitRate"] += 1
                         if meta.get("structured_hit"):
                             ablation_stats["StructuredHitRate"] += 1

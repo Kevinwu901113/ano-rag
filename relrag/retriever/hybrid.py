@@ -60,6 +60,7 @@ class HybridRetriever:
         structured_candidates: List[structured_pipeline.Candidate],
         note_store: NoteStore,
         alias_lookup: Optional[Dict[str, str]] = None,
+        scoring_stats: Optional[Dict[str, Any]] = None,
     ) -> Optional[Dict[str, Any]]:
         alias_lookup = alias_lookup or {}
         structured_candidates = sorted(structured_candidates or [], key=lambda c: c.score, reverse=True)
@@ -126,6 +127,7 @@ class HybridRetriever:
                 struct_path_score=struct_score_map.get(item["note_id"]),
                 alias_lookup=alias_lookup,
                 seed_texts=seed_texts,
+                scoring_stats=scoring_stats,
             )
             if scoring is None:
                 continue
@@ -336,8 +338,14 @@ class HybridRetriever:
         struct_path_score: Optional[float],
         alias_lookup: Dict[str, str],
         seed_texts: Sequence[str],
+        scoring_stats: Optional[Dict[str, Any]] = None,
     ) -> Optional[Dict[str, Any]]:
-        subj_score = subject_match(note.get("subj"), seed_texts, alias_lookup)
+        subj_score = subject_match(
+            note.get("subj"),
+            seed_texts,
+            alias_lookup,
+            diagnostics=scoring_stats,
+        )
         match_by = "subject"
         if subj_score <= 0.0:
             subj_score = self._entity_match_score(note, seed_texts)

@@ -460,6 +460,7 @@ def _build_retrieved_context(
                 "weak": bool(ev.get("weak", False)),
                 "score": ev.get("score"),
                 "source": source,
+                "_original_evidence": ev,
             }
         )
     return contexts
@@ -1620,10 +1621,36 @@ def _process_example(
         backfill_rounds=backfill_rounds,
     )
 
-    evidences = retrieve_result.get("evidence") or []
+    # evidences = retrieve_result.get("evidence") or []
+    # FIX: Use retrieved_context_topk to filter evidences to the exact top_k set
+    # This ensures the LLM only sees the deduplicated top_k items, not the raw fetched set (which includes duplicates/extra items).
+    evidences = []
+    if retrieved_context_topk:
+        for ctx in retrieved_context_topk:
+            orig = ctx.get("_original_evidence")
+            if orig:
+                evidences.append(orig)
+            else:
+                # Fallback if _original_evidence missing
+                evidences.append({
+                    "evidence": ctx.get("evidence") or ctx.get("text"),
+                    "canonical": ctx.get("canonical"),
+                    "score": ctx.get("score"),
+                    "note_id": ctx.get("note_id"),
+                    "weak": ctx.get("weak", False),
+                    "source": ctx.get("source"),
+                })
+            # Clean up _original_evidence to avoid bloat in output
+            if "_original_evidence" in ctx:
+                del ctx["_original_evidence"]
+    elif retrieve_result.get("evidence"):
+         # Fallback if retrieved_context_topk is empty but evidence exists (unlikely given logic)
+         evidences = retrieve_result.get("evidence") or []
+
     intent_payload = retrieve_result.get("intent") or {}
     attribute_name = str(intent_payload.get("attribute") or "").strip() or None
     structured_answer = retrieve_result.get("answer") if use_structured_answer else None
+
     raw_answer, prompt_meta, llm_error, llm_error_reason = generate_answer(
         question=question,
         evidences=evidences,

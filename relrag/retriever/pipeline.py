@@ -126,7 +126,18 @@ def retrieve_answer(
     rescue_used = False
     seed_entities: List[str] = []
     bind_candidates_count: int = 0
-    alias_hit: bool = False
+    bind_diag: Dict[str, Any] = {
+        "bind_attempted": False,
+        "bind_used_alias_index": bool(use_alias_binding),
+        "bind_alias_matched": False,
+        "bind_direct_matched": False,
+    }
+    alias_lookup: Dict[str, str] = {}
+    scoring_diag: Dict[str, Any] = {
+        "alias_lookup_hit_count": 0,
+        "subject_match_calls": 0,
+        "subject_match_fail_reason": {},
+    }
 
     def _finalize_result(
         result: Dict[str, Any],
@@ -144,10 +155,18 @@ def retrieve_answer(
         result_meta["predicate_constraint_enabled"] = predicate_mode != "off"
         result_meta["predicate_random_seed"] = predicate_random_seed
         result_meta["ablation"] = {
-            "bind_used_alias_index": alias_hit,
+            "bind_attempted": bool(bind_diag.get("bind_attempted", False)),
+            "bind_used_alias_index": bool(bind_diag.get("bind_used_alias_index", use_alias_binding)),
+            "bind_alias_matched": bool(bind_diag.get("bind_alias_matched", False)),
+            "bind_direct_matched": bool(bind_diag.get("bind_direct_matched", False)),
             "bind_candidates_count": bind_candidates_count,
             "seed_entities": list(seed_entities),
+            "score_used_alias_lookup": use_alias_lookup,
             "scoring_used_alias_lookup": use_alias_lookup,
+            "alias_lookup_size": len(alias_lookup),
+            "alias_lookup_hit_count": int(scoring_diag.get("alias_lookup_hit_count", 0)),
+            "subject_match_calls": int(scoring_diag.get("subject_match_calls", 0)),
+            "subject_match_fail_reason": dict(scoring_diag.get("subject_match_fail_reason") or {}),
             "structured_hit": (result.get("fallback") or {}).get("status") == "structured_hit"
             or bool(result.get("paths")),
         }
@@ -175,7 +194,16 @@ def retrieve_answer(
     except Exception:
         pass
     if ir is None or not ir.is_valid:
-        result = _fallback_lookup(intent, indexes, note_store, None, "parse_failed", normalized_doc_hint, cfg=cfg)
+        result = _fallback_lookup(
+            intent,
+            indexes,
+            note_store,
+            None,
+            "parse_failed",
+            normalized_doc_hint,
+            cfg=cfg,
+            use_alias_binding=use_alias_binding,
+        )
         result.setdefault("meta", {})["relaxed_path_retry"] = False
         return _finalize_result(result, ir_override=ir, intent_override=intent)
 
@@ -193,13 +221,19 @@ def retrieve_answer(
             fallback=ir.fallback,
         )
 
-    seed_entities, bind_candidates_count, alias_hit = _bind_seeds(
+    seed_entities, bind_candidates_count, bind_diag = _bind_seeds(
         ir.seeds, indexes, ir.fanout, use_alias_binding=use_alias_binding
     )
     # 注入 doc_name 别名约束：若检测到实体名称，作为强别名参与绑定
     try:
         if intent.entity and isinstance(intent.entity, str) and intent.entity.strip():
-            extra = BIND(indexes, intent.entity.strip(), [], limit=ir.fanout)
+            extra = BIND(
+                indexes,
+                intent.entity.strip(),
+                [],
+                limit=ir.fanout,
+                use_alias_index=use_alias_binding,
+            )
             for ent in extra:
                 if ent not in seed_entities:
                     seed_entities.append(ent)
@@ -215,7 +249,16 @@ def retrieve_answer(
         except Exception:
             pass
         # 结构化优先兜底：尝试限制在别名索引范围内的弱信号补全（向量-only）
-        result = _fallback_lookup(intent, indexes, note_store, ir, "no_seed_match", normalized_doc_hint, cfg=cfg)
+        result = _fallback_lookup(
+            intent,
+            indexes,
+            note_store,
+            ir,
+            "no_seed_match",
+            normalized_doc_hint,
+            cfg=cfg,
+            use_alias_binding=use_alias_binding,
+        )
         result.setdefault("meta", {})["relaxed_path_retry"] = False
         return _finalize_result(result, ir_override=ir, intent_override=intent)
 
@@ -225,7 +268,6 @@ def retrieve_answer(
     doc_name = intent.entity if isinstance(intent.entity, str) else None
     normalized_doc_hint = _normalize_doc_hint(doc_hint)
     seed_texts = [seed.text for seed in ir.seeds if seed.text]
-    alias_lookup = {}
     if use_alias_lookup:
         alias_lookup = _build_seed_alias_lookup(indexes, seed_entities, seed_texts, doc_name)
     candidates: List[Candidate] = []
@@ -239,6 +281,7 @@ def retrieve_answer(
             attribute=intent.attribute,
             seed_texts=seed_texts,
             alias_lookup=alias_lookup,
+            scoring_diag=scoring_diag,
             entity_match_threshold=entity_match_threshold,
             path_match_threshold=path_consistency_threshold if walk_ir.pred_chain else -1.0,
             predicate_mode=predicate_mode,
@@ -267,6 +310,7 @@ def retrieve_answer(
                 attribute=intent.attribute,
                 seed_texts=seed_texts,
                 alias_lookup=alias_lookup,
+                scoring_diag=scoring_diag,
                 entity_match_threshold=max(0.25, entity_match_threshold * 0.6),
                 path_match_threshold=0.25,
                 predicate_mode=predicate_mode,
@@ -293,6 +337,7 @@ def retrieve_answer(
                 note_store,
                 seed_texts=seed_texts,
                 alias_lookup=alias_lookup,
+                scoring_diag=scoring_diag,
                 attribute=intent.attribute,
                 entity_match_threshold=0.0,
                 path_match_threshold=path_consistency_threshold if walk_ir.pred_chain else -1.0,
@@ -325,6 +370,7 @@ def retrieve_answer(
         cfg=cfg,
         hybrid=hybrid,
         alias_lookup=alias_lookup,
+        scoring_diag=scoring_diag,
     )
     if hybrid_result is not None:
         hybrid_result.setdefault("meta", {"path_consistency": 0.0, "entity_consistency": 0.0})
@@ -348,7 +394,16 @@ def retrieve_answer(
         if structured:
             structured.setdefault("meta", {})["relaxed_path_retry"] = relaxed_path_used
             return _finalize_result(structured, ir_override=ir, intent_override=intent)
-        result = _fallback_lookup(intent, indexes, note_store, ir, "no_path", normalized_doc_hint, cfg=cfg)
+        result = _fallback_lookup(
+            intent,
+            indexes,
+            note_store,
+            ir,
+            "no_path",
+            normalized_doc_hint,
+            cfg=cfg,
+            use_alias_binding=use_alias_binding,
+        )
         result.setdefault("meta", {})["relaxed_path_retry"] = relaxed_path_used
         return _finalize_result(result, ir_override=ir, intent_override=intent)
 
@@ -419,11 +474,16 @@ def _bind_seeds(
     indexes: Indexes,
     limit: int,
     use_alias_binding: bool = True,
-) -> Tuple[List[str], int, bool]:
+) -> Tuple[List[str], int, Dict[str, Any]]:
     collected: List[str] = []
     seen = set()
     total_candidates = 0
-    alias_hit = False
+    bind_diag: Dict[str, Any] = {
+        "bind_attempted": bool(seeds),
+        "bind_used_alias_index": bool(use_alias_binding),
+        "bind_alias_matched": False,
+        "bind_direct_matched": False,
+    }
     for seed in seeds:
         type_candidates = [seed.type_hint] if seed.type_hint else []
         matches = BIND(
@@ -433,9 +493,15 @@ def _bind_seeds(
             limit=limit,
             use_alias_index=use_alias_binding,
         )
-        reason = getattr(matches, "bind_reason", None)
-        if reason and "alias" in str(reason):
-            alias_hit = True
+        if getattr(matches, "alias_matched", False):
+            bind_diag["bind_alias_matched"] = True
+        if getattr(matches, "direct_matched", False):
+            bind_diag["bind_direct_matched"] = True
+        reason = str(getattr(matches, "bind_reason", "") or "")
+        if reason and "alias" in reason:
+            bind_diag["bind_alias_matched"] = True
+        if reason and "entity" in reason:
+            bind_diag["bind_direct_matched"] = True
         total_candidates += len(matches)
         for entity in matches:
             if entity in seen:
@@ -443,8 +509,8 @@ def _bind_seeds(
             collected.append(entity)
             seen.add(entity)
             if len(collected) >= limit:
-                return collected, total_candidates, alias_hit
-    return collected, total_candidates, alias_hit
+                return collected, total_candidates, bind_diag
+    return collected, total_candidates, bind_diag
 
 
 def _resolve_expand_predicate(
@@ -490,6 +556,7 @@ def _walk_chain(
     *,
     seed_texts: Optional[Sequence[str]] = None,
     alias_lookup: Optional[Dict[str, str]] = None,
+    scoring_diag: Optional[Dict[str, Any]] = None,
     entity_match_threshold: float = 0.0,
     path_match_threshold: float = -1.0,
     predicate_mode: str = "on",
@@ -504,6 +571,7 @@ def _walk_chain(
             doc_name,
             seed_texts=seed_texts,
             alias_lookup=alias_lookup,
+            scoring_diag=scoring_diag,
             entity_match_threshold=entity_match_threshold,
         )
 
@@ -559,6 +627,7 @@ def _walk_chain(
             seeds=seed_texts,
             query_ir=ir,
             alias_lookup=alias_lookup,
+            scoring_stats=scoring_diag,
         )
         if metrics.get("entity_score", 0.0) < entity_match_threshold:
             continue
@@ -583,6 +652,7 @@ def _rescue_multihop(
     *,
     seed_texts: Optional[Sequence[str]] = None,
     alias_lookup: Optional[Dict[str, str]] = None,
+    scoring_diag: Optional[Dict[str, Any]] = None,
     attribute: Optional[str] = None,
     entity_match_threshold: float = 0.0,
     path_match_threshold: float = -1.0,
@@ -645,6 +715,7 @@ def _rescue_multihop(
                 seeds=seed_texts,
                 query_ir=ir,
                 alias_lookup=alias_lookup,
+                scoring_stats=scoring_diag,
             )
             if metrics.get("entity_score", 0.0) < entity_match_threshold:
                 continue
@@ -674,6 +745,7 @@ def _collect_entity_mentions(
     *,
     seed_texts: Optional[Sequence[str]] = None,
     alias_lookup: Optional[Dict[str, str]] = None,
+    scoring_diag: Optional[Dict[str, Any]] = None,
     entity_match_threshold: float = 0.0,
 ) -> List[Candidate]:
     candidates: List[Candidate] = []
@@ -696,6 +768,7 @@ def _collect_entity_mentions(
                 doc_name=doc_name,
                 seeds=seed_texts,
                 alias_lookup=alias_lookup,
+                scoring_stats=scoring_diag,
             )
             if metrics.get("entity_score", 0.0) < entity_match_threshold:
                 continue
@@ -713,6 +786,7 @@ def _fallback_lookup(
     trigger: str,
     doc_hint: Optional[str],
     cfg: Optional[Dict[str, Any]] = None,
+    use_alias_binding: bool = True,
 ) -> Dict[str, Any]:
     doc_hint_norm = _normalize_doc_hint(doc_hint)
     entity_queries: List[str] = []
@@ -741,7 +815,7 @@ def _fallback_lookup(
         for name in direct:
             if name not in entity_candidates:
                 entity_candidates.append(name)
-        bound = BIND(indexes, query, type_candidates, limit=25)
+        bound = BIND(indexes, query, type_candidates, limit=25, use_alias_index=use_alias_binding)
         for entity in bound:
             if entity not in entity_candidates:
                 entity_candidates.append(entity)
@@ -1283,6 +1357,7 @@ def _maybe_run_hybrid(
     cfg: Optional[Dict[str, Any]] = None,
     hybrid: Optional["HybridRetriever"] = None,
     alias_lookup: Optional[Dict[str, str]] = None,
+    scoring_diag: Optional[Dict[str, Any]] = None,
 ):
     cfg_obj = cfg or getattr(hybrid, "cfg", None) or config_loader.load_config()
     retr_cfg = cfg_obj.get("retriever") or {}
@@ -1302,7 +1377,15 @@ def _maybe_run_hybrid(
     rerank_on = bool(getattr(hybrid_inst.reranker, "enabled", False))
     if not (embedding_on or bm25_on or rerank_on):
         return None
-    return hybrid_inst.retrieve(question, ir, intent, candidates, note_store, alias_lookup=alias_lookup)
+    return hybrid_inst.retrieve(
+        question,
+        ir,
+        intent,
+        candidates,
+        note_store,
+        alias_lookup=alias_lookup,
+        scoring_stats=scoring_diag,
+    )
 
 
 def _candidate_root_entity(candidate: Candidate) -> Optional[str]:

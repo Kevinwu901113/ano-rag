@@ -1,0 +1,228 @@
+import json
+import os
+import collections
+import numpy as np
+import glob
+import re
+import string
+import argparse
+from typing import List, Dict, Tuple, Set, Any
+
+def normalize_answer(s):
+    """Lower text and remove punctuation, articles and extra whitespace."""
+    def remove_articles(text):
+        return ' '.join([t for t in text.split() if t not in ['a', 'an', 'the']])
+
+    def white_space_fix(text):
+        return ' '.join(text.split())
+
+    def remove_punc(text):
+        exclude = set(string.punctuation)
+        return ''.join(ch for ch in text if ch not in exclude)
+
+    def lower(text):
+        return text.lower()
+
+    return white_space_fix(remove_articles(remove_punc(lower(s))))
+
+def f1_score(prediction, ground_truth):
+    normalized_prediction = normalize_answer(prediction)
+    normalized_ground_truth = normalize_answer(ground_truth)
+
+    ZERO_METRIC = (0, 0, 0)
+
+    if normalized_prediction in ['yes', 'no', 'noanswer'] and normalized_prediction != normalized_ground_truth:
+        return ZERO_METRIC
+    if normalized_ground_truth in ['yes', 'no', 'noanswer'] and normalized_prediction != normalized_ground_truth:
+        return ZERO_METRIC
+
+    prediction_tokens = normalized_prediction.split()
+    ground_truth_tokens = normalized_ground_truth.split()
+    common = collections.Counter(prediction_tokens) & collections.Counter(ground_truth_tokens)
+    num_same = sum(common.values())
+    if num_same == 0:
+        return ZERO_METRIC
+    precision = 1.0 * num_same / len(prediction_tokens)
+    recall = 1.0 * num_same / len(ground_truth_tokens)
+    f1 = (2 * precision * recall) / (precision + recall)
+    return f1, precision, recall
+
+def exact_match_score(prediction, ground_truth):
+    return (normalize_answer(prediction) == normalize_answer(ground_truth))
+
+def calculate_ndcg(retrieved_items: List[Tuple], gold_set: Set[Tuple], k: int) -> float:
+    """
+    Calculate NDCG@k.
+    retrieved_items: list of (title, sent_id) for Hotpot or just (title, ?)
+    MuSiQue gold supporting facts: paragraphs with is_supporting=True
+    We need to match by title.
+    """
+    relevance = []
+    seen_gold = set()
+    for i in range(min(k, len(retrieved_items))):
+        # retrieved_items are (title, index) usually
+        title = retrieved_items[i][0]
+        # In MuSiQue, supporting facts are identified by title
+        # Only count the first occurrence of a relevant title
+        if title in gold_set and title not in seen_gold:
+            relevance.append(1)
+            seen_gold.add(title)
+        else:
+            relevance.append(0)
+    
+    dcg = 0.0
+    for i, rel in enumerate(relevance):
+        dcg += rel / np.log2(i + 2)
+        
+    num_gold = len(gold_set)
+    ideal_k = min(num_gold, k)
+    
+    idcg = 0.0
+    for i in range(ideal_k):
+        idcg += 1.0 / np.log2(i + 2)
+        
+    if idcg == 0.0:
+        return 0.0
+        
+    return dcg / idcg
+
+def calculate_recall(retrieved_items: List[Tuple], gold_set: Set[Tuple], k: int) -> float:
+    if not gold_set:
+        return 0.0
+    
+    retrieved_k = [x[0] for x in retrieved_items[:k]] # just titles
+    # Use set intersection to avoid double counting same document retrieved multiple times
+    hits = len(set(retrieved_k) & gold_set)
+    return hits / len(gold_set)
+
+def evaluate_run(pred_file: str, gold_data: Dict[str, Any]) -> Dict[str, float]:
+    print(f"Reading {pred_file}...")
+    with open(pred_file, 'r', encoding='utf-8') as f:
+        preds = []
+        for line in f:
+            try:
+                preds.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+        
+    metrics = {
+        'em': [],
+        'f1': [],
+        'recall@2': [],
+        'recall@5': [],
+        'ndcg@5': [],
+        'ndcg@10': []
+    }
+    
+    for pred in preds:
+        qid = pred.get('_id')
+        if not qid:
+            qid = pred.get('id')
+            
+        if qid not in gold_data:
+            continue
+            
+        gold_entry = gold_data[qid]
+        gold_answer = gold_entry.get('answer', '')
+        
+        # QA Metrics
+        pred_answer = pred.get('short_answer', pred.get('answer', ''))
+        
+        em = exact_match_score(pred_answer, gold_answer)
+        f1, _, _ = f1_score(pred_answer, gold_answer)
+        
+        metrics['em'].append(float(em))
+        metrics['f1'].append(f1)
+        
+        # Retrieval Metrics
+        # MuSiQue gold supporting facts: paragraphs where is_supporting=True
+        # We collect titles of supporting paragraphs
+        gold_sp = set()
+        for p in gold_entry.get('paragraphs', []):
+            if p.get('is_supporting', False):
+                gold_sp.add(p['title'])
+        
+        # pred_sp_topk format: list of [title, sent_id] or similar
+        pred_sp_topk = pred.get('pred_sp_topk', [])
+        if not pred_sp_topk:
+             pred_sp_topk = pred.get('pred_sp', [])
+             
+        # Normalize to list of tuples (title, id)
+        pred_sp_tuples = [tuple(x) for x in pred_sp_topk]
+        
+        metrics['recall@2'].append(calculate_recall(pred_sp_tuples, gold_sp, 2))
+        metrics['recall@5'].append(calculate_recall(pred_sp_tuples, gold_sp, 5))
+        metrics['ndcg@5'].append(calculate_ndcg(pred_sp_tuples, gold_sp, 5))
+        metrics['ndcg@10'].append(calculate_ndcg(pred_sp_tuples, gold_sp, 10))
+        
+    aggregated = {k: np.mean(v) if v else 0.0 for k, v in metrics.items()}
+    return aggregated
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--base_dir", default="/home/wjk/workplace/nq/ano-rag/result/musique_experiment_3")
+    parser.add_argument("--gold_file", default="/home/wjk/workplace/nq/ano-rag/data/musique_ans_v1.0_dev_500.jsonl")
+    args = parser.parse_args()
+
+    base_dir = args.base_dir
+    gold_file = args.gold_file
+    
+    print(f"Loading gold data from {gold_file}...")
+    gold_data = {}
+    with open(gold_file, 'r', encoding='utf-8') as f:
+        # Check if it's a json array or jsonl
+        first_char = f.read(1)
+        f.seek(0)
+        if first_char == '[':
+            gold_list = json.load(f)
+            gold_data = {item['id']: item for item in gold_list}
+        else:
+            for line in f:
+                try:
+                    item = json.loads(line)
+                    gold_data[item['id']] = item
+                except:
+                    pass
+    
+    print(f"Loaded {len(gold_data)} gold entries.")
+    
+    pred_files = glob.glob(os.path.join(base_dir, "pred_dev_*.jsonl"))
+    
+    results = {}
+    
+    for pred_file in pred_files:
+        filename = os.path.basename(pred_file)
+        config_name = filename.replace("pred_dev_", "").replace(".jsonl", "")
+        
+        print(f"Evaluating {config_name}...")
+        results[config_name] = evaluate_run(pred_file, gold_data)
+    
+    # Generate Report
+    report_path = os.path.join(base_dir, "evaluation_report_zh.md")
+    with open(report_path, 'w', encoding='utf-8') as f:
+        f.write("# MuSiQue Experiment 3 评估报告\n\n")
+        f.write("## 1. 评估概述\n")
+        f.write(f"- **评估目录**: `{base_dir}`\n")
+        f.write(f"- **金标数据**: `{gold_file}` (MuSiQue Dev, 共 {len(gold_data)} 条)\n")
+        f.write(f"- **评估指标**: F1, EM, Recall@2/5, NDCG@5/10\n\n")
+        
+        f.write("## 2. 详细结果\n\n")
+        f.write("| Config | EM | F1 | Recall@2 | Recall@5 | NDCG@5 | NDCG@10 |\n")
+        f.write("| :--- | :--- | :--- | :--- | :--- | :--- | :--- |\n")
+        
+        for config, metrics in results.items():
+            f.write(f"| {config} | {metrics['em']:.4f} | {metrics['f1']:.4f} | {metrics['recall@2']:.4f} | {metrics['recall@5']:.4f} | {metrics['ndcg@5']:.4f} | {metrics['ndcg@10']:.4f} |\n")
+                
+        f.write("\n## 3. 结果分析\n")
+        
+        if results:
+            best_f1_config = max(results.keys(), key=lambda x: results[x]['f1'])
+            best_recall_config = max(results.keys(), key=lambda x: results[x]['ndcg@10'])
+            
+            f.write(f"- **最佳 QA 配置**: `{best_f1_config}` (F1: {results[best_f1_config]['f1']:.4f})\n")
+            f.write(f"- **最佳 检索 配置**: `{best_recall_config}` (NDCG@10: {results[best_recall_config]['ndcg@10']:.4f})\n")
+
+    print(f"Report saved to {report_path}")
+
+if __name__ == "__main__":
+    main()
