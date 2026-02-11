@@ -34,6 +34,7 @@ from relrag.utils import TextUtils
 from relrag.utils.answer_source import resolve_short_answer, sha1_text
 from relrag.utils.openai_answer import generate_openai_answer
 from relrag.utils.output_eval import has_final_tag
+from relrag.utils.vllm_runtime import resolve_vllm_endpoint_model
 from relrag.doc.chunking_strategies import SentenceAwareChunker, FixedWindowChunker, Chunker
 
 
@@ -897,11 +898,11 @@ def _write_debug_artifacts(
 
 def _resolve_llm_config(args: argparse.Namespace) -> Tuple[str, str]:
     cfg = global_config.load_config()
-    endpoint = args.endpoint or (cfg.get("vllm") or {}).get("endpoint")
-    model = args.model or (cfg.get("vllm") or {}).get("model")
-    if not endpoint or not model:
-        raise ValueError("LLM endpoint/model is required (use args or config)")
-    return endpoint, model
+    return resolve_vllm_endpoint_model(
+        endpoint_override=args.endpoint,
+        model_override=args.model,
+        vllm_cfg=cfg.get("vllm"),
+    )
 
 
 def generate_answer(
@@ -1738,7 +1739,7 @@ def _process_example(
     )
 
     # evidences = retrieve_result.get("evidence") or []
-    # FIX: Use retrieved_context_topk to filter evidences to the exact top_k set
+    # FIXED: Ensure evidences passed to generator are strictly top-k from the final context
     # This ensures the LLM only sees the deduplicated top_k items, not the raw fetched set (which includes duplicates/extra items).
     evidences = []
     if retrieved_context_topk:
@@ -2692,10 +2693,8 @@ def main() -> None:
             run_meta: Optional[Dict[str, Any]] = None
             if run_dir:
                 resolved_cfg = deepcopy(reader_base_cfg)
-                if args.endpoint:
-                    resolved_cfg.setdefault("vllm", {})["endpoint"] = args.endpoint
-                if args.model:
-                    resolved_cfg.setdefault("vllm", {})["model"] = args.model
+                resolved_cfg.setdefault("vllm", {})["endpoint"] = llm_endpoint
+                resolved_cfg.setdefault("vllm", {})["model"] = llm_model
                 if reader_openai_cfg:
                     resolved_cfg["openai"] = deepcopy(reader_openai_cfg)
                 entry_snapshot = resolved_cfg.setdefault("musique_entry", {})

@@ -1,33 +1,42 @@
 You are a factual answerer. Use the provided evidence sentences to answer the question.
-If the evidence is insufficient, respond EXACTLY with "Insufficient evidence".
-Prioritize high-confidence evidence, but do not ignore weak evidence if it provides a reasonable answer and does not conflict with strong evidence.
+If the evidence is partial, answer based on the best available information or reasonable inference from the context. Only say "Insufficient evidence" if absolutely no relevant information is present.
+Prioritize high-confidence evidence.
 For yes/no questions, answer exactly "yes" or "no" (lowercase) when the evidence supports a decision.
 {label_instruction}
+
 Question: {q}
+
 [STRUCTURED EVIDENCE]
 {strong_block}
+
 [WEAK EVIDENCE – lower confidence]
 {weak_block}
+
 Rules:
-- Prefer answers supported by strong evidence.
-- You can use weak evidence if it directly answers the question and is not contradicted by strong evidence.
-- If weak evidence conflicts with strong evidence, ignore the weak evidence.
-- **Relation Precision (critical)**: Answer strictly based on the exact relation asked in the question. Never swap relation types (e.g., writer != performer, director != actor, birthplace != workplace, founder != CEO).
-- **Attribute Isolation**: Do not transfer attributes (e.g., writers, directors, dates) from one entity to another just because they are related (e.g., same performer). Look for the specific attribute for the *target* entity in the evidence.
-- If evidence supports a different relation than the one asked, do not use it as the final answer.
-- **Context Specificity**: If the question is ambiguous (e.g., unspecified timeframe), prefer the answer that relates to the specific events or entities detailed in the evidence, rather than general facts or records.
-- **Semantic Flexibility**: If the question's premise has minor discrepancies with the evidence (e.g., "invasion of X" vs "invasion of Y") but the target entity is clearly identifiable, provide the answer instead of refusing.
-- If no sufficient evidence exists, answer "Insufficient evidence".
-- **Reasoning**: Briefly analyze the evidence step-by-step to bridge the gap between the question and the evidence, especially for multi-hop questions. Enclose your analysis in <think>...</think> tags.
-- Output the final answer on a separate line starting with 'FINAL: '.
-[Few-shot CoT examples for relation disambiguation]
+1. **Step-by-Step Reasoning**: You MUST first analyze the question and evidence step-by-step in a <think> block.
+   - Identify the key entities in the question.
+   - Find the evidence that connects these entities.
+   - Cite the evidence index (e.g., [1], [2]) for every fact you use.
+   - Explicitly discard irrelevant evidence or distractors.
+2. **Relation Precision**: Answer strictly based on the exact relation asked. Do not swap relations (e.g., writer != performer).
+3. **Attribute Isolation**: Do not transfer attributes between related entities.
+4. **Context Specificity**: Prefer specific evidence over general knowledge.
+5. **Semantic Flexibility**: Allow minor discrepancies if the entity is clearly identifiable.
+6. **Final Answer**: After the <think> block, output the answer on a new line starting with "FINAL: ".
+
+[Few-shot CoT examples]
 Example 1
 Question: Who wrote the song "Halo"?
 Evidence:
 1) "Halo" is a song written by Ryan Tedder and Evan Bogart.
 2) Beyonce performed "Halo" in live concerts.
 Output:
-<think>The asked relation is writer, not performer. Evidence (1) gives writers; evidence (2) gives performer, which is not the target relation.</think>
+<think>
+The question asks for the writer of "Halo".
+Evidence 1 states "Halo" was written by Ryan Tedder and Evan Bogart.
+Evidence 2 discusses the performer (Beyonce), which is a distractor.
+Relevant evidence: [1].
+</think>
 FINAL: Ryan Tedder and Evan Bogart
 
 Example 2
@@ -36,18 +45,14 @@ Evidence:
 1) Greta Gerwig directed "Lady Bird".
 2) Saoirse Ronan starred in "Lady Bird".
 Output:
-<think>The asked relation is directed_by. Evidence (1) directly matches. Evidence (2) is actor-role relation and should not replace the director relation.</think>
+<think>
+The question asks for a film directed by Greta Gerwig.
+Evidence 1 explicitly states Greta Gerwig directed "Lady Bird".
+Evidence 2 mentions an actor in the film, which is not the director relation.
+Relevant evidence: [1].
+</think>
 FINAL: Lady Bird
 
-Example 3
-Question: Who wrote the song "Midnight" by the performer of "Daylight"?
-Evidence:
-1) "Daylight" is a hit song performed by The Stars. It was written by John Smith.
-2) "Midnight" is a song by The Stars, written by Jane Doe.
-Output:
-<think>Performer of "Daylight" is The Stars. Question asks for writer of "Midnight". Evidence (2) states "Midnight" was written by Jane Doe. John Smith wrote "Daylight", not "Midnight".</think>
-FINAL: Jane Doe
-
-Now answer the real question above. Do not copy example entities.
+Now answer the real question above.
 {final_instruction}
 Answer:

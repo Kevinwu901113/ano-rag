@@ -43,6 +43,7 @@ from relrag.utils.llm_stats import LLMCallStats, llm_stats_scope
 from relrag.utils.embedding_utils import get_shared_encoder
 from relrag.utils.openai_answer import generate_openai_answer
 from relrag.utils.output_eval import has_final_tag
+from relrag.utils.vllm_runtime import resolve_vllm_endpoint_model
 
 
 DEFAULT_STALL_WARN_SEC = 300.0
@@ -1442,8 +1443,11 @@ def main() -> None:
     openai_cfg = resolve_openai_config(cfg, dataset_cfg)
     openai_cfg["api_key"] = args.openai_api_key or openai_cfg.get("api_key")
 
-    llm_endpoint = str(args.endpoint or (cfg.get("vllm") or {}).get("endpoint") or "")
-    llm_model = str(args.model or (cfg.get("vllm") or {}).get("model") or "")
+    llm_endpoint, llm_model = resolve_vllm_endpoint_model(
+        endpoint_override=args.endpoint,
+        model_override=args.model,
+        vllm_cfg=cfg.get("vllm"),
+    )
 
     if args.run_dir:
         if len(readers) != 1 or len(modes) != 1:
@@ -1566,10 +1570,8 @@ def main() -> None:
             run_meta: Optional[Dict[str, Any]] = None
             if args.run_dir:
                 resolved_cfg = deepcopy(base_cfg)
-                if args.endpoint:
-                    resolved_cfg.setdefault("vllm", {})["endpoint"] = args.endpoint
-                if args.model:
-                    resolved_cfg.setdefault("vllm", {})["model"] = args.model
+                resolved_cfg.setdefault("vllm", {})["endpoint"] = llm_endpoint
+                resolved_cfg.setdefault("vllm", {})["model"] = llm_model
                 if reader_openai_cfg:
                     resolved_cfg["openai"] = deepcopy(reader_openai_cfg)
                 entry_snapshot = resolved_cfg.setdefault("mirage_baseline_entry", {})

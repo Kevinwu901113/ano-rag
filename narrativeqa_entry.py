@@ -36,6 +36,7 @@ from relrag.utils.answer_source import resolve_short_answer, sha1_text
 from relrag.utils.openai_answer import generate_openai_answer
 from relrag.utils.output_eval import has_final_tag
 from relrag.utils.eval_metrics import score_metrics
+from relrag.utils.vllm_runtime import resolve_vllm_endpoint_model
 
 
 DEFAULT_TOP_K = 10
@@ -316,11 +317,11 @@ def _pred_filename(split: str, reader: str, mode: str, reader_count: int, mode_c
 
 
 def _resolve_llm_config(args: argparse.Namespace, cfg: Dict[str, Any]) -> Tuple[str, str]:
-    endpoint = args.endpoint or (cfg.get("vllm") or {}).get("endpoint")
-    model = args.model or (cfg.get("vllm") or {}).get("model")
-    if not endpoint or not model:
-        raise ValueError("LLM endpoint/model is required (use args or config)")
-    return endpoint, model
+    return resolve_vllm_endpoint_model(
+        endpoint_override=args.endpoint,
+        model_override=args.model,
+        vllm_cfg=cfg.get("vllm"),
+    )
 
 
 def _prompt_template_hash(prompt_name: Optional[str]) -> Optional[str]:
@@ -1063,7 +1064,8 @@ def _process_question(
         backfill_rounds=backfill_rounds,
         doc_id=doc_id,
     )
-    evidences = retrieve_result.get("evidence") or []
+    # FIXED: Ensure evidences passed to generator are strictly top-k from the final context
+    evidences = [_ctx_to_evidence(ctx) for ctx in retrieved_context_topk]
     structured_answer = retrieve_result.get("answer")
     raw_answer, prompt_meta, llm_error, llm_error_reason = generate_answer(
         question=item["question"],
@@ -1657,10 +1659,8 @@ def main() -> None:
             run_started_at = time.time()
             if run_dir:
                 resolved_cfg = deepcopy(reader_base_cfg)
-                if args.endpoint:
-                    resolved_cfg.setdefault("vllm", {})["endpoint"] = args.endpoint
-                if args.model:
-                    resolved_cfg.setdefault("vllm", {})["model"] = args.model
+                resolved_cfg.setdefault("vllm", {})["endpoint"] = llm_endpoint
+                resolved_cfg.setdefault("vllm", {})["model"] = llm_model
                 if openai_runtime_cfg:
                     resolved_cfg["openai"] = deepcopy(openai_runtime_cfg)
                 entry_snapshot = resolved_cfg.setdefault("narrativeqa_entry", {})

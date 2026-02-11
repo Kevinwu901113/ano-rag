@@ -14,6 +14,7 @@ from loguru import logger
 from relrag.config.config_loader import config as global_config
 from relrag.utils.llm_errors import ContextLengthError, is_context_length_error, parse_error_message
 from relrag.utils.llm_stats import get_active_llm_stats
+from relrag.utils.vllm_runtime import detect_vllm_served_model
 from relrag.utils.token_counter import TokenCounter
 from relrag.utils.text_utils import TextUtils
 
@@ -66,14 +67,6 @@ def _normalize_endpoint(endpoint: Optional[str]) -> str:
     if not raw:
         return VLLM_ENDPOINT
     normalized = raw.rstrip("/")
-    
-    # Allow custom if env var is set
-    if _allow_custom_llm():
-        return normalized
-        
-    if normalized != VLLM_ENDPOINT:
-        logger.warning("Overriding LLM endpoint {} -> {}", normalized, VLLM_ENDPOINT)
-        return VLLM_ENDPOINT
     return normalized
 
 def _normalize_custom_endpoint(endpoint: Optional[str]) -> str:
@@ -83,20 +76,28 @@ def _normalize_custom_endpoint(endpoint: Optional[str]) -> str:
     return raw.rstrip("/")
 
 
-def _normalize_model(model: Optional[str]) -> str:
+def _normalize_model(model: Optional[str], endpoint: Optional[str]) -> str:
     raw = (model or "").strip()
     if not raw:
+        detected = detect_vllm_served_model(endpoint)
+        return detected or SERVED_MODEL_NAME
+
+    lowered = raw.lower()
+    if lowered == HF_MODEL_ID.lower():
         return SERVED_MODEL_NAME
-        
-    # Allow custom if env var is set
+
+    # Keep explicit user model unchanged when custom mode is enabled.
     if _allow_custom_llm():
         return raw
-        
-    lowered = raw.lower()
-    if lowered in {SERVED_MODEL_NAME, HF_MODEL_ID.lower()}:
+
+    # Default-config model may be stale if server was started with another served name.
+    if lowered == SERVED_MODEL_NAME:
+        detected = detect_vllm_served_model(endpoint)
+        if detected:
+            return detected
         return SERVED_MODEL_NAME
-    logger.warning("Overriding LLM model {} -> {}", raw, SERVED_MODEL_NAME)
-    return SERVED_MODEL_NAME
+
+    return raw
 
 
 def _trim_messages(messages: List[Dict[str, str]], max_chars: int = 200) -> List[Dict[str, str]]:
@@ -215,7 +216,7 @@ class LLMChatClient:
             self.model = str(model or "")
         else:
             self.endpoint = _normalize_endpoint(endpoint)
-            self.model = _normalize_model(model)
+            self.model = _normalize_model(model, endpoint=self.endpoint)
         self.llm_profile = llm_profile or "generate"
         self.temperature = temperature
         self.max_tokens = max_tokens

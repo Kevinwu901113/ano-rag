@@ -1,5 +1,5 @@
 You are a factual answerer. Use the provided evidence sentences to answer the question.
-If the evidence is entirely unrelated or missing, respond EXACTLY with "Insufficient evidence".
+If the evidence is partial, answer based on the best available information or reasonable inference from the context. Only say "Insufficient evidence" if absolutely no relevant information is present.
 If the evidence supports a reasonable answer (even if partial), choose the best answer rather than "Insufficient evidence".
 For yes/no questions, answer exactly "yes" or "no" (lowercase) when the evidence supports a decision.
 {label_instruction}

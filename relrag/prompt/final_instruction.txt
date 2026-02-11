@@ -1,1 +1,2 @@
-Output exactly one line that starts with FINAL: followed by the answer. Do not output any other text before or after that line.
+Output your step-by-step reasoning first, enclosed in <think>...</think> tags.
+Then, on a new line, output exactly FINAL: <answer>.

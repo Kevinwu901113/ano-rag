@@ -42,6 +42,7 @@ from relrag.utils.answer_source import resolve_short_answer, sha1_text
 from relrag.utils.embedding_utils import get_shared_encoder
 from relrag.utils.openai_answer import generate_openai_answer
 from relrag.utils.output_eval import has_final_tag
+from relrag.utils.vllm_runtime import resolve_vllm_endpoint_model
 
 
 DEFAULT_STALL_WARN_SEC = 300.0
@@ -551,11 +552,11 @@ def _classify_llm_exception(exc: Exception) -> Tuple[str, str]:
 
 def _resolve_llm_config(args: argparse.Namespace) -> Tuple[str, str]:
     cfg = global_config.load_config()
-    endpoint = args.endpoint or (cfg.get("vllm") or {}).get("endpoint")
-    model = args.model or (cfg.get("vllm") or {}).get("model")
-    if not endpoint or not model:
-        raise ValueError("LLM endpoint/model is required (use args or config)")
-    return endpoint, model
+    return resolve_vllm_endpoint_model(
+        endpoint_override=args.endpoint,
+        model_override=args.model,
+        vllm_cfg=cfg.get("vllm"),
+    )
 
 
 def generate_answer(
@@ -1719,10 +1720,8 @@ def main() -> None:
             run_meta: Optional[Dict[str, Any]] = None
             if run_dir:
                 resolved_cfg = deepcopy(base_cfg)
-                if args.endpoint:
-                    resolved_cfg.setdefault("vllm", {})["endpoint"] = args.endpoint
-                if args.model:
-                    resolved_cfg.setdefault("vllm", {})["model"] = args.model
+                resolved_cfg.setdefault("vllm", {})["endpoint"] = llm_endpoint
+                resolved_cfg.setdefault("vllm", {})["model"] = llm_model
                 if reader_openai_cfg:
                     resolved_cfg["openai"] = deepcopy(reader_openai_cfg)
                 entry_snapshot = resolved_cfg.setdefault("musique_entry", {})

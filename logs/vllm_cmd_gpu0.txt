@@ -1,8 +1,8 @@
 label=llm
-model_id=cyankiwi/Qwen3-30B-A3B-Instruct-2507-AWQ-4bit
+model_id=openai/gpt-oss-20b
 cached=True
-quantization_reason=config:compressed-tensors
-cmd=/home/wjk/miniconda3/envs/anorag/bin/python -m vllm.entrypoints.openai.api_server --host 127.0.0.1 --port 8000 --model cyankiwi/Qwen3-30B-A3B-Instruct-2507-AWQ-4bit --gpu-memory-utilization 0.9 --served-model-name qwen3-30b-a3b --trust-remote-code --max-model-len 12288 --max-num-seqs 8 --max-num-batched-tokens 4096 --swap-space 8 --cpu-offload-gb 8 --kv-cache-dtype fp8
+quantization_reason=none
+cmd=/home/wjk/miniconda3/envs/anorag/bin/python -m vllm.entrypoints.openai.api_server --host 127.0.0.1 --port 8000 --model openai/gpt-oss-20b --gpu-memory-utilization 0.9 --served-model-name gpt-oss-20b --trust-remote-code --max-model-len 4096 --max-num-seqs 1 --max-num-batched-tokens 1024 --swap-space 8 --cpu-offload-gb 0 --kv-cache-dtype fp8
 env={}
   CUDA_VISIBLE_DEVICES=0
   HF_HOME=/home/wjk/.cache/hf

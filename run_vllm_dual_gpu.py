@@ -335,7 +335,9 @@ def _spawn_server(
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run vLLM on two GPUs (LLM + Embedding)")
     parser.add_argument("--llm-model", default=DEFAULT_LLM_MODEL)
+    parser.add_argument("--llm-served-model-name", default="qwen3-30b-a3b")
     parser.add_argument("--embed-model", default=DEFAULT_EMBED_MODEL)
+    parser.add_argument("--embed-served-model-name", default="qwen3-embedding")
     parser.add_argument("--cache-dir", default=DEFAULT_CACHE_DIR)
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--llm-port", type=int, default=8000)
@@ -430,7 +432,7 @@ def main() -> None:
             args.llm_model, args.llm_quantization or None, cache_dir
         )
         llm_proc = _spawn_server(
-            name="qwen3-30b-a3b",
+            name=args.llm_served_model_name,
             model_id=args.llm_model,
             host=args.host,
             port=args.llm_port,
@@ -457,7 +459,7 @@ def main() -> None:
         )
     if start_embed:
         embed_proc = _spawn_server(
-            name="qwen3-embedding",
+            name=args.embed_served_model_name,
             model_id=args.embed_model,
             host=args.host,
             port=args.embed_port,

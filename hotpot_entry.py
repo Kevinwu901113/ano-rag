@@ -48,6 +48,7 @@ from relrag.utils.answer_source import resolve_short_answer, sha1_text
 from relrag.utils.openai_answer import generate_openai_answer
 from relrag.utils.eval_metrics import score_metrics
 from relrag.utils.output_eval import has_final_tag
+from relrag.utils.vllm_runtime import resolve_vllm_endpoint_model
 from relrag.doc.chunking_strategies import SentenceAwareChunker, FixedWindowChunker, Chunker
 
 
@@ -1306,11 +1307,11 @@ def _write_debug_artifacts(
 
 def _resolve_llm_config(args: argparse.Namespace) -> Tuple[str, str]:
     cfg = global_config.load_config()
-    endpoint = args.endpoint or (cfg.get("vllm") or {}).get("endpoint")
-    model = args.model or (cfg.get("vllm") or {}).get("model")
-    if not endpoint or not model:
-        raise ValueError("LLM endpoint/model is required (use args or config)")
-    return endpoint, model
+    return resolve_vllm_endpoint_model(
+        endpoint_override=args.endpoint,
+        model_override=args.model,
+        vllm_cfg=cfg.get("vllm"),
+    )
 
 
 def generate_answer(
@@ -2272,7 +2273,8 @@ def _process_example(
         use_alias_lookup=use_alias_lookup,
     )
 
-    evidences = retrieve_result.get("evidence") or []
+    # FIXED: Ensure evidences passed to generator are strictly top-k from the final context
+    evidences = [_ctx_to_evidence(ctx) for ctx in retrieved_context_topk]
     structured_answer = retrieve_result.get("answer")
     raw_answer = ""
     prompt_meta: Dict[str, Any] = {}
