@@ -2727,6 +2727,9 @@ def main() -> None:
                         "official_template": args.official_template,
                     }
                 )
+                embed_snap = resolved_cfg.get("retriever", {}).get("embedding")
+                if isinstance(embed_snap, dict):
+                    embed_snap["offline_index_path"] = "<dynamic_per_example>"
                 _write_json(run_dir / "config.resolved.json", _sanitize_config(resolved_cfg))
                 gold_sp_policy = "paragraphs.is_supporting"
                 if args.include_decomposition_sp:

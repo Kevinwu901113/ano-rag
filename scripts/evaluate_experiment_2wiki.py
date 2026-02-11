@@ -89,6 +89,54 @@ def calculate_recall(retrieved_items: List[Tuple], gold_set: Set[Tuple], k: int)
     hits = len(set(retrieved_k) & gold_set)
     return hits / len(gold_set)
 
+def calculate_paragraph_recall(retrieved_items: List[Tuple], gold_titles: Set[str], k: int) -> float:
+    if not gold_titles:
+        return 0.0
+    
+    retrieved_k = retrieved_items[:k]
+    pred_titles = set(item[0] for item in retrieved_k)
+    hits = len(pred_titles & gold_titles)
+    return hits / len(gold_titles)
+
+def calculate_paragraph_ndcg(retrieved_items: List[Tuple], gold_titles: Set[str], k: int) -> float:
+    relevance = []
+    seen_titles = set()
+    
+    # Filter retrieved items to just top k
+    retrieved_k = retrieved_items[:k]
+    
+    for item in retrieved_k:
+        title = item[0]
+        if title in gold_titles and title not in seen_titles:
+            relevance.append(1)
+            seen_titles.add(title)
+        else:
+            relevance.append(0)
+            
+    dcg = 0.0
+    for i, rel in enumerate(relevance):
+        dcg += rel / np.log2(i + 2)
+        
+    # IDCG
+    num_gold = len(gold_titles)
+    ideal_k = min(num_gold, k)
+    idcg = 0.0
+    for i in range(ideal_k):
+        idcg += 1.0 / np.log2(i + 2)
+        
+    if idcg == 0.0:
+        return 0.0
+        
+    return dcg / idcg
+
+def calculate_ie_at_k(retrieved_items: List[Tuple], gold_titles: Set[str], k: int) -> float:
+    effective_count = 0
+    for i in range(min(k, len(retrieved_items))):
+        title = retrieved_items[i][0] # (title, sent_id)
+        if title in gold_titles:
+            effective_count += 1
+    return effective_count / k
+
 def evaluate_run(pred_file: str, gold_data: Dict[str, Any]) -> Dict[str, float]:
     print(f"Reading {pred_file}...")
     with open(pred_file, 'r', encoding='utf-8') as f:
@@ -104,8 +152,10 @@ def evaluate_run(pred_file: str, gold_data: Dict[str, Any]) -> Dict[str, float]:
         'f1': [],
         'recall@2': [],
         'recall@5': [],
+        'ie@2': [],
+        'ie@5': [],
+        'ndcg@2': [],
         'ndcg@5': [],
-        'ndcg@10': []
     }
     
     count = 0
@@ -133,6 +183,7 @@ def evaluate_run(pred_file: str, gold_data: Dict[str, Any]) -> Dict[str, float]:
         
         # Retrieval Metrics
         gold_sp = set(tuple(x) for x in gold_entry.get('supporting_facts', []))
+        gold_titles = set(x[0] for x in gold_sp)
         
         pred_sp_topk = pred.get('pred_sp_topk', [])
         if not pred_sp_topk:
@@ -140,10 +191,13 @@ def evaluate_run(pred_file: str, gold_data: Dict[str, Any]) -> Dict[str, float]:
              
         pred_sp_tuples = [tuple(x) for x in pred_sp_topk]
         
-        metrics['recall@2'].append(calculate_recall(pred_sp_tuples, gold_sp, 2))
-        metrics['recall@5'].append(calculate_recall(pred_sp_tuples, gold_sp, 5))
-        metrics['ndcg@5'].append(calculate_ndcg(pred_sp_tuples, gold_sp, 5))
-        metrics['ndcg@10'].append(calculate_ndcg(pred_sp_tuples, gold_sp, 10))
+        # Using Paragraph-level metrics for all standard reports as requested
+        metrics['recall@2'].append(calculate_paragraph_recall(pred_sp_tuples, gold_titles, 2))
+        metrics['recall@5'].append(calculate_paragraph_recall(pred_sp_tuples, gold_titles, 5))
+        metrics['ie@2'].append(calculate_ie_at_k(pred_sp_tuples, gold_titles, 2))
+        metrics['ie@5'].append(calculate_ie_at_k(pred_sp_tuples, gold_titles, 5))
+        metrics['ndcg@2'].append(calculate_paragraph_ndcg(pred_sp_tuples, gold_titles, 2))
+        metrics['ndcg@5'].append(calculate_paragraph_ndcg(pred_sp_tuples, gold_titles, 5))
         
     aggregated = {k: np.mean(v) if v else 0.0 for k, v in metrics.items()}
     aggregated['count'] = count
@@ -197,14 +251,15 @@ def main():
         f.write("## 1. 评估概述\n")
         f.write(f"- **评估目录**: `{base_dir}`\n")
         f.write(f"- **金标数据**: `{gold_file}` (共 {len(gold_data)} 条)\n")
-        f.write(f"- **评估指标**: F1, EM, Recall@2/5, NDCG@5/10\n\n")
+        f.write(f"- **评估指标**: F1, EM, Recall@2/5, IE@2/5, NDCG@2/5\n\n")
         
         f.write("## 2. 详细结果\n\n")
-        f.write("| Config | EM | F1 | Recall@2 | Recall@5 | NDCG@5 | NDCG@10 |\n")
-        f.write("| :--- | :--- | :--- | :--- | :--- | :--- | :--- |\n")
+        f.write("| Config | F1 | EM | Recall@2 | Recall@5 | IE@2 | IE@5 | NDCG@2 | NDCG@5 |\n")
+        f.write("| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |\n")
         
         for config, metrics in results.items():
-            f.write(f"| {config} | {metrics['em']:.4f} | {metrics['f1']:.4f} | {metrics['recall@2']:.4f} | {metrics['recall@5']:.4f} | {metrics['ndcg@5']:.4f} | {metrics['ndcg@10']:.4f} |\n")
+            f.write(f"| {config} | {metrics['f1']:.4f} | {metrics['em']:.4f} | {metrics['recall@2']:.4f} | {metrics['recall@5']:.4f} | {metrics['ie@2']:.4f} | {metrics['ie@5']:.4f} | {metrics['ndcg@2']:.4f} | {metrics['ndcg@5']:.4f} |\n")
+
                 
         f.write("\n## 3. 结果分析\n")
         

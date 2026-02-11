@@ -86,6 +86,14 @@ def calculate_ndcg(retrieved_items: List[Tuple], gold_set: Set[Tuple], k: int) -
         
     return dcg / idcg
 
+def calculate_ie_at_k(retrieved_items: List[Tuple], gold_titles: Set[str], k: int) -> float:
+    effective_count = 0
+    for i in range(min(k, len(retrieved_items))):
+        title = retrieved_items[i][0] # (title, sent_id)
+        if title in gold_titles:
+            effective_count += 1
+    return effective_count / k
+
 def calculate_recall(retrieved_items: List[Tuple], gold_set: Set[Tuple], k: int) -> float:
     if not gold_set:
         return 0.0
@@ -110,8 +118,10 @@ def evaluate_run(pred_file: str, gold_data: Dict[str, Any]) -> Dict[str, float]:
         'f1': [],
         'recall@2': [],
         'recall@5': [],
+        'ie@2': [],
+        'ie@5': [],
+        'ndcg@2': [],
         'ndcg@5': [],
-        'ndcg@10': []
     }
     
     for pred in preds:
@@ -152,8 +162,10 @@ def evaluate_run(pred_file: str, gold_data: Dict[str, Any]) -> Dict[str, float]:
         
         metrics['recall@2'].append(calculate_recall(pred_sp_tuples, gold_sp, 2))
         metrics['recall@5'].append(calculate_recall(pred_sp_tuples, gold_sp, 5))
+        metrics['ie@2'].append(calculate_ie_at_k(pred_sp_tuples, gold_sp, 2))
+        metrics['ie@5'].append(calculate_ie_at_k(pred_sp_tuples, gold_sp, 5))
+        metrics['ndcg@2'].append(calculate_ndcg(pred_sp_tuples, gold_sp, 2))
         metrics['ndcg@5'].append(calculate_ndcg(pred_sp_tuples, gold_sp, 5))
-        metrics['ndcg@10'].append(calculate_ndcg(pred_sp_tuples, gold_sp, 10))
         
     aggregated = {k: np.mean(v) if v else 0.0 for k, v in metrics.items()}
     return aggregated
@@ -204,14 +216,14 @@ def main():
         f.write("## 1. 评估概述\n")
         f.write(f"- **评估目录**: `{base_dir}`\n")
         f.write(f"- **金标数据**: `{gold_file}` (MuSiQue Dev, 共 {len(gold_data)} 条)\n")
-        f.write(f"- **评估指标**: F1, EM, Recall@2/5, NDCG@5/10\n\n")
+        f.write(f"- **评估指标**: F1, EM, Recall@2/5, IE@2/5, NDCG@2/5\n\n")
         
         f.write("## 2. 详细结果\n\n")
-        f.write("| Config | EM | F1 | Recall@2 | Recall@5 | NDCG@5 | NDCG@10 |\n")
-        f.write("| :--- | :--- | :--- | :--- | :--- | :--- | :--- |\n")
+        f.write("| Config | F1 | EM | Recall@2 | Recall@5 | IE@2 | IE@5 | NDCG@2 | NDCG@5 |\n")
+        f.write("| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |\n")
         
         for config, metrics in results.items():
-            f.write(f"| {config} | {metrics['em']:.4f} | {metrics['f1']:.4f} | {metrics['recall@2']:.4f} | {metrics['recall@5']:.4f} | {metrics['ndcg@5']:.4f} | {metrics['ndcg@10']:.4f} |\n")
+            f.write(f"| {config} | {metrics['f1']:.4f} | {metrics['em']:.4f} | {metrics['recall@2']:.4f} | {metrics['recall@5']:.4f} | {metrics['ie@2']:.4f} | {metrics['ie@5']:.4f} | {metrics['ndcg@2']:.4f} | {metrics['ndcg@5']:.4f} |\n")
                 
         f.write("\n## 3. 结果分析\n")
         

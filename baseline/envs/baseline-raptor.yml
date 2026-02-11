@@ -1,0 +1,8 @@
+name: baseline-raptor
+channels:
+  - https://mirrors.tuna.tsinghua.edu.cn/anaconda/pkgs/free/
+  - https://mirrors.tuna.tsinghua.edu.cn/anaconda/pkgs/main/
+  - defaults
+dependencies:
+  - python=3.9
+prefix: /home/wjk/miniconda3/envs/baseline-raptor

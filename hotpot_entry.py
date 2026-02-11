@@ -2934,6 +2934,9 @@ def run_experiment_task(
         }
     )
     config_path = output_base / f"config.resolved{suffix}.json"
+    embed_snap = resolved_cfg.get("retriever", {}).get("embedding")
+    if isinstance(embed_snap, dict):
+        embed_snap["offline_index_path"] = "<dynamic_per_example>"
     _write_json(config_path, _sanitize_config(resolved_cfg))
 
     answer_cfg = (effective_base_cfg.get("answer") or {})
