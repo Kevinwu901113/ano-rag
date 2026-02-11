@@ -24,3 +24,9 @@ lightrag.log
 # Baseline experiment artifacts
 baseline/workspaces/
 baseline/results/
+
+# Ignore all markdown files except README
+*.md
+!README.md
+!readme.md
+!Readme.md
