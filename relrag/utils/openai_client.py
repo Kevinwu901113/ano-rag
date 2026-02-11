@@ -8,13 +8,41 @@ from typing import Any, Dict, List, Optional
 import requests
 from loguru import logger
 
+from relrag.config.config_loader import config as global_config
 from relrag.utils.llm_errors import ContextLengthError, is_context_length_error
 from relrag.utils.llm_stats import get_active_llm_stats
+from relrag.utils.token_counter import TokenCounter
 from relrag.utils.text_utils import TextUtils
 
 
 DEFAULT_OPENAI_BASE_URL = "https://api.openai.com/v1"
 _RETRY_STATUS = {408, 429, 500, 502, 503, 504}
+MIN_OUTPUT_TOKENS = 16
+
+
+def _coerce_int(value: Any, fallback: int) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return int(fallback)
+
+
+def _resolve_model_ctx_len(cfg: Dict[str, Any]) -> int:
+    vllm_cfg = cfg.get("vllm") if isinstance(cfg.get("vllm"), dict) else {}
+    llm_cfg = cfg.get("llm") if isinstance(cfg.get("llm"), dict) else {}
+    max_model_len = vllm_cfg.get("max_model_len")
+    if max_model_len is None:
+        max_model_len = llm_cfg.get("max_context_len")
+    return max(256, _coerce_int(max_model_len, 8192))
+
+
+def _resolve_safety_margin_tokens(cfg: Dict[str, Any]) -> int:
+    vllm_cfg = cfg.get("vllm") if isinstance(cfg.get("vllm"), dict) else {}
+    llm_cfg = cfg.get("llm") if isinstance(cfg.get("llm"), dict) else {}
+    safety_margin = vllm_cfg.get("context_safety_margin")
+    if safety_margin is None:
+        safety_margin = llm_cfg.get("safety_margin_tokens")
+    return max(0, _coerce_int(safety_margin, 256))
 
 
 def _normalize_base_url(base_url: Optional[str]) -> str:
@@ -97,6 +125,26 @@ def chat_completion(
     if extra_body:
         payload.update(extra_body)
 
+    prompt_tokens_real = TokenCounter.count_messages(messages)
+    if "max_tokens" in payload:
+        cfg = global_config.load_config()
+        model_ctx_len = _resolve_model_ctx_len(cfg)
+        safety_margin = _resolve_safety_margin_tokens(cfg)
+        requested = _coerce_int(payload.get("max_tokens"), MIN_OUTPUT_TOKENS)
+        allowed = model_ctx_len - safety_margin - prompt_tokens_real
+        clamped = min(requested, max(MIN_OUTPUT_TOKENS, allowed))
+        if clamped != requested:
+            logger.debug(
+                "OpenAI clamp max_tokens: prompt_tokens={} model_ctx_len={} safety_margin={} allowed={} requested={} final={}",
+                prompt_tokens_real,
+                model_ctx_len,
+                safety_margin,
+                allowed,
+                requested,
+                clamped,
+            )
+            payload["max_tokens"] = clamped
+
     headers = {
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
@@ -106,12 +154,9 @@ def chat_completion(
     for attempt in range(max_retries + 1):
         stats = get_active_llm_stats()
         prompt_chars = 0
-        prompt_tokens = 0
-        if stats is not None:
-            for msg in messages or []:
-                content = str(msg.get("content") or "")
-                prompt_chars += len(content)
-                prompt_tokens += TextUtils.rough_token_len(content)
+        for msg in messages or []:
+            content = str(msg.get("content") or "")
+            prompt_chars += len(content)
         start = time.time()
         try:
             proxies = {"http": None, "https": None} if _is_local_url(url) else None
@@ -122,7 +167,7 @@ def chat_completion(
                 if attempt < max_retries:
                     if stats is not None:
                         stats.record_llm_attempt(
-                            prompt_tokens=prompt_tokens,
+                            prompt_tokens=prompt_tokens_real,
                             completion_tokens=None,
                             prompt_chars=prompt_chars,
                             completion_chars=None,
@@ -146,7 +191,7 @@ def chat_completion(
                 if isinstance(choices, list) and choices:
                     finish_reason = choices[0].get("finish_reason")
                 stats.record_llm_attempt(
-                    prompt_tokens=prompt_used if prompt_used is not None else prompt_tokens,
+                    prompt_tokens=prompt_used if prompt_used is not None else prompt_tokens_real,
                     completion_tokens=completion_used,
                     prompt_chars=prompt_chars,
                     completion_chars=len(content),
@@ -162,7 +207,7 @@ def chat_completion(
             if status == 400 and is_context_length_error(message):
                 if stats is not None:
                     stats.record_llm_attempt(
-                        prompt_tokens=prompt_tokens,
+                        prompt_tokens=prompt_tokens_real,
                         completion_tokens=None,
                         prompt_chars=prompt_chars,
                         completion_chars=None,
@@ -175,7 +220,7 @@ def chat_completion(
                 logger.warning("OpenAI HTTP {} (attempt {}): {}", status, attempt + 1, message)
                 if stats is not None:
                     stats.record_llm_attempt(
-                        prompt_tokens=prompt_tokens,
+                        prompt_tokens=prompt_tokens_real,
                         completion_tokens=None,
                         prompt_chars=prompt_chars,
                         completion_chars=None,
@@ -191,7 +236,7 @@ def chat_completion(
                 logger.error("OpenAI HTTP error {}: {}", status, message)
             if stats is not None:
                 stats.record_llm_attempt(
-                    prompt_tokens=prompt_tokens,
+                    prompt_tokens=prompt_tokens_real,
                     completion_tokens=None,
                     prompt_chars=prompt_chars,
                     completion_chars=None,
@@ -204,7 +249,7 @@ def chat_completion(
             logger.warning("OpenAI request timed out after {}s (attempt {})", timeout_sec, attempt + 1)
             if stats is not None:
                 stats.record_llm_attempt(
-                    prompt_tokens=prompt_tokens,
+                    prompt_tokens=prompt_tokens_real,
                     completion_tokens=None,
                     prompt_chars=prompt_chars,
                     completion_chars=None,
@@ -220,7 +265,7 @@ def chat_completion(
             logger.warning("OpenAI request failed (attempt {}): {}", attempt + 1, exc)
             if stats is not None:
                 stats.record_llm_attempt(
-                    prompt_tokens=prompt_tokens,
+                    prompt_tokens=prompt_tokens_real,
                     completion_tokens=None,
                     prompt_chars=prompt_chars,
                     completion_chars=None,

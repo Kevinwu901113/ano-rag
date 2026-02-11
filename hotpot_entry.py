@@ -48,6 +48,7 @@ from relrag.utils.answer_source import resolve_short_answer, sha1_text
 from relrag.utils.openai_answer import generate_openai_answer
 from relrag.utils.eval_metrics import score_metrics
 from relrag.utils.output_eval import has_final_tag
+from relrag.doc.chunking_strategies import SentenceAwareChunker, FixedWindowChunker, Chunker
 
 
 DEFAULT_STALL_WARN_SEC = 300.0
@@ -304,11 +305,14 @@ def _write_sentence_notes_for_example(
 def _write_chunks_for_example(
     doc_index: Dict[str, Dict[str, Any]],
     chunks_path: Path,
+    chunker: Optional[Chunker] = None,
     overwrite: bool = False,
 ) -> int:
     if chunks_path.exists() and not overwrite:
         return 0
     chunks_path.parent.mkdir(parents=True, exist_ok=True)
+    if chunker is None:
+        chunker = SentenceAwareChunker()
     written = 0
     with chunks_path.open("w", encoding="utf-8") as handle:
         for idx, (doc_id, meta) in enumerate(doc_index.items()):
@@ -316,21 +320,11 @@ def _write_chunks_for_example(
             sentences = [str(s).strip() for s in (meta.get("sentences") or []) if str(s).strip()]
             if not sentences:
                 continue
-            chunk_id = f"c{idx:04d}_{doc_id}"
             text = " ".join(sentences)
-            sent_spans = [{"idx": sent_idx, "text": sentence} for sent_idx, sentence in enumerate(sentences)]
-            chunk = {
-                "chunk_id": chunk_id,
-                "doc_id": str(doc_id),
-                "text": text,
-                "meta": {
-                    "title": title,
-                    "doc_title": title,
-                    "sent_spans": sent_spans,
-                },
-            }
-            handle.write(json.dumps(chunk, ensure_ascii=False) + "\n")
-            written += 1
+            chunks = chunker.chunk(doc_id, text, meta)
+            for chunk in chunks:
+                handle.write(json.dumps(chunk, ensure_ascii=False) + "\n")
+                written += 1
     return written
 
 
@@ -1818,6 +1812,7 @@ def _ensure_index(
     doc_index: Dict[str, Dict[str, Any]],
     index_root: Path,
     force_build: bool,
+    chunker: Optional[Chunker] = None,
 ) -> Dict[str, Any]:
     notes_path = index_root / "notes.jsonl"
     chunks_path = index_root / "chunks.jsonl"
@@ -1831,7 +1826,7 @@ def _ensure_index(
         if not force_build and notes_ready and indexes_ready and chunks_ready:
             return {"status": "reused"}
         if not force_build and notes_ready and indexes_ready and not chunks_ready:
-            chunks_written = _write_chunks_for_example(doc_index, chunks_path, overwrite=True)
+            chunks_written = _write_chunks_for_example(doc_index, chunks_path, chunker=chunker, overwrite=True)
             return {"status": "reused_chunks", "chunks": chunks_written}
         
         index_root.mkdir(parents=True, exist_ok=True)
@@ -1840,7 +1835,7 @@ def _ensure_index(
         if force_build or not notes_path.exists():
             notes_written = _write_sentence_notes_for_example(doc_index, notes_path, overwrite=True)
         if force_build or not chunks_path.exists():
-            chunks_written = _write_chunks_for_example(doc_index, chunks_path, overwrite=True)
+            chunks_written = _write_chunks_for_example(doc_index, chunks_path, chunker=chunker, overwrite=True)
         builder = IndexBuilder()
         builder.build_from_jsonl(str(notes_path))
         builder.dump(str(indexes_dir))
@@ -2217,14 +2212,23 @@ def _process_example(
     debug_dir: Optional[Path],
     debug_max_notes: int,
     run_dir: Optional[str] = None,
+    chunking_method: str = "sentence",
+    chunking_size: int = 256,
+    chunking_overlap: int = 32,
 ) -> Dict[str, Any]:
     qid = str(example.get("_id") or "unknown")
     question = str(example.get("question") or "")
+    
+    chunker: Optional[Chunker] = None
+    if chunking_method == "fixed":
+        chunker = FixedWindowChunker(chunk_size=chunking_size, overlap=chunking_overlap)
+    else:
+        chunker = SentenceAwareChunker()
 
     example_root = cache_root / qid
     docs_dir = example_root / "docs"
     doc_index = _write_docs_for_example(example, docs_dir, overwrite=force_build)
-    build_stats = _ensure_index(doc_index, example_root, force_build)
+    build_stats = _ensure_index(doc_index, example_root, force_build, chunker=chunker)
     build_embedding, build_bm25 = _mode_requirements(mode)
     aux_stats = _build_aux_indexes(
         example_root,
@@ -2833,6 +2837,9 @@ def run_experiment_task(
     stall_abort_sec: float,
     readers_count: int,
     modes_count: int,
+    chunking_method: str = "sentence",
+    chunking_size: int = 256,
+    chunking_overlap: int = 32,
 ) -> Dict[str, Any]:
     reader_openai_cfg = openai_runtime_cfg if reader == "openai" else None
     answer_model = reader_openai_cfg.get("model") if reader == "openai" and reader_openai_cfg else llm_model
@@ -3083,6 +3090,9 @@ def run_experiment_task(
                             debug_dir=run_debug_dir,
                             debug_max_notes=debug_max_notes,
                             run_dir=str(output_base),
+                            chunking_method=chunking_method,
+                            chunking_size=chunking_size,
+                            chunking_overlap=chunking_overlap,
                         )
                         handle.write(json.dumps(record, ensure_ascii=False) + "\n")
                         handle.flush()
@@ -3146,6 +3156,9 @@ def run_experiment_task(
                             run_debug_dir,
                             debug_max_notes,
                             str(output_base),
+                            chunking_method,
+                            chunking_size,
+                            chunking_overlap,
                         )
                         future_map[future] = qid
                         scheduled += 1
@@ -3303,6 +3316,9 @@ def main() -> None:
     parser.add_argument("--debug_max_notes", type=int, help="Max notes to store per question in debug dump (fallback to config)")
     parser.add_argument("--stall_warn_sec", type=float, help="Warn if no worker finishes within this many seconds (fallback to config)")
     parser.add_argument("--stall_abort_sec", type=float, help="Abort pending workers after this many idle seconds (0 to disable, fallback to config)")
+    parser.add_argument("--chunking_method", choices=["sentence", "fixed"], help="Chunking method: sentence or fixed")
+    parser.add_argument("--chunking_size", type=int, help="Fixed chunk size in tokens")
+    parser.add_argument("--chunking_overlap", type=int, help="Fixed chunk overlap in tokens")
 
     args = parser.parse_args()
     repo_root = Path(__file__).resolve().parent
@@ -3324,6 +3340,9 @@ def main() -> None:
     args.split = _pick_arg(args, entry_cfg, dataset_cfg, "split", DEFAULT_SPLIT)
     args.cache_dir = _pick_arg(args, entry_cfg, dataset_cfg, "cache_dir", DEFAULT_CACHE_DIR)
     args.output_dir = _pick_arg(args, entry_cfg, dataset_cfg, "output_dir", DEFAULT_OUTPUT_DIR)
+    args.chunking_method = _pick_arg(args, entry_cfg, dataset_cfg, "chunking_method", "sentence")
+    args.chunking_size = _coerce_int(_pick_arg(args, entry_cfg, dataset_cfg, "chunking_size", 256), 256)
+    args.chunking_overlap = _coerce_int(_pick_arg(args, entry_cfg, dataset_cfg, "chunking_overlap", 32), 32)
     args.top_k = _coerce_int(
         _pick_arg(args, entry_cfg, dataset_cfg, "top_k", DEFAULT_TOP_K),
         DEFAULT_TOP_K,
@@ -3620,6 +3639,9 @@ def main() -> None:
                 "stall_abort_sec": args.stall_abort_sec,
                 "readers_count": len(readers),
                 "modes_count": len(modes),
+                "chunking_method": args.chunking_method,
+                "chunking_size": args.chunking_size,
+                "chunking_overlap": args.chunking_overlap,
             })
 
     results = []

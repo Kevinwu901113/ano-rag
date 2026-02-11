@@ -34,6 +34,7 @@ from relrag.utils import TextUtils
 from relrag.utils.answer_source import resolve_short_answer, sha1_text
 from relrag.utils.openai_answer import generate_openai_answer
 from relrag.utils.output_eval import has_final_tag
+from relrag.doc.chunking_strategies import SentenceAwareChunker, FixedWindowChunker, Chunker
 
 
 DEFAULT_STALL_WARN_SEC = 300.0
@@ -293,6 +294,71 @@ def _write_paragraph_notes_for_example(
         seen.add(key)
         entities.append(cleaned)
 
+    def _clean_alias_candidate(value: str) -> str:
+        candidate = re.sub(r"^[\"'(\[]+|[\"')\].,;:]+$", "", str(value or "").strip())
+        candidate = re.sub(r"\s+", " ", candidate).strip()
+        candidate = re.sub(r"^(?:also|formerly)\s+roman(?:iz|is)(?:ed|e[sd])\s+as\s+", "", candidate, flags=re.I)
+        candidate = re.sub(r"^roman(?:iz|is)(?:ed|e[sd])\s+as\s+", "", candidate, flags=re.I)
+        candidate = re.sub(r"^(?:also\s+)?known\s+as\s+", "", candidate, flags=re.I)
+        candidate = re.sub(r"^(?:aka|a\.k\.a\.)\s+", "", candidate, flags=re.I)
+        if len(candidate) < 2 or len(candidate) > 64:
+            return ""
+        if any(ch.isdigit() for ch in candidate):
+            return ""
+        lowered = candidate.lower()
+        if lowered in {"help", "info", "help info", "citation needed"}:
+            return ""
+        if re.fullmatch(r"\d{3,4}", candidate):
+            return ""
+        return candidate
+
+    def _collect_aliases(title: str, text: str) -> List[str]:
+        canonical = str(title or "").strip()
+        aliases: List[str] = []
+        seen: set[str] = set()
+
+        def _add(raw: str) -> None:
+            cleaned = _clean_alias_candidate(raw)
+            if not cleaned:
+                return
+            if canonical and cleaned.lower() == canonical.lower():
+                return
+            key = cleaned.lower()
+            if key in seen:
+                return
+            seen.add(key)
+            aliases.append(cleaned)
+
+        if canonical:
+            match = re.match(r"^(?P<base>[^()]+?)\s*\((?P<paren>[^()]{1,80})\)\s*$", canonical)
+            if match:
+                _add(match.group("base"))
+                paren = (match.group("paren") or "").strip()
+                if re.fullmatch(r"[A-Za-z][A-Za-z0-9.\- ]{1,15}", paren) and (
+                    any(ch.isupper() for ch in paren) or "." in paren
+                ):
+                    _add(paren)
+
+        short_text = str(text or "")[:600]
+        lead_paren = re.match(r"^\s*[^()]{1,120}\(([^()]{1,80})\)", short_text)
+        if lead_paren:
+            for part in re.split(r"[,;/]|\bor\b", lead_paren.group(1), flags=re.I):
+                _add(part)
+
+        patterns = [
+            re.compile(r"\b(?:formerly|also)\s+roman(?:iz|is)(?:ed|e[sd])\s+as\s+([A-Za-z][A-Za-z.'\- ]{1,60})", flags=re.I),
+            re.compile(r"\b(?:also known as|known as|aka|a\.k\.a\.)\s+([A-Za-z][A-Za-z.'\- ]{1,60})", flags=re.I),
+            re.compile(r"\b(?:abbreviated as|abbrev\. as)\s+([A-Za-z][A-Za-z.'\- ]{1,30})", flags=re.I),
+        ]
+        for pattern in patterns:
+            found = pattern.search(short_text)
+            if not found:
+                continue
+            alias_text = re.split(r"[.;]", found.group(1), maxsplit=1)[0]
+            _add(alias_text)
+
+        return aliases
+
     with notes_path.open("w", encoding="utf-8") as handle:
         for doc_id, meta in doc_index.items():
             title = meta.get("title") or ""
@@ -300,9 +366,26 @@ def _write_paragraph_notes_for_example(
             text = str(meta.get("text") or "").strip()
             if text == "" or para_idx is None:
                 continue
+            aliases = _collect_aliases(str(title), text)
+            canonical_title = str(title).strip()
+            alias_map = {canonical_title: aliases} if canonical_title and aliases else {}
+            subject_profile = {
+                "type": "CONCEPT",
+                "aliases": aliases,
+                "nationality": [],
+                "birth": None,
+                "death": None,
+                "occupations": [],
+                "titles": [],
+                "categories": [],
+                "same_as": [],
+                "description": None,
+            }
             entities: List[str] = []
             seen_entities: set[str] = set()
             _append_entity(entities, seen_entities, title)
+            for alias in aliases:
+                _append_entity(entities, seen_entities, alias)
             for candidate in TextUtils.extract_entity_candidates(text):
                 _append_entity(entities, seen_entities, candidate)
             if len(entities) > 32:
@@ -324,6 +407,8 @@ def _write_paragraph_notes_for_example(
                     "quality_score": 1.0,
                     "evidence_canonical": text,
                     "entities": entities,
+                    "subject_profile": subject_profile,
+                    "alias_map": alias_map,
                 },
             }
             handle.write(json.dumps(note, ensure_ascii=False) + "\n")
@@ -334,11 +419,16 @@ def _write_paragraph_notes_for_example(
 def _write_chunks_for_example(
     doc_index: Dict[str, Dict[str, Any]],
     chunks_path: Path,
+    chunker: Optional[Chunker] = None,
     overwrite: bool = False,
 ) -> int:
     if chunks_path.exists() and not overwrite:
         return 0
     chunks_path.parent.mkdir(parents=True, exist_ok=True)
+    
+    if chunker is None:
+        chunker = SentenceAwareChunker()
+        
     written = 0
     with chunks_path.open("w", encoding="utf-8") as handle:
         for doc_id, meta in doc_index.items():
@@ -347,18 +437,33 @@ def _write_chunks_for_example(
             text = str(meta.get("text") or "").strip()
             if text == "" or para_idx is None:
                 continue
-            chunk_id = f"c{int(para_idx):04d}_{doc_id}"
-            chunk = {
-                "chunk_id": chunk_id,
-                "doc_id": doc_id,
-                "text": text,
-                "meta": {
-                    "title": str(title),
-                    "paragraph_idx": int(para_idx),
-                },
-            }
-            handle.write(json.dumps(chunk, ensure_ascii=False) + "\n")
-            written += 1
+            
+            # Musique defaults: one chunk per paragraph
+            # We can use the Chunker here.
+            # However, SentenceAwareChunker in relrag/doc/chunking_strategies.py uses 'sentences' from meta.
+            # Musique doc_index items have 'text' (paragraph) but maybe not 'sentences'.
+            # Let's check _write_docs_for_example in musique_entry.py to see if it populates 'sentences'.
+            
+            # If not, SentenceAwareChunker will use TextUtils.split_with_spans(text).
+            # This is fine.
+            
+            # Note: Musique baseline logic was:
+            # chunk_id = f"c{int(para_idx):04d}_{doc_id}"
+            # chunk = { ... text: text ... }
+            # So one chunk per paragraph.
+            
+            # If we use SentenceAwareChunker, it will produce:
+            # [{ chunk_id: ..., text: "sent1 sent2...", meta: { sent_spans: ... } }]
+            # If we pass doc_id and meta to chunker.
+            
+            chunks = chunker.chunk(doc_id, text, meta)
+            for chunk in chunks:
+                # Ensure Musique-specific meta is preserved if needed
+                if "paragraph_idx" not in chunk["meta"] and para_idx is not None:
+                    chunk["meta"]["paragraph_idx"] = int(para_idx)
+                
+                handle.write(json.dumps(chunk, ensure_ascii=False) + "\n")
+                written += 1
     return written
 
 
@@ -1150,6 +1255,7 @@ def _ensure_index(
     doc_index: Dict[str, Dict[str, Any]],
     index_root: Path,
     force_build: bool,
+    chunker: Optional[Chunker] = None,
 ) -> Dict[str, Any]:
     notes_path = index_root / "notes.jsonl"
     indexes_dir = index_root / "indexes"
@@ -1179,7 +1285,7 @@ def _ensure_index(
 
     chunks_written = 0
     if force_build or not chunks_ready:
-        chunks_written = _write_chunks_for_example(doc_index, chunks_path, overwrite=True)
+        chunks_written = _write_chunks_for_example(doc_index, chunks_path, chunker=chunker, overwrite=True)
 
     return {"status": index_status, "notes": notes_written, "chunks": chunks_written}
 
@@ -1578,14 +1684,24 @@ def _process_example(
     force_answerable: bool,
     repair_max_tokens: int,
     run_dir: Optional[str] = None,
+    chunking_method: str = "sentence",
+    chunking_size: int = 256,
+    chunking_overlap: int = 32,
 ) -> Dict[str, Any]:
     qid = str(example.get("id") or "unknown")
     question = str(example.get("question") or "")
     cache_key = f"{qid}__{int(example_idx):05d}"
     example_root = cache_root / cache_key
     docs_dir = example_root / "docs"
+    
+    chunker: Optional[Chunker] = None
+    if chunking_method == "fixed":
+        chunker = FixedWindowChunker(chunk_size=chunking_size, overlap=chunking_overlap)
+    else:
+        chunker = SentenceAwareChunker()
+        
     doc_index = _write_docs_for_example(example, docs_dir, overwrite=force_build)
-    build_stats = _ensure_index(doc_index, example_root, force_build)
+    build_stats = _ensure_index(doc_index, example_root, force_build, chunker=chunker)
     build_embedding, build_bm25 = _mode_requirements(mode)
     aux_stats = _build_aux_indexes(
         example_root,
@@ -2345,6 +2461,9 @@ def main() -> None:
     parser.add_argument("--debug_max_notes", type=int, help="Max notes to store per question in debug dump (fallback to config)")
     parser.add_argument("--stall_warn_sec", type=float, help="Warn if no worker finishes within this many seconds (fallback to config)")
     parser.add_argument("--stall_abort_sec", type=float, help="Abort pending workers after this many idle seconds (0 to disable, fallback to config)")
+    parser.add_argument("--chunking_method", choices=["sentence", "fixed"], help="Chunking method: sentence or fixed")
+    parser.add_argument("--chunking_size", type=int, help="Fixed chunk size in tokens")
+    parser.add_argument("--chunking_overlap", type=int, help="Fixed chunk overlap in tokens")
 
     args = parser.parse_args()
     repo_root = Path(__file__).resolve().parent
@@ -2362,6 +2481,9 @@ def main() -> None:
     args.split = _pick_arg(args, entry_cfg, dataset_cfg, "split", DEFAULT_SPLIT)
     args.cache_dir = _pick_arg(args, entry_cfg, dataset_cfg, "cache_dir", DEFAULT_CACHE_DIR)
     args.output_dir = _pick_arg(args, entry_cfg, dataset_cfg, "output_dir", DEFAULT_OUTPUT_DIR)
+    args.chunking_method = _pick_arg(args, entry_cfg, dataset_cfg, "chunking_method", "sentence")
+    args.chunking_size = _coerce_int(_pick_arg(args, entry_cfg, dataset_cfg, "chunking_size", 256), 256)
+    args.chunking_overlap = _coerce_int(_pick_arg(args, entry_cfg, dataset_cfg, "chunking_overlap", 32), 32)
     args.top_k = _coerce_int(
         _pick_arg(args, entry_cfg, dataset_cfg, "top_k", DEFAULT_TOP_K),
         DEFAULT_TOP_K,
@@ -2717,7 +2839,10 @@ def main() -> None:
                                     answer_repair=args.answer_repair,
                                     force_answerable=args.force_answerable,
                                     repair_max_tokens=args.repair_max_tokens,
-                                    run_dir=str(run_dir) if run_dir else None,
+                                    run_dir=str(output_base),
+                                    chunking_method=args.chunking_method,
+                                    chunking_size=args.chunking_size,
+                                    chunking_overlap=args.chunking_overlap,
                                 )
                                 handle.write(json.dumps(record, ensure_ascii=False) + "\n")
                                 handle.flush()
@@ -2772,6 +2897,10 @@ def main() -> None:
                                     args.answer_repair,
                                     args.force_answerable,
                                     args.repair_max_tokens,
+                                    str(output_base),
+                                    args.chunking_method,
+                                    args.chunking_size,
+                                    args.chunking_overlap,
                                 )
                                 future_map[future] = cache_key
                                 scheduled += 1

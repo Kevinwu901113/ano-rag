@@ -15,16 +15,18 @@ vllm:
   endpoint: http://127.0.0.1:8000/v1
   model: qwen3-30b-a3b
   temperature: 0.0
-  max_tokens: 256
-  max_new_tokens: 256
+  max_tokens: 1024
+  max_new_tokens: 1024
+  max_model_len: 12288
+  context_safety_margin: 512
   concurrency:
     max_workers: 16
     batch_size: 1
     endpoints: []
     connect_timeout_sec: 3.05
-    read_timeout_sec: 20.0
+    read_timeout_sec: 60.0
     retry_max_attempts: 2
-    retry_total_cap_sec: 30.0
+    retry_total_cap_sec: 60.0
     retry_backoff_base: 1.0
     retry_backoff_max_sec: 6.0
     retry_jitter_frac: 0.5
@@ -71,8 +73,7 @@ openai:
   retry_backoff_max_sec: 60.0
   system_prompt_name: system_prompt_openai.txt
 answerer:
-  stop:
-  - "\n"
+  stop: null
 datasets:
   mirage:
     cache_dir: result/mirage/cache
@@ -120,11 +121,11 @@ datasets:
 llm_profiles:
   extract:
     temperature: 0.0
-    max_tokens: 256
+    max_tokens: 1024
     thinking: false
   generate:
     temperature: 0.2
-    max_tokens: 128
+    max_tokens: 1024
     thinking: null
 structrag:
   router: llm
@@ -136,8 +137,8 @@ structrag:
 routing:
   token_budget_hint: 320000
 llm:
-  max_context_len: 8192
-  safety_margin_tokens: 256
+  max_context_len: 12288
+  safety_margin_tokens: 512
 rerank:
   max_candidates: 12
   max_candidate_tokens: 256
@@ -347,7 +348,7 @@ parsing:
   enable_bare_key_fix: true
   enable_loose_extractor: true
   loose_split_key: subj
-  max_tokens: 768
+  max_tokens: 2048
   parse_retry: 1
   validation_retry: 1
   stop:

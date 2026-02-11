@@ -11,7 +11,7 @@ from loguru import logger
 from relrag.config.config_loader import config as global_config
 from relrag.prompt import render_prompt
 from relrag.utils.output_protocol import build_final_instruction
-from relrag.utils.text_utils import TextUtils
+from relrag.utils.token_counter import TokenCounter
 
 
 CHAT_BASE_OVERHEAD_TOKENS = 12
@@ -114,16 +114,11 @@ def _resolve_settings(
 
 
 def _estimate_text_tokens(text: str) -> int:
-    return TextUtils.rough_token_len(text or "")
+    return TokenCounter.count_text(text or "")
 
 
 def estimate_messages_tokens(messages: List[Dict[str, str]]) -> int:
-    tokens = CHAT_BASE_OVERHEAD_TOKENS
-    for msg in messages or []:
-        content = msg.get("content") or ""
-        tokens += _estimate_text_tokens(str(content))
-        tokens += CHAT_MESSAGE_OVERHEAD_TOKENS
-    return tokens
+    return TokenCounter.count_messages(messages or [])
 
 
 def _truncate_text(text: str, max_chars: Optional[int]) -> str:

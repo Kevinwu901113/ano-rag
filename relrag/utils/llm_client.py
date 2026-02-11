@@ -14,6 +14,7 @@ from loguru import logger
 from relrag.config.config_loader import config as global_config
 from relrag.utils.llm_errors import ContextLengthError, is_context_length_error, parse_error_message
 from relrag.utils.llm_stats import get_active_llm_stats
+from relrag.utils.token_counter import TokenCounter
 from relrag.utils.text_utils import TextUtils
 
 
@@ -26,6 +27,7 @@ _DEFAULT_PROFILES = {
     "extract": {"temperature": 0.0, "max_tokens": 256, "thinking": False},
     "generate": {"temperature": 0.2, "max_tokens": 128, "thinking": False},
 }
+MIN_OUTPUT_TOKENS = 16
 
 
 @dataclass(frozen=True)
@@ -105,6 +107,24 @@ def _trim_messages(messages: List[Dict[str, str]], max_chars: int = 200) -> List
             content = content[:max_chars].rstrip() + "..."
         trimmed.append({**msg, "content": content})
     return trimmed
+
+
+def _resolve_model_ctx_len(cfg: Dict[str, Any]) -> int:
+    vllm_cfg = cfg.get("vllm") if isinstance(cfg.get("vllm"), dict) else {}
+    llm_cfg = cfg.get("llm") if isinstance(cfg.get("llm"), dict) else {}
+    max_model_len = vllm_cfg.get("max_model_len")
+    if max_model_len is None:
+        max_model_len = llm_cfg.get("max_context_len")
+    return max(256, _coerce_int(max_model_len, 8192))
+
+
+def _resolve_safety_margin_tokens(cfg: Dict[str, Any]) -> int:
+    vllm_cfg = cfg.get("vllm") if isinstance(cfg.get("vllm"), dict) else {}
+    llm_cfg = cfg.get("llm") if isinstance(cfg.get("llm"), dict) else {}
+    safety_margin = vllm_cfg.get("context_safety_margin")
+    if safety_margin is None:
+        safety_margin = llm_cfg.get("safety_margin_tokens")
+    return max(0, _coerce_int(safety_margin, 256))
 
 
 def get_profile_config(profile: Optional[str] = None, config: Optional[Dict[str, Any]] = None) -> LLMProfileConfig:
@@ -243,6 +263,31 @@ class LLMChatClient:
             return raw.rstrip("/")
         return _normalize_endpoint(endpoint_override or self.endpoint)
 
+    def _clamp_payload_max_tokens(
+        self,
+        payload: Dict[str, Any],
+        messages: List[Dict[str, str]],
+    ) -> int:
+        prompt_tokens_real = TokenCounter.count_messages(messages)
+        requested = _coerce_int(payload.get("max_tokens"), MIN_OUTPUT_TOKENS)
+        cfg = global_config.load_config()
+        model_ctx_len = _resolve_model_ctx_len(cfg)
+        safety_margin = _resolve_safety_margin_tokens(cfg)
+        allowed = model_ctx_len - safety_margin - prompt_tokens_real
+        clamped = min(requested, max(MIN_OUTPUT_TOKENS, allowed))
+        if clamped != requested:
+            logger.debug(
+                "LLM clamp max_tokens: prompt_tokens={} model_ctx_len={} safety_margin={} allowed={} requested={} final={}",
+                prompt_tokens_real,
+                model_ctx_len,
+                safety_margin,
+                allowed,
+                requested,
+                clamped,
+            )
+            payload["max_tokens"] = clamped
+        return prompt_tokens_real
+
     def _build_payload(
         self,
         messages: List[Dict[str, str]],
@@ -294,12 +339,9 @@ class LLMChatClient:
         url = f"{endpoint}/chat/completions"
         stats = get_active_llm_stats()
         prompt_chars = 0
-        prompt_tokens_est = 0
-        if stats is not None:
-            for msg in messages or []:
-                content = str(msg.get("content") or "")
-                prompt_chars += len(content)
-                prompt_tokens_est += TextUtils.rough_token_len(content)
+        for msg in messages or []:
+            content = str(msg.get("content") or "")
+            prompt_chars += len(content)
         payload = self._build_payload(
             messages,
             temperature=temperature if temperature is not None else self.temperature,
@@ -309,6 +351,7 @@ class LLMChatClient:
             stop=stop,
             profile=profile,
         )
+        prompt_tokens_real = self._clamp_payload_max_tokens(payload, messages)
         req_timeout = timeout if timeout is not None else self.timeout
 
         last_exc: Optional[Exception] = None
@@ -334,7 +377,7 @@ class LLMChatClient:
                     if isinstance(choices, list) and choices:
                         finish_reason = choices[0].get("finish_reason")
                     stats.record_llm_attempt(
-                        prompt_tokens=prompt_used if prompt_used is not None else prompt_tokens_est,
+                        prompt_tokens=prompt_used if prompt_used is not None else prompt_tokens_real,
                         completion_tokens=completion_used,
                         prompt_chars=prompt_chars,
                         completion_chars=len(content),
@@ -352,7 +395,7 @@ class LLMChatClient:
                     if is_context_length_error(message):
                         if stats is not None:
                             stats.record_llm_attempt(
-                                prompt_tokens=prompt_tokens_est,
+                                prompt_tokens=prompt_tokens_real,
                                 completion_tokens=None,
                                 prompt_chars=prompt_chars,
                                 completion_chars=None,
@@ -370,7 +413,7 @@ class LLMChatClient:
                     }, indent=2))
                 if stats is not None:
                     stats.record_llm_attempt(
-                        prompt_tokens=prompt_tokens_est,
+                        prompt_tokens=prompt_tokens_real,
                         completion_tokens=None,
                         prompt_chars=prompt_chars,
                         completion_chars=None,
@@ -384,7 +427,7 @@ class LLMChatClient:
                 logger.warning("LLM call timed out after {}s (attempt {})", req_timeout, attempt + 1)
                 if stats is not None:
                     stats.record_llm_attempt(
-                        prompt_tokens=prompt_tokens_est,
+                        prompt_tokens=prompt_tokens_real,
                         completion_tokens=None,
                         prompt_chars=prompt_chars,
                         completion_chars=None,
@@ -397,7 +440,7 @@ class LLMChatClient:
                 logger.warning("LLM call failed (attempt {}): {}", attempt + 1, exc)
                 if stats is not None:
                     stats.record_llm_attempt(
-                        prompt_tokens=prompt_tokens_est,
+                        prompt_tokens=prompt_tokens_real,
                         completion_tokens=None,
                         prompt_chars=prompt_chars,
                         completion_chars=None,
@@ -436,6 +479,7 @@ class LLMChatClient:
             stop=stop,
             profile=profile,
         )
+        self._clamp_payload_max_tokens(payload, messages)
         req_timeout = timeout if timeout is not None else self.timeout
         proxies = {"http": None, "https": None} if self._is_local_url(url) else None
         if session is not None:
@@ -467,6 +511,7 @@ class LLMChatClient:
             stop=stop,
             profile=profile,
         )
+        self._clamp_payload_max_tokens(payload, messages)
         req_timeout = timeout if timeout is not None else self.timeout
         if isinstance(req_timeout, tuple):
             timeout_obj = aiohttp.ClientTimeout(sock_connect=req_timeout[0], sock_read=req_timeout[1])

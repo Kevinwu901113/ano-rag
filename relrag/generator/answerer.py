@@ -20,7 +20,7 @@ def call_llm(
     question: str,
     evidences: list,
     temperature: float = 0.2,
-    max_tokens: int = 64,
+    max_tokens: Optional[int] = None,
     retries: int = 2,
     allowed_labels: Optional[List[str]] = None,
     attribute_name: Optional[str] = None,
@@ -64,6 +64,15 @@ def call_llm(
         base_max_item_tokens = int(base_max_item_tokens) if base_max_item_tokens is not None else None
     except (TypeError, ValueError):
         base_max_item_tokens = None
+    if max_tokens is None:
+        profiles_cfg = resolved_cfg.get("llm_profiles") if isinstance(resolved_cfg.get("llm_profiles"), dict) else {}
+        generate_cfg = profiles_cfg.get("generate") if isinstance(profiles_cfg.get("generate"), dict) else {}
+        vllm_cfg = resolved_cfg.get("vllm") if isinstance(resolved_cfg.get("vllm"), dict) else {}
+        max_tokens = (
+            generate_cfg.get("max_tokens")
+            if generate_cfg.get("max_tokens") is not None
+            else vllm_cfg.get("max_tokens", 256)
+        )
     requested_max_tokens = int(max_tokens)
     max_items_override = None
     max_item_tokens_override = None

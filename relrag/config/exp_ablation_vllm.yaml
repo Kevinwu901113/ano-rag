@@ -1,0 +1,30 @@
+datasets:
+  hotpotqa:
+    retrievers: ["hybrid"]
+    readers: ["vllm"]
+  musique:
+    retrievers: ["hybrid"]
+    readers: ["vllm"]
+    
+hotpot_entry:
+  retrieval_only: false
+  disable_retriever_llm: true
+
+openai:
+  enabled: false
+  # Dummy key to pass validation if strictly required by legacy code
+  api_key: "sk-dummy-key-for-vllm-only-run" 
+
+vllm:
+  endpoint: http://127.0.0.1:8000/v1
+  model: qwen3-30b-a3b
+  temperature: 0.0
+  max_tokens: 256
+  
+retriever:
+  bm25:
+    top_k: 10
+  embedding:
+    top_k: 10
+  hybrid:
+    top_k: 10
