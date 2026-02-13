@@ -13,8 +13,25 @@ def has_final_tag(text: str) -> bool:
 _ANSWER_PATTERNS = [
     re.compile(r"(?:^|[\n\r])\s*(?:final answer|answer|ans|response)\s*[:\-]\s*(.+)", re.IGNORECASE),
     re.compile(r"(?:the\s+)?answer\s+is\s+(.+)", re.IGNORECASE),
+    re.compile(r"(?:likely|probably|maybe)\s*(?:is|:)?\s+(.+)", re.IGNORECASE),
     re.compile(r"(?:therefore|thus|hence|so)[^\n\r]{0,120}?\banswer(?:\s+is)?\s+(.+)", re.IGNORECASE),
 ]
+
+_REASONING_MARKERS = (
+    "we need to answer",
+    "the question asks",
+    "question asks",
+    "let's",
+    "from evidence",
+    "evidence shows",
+    "evidence doesn't support",
+    "we need to find",
+    "we have evidence",
+    "the only one",
+    "actually",
+    "i need to",
+    "step-by-step",
+)
 
 
 def _truncate_tokens(text: str, max_tokens: int) -> str:
@@ -36,15 +53,85 @@ def _clean_candidate(text: str) -> str:
         return ""
     if re.search(r"\binsufficient evidence\b", candidate, flags=re.IGNORECASE):
         return "Insufficient evidence"
-    candidate = candidate.strip(" \t\"'`")
+    candidate = candidate.strip(" \t\"'`“”‘’")
     candidate = re.sub(r"[\s\-\u2013\u2014,;.!?]+$", "", candidate).strip()
+    candidate = candidate.strip(" \t\"'`“”‘’")
     lowered = candidate.lower()
     for sep in (" because ", " since ", " as ", " therefore ", " thus ", " so "):
         idx = lowered.find(sep)
         if idx > 0:
             candidate = candidate[:idx].strip()
             break
+    lowered = candidate.lower()
+    for sep in (" the question", "\nquestion", " question:", " evidence:", " we need to", " let's "):
+        idx = lowered.find(sep)
+        if idx > 0:
+            candidate = candidate[:idx].strip()
+            lowered = candidate.lower()
+    candidate = candidate.strip(" \t\"'`“”‘’")
+    candidate = re.sub(r"[\s\-\u2013\u2014,;.!?]+$", "", candidate).strip()
+    candidate = candidate.strip(" \t\"'`“”‘’")
     return candidate
+
+
+def _looks_like_reasoning_fragment(text: str) -> bool:
+    if not text:
+        return False
+    lowered = text.lower()
+    if any(marker in lowered for marker in _REASONING_MARKERS):
+        return True
+    token_count = len(text.split())
+    lowered_spaced = f" {lowered} "
+    if token_count >= 5 and any(
+        marker in lowered_spaced for marker in (" who ", " what ", " which ", " where ", " when ", " why ", " how ")
+    ):
+        return True
+    if token_count >= 4 and lowered.startswith(
+        (
+            "who ",
+            "what ",
+            "which ",
+            "where ",
+            "when ",
+            "why ",
+            "how ",
+            "out of ",
+            "in what ",
+            "at what ",
+            "is ",
+            "are ",
+            "was ",
+            "were ",
+            "do ",
+            "does ",
+            "did ",
+        )
+    ):
+        return True
+    if token_count >= 28:
+        return True
+    if token_count >= 12 and "," in text:
+        return True
+    if token_count >= 8 and ":" in text:
+        return True
+    if "?" in text and token_count >= 12:
+        return True
+    return False
+
+
+def _extract_quoted_span(text: str) -> str:
+    if not text:
+        return ""
+    for pattern in (
+        r'"([^"\n]{1,80})"',
+        r"'([^'\n]{1,80})'",
+        r'"([^"\n]{1,80})$',
+        r"'([^'\n]{1,80})$",
+    ):
+        match = re.search(pattern, text)
+        if match:
+            return (match.group(1) or "").strip()
+    return ""
 
 
 def _find_answer_candidate(text: str) -> str:
@@ -88,6 +175,13 @@ def extract_final_answer(text: str, *, max_tokens: int = 50) -> str:
         if cleaned_lines:
             candidate = cleaned_lines[-1].strip()
     candidate = _clean_candidate(candidate)
+    quoted = _clean_candidate(_extract_quoted_span(candidate))
+    if quoted and len(candidate.split()) >= len(quoted.split()) + 2:
+        candidate = quoted
+    if _looks_like_reasoning_fragment(candidate):
+        if quoted and not _looks_like_reasoning_fragment(quoted):
+            return _truncate_tokens(quoted, max_tokens)
+        return ""
     return _truncate_tokens(candidate, max_tokens)
 
 

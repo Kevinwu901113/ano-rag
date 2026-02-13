@@ -4,7 +4,7 @@ import json
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Iterable, List
+from typing import Any, Dict, Iterable, List
 
 QWEN_CHAT_BASE_URL = "http://127.0.0.1:8000/v1"
 QWEN_CHAT_MODEL = "qwen3-30b-a3b"
@@ -83,6 +83,45 @@ def load_qa(path: Path, limit: int = 0) -> List[Dict]:
         rows.append(row)
         if limit > 0 and len(rows) >= limit:
             break
+    return rows
+
+
+def normalize_doc_pool(row: Dict[str, Any]) -> List[Dict[str, Any]]:
+    docs = row.get("docs") or []
+    if not isinstance(docs, list):
+        raise ValueError("row.docs must be a list")
+    normalized: List[Dict[str, Any]] = []
+    for idx, doc in enumerate(docs):
+        if not isinstance(doc, dict):
+            continue
+        title = str(doc.get("title") or "").strip()
+        text = str(doc.get("text") or "").strip()
+        if not title or not text:
+            continue
+        source_idx_raw = doc.get("source_idx")
+        try:
+            source_idx = int(source_idx_raw) if source_idx_raw is not None else idx
+        except Exception:
+            source_idx = idx
+        normalized.append(
+            {
+                "id": str(doc.get("id") or f"qdoc_{idx + 1:04d}"),
+                "title": title,
+                "text": text,
+                "is_supporting": (
+                    None if doc.get("is_supporting") is None else bool(doc.get("is_supporting"))
+                ),
+                "source_idx": source_idx,
+            }
+        )
+    normalized.sort(key=lambda item: (int(item.get("source_idx", 0)), str(item.get("id", ""))))
+    return normalized
+
+
+def load_qa_with_docs(path: Path, limit: int = 0) -> List[Dict[str, Any]]:
+    rows = load_qa(path, limit=limit)
+    for row in rows:
+        row["docs"] = normalize_doc_pool(row)
     return rows
 
 

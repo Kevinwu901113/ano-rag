@@ -46,7 +46,7 @@ def call_llm(
 
     compressed: list = []
     if compress_enabled:
-        compressed = _compress_evidence(question, evidences, endpoint, model)
+        compressed = _compress_evidence(question, evidences, endpoint, model, cfg=resolved_cfg)
 
     display_evs = compressed or evidences
     sanitized_labels = _prepare_allowed_labels(allowed_labels)
@@ -189,10 +189,53 @@ def call_llm(
             raise
 
 
-def _compress_evidence(question: str, evidences: list, endpoint: str, model: str) -> list:
+def _compress_evidence(
+    question: str,
+    evidences: list,
+    endpoint: str,
+    model: str,
+    *,
+    cfg: Optional[Dict[str, Any]] = None,
+) -> list:
     if not evidences:
         return []
-    llm_cfg = {"endpoint": endpoint, "model": model, "timeout_s": 10}
+    resolved_cfg = cfg or {}
+    answerer_cfg = resolved_cfg.get("answerer") if isinstance(resolved_cfg.get("answerer"), dict) else {}
+    compress_cfg = answerer_cfg.get("compress_evidence") if isinstance(answerer_cfg.get("compress_evidence"), dict) else {}
+    vllm_cfg = resolved_cfg.get("vllm") if isinstance(resolved_cfg.get("vllm"), dict) else {}
+    reranker_cfg = resolved_cfg.get("reranker") if isinstance(resolved_cfg.get("reranker"), dict) else {}
+    rerank_llm_cfg = reranker_cfg.get("llm") if isinstance(reranker_cfg.get("llm"), dict) else {}
+    concurrency_cfg = vllm_cfg.get("concurrency") if isinstance(vllm_cfg.get("concurrency"), dict) else {}
+
+    timeout_s = compress_cfg.get("timeout_s")
+    if timeout_s is None:
+        timeout_s = rerank_llm_cfg.get("timeout_s")
+    if timeout_s is None:
+        timeout_s = concurrency_cfg.get("read_timeout_sec")
+    if timeout_s is None:
+        timeout_s = 60
+    retries = compress_cfg.get("retries", 2)
+    max_tokens = compress_cfg.get("max_tokens", 128)
+    try:
+        timeout_s = int(timeout_s)
+    except (TypeError, ValueError):
+        timeout_s = 60
+    try:
+        retries = int(retries)
+    except (TypeError, ValueError):
+        retries = 2
+    try:
+        max_tokens = int(max_tokens)
+    except (TypeError, ValueError):
+        max_tokens = 128
+
+    llm_cfg = {
+        "endpoint": endpoint,
+        "model": model,
+        "timeout_s": max(5, timeout_s),
+        "retries": max(0, retries),
+        "max_tokens": max(16, max_tokens),
+    }
     notes = []
     for ev in evidences:
         notes.append(

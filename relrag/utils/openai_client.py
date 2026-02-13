@@ -69,19 +69,69 @@ def _extract_error_message(response: requests.Response) -> str:
     return str(data)[:200]
 
 
+def _coerce_text(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, (int, float, bool)):
+        return str(value)
+    if isinstance(value, list):
+        parts: List[str] = []
+        for item in value:
+            text = _coerce_text(item)
+            if text:
+                parts.append(text)
+        return "\n".join(parts).strip()
+    if isinstance(value, dict):
+        for key in ("text", "content", "output_text", "input_text", "value"):
+            text = _coerce_text(value.get(key))
+            if text:
+                return text
+        return ""
+    return ""
+
+
 def _extract_content(data: Dict[str, Any]) -> str:
     if "error" in data:
         raise RuntimeError(f"OpenAI error response: {data['error']}")
     choices = data.get("choices")
     if not choices:
         raise RuntimeError(f"OpenAI response missing choices: {json.dumps(data)[:200]}")
-    message = choices[0].get("message") if isinstance(choices[0], dict) else None
-    if not message:
+    choice = choices[0] if isinstance(choices[0], dict) else {}
+    message = choice.get("message") if isinstance(choice, dict) else None
+    if not isinstance(message, dict):
         raise RuntimeError(f"OpenAI response missing message: {json.dumps(data)[:200]}")
-    content = message.get("content")
-    if content is None:
-        raise RuntimeError(f"OpenAI response missing content: {json.dumps(data)[:200]}")
-    return str(content)
+
+    content = _coerce_text(message.get("content"))
+    if content:
+        return content
+
+    fallback_fields = [
+        choice.get("text"),
+        message.get("reasoning_content"),
+        choice.get("reasoning_content"),
+        message.get("refusal"),
+    ]
+    for value in fallback_fields:
+        text = _coerce_text(value)
+        if text:
+            return text
+
+    tool_calls = message.get("tool_calls")
+    if isinstance(tool_calls, list):
+        parts: List[str] = []
+        for call in tool_calls:
+            if not isinstance(call, dict):
+                continue
+            function = call.get("function") if isinstance(call.get("function"), dict) else {}
+            arguments = _coerce_text(function.get("arguments"))
+            if arguments:
+                parts.append(arguments)
+        if parts:
+            return "\n".join(parts)
+
+    raise RuntimeError(f"OpenAI response missing content: {json.dumps(data)[:200]}")
 
 
 def _sleep_backoff(attempt: int, base_sec: float, max_sec: float) -> None:

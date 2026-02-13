@@ -1,6 +1,36 @@
 You are re-ranking notes for answering a question.
 Question: {question}
-For each candidate note, provide a confidence score between 0 and 100 indicating how well it helps answer the question.
-Return strict JSON list: [{{"idx": <int>, "score": <0-100>, "labels": ["pred_hit","alias_hit","pronoun_risk","year_hit"]}}, ...]
+Return ONLY the ranked candidate indices (best to worst).
+Rules:
+- Use 1-based candidate indices only.
+- Output all candidates exactly once (no missing, no duplicates).
+- Output a single line of integers separated by spaces.
+- No markdown, no prose, no explanation.
+- Do NOT repeat or quote the question/candidates.
+
+Format example 1:
+- If there are 10 candidates, valid output is exactly 10 integers, e.g.
+  7 3 10 1 2 9 4 8 6 5
+
+Format example 2:
+Question: Which note best supports "who founded X"?
+Candidates:
+1. note_id=a :: X is located in Y.
+2. note_id=b :: X was founded by Alice in 1998.
+3. note_id=c :: Y is a city in Europe.
+4. note_id=d :: Alice was born in 1970.
+Output:
+2 4 1 3
+
+Format example 3 (Multi-hop):
+Question: "The director of 'Pulp Fiction' was born in which US state?"
+Candidates:
+1. note_id=a :: 'Pulp Fiction' is a 1994 film directed by Quentin Tarantino.
+2. note_id=b :: Quentin Tarantino was born in Knoxville, Tennessee.
+3. note_id=c :: 'Pulp Fiction' stars John Travolta.
+4. note_id=d :: Tennessee is a state in the Southeastern United States.
+Output:
+1 2 4 3
+
 Candidates:
 {candidates}

@@ -2667,7 +2667,9 @@ def main() -> None:
 
     for reader in readers:
         reader_openai_cfg = openai_runtime_cfg if reader == "openai" else None
-        reader_base_cfg = _apply_openai_reranker(base_cfg, reader_openai_cfg) if reader == "openai" else base_cfg
+        reader_base_cfg = _apply_openai_reranker(base_cfg, reader_openai_cfg) if reader == "openai" else deepcopy(base_cfg)
+        reader_base_cfg.setdefault("vllm", {})["endpoint"] = llm_endpoint
+        reader_base_cfg.setdefault("vllm", {})["model"] = llm_model
         answer_model = reader_openai_cfg.get("model") if reader == "openai" and reader_openai_cfg else llm_model
         summary_report["runs"].setdefault(reader, {})
         for mode in modes:

@@ -13,12 +13,22 @@ EXTRACT_PROMPT_NAME = "extractor.txt"
 
 
 class EvidenceExtractor:
-    def __init__(self, endpoint: str, model: str, timeout: int = 15) -> None:
+    def __init__(
+        self,
+        endpoint: str,
+        model: str,
+        *,
+        timeout: int = 60,
+        retries: int = 2,
+        max_tokens: int = 128,
+    ) -> None:
+        self.max_tokens = max(16, int(max_tokens))
         self.client = LLMChatClient(
             endpoint=endpoint,
             model=model,
             llm_profile="extract",
             timeout=timeout,
+            retries=max(0, int(retries)),
         )
 
     def judge_and_compress(self, question: str, notes: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -30,7 +40,7 @@ class EvidenceExtractor:
                 response = self.client.chat(
                     [{"role": "user", "content": payload}],
                     temperature=0.0,
-                    max_tokens=128,
+                    max_tokens=self.max_tokens,
                     llm_profile="extract",
                 )
                 content = response.content
@@ -76,5 +86,26 @@ def judge_and_compress(question: str, notes: List[Dict[str, Any]], llm_cfg: Dict
                 {"note_id": note.get("note_id"), "summary": note.get("evidence", ""), "labels": ["no_llm"]}
             )
         return outputs
-    extractor = EvidenceExtractor(endpoint, model, timeout=int(llm_cfg.get("timeout_s", 15)))
+    timeout_s = llm_cfg.get("timeout_s", 60)
+    retries = llm_cfg.get("retries", 2)
+    max_tokens = llm_cfg.get("max_tokens", 128)
+    try:
+        timeout_s = int(timeout_s)
+    except (TypeError, ValueError):
+        timeout_s = 60
+    try:
+        retries = int(retries)
+    except (TypeError, ValueError):
+        retries = 2
+    try:
+        max_tokens = int(max_tokens)
+    except (TypeError, ValueError):
+        max_tokens = 128
+    extractor = EvidenceExtractor(
+        endpoint,
+        model,
+        timeout=max(5, timeout_s),
+        retries=max(0, retries),
+        max_tokens=max(16, max_tokens),
+    )
     return extractor.judge_and_compress(question, notes)

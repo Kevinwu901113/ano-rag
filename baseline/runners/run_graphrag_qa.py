@@ -9,10 +9,11 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
-from typing import Dict, List
+from typing import Any, Dict, List, Tuple
 
 import pandas as pd
 import yaml
+from openai import OpenAI
 
 _THIS_DIR = Path(__file__).resolve().parent
 if str(_THIS_DIR) not in sys.path:
@@ -22,8 +23,7 @@ from common import (  # noqa: E402
     EMBED_BASE_URL,
     EMBED_MODEL,
     ensure_dataset,
-    load_json,
-    load_qa,
+    load_qa_with_docs,
     output_pred_path,
     resolve_llm_backend,
     write_pred_jsonl,
@@ -38,13 +38,13 @@ If the context is insufficient, return: Insufficient evidence
 """
 
 
-def _sha1_file(path: Path) -> str:
-    return hashlib.sha1(path.read_bytes()).hexdigest()
-
-
 def _sha1_json(payload: object) -> str:
     raw = json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
     return hashlib.sha1(raw).hexdigest()
+
+
+def _sanitize_qid(value: str) -> str:
+    return "".join(ch if ch.isalnum() or ch in {"-", "_"} else "_" for ch in value)[:160]
 
 
 def _resolve_graphrag_cli(explicit: str | None) -> str:
@@ -66,17 +66,41 @@ def _last_non_empty_line(text: str) -> str:
     return ""
 
 
+def _detect_embedding_dim(embed_base_url: str, embed_model: str, request_timeout: float) -> int:
+    client = OpenAI(
+        base_url=embed_base_url,
+        api_key="EMPTY",
+        timeout=float(request_timeout),
+    )
+    probe_vec = client.embeddings.create(model=embed_model, input="hello").data[0].embedding
+    observed_dim = len(probe_vec)
+    if observed_dim <= 0:
+        raise RuntimeError(f"Invalid embedding dim ({observed_dim}) from model {embed_model}.")
+    return observed_dim
+
+
 def _run(cmd: List[str], *, env: Dict[str, str]) -> subprocess.CompletedProcess:
     result = subprocess.run(cmd, capture_output=True, text=True, env=env, check=False)
     if result.returncode != 0:
-        tail_out = "\n".join((result.stdout or "").splitlines()[-40:])
-        tail_err = "\n".join((result.stderr or "").splitlines()[-40:])
+        tail_out = "\n".join((result.stdout or "").splitlines()[-60:])
+        tail_err = "\n".join((result.stderr or "").splitlines()[-60:])
         raise RuntimeError(
             f"Command failed ({result.returncode}): {' '.join(cmd)}\n"
             f"stdout tail:\n{tail_out}\n\n"
             f"stderr tail:\n{tail_err}"
         )
     return result
+
+
+def _is_prune_empty_failure(exc: Exception) -> bool:
+    text = str(exc)
+    return (
+        "Graph Pruning failed." in text
+        and (
+            "No entities remain" in text
+            or "No relationships remain" in text
+        )
+    )
 
 
 def _ensure_community_reports(workspace: Path) -> None:
@@ -124,13 +148,16 @@ def _patch_settings(
     embed_model: str,
     embed_dim: int,
     temperature: float,
-    max_tokens: int,
+    answer_max_tokens: int,
+    top_k: int,
+    qa_prompt_mode: str,
+    relax_pruning: bool,
+    request_timeout: float,
 ) -> None:
     cfg = yaml.safe_load(settings_path.read_text(encoding="utf-8")) or {}
 
     cfg.setdefault("input", {})
     cfg["input"]["type"] = "json"
-    # GraphRAG runs string.Template substitution over settings; avoid trailing '$' in regex.
     cfg["input"]["file_pattern"] = ".*\\.json"
     cfg["input"]["id_column"] = "id"
     cfg["input"]["title_column"] = "title"
@@ -139,10 +166,7 @@ def _patch_settings(
     completion_models = cfg.setdefault("completion_models", {})
     if not completion_models:
         completion_models["default_completion_model"] = {}
-    completion_id = (
-        cfg.get("local_search", {}).get("completion_model_id")
-        or "default_completion_model"
-    )
+    completion_id = cfg.get("local_search", {}).get("completion_model_id") or "default_completion_model"
     if completion_id not in completion_models:
         completion_models[completion_id] = {}
     completion_models[completion_id].update(
@@ -159,7 +183,7 @@ def _patch_settings(
             "requests_per_minute": 0,
             "max_retries": 5,
             "sleep_on_rate_limit_recommendation": True,
-            "request_timeout": 120.0,
+            "request_timeout": float(request_timeout),
             "api_version": None,
             "audience": None,
             "organization": None,
@@ -167,7 +191,7 @@ def _patch_settings(
             "encoding_model": "o200k_base",
             "call_args": {
                 "temperature": float(temperature),
-                "max_tokens": int(max_tokens),
+                "max_tokens": int(answer_max_tokens),
             },
         }
     )
@@ -175,10 +199,7 @@ def _patch_settings(
     embedding_models = cfg.setdefault("embedding_models", {})
     if not embedding_models:
         embedding_models["default_embedding_model"] = {}
-    embedding_id = (
-        cfg.get("local_search", {}).get("embedding_model_id")
-        or "default_embedding_model"
-    )
+    embedding_id = cfg.get("local_search", {}).get("embedding_model_id") or "default_embedding_model"
     if embedding_id not in embedding_models:
         embedding_models[embedding_id] = {}
     embedding_models[embedding_id].update(
@@ -194,7 +215,7 @@ def _patch_settings(
             "requests_per_minute": 0,
             "max_retries": 5,
             "sleep_on_rate_limit_recommendation": True,
-            "request_timeout": 120.0,
+            "request_timeout": float(request_timeout),
             "api_version": None,
             "audience": None,
             "organization": None,
@@ -212,6 +233,7 @@ def _patch_settings(
         "entity_description",
         "text_unit_text",
     ]
+
     cfg.setdefault("vector_store", {})
     cfg["vector_store"]["index_schema"] = {
         "entity_description": {
@@ -234,8 +256,6 @@ def _patch_settings(
         },
     }
 
-    # Use a custom workflow set tuned for small QA corpora while preserving
-    # local-search prerequisites (including community_reports parquet output).
     cfg["workflows"] = [
         "load_input_documents",
         "create_base_text_units",
@@ -250,20 +270,246 @@ def _patch_settings(
 
     cfg.setdefault("extract_graph", {})
     cfg["extract_graph"]["completion_model_id"] = completion_id
+
     cfg.setdefault("summarize_descriptions", {})
     cfg["summarize_descriptions"]["completion_model_id"] = completion_id
+
     cfg.setdefault("community_reports", {})
     cfg["community_reports"]["completion_model_id"] = completion_id
 
     cfg.setdefault("local_search", {})
     cfg["local_search"]["completion_model_id"] = completion_id
     cfg["local_search"]["embedding_model_id"] = embedding_id
-    cfg["local_search"]["prompt"] = "prompts/answer_only.txt"
+    cfg["local_search"]["prompt"] = "prompts/answer_only.txt" if qa_prompt_mode == "answer_only" else cfg["local_search"].get("prompt", "prompts/local_search_system_prompt.txt")
+    cfg["local_search"]["top_k_mapped_entities"] = int(top_k)
+    cfg["local_search"]["top_k_relationships"] = int(top_k)
+    cfg["local_search"]["llm_max_gen_tokens"] = int(answer_max_tokens)
+
+    cfg.setdefault("prune_graph", {})
+    if relax_pruning:
+        cfg["prune_graph"]["min_node_freq"] = 1
+        cfg["prune_graph"]["min_node_degree"] = 0
+        cfg["prune_graph"]["min_edge_weight_pct"] = 0.0
+        cfg["prune_graph"]["remove_ego_nodes"] = False
 
     settings_path.write_text(
         yaml.safe_dump(cfg, sort_keys=False, allow_unicode=True),
         encoding="utf-8",
     )
+
+
+def _prepare_workspace(
+    workspace: Path,
+    *,
+    docs: List[Dict[str, Any]],
+    graphrag_cli: str,
+    env: Dict[str, str],
+    llm_base_url: str,
+    llm_model: str,
+    embed_base_url: str,
+    embed_model: str,
+    embed_dim: int,
+    temperature: float,
+    answer_max_tokens: int,
+    top_k: int,
+    qa_prompt_mode: str,
+    relax_pruning: bool,
+    request_timeout: float,
+) -> None:
+    if workspace.exists():
+        shutil.rmtree(workspace)
+    workspace.mkdir(parents=True, exist_ok=True)
+
+    _run(
+        [
+            graphrag_cli,
+            "init",
+            "--root",
+            str(workspace),
+            "--model",
+            llm_model,
+            "--embedding",
+            embed_model,
+        ],
+        env=env,
+    )
+
+    prompts_dir = workspace / "prompts"
+    prompts_dir.mkdir(parents=True, exist_ok=True)
+    (prompts_dir / "answer_only.txt").write_text(ANSWER_ONLY_PROMPT, encoding="utf-8")
+
+    input_dir = workspace / "input"
+    input_dir.mkdir(parents=True, exist_ok=True)
+    (input_dir / "corpus.json").write_text(
+        json.dumps(docs, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+    settings_path = workspace / "settings.yaml"
+    _patch_settings(
+        settings_path,
+        llm_base_url=llm_base_url,
+        llm_model=llm_model,
+        embed_base_url=embed_base_url,
+        embed_model=embed_model,
+        embed_dim=embed_dim,
+        temperature=temperature,
+        answer_max_tokens=answer_max_tokens,
+        top_k=top_k,
+        qa_prompt_mode=qa_prompt_mode,
+        relax_pruning=relax_pruning,
+        request_timeout=request_timeout,
+    )
+
+
+def _index_workspace(
+    workspace: Path,
+    *,
+    graphrag_cli: str,
+    env: Dict[str, str],
+    index_method: str,
+) -> None:
+    _run(
+        [
+            graphrag_cli,
+            "index",
+            "--root",
+            str(workspace),
+            "--method",
+            index_method,
+        ],
+        env=env,
+    )
+    _ensure_community_reports(workspace)
+
+
+def _build_docs(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    docs: List[Dict[str, Any]] = []
+    for row in rows:
+        title = str(row.get("title") or "").strip()
+        text = str(row.get("text") or "").strip()
+        if not text:
+            continue
+        docs.append(
+            {
+                "id": str(row.get("id") or f"qdoc_{len(docs)+1:04d}"),
+                "title": title,
+                "text": text,
+            }
+        )
+    return docs
+
+
+def _build_and_query_one(
+    args: argparse.Namespace,
+    *,
+    dataset: str,
+    backend_name: str,
+    backend_model: str,
+    backend_base_url: str,
+    qid: str,
+    question: str,
+    docs: List[Dict[str, Any]],
+    workspace_root: Path,
+    graphrag_cli: str,
+    env: Dict[str, str],
+    embedding_dim: int,
+) -> str:
+    if args.max_docs > 0:
+        docs = docs[: args.max_docs]
+    docs = _build_docs(docs)
+    docs_hash = _sha1_json(docs)
+
+    q_workspace = workspace_root / "graphrag" / dataset / backend_name / _sanitize_qid(qid)
+    state_path = q_workspace / "index_state.json"
+
+    reuse_index = (
+        (not args.rebuild_index)
+        and state_path.exists()
+        and (q_workspace / "output").exists()
+        and (q_workspace / "settings.yaml").exists()
+        and json.loads(state_path.read_text(encoding="utf-8")).get("docs_hash") == docs_hash
+    )
+
+    prune_relaxed = False
+    if not reuse_index:
+        try:
+            _prepare_workspace(
+                q_workspace,
+                docs=docs,
+                graphrag_cli=graphrag_cli,
+                env=env,
+                llm_base_url=backend_base_url,
+                llm_model=backend_model,
+                embed_base_url=args.embed_base_url,
+                embed_model=args.embed_model,
+                embed_dim=embedding_dim,
+                temperature=args.temperature,
+                answer_max_tokens=args.answer_max_tokens,
+                top_k=args.top_k,
+                qa_prompt_mode=args.qa_prompt_mode,
+                relax_pruning=False,
+                request_timeout=args.request_timeout,
+            )
+            _index_workspace(
+                q_workspace,
+                graphrag_cli=graphrag_cli,
+                env=env,
+                index_method=args.index_method,
+            )
+        except Exception as exc:
+            if not _is_prune_empty_failure(exc):
+                raise
+            prune_relaxed = True
+            _prepare_workspace(
+                q_workspace,
+                docs=docs,
+                graphrag_cli=graphrag_cli,
+                env=env,
+                llm_base_url=backend_base_url,
+                llm_model=backend_model,
+                embed_base_url=args.embed_base_url,
+                embed_model=args.embed_model,
+                embed_dim=embedding_dim,
+                temperature=args.temperature,
+                answer_max_tokens=args.answer_max_tokens,
+                top_k=args.top_k,
+                qa_prompt_mode=args.qa_prompt_mode,
+                relax_pruning=True,
+                request_timeout=args.request_timeout,
+            )
+            _index_workspace(
+                q_workspace,
+                graphrag_cli=graphrag_cli,
+                env=env,
+                index_method=args.index_method,
+            )
+
+        state = {
+            "dataset": dataset,
+            "llm_backend": backend_name,
+            "qid": qid,
+            "docs_hash": docs_hash,
+            "index_method": args.index_method,
+            "prune_relaxed": prune_relaxed,
+        }
+        state_path.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    result = _run(
+        [
+            graphrag_cli,
+            "query",
+            "--root",
+            str(q_workspace),
+            "--method",
+            "local",
+            "--response-type",
+            "Short Answer" if args.qa_prompt_mode == "answer_only" else "Multiple Paragraphs",
+            question,
+        ],
+        env=env,
+    )
+    return _last_non_empty_line(result.stdout)
 
 
 def main() -> None:
@@ -279,9 +525,18 @@ def main() -> None:
 
     parser.add_argument("--embed_base_url", default=EMBED_BASE_URL)
     parser.add_argument("--embed_model", default=EMBED_MODEL)
-    parser.add_argument("--embedding_dim", type=int, default=4096)
+    parser.add_argument(
+        "--embedding_dim",
+        type=int,
+        default=0,
+        help="Embedding dimension. Use <=0 to auto-detect from embedding endpoint.",
+    )
+
     parser.add_argument("--temperature", type=float, default=0.0)
-    parser.add_argument("--max_tokens", type=int, default=256)
+    parser.add_argument("--answer_max_tokens", type=int, default=96)
+    parser.add_argument("--top_k", type=int, default=5)
+    parser.add_argument("--qa_prompt_mode", default="answer_only", choices=["answer_only", "default"])
+    parser.add_argument("--request_timeout", type=float, default=60.0)
     parser.add_argument("--index_method", default="standard", choices=["standard", "fast"])
     parser.add_argument("--graphrag_cli", default=None)
     args = parser.parse_args()
@@ -294,124 +549,59 @@ def main() -> None:
     workspace_root = Path(args.workspace_root)
 
     qa_path = data_root / dataset / "qa.jsonl"
-    corpus_path = data_root / dataset / "corpus.json"
-    if not qa_path.exists() or not corpus_path.exists():
+    if not qa_path.exists():
         raise FileNotFoundError(
             f"Missing intermediate data for {dataset}. Run baseline/tools/build_intermediate.py first."
         )
 
-    qa_rows = load_qa(qa_path, limit=args.limit)
+    qa_rows = load_qa_with_docs(qa_path, limit=args.limit)
     pred_path = output_pred_path(output_root, "graphrag", dataset, backend.name)
-
-    workspace = workspace_root / "graphrag" / f"{dataset}_{backend.name}"
-    settings_path = workspace / "settings.yaml"
-    prompts_dir = workspace / "prompts"
-    input_dir = workspace / "input"
-    state_path = workspace / "index_state.json"
-
-    corpus_rows = None
-    if args.max_docs > 0:
-        corpus_rows = load_json(corpus_path)[: args.max_docs]
-        corpus_hash = _sha1_json(corpus_rows)
-    else:
-        corpus_hash = _sha1_file(corpus_path)
-    reuse_index = (
-        (not args.rebuild_index)
-        and state_path.exists()
-        and settings_path.exists()
-        and (workspace / "output").exists()
-        and json.loads(state_path.read_text(encoding="utf-8")).get("corpus_hash") == corpus_hash
-    )
 
     graphrag_cli = _resolve_graphrag_cli(args.graphrag_cli)
     env = os.environ.copy()
     env["PYTHONUNBUFFERED"] = "1"
     env["OPENAI_API_KEY"] = backend.api_key
 
-    if args.rebuild_index or not reuse_index:
-        if workspace.exists():
-            shutil.rmtree(workspace)
-        workspace.mkdir(parents=True, exist_ok=True)
-
-        _run(
-            [
-                graphrag_cli,
-                "init",
-                "--root",
-                str(workspace),
-                "--model",
-                backend.model,
-                "--embedding",
-                args.embed_model,
-            ],
-            env=env,
+    observed_dim = _detect_embedding_dim(
+        args.embed_base_url,
+        args.embed_model,
+        request_timeout=args.request_timeout,
+    )
+    if args.embedding_dim <= 0:
+        embedding_dim = observed_dim
+        print(
+            f"[info] Auto-detected embedding dim={embedding_dim} "
+            f"from model={args.embed_model} ({args.embed_base_url})"
         )
-
-        prompts_dir.mkdir(parents=True, exist_ok=True)
-        (prompts_dir / "answer_only.txt").write_text(ANSWER_ONLY_PROMPT, encoding="utf-8")
-
-        input_dir.mkdir(parents=True, exist_ok=True)
-        if corpus_rows is None:
-            shutil.copy2(corpus_path, input_dir / "corpus.json")
-        else:
-            (input_dir / "corpus.json").write_text(
-                json.dumps(corpus_rows, ensure_ascii=False, indent=2),
-                encoding="utf-8",
-            )
-
-        _patch_settings(
-            settings_path,
-            llm_base_url=backend.base_url,
-            llm_model=backend.model,
-            embed_base_url=args.embed_base_url,
-            embed_model=args.embed_model,
-            embed_dim=args.embedding_dim,
-            temperature=args.temperature,
-            max_tokens=args.max_tokens,
+    else:
+        embedding_dim = int(args.embedding_dim)
+    if observed_dim != embedding_dim:
+        raise RuntimeError(
+            f"Embedding dim mismatch: expected {embedding_dim}, observed {observed_dim}. "
+            f"Use --embedding_dim {observed_dim} (or --embedding_dim 0 for auto-detect)."
         )
-
-        _run(
-            [
-                graphrag_cli,
-                "index",
-                "--root",
-                str(workspace),
-                "--method",
-                args.index_method,
-            ],
-            env=env,
-        )
-        _ensure_community_reports(workspace)
-
-        state = {
-            "dataset": dataset,
-            "llm_backend": backend.name,
-            "corpus_hash": corpus_hash,
-            "index_method": args.index_method,
-        }
-        state_path.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
 
     pred_rows: List[Dict[str, str]] = []
     for row in qa_rows:
         qid = str(row.get("id") or "").strip()
         question = str(row.get("question") or "").strip()
+        docs = list(row.get("docs") or [])
 
         try:
-            result = _run(
-                [
-                    graphrag_cli,
-                    "query",
-                    "--root",
-                    str(workspace),
-                    "--method",
-                    "local",
-                    "--response-type",
-                    "Short Answer",
-                    question,
-                ],
+            pred = _build_and_query_one(
+                args,
+                dataset=dataset,
+                backend_name=backend.name,
+                backend_model=backend.model,
+                backend_base_url=backend.base_url,
+                qid=qid,
+                question=question,
+                docs=docs,
+                workspace_root=workspace_root,
+                graphrag_cli=graphrag_cli,
                 env=env,
+                embedding_dim=embedding_dim,
             )
-            pred = _last_non_empty_line(result.stdout)
         except Exception:
             pred = ""
 

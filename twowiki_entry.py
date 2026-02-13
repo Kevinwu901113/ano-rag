@@ -2631,6 +2631,10 @@ def run_experiment_task(
     reader_openai_cfg = openai_runtime_cfg if reader == "openai" else None
     answer_model = reader_openai_cfg.get("model") if reader == "openai" and reader_openai_cfg else llm_model
     effective_base_cfg = deepcopy(base_cfg)
+    if llm_endpoint:
+        effective_base_cfg.setdefault("vllm", {})["endpoint"] = llm_endpoint
+    if llm_model:
+        effective_base_cfg.setdefault("vllm", {})["model"] = llm_model
     if retrieval_only and disable_retriever_llm:
         effective_base_cfg.setdefault("reranker", {})["enabled"] = False
     effective_entry_cfg = effective_base_cfg.setdefault("twowiki_entry", {})

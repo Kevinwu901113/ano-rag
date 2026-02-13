@@ -21,8 +21,7 @@ from common import (  # noqa: E402
     EMBED_BASE_URL,
     EMBED_MODEL,
     ensure_dataset,
-    load_json,
-    load_qa,
+    load_qa_with_docs,
     output_pred_path,
     resolve_llm_backend,
     write_pred_jsonl,
@@ -34,62 +33,62 @@ def _sha1_json(payload: Any) -> str:
     return hashlib.sha1(raw).hexdigest()
 
 
-async def run(args: argparse.Namespace) -> Path:
+def _detect_embedding_dim(embed_client: OpenAI, model: str) -> int:
+    probe_vec = embed_client.embeddings.create(
+        model=model,
+        input="hello",
+    ).data[0].embedding
+    observed_dim = len(probe_vec)
+    if observed_dim <= 0:
+        raise RuntimeError(f"Invalid embedding dim ({observed_dim}) from model {model}.")
+    return observed_dim
+
+
+def _sanitize_qid(value: str) -> str:
+    return "".join(ch if ch.isalnum() or ch in {"-", "_"} else "_" for ch in value)[:160]
+
+
+async def _run_single_question(
+    args: argparse.Namespace,
+    *,
+    dataset: str,
+    backend_name: str,
+    backend_model: str,
+    embed_client: OpenAI,
+    llm_client: OpenAI,
+    embedding_dim: int,
+    workspace_root: Path,
+    row: Dict[str, Any],
+) -> str:
     from lightrag import LightRAG, QueryParam
-    from lightrag.utils import setup_logger, wrap_embedding_func_with_attrs
+    from lightrag.utils import wrap_embedding_func_with_attrs
 
-    dataset = ensure_dataset(args.dataset)
-    backend = resolve_llm_backend(args.llm_backend)
-
-    data_root = Path(args.data_root)
-    output_root = Path(args.output_root)
-
-    corpus_path = data_root / dataset / "corpus.json"
-    qa_path = data_root / dataset / "qa.jsonl"
-    if not corpus_path.exists() or not qa_path.exists():
-        raise FileNotFoundError(
-            f"Missing intermediate data for {dataset}. Run baseline/tools/build_intermediate.py first."
-        )
-
-    corpus_rows = load_json(corpus_path)
+    qid = str(row.get("id") or "").strip()
+    question = str(row.get("question") or "").strip()
+    docs = list(row.get("docs") or [])
     if args.max_docs > 0:
-        corpus_rows = corpus_rows[: args.max_docs]
-    qa_rows = load_qa(qa_path, limit=args.limit)
+        docs = docs[: args.max_docs]
 
-    pred_path = output_pred_path(output_root, "lightrag", dataset, backend.name)
+    if not qid or not question:
+        return ""
 
-    workspace = Path(args.workspace_root) / "lightrag" / dataset / backend.name
-    state_path = workspace / "index_state.json"
-    corpus_hash = _sha1_json(corpus_rows)
+    q_workspace = workspace_root / "lightrag" / dataset / backend_name / _sanitize_qid(qid)
+    state_path = q_workspace / "index_state.json"
+    docs_hash = _sha1_json(docs)
 
     reuse_index = (
         (not args.rebuild_index)
         and state_path.exists()
-        and json.loads(state_path.read_text(encoding="utf-8")).get("corpus_hash") == corpus_hash
+        and json.loads(state_path.read_text(encoding="utf-8")).get("docs_hash") == docs_hash
     )
+
     if args.rebuild_index or not reuse_index:
-        if workspace.exists():
-            shutil.rmtree(workspace)
-
-    workspace.mkdir(parents=True, exist_ok=True)
-
-    setup_logger("lightrag", level="INFO")
-
-    embed_client = OpenAI(base_url=args.embed_base_url, api_key="EMPTY")
-    llm_client = OpenAI(base_url=backend.base_url, api_key=backend.api_key)
-
-    probe_vec = embed_client.embeddings.create(
-        model=args.embed_model,
-        input="hello",
-    ).data[0].embedding
-    observed_dim = len(probe_vec)
-    if observed_dim != args.embedding_dim:
-        raise RuntimeError(
-            f"Embedding dim mismatch: expected {args.embedding_dim}, observed {observed_dim}."
-        )
+        if q_workspace.exists():
+            shutil.rmtree(q_workspace)
+    q_workspace.mkdir(parents=True, exist_ok=True)
 
     @wrap_embedding_func_with_attrs(
-        embedding_dim=args.embedding_dim,
+        embedding_dim=embedding_dim,
         max_token_size=args.embed_max_tokens,
         model_name=args.embed_model,
     )
@@ -109,7 +108,7 @@ async def run(args: argparse.Namespace) -> Path:
         if not isinstance(history_messages, list):
             history_messages = []
 
-        requested = int(kwargs.get("max_tokens") or args.max_tokens)
+        requested = int(kwargs.get("max_tokens") or args.answer_max_tokens)
         max_tokens = max(16, min(requested, args.extract_max_tokens))
 
         messages: List[Dict[str, str]] = []
@@ -124,7 +123,7 @@ async def run(args: argparse.Namespace) -> Path:
 
         def _call() -> str:
             response = llm_client.chat.completions.create(
-                model=backend.model,
+                model=backend_model,
                 messages=messages,
                 temperature=float(args.temperature),
                 max_tokens=max_tokens,
@@ -134,9 +133,9 @@ async def run(args: argparse.Namespace) -> Path:
         return await asyncio.to_thread(_call)
 
     rag = LightRAG(
-        working_dir=str(workspace),
+        working_dir=str(q_workspace),
         llm_model_func=llm_model_func,
-        llm_model_name=backend.model,
+        llm_model_name=backend_model,
         embedding_func=embedding_func,
         chunk_token_size=int(args.chunk_token_size),
         chunk_overlap_token_size=int(args.chunk_overlap_token_size),
@@ -148,9 +147,9 @@ async def run(args: argparse.Namespace) -> Path:
 
     try:
         if args.rebuild_index or not reuse_index:
-            for row in corpus_rows:
-                title = str(row.get("title") or "").strip()
-                text = str(row.get("text") or "").strip()
+            for doc in docs:
+                title = str(doc.get("title") or "").strip()
+                text = str(doc.get("text") or "").strip()
                 if not text:
                     continue
                 doc_text = f"{title}\n{text}" if title else text
@@ -158,34 +157,98 @@ async def run(args: argparse.Namespace) -> Path:
 
             state_payload = {
                 "dataset": dataset,
-                "llm_backend": backend.name,
-                "corpus_hash": corpus_hash,
-                "num_docs": len(corpus_rows),
+                "llm_backend": backend_name,
+                "qid": qid,
+                "docs_hash": docs_hash,
+                "num_docs": len(docs),
             }
             state_path.write_text(
                 json.dumps(state_payload, ensure_ascii=False, indent=2),
                 encoding="utf-8",
             )
 
-        pred_rows: List[Dict[str, str]] = []
-        for row in qa_rows:
-            qid = str(row.get("id") or "").strip()
-            question = str(row.get("question") or "").strip()
-            try:
-                result = await rag.aquery(
-                    question,
-                    param=QueryParam(mode=args.query_mode, enable_rerank=False),
-                )
-                pred = str(result or "").strip()
-            except Exception:
-                pred = ""
-            pred_rows.append({"id": qid, "pred": pred})
-
-        write_pred_jsonl(pred_path, pred_rows)
+        response_type = "Short Answer" if args.qa_prompt_mode == "answer_only" else "Multiple Paragraphs"
+        result = await rag.aquery(
+            question,
+            param=QueryParam(
+                mode=args.query_mode,
+                enable_rerank=False,
+                top_k=int(args.top_k),
+                response_type=response_type,
+            ),
+        )
+        return str(result or "").strip()
+    except Exception:
+        return ""
     finally:
         if hasattr(rag, "finalize_storages"):
             await rag.finalize_storages()
 
+
+async def run(args: argparse.Namespace) -> Path:
+    from lightrag.utils import setup_logger
+
+    dataset = ensure_dataset(args.dataset)
+    backend = resolve_llm_backend(args.llm_backend)
+
+    data_root = Path(args.data_root)
+    output_root = Path(args.output_root)
+    workspace_root = Path(args.workspace_root)
+
+    qa_path = data_root / dataset / "qa.jsonl"
+    if not qa_path.exists():
+        raise FileNotFoundError(
+            f"Missing intermediate data for {dataset}. Run baseline/tools/build_intermediate.py first."
+        )
+
+    qa_rows = load_qa_with_docs(qa_path, limit=args.limit)
+    pred_path = output_pred_path(output_root, "lightrag", dataset, backend.name)
+
+    setup_logger("lightrag", level="INFO")
+
+    embed_client = OpenAI(
+        base_url=args.embed_base_url,
+        api_key="EMPTY",
+        timeout=float(args.request_timeout),
+    )
+    llm_client = OpenAI(
+        base_url=backend.base_url,
+        api_key=backend.api_key,
+        timeout=float(args.request_timeout),
+    )
+
+    observed_dim = _detect_embedding_dim(embed_client, args.embed_model)
+    if args.embedding_dim <= 0:
+        embedding_dim = observed_dim
+        print(
+            f"[info] Auto-detected embedding dim={embedding_dim} "
+            f"from model={args.embed_model} ({args.embed_base_url})"
+        )
+    else:
+        embedding_dim = int(args.embedding_dim)
+    if observed_dim != embedding_dim:
+        raise RuntimeError(
+            f"Embedding dim mismatch: expected {embedding_dim}, observed {observed_dim}. "
+            f"Use --embedding_dim {observed_dim} (or --embedding_dim 0 for auto-detect)."
+        )
+
+    pred_rows: List[Dict[str, str]] = []
+    for row in qa_rows:
+        qid = str(row.get("id") or "").strip()
+        pred = await _run_single_question(
+            args,
+            dataset=dataset,
+            backend_name=backend.name,
+            backend_model=backend.model,
+            embed_client=embed_client,
+            llm_client=llm_client,
+            embedding_dim=embedding_dim,
+            workspace_root=workspace_root,
+            row=row,
+        )
+        pred_rows.append({"id": qid, "pred": pred})
+
+    write_pred_jsonl(pred_path, pred_rows)
     return pred_path
 
 
@@ -202,12 +265,20 @@ def parse_args() -> argparse.Namespace:
 
     parser.add_argument("--embed_base_url", default=EMBED_BASE_URL)
     parser.add_argument("--embed_model", default=EMBED_MODEL)
-    parser.add_argument("--embedding_dim", type=int, default=4096)
+    parser.add_argument(
+        "--embedding_dim",
+        type=int,
+        default=0,
+        help="Embedding dimension. Use <=0 to auto-detect from embedding endpoint.",
+    )
     parser.add_argument("--embed_max_tokens", type=int, default=8192)
+    parser.add_argument("--request_timeout", type=float, default=60.0)
 
     parser.add_argument("--temperature", type=float, default=0.0)
-    parser.add_argument("--max_tokens", type=int, default=256)
+    parser.add_argument("--answer_max_tokens", type=int, default=96)
     parser.add_argument("--extract_max_tokens", type=int, default=6144)
+    parser.add_argument("--qa_prompt_mode", default="answer_only", choices=["answer_only", "default"])
+    parser.add_argument("--top_k", type=int, default=5)
     parser.add_argument("--query_mode", default="hybrid")
     parser.add_argument("--chunk_token_size", type=int, default=600)
     parser.add_argument("--chunk_overlap_token_size", type=int, default=80)

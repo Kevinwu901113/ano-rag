@@ -77,6 +77,75 @@ def extract_musique_docs(paragraphs: Any) -> List[Tuple[str, str]]:
     return docs
 
 
+def _hotpot_supporting_title_set(rec: Dict[str, Any]) -> set[str]:
+    titles: set[str] = set()
+    for item in rec.get("supporting_facts") or []:
+        if not isinstance(item, (list, tuple)) or len(item) < 1:
+            continue
+        title = normalize_title(item[0])
+        if title:
+            titles.add(title)
+    return titles
+
+
+def _build_doc_rows_with_flags(
+    docs: List[Tuple[str, str]],
+    *,
+    supporting_titles: set[str] | None = None,
+) -> List[Dict[str, Any]]:
+    rows: List[Dict[str, Any]] = []
+    seen: set[str] = set()
+    for idx, (title, text) in enumerate(docs):
+        if not title or not text:
+            continue
+        key = doc_key(title, text)
+        if key in seen:
+            continue
+        seen.add(key)
+        rows.append(
+            {
+                "id": f"qdoc_{len(rows) + 1:04d}",
+                "title": title,
+                "text": text,
+                "is_supporting": (
+                    bool(supporting_titles and title in supporting_titles)
+                    if supporting_titles is not None
+                    else None
+                ),
+                "source_idx": int(idx),
+            }
+        )
+    return rows
+
+
+def _build_musique_doc_rows(paragraphs: Any) -> List[Dict[str, Any]]:
+    rows: List[Dict[str, Any]] = []
+    if not isinstance(paragraphs, list):
+        return rows
+    seen: set[str] = set()
+    for idx, para in enumerate(paragraphs):
+        if not isinstance(para, dict):
+            continue
+        title = normalize_title(para.get("title"))
+        text = normalize_text(para.get("paragraph_text"))
+        if not title or not text:
+            continue
+        key = doc_key(title, text)
+        if key in seen:
+            continue
+        seen.add(key)
+        rows.append(
+            {
+                "id": f"qdoc_{len(rows) + 1:04d}",
+                "title": title,
+                "text": text,
+                "is_supporting": bool(para.get("is_supporting", False)),
+                "source_idx": int(para.get("idx")) if para.get("idx") is not None else int(idx),
+            }
+        )
+    return rows
+
+
 def build_dataset(spec: DatasetSpec, out_root: Path) -> None:
     records = list(iter_jsonl(spec.source_path))
     corpus_by_key: Dict[str, Dict[str, Any]] = {}
@@ -93,6 +162,8 @@ def build_dataset(spec: DatasetSpec, out_root: Path) -> None:
             answerable = True
             answer_aliases: List[str] = []
             docs = extract_from_context(rec.get("context"))
+            supporting_titles = _hotpot_supporting_title_set(rec)
+            q_docs = _build_doc_rows_with_flags(docs, supporting_titles=supporting_titles)
         elif spec.name == "musique":
             qid = str(rec.get("id") or "").strip()
             question = str(rec.get("question") or "").strip()
@@ -104,6 +175,7 @@ def build_dataset(spec: DatasetSpec, out_root: Path) -> None:
                 if str(item).strip()
             ]
             docs = extract_musique_docs(rec.get("paragraphs"))
+            q_docs = _build_musique_doc_rows(rec.get("paragraphs"))
         else:
             raise ValueError(f"Unsupported dataset: {spec.name}")
 
@@ -133,6 +205,7 @@ def build_dataset(spec: DatasetSpec, out_root: Path) -> None:
                 "answerable": answerable,
                 "answer_aliases": answer_aliases,
                 "dataset": spec.name,
+                "docs": q_docs,
             }
         )
 
