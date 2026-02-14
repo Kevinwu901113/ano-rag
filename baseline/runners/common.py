@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Iterable, List
@@ -10,7 +11,7 @@ QWEN_CHAT_BASE_URL = "http://127.0.0.1:8000/v1"
 QWEN_CHAT_MODEL = "qwen3-30b-a3b"
 EMBED_BASE_URL = "http://127.0.0.1:8001/v1"
 EMBED_MODEL = "qwen3-embedding"
-DEEPSEEK_BASE_URL = "https://api.deepseek.com/v1"
+DEEPSEEK_BASE_URL = "https://api.deepseek.com"
 DEEPSEEK_MODEL = "deepseek-chat"
 
 REFUSAL_KEYWORDS = (
@@ -21,6 +22,14 @@ REFUSAL_KEYWORDS = (
     "i don't know",
     "unknown",
 )
+
+_REF_SECTION_RE = re.compile(r"(?is)\n+#{1,6}\s*references\b.*$")
+_LINE_REF_HEADER_RE = re.compile(r"(?i)^#{0,6}\s*references\s*:?\s*$")
+_LINE_CITATION_RE = re.compile(r"^\s*[-*]?\s*\[\d+\]\s+")
+_LINE_HEADER_RE = re.compile(r"^\s*#{1,6}\s*")
+_LINE_BULLET_RE = re.compile(r"^\s*[-*+]\s*")
+_ANSWER_PREFIX_RE = re.compile(r"(?i)^(answer|final answer)\s*[:：-]\s*")
+_TRAILING_CITATION_RE = re.compile(r"\s*\[\d+\]\s*$")
 
 
 @dataclass(frozen=True)
@@ -148,3 +157,54 @@ def write_pred_jsonl(path: Path, rows: Iterable[Dict]) -> None:
 def looks_refusal(text: str) -> bool:
     norm = str(text or "").strip().lower()
     return any(key in norm for key in REFUSAL_KEYWORDS)
+
+
+def normalize_answer_for_eval(text: str, *, max_chars: int = 160) -> str:
+    raw = str(text or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+    if not raw:
+        return ""
+
+    raw = _REF_SECTION_RE.sub("", raw).strip()
+    lines: List[str] = []
+    for row in raw.splitlines():
+        line = str(row).strip()
+        if not line:
+            continue
+        if _LINE_REF_HEADER_RE.match(line):
+            break
+        if _LINE_CITATION_RE.match(line):
+            continue
+        line = _LINE_HEADER_RE.sub("", line)
+        line = _LINE_BULLET_RE.sub("", line)
+        line = _ANSWER_PREFIX_RE.sub("", line).strip()
+        line = _TRAILING_CITATION_RE.sub("", line).strip()
+        if line:
+            lines.append(line)
+
+    if not lines:
+        return ""
+
+    answer = lines[0].strip().strip("`*_\"'")
+    if not answer:
+        return ""
+
+    lower = answer.lower()
+    if any(key in lower for key in REFUSAL_KEYWORDS):
+        return "Insufficient evidence"
+
+    if re.match(r"(?i)^yes\b", answer):
+        return "Yes"
+    if re.match(r"(?i)^no\b", answer):
+        return "No"
+
+    sentence_split = re.split(r"(?<=[.!?])\s+", answer, maxsplit=1)
+    if sentence_split:
+        answer = sentence_split[0].strip()
+
+    answer = _ANSWER_PREFIX_RE.sub("", answer).strip()
+    answer = _TRAILING_CITATION_RE.sub("", answer).strip()
+    answer = answer.rstrip(" .;:")
+
+    if len(answer) > max_chars:
+        answer = answer[:max_chars].rstrip(" .;:")
+    return answer

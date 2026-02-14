@@ -20,6 +20,7 @@ from common import (  # noqa: E402
     EMBED_MODEL,
     ensure_dataset,
     load_qa_with_docs,
+    normalize_answer_for_eval,
     output_pred_path,
     resolve_llm_backend,
     write_pred_jsonl,
@@ -132,7 +133,14 @@ class OpenAICompatQAModel(BaseQAModel):
     def answer_question(self, context: str, question: str):
         ctx = str(context or "")[: self.max_input_chars]
         if self.qa_prompt_mode == "answer_only":
-            sys_prompt = "Answer using only the provided context. Return only the final short answer."
+            sys_prompt = (
+                "You are a factual answerer. Use the provided context to answer the question.\n"
+                "If the context is partial, answer based on the best available information or reasonable inference. "
+                "Only say 'Insufficient evidence' if absolutely no relevant information is present.\n"
+                "If the context supports a reasonable answer (even if partial), choose the best answer rather than 'Insufficient evidence'.\n"
+                "For yes/no questions, answer exactly 'yes' or 'no' (lowercase).\n"
+                "Return only the final short answer text. Do not output analysis or rationale."
+            )
         else:
             sys_prompt = "Answer using only the provided context."
         response = self.client.chat.completions.create(
@@ -147,7 +155,7 @@ class OpenAICompatQAModel(BaseQAModel):
             temperature=0.0,
             max_tokens=max(16, self.max_tokens),
         )
-        return (response.choices[0].message.content or "").strip()
+        return normalize_answer_for_eval(response.choices[0].message.content or "")
 
 
 def _sha1_text(text: str) -> str:
@@ -259,7 +267,7 @@ def _answer_one_question(
         state_path.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
 
     try:
-        return str(ra.answer_question(question) or "").strip()
+        return normalize_answer_for_eval(str(ra.answer_question(question) or "").strip())
     except Exception:
         return ""
 

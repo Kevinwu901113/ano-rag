@@ -152,9 +152,12 @@ def _answer_with_llm(
 ) -> str:
     if qa_prompt_mode == "answer_only":
         system_prompt = (
-            "Answer using only the provided context. "
-            "Return only the final short answer text. "
-            "If context is insufficient, return: Insufficient evidence"
+            "You are a factual answerer. Use the provided context to answer the question.\n"
+            "If the context is partial, answer based on the best available information or reasonable inference. "
+            "Only say 'Insufficient evidence' if absolutely no relevant information is present.\n"
+            "If the context supports a reasonable answer (even if partial), choose the best answer rather than 'Insufficient evidence'.\n"
+            "For yes/no questions, answer exactly 'yes' or 'no' (lowercase).\n"
+            "Return only the final short answer text. Do not output analysis or rationale."
         )
     else:
         system_prompt = "Answer using only the provided context."

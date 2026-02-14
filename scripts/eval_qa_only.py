@@ -110,7 +110,8 @@ def main():
         if 'references' in gold_entry:
              gold_answers = gold_entry['references']
              
-        pred_answer = pred.get('answer', pred.get('prediction', ''))
+        # Support 'pred' key (baseline format), 'short_answer', 'prediction', 'answer'
+        pred_answer = pred.get('short_answer', pred.get('prediction', pred.get('pred', pred.get('answer', ''))))
         if isinstance(pred_answer, dict): # Sometimes it's a dict?
              pred_answer = pred_answer.get('text', '')
         

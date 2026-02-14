@@ -5,10 +5,11 @@ import argparse
 import asyncio
 import hashlib
 import json
+import re
 import shutil
 import sys
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Tuple
 
 import numpy as np
 from openai import OpenAI
@@ -22,6 +23,7 @@ from common import (  # noqa: E402
     EMBED_MODEL,
     ensure_dataset,
     load_qa_with_docs,
+    normalize_answer_for_eval,
     output_pred_path,
     resolve_llm_backend,
     write_pred_jsonl,
@@ -48,6 +50,159 @@ def _sanitize_qid(value: str) -> str:
     return "".join(ch if ch.isalnum() or ch in {"-", "_"} else "_" for ch in value)[:160]
 
 
+def _title_key(text: str) -> str:
+    return re.sub(r"\s+", " ", str(text or "").strip()).lower()
+
+
+def _guess_title_and_body(content: str) -> Tuple[str, str]:
+    lines = [ln.strip() for ln in str(content or "").splitlines() if ln.strip()]
+    if not lines:
+        return "", ""
+
+    first = lines[0]
+    title = first
+    body_lines = lines[1:]
+
+    if first.lower().startswith("title:"):
+        title = first.split(":", 1)[1].strip()
+    elif first.lower().startswith("### doc "):
+        title_match = re.search(r"\|\s*title:\s*(.+)$", first, flags=re.IGNORECASE)
+        if title_match:
+            title = title_match.group(1).strip()
+        else:
+            title = ""
+        body_lines = lines[1:]
+
+    body = "\n".join(body_lines).strip()
+    return title, body
+
+
+def _build_retrieved_context_rows(
+    *,
+    docs: List[Dict[str, Any]],
+    chunks: List[Dict[str, Any]],
+    top_k: int,
+) -> List[Dict[str, Any]]:
+    doc_by_title: Dict[str, List[Dict[str, Any]]] = {}
+    for doc in docs:
+        key = _title_key(doc.get("title"))
+        if key:
+            doc_by_title.setdefault(key, []).append(doc)
+
+    out: List[Dict[str, Any]] = []
+    for rank, chunk in enumerate(chunks[: max(0, int(top_k))], start=1):
+        content = str(chunk.get("content") or "").strip()
+        title_guess, body = _guess_title_and_body(content)
+        matched_doc = None
+        candidates = doc_by_title.get(_title_key(title_guess), [])
+        if candidates:
+            matched_doc = candidates[0]
+
+        if matched_doc is None and body:
+            probe = body[:220].strip()
+            if probe:
+                for doc in docs:
+                    doc_text = str(doc.get("text") or "").strip()
+                    if probe in doc_text:
+                        matched_doc = doc
+                        break
+
+        if matched_doc is not None:
+            title = str(matched_doc.get("title") or title_guess).strip()
+            text = body or str(matched_doc.get("text") or "").strip()
+            doc_id = str(matched_doc.get("id") or f"qdoc_{rank:04d}")
+            is_supporting = (
+                None
+                if matched_doc.get("is_supporting") is None
+                else bool(matched_doc.get("is_supporting"))
+            )
+        else:
+            title = title_guess
+            text = content
+            doc_id = f"chunk_{rank:04d}"
+            is_supporting = None
+
+        out.append(
+            {
+                "id": doc_id,
+                "title": title,
+                "text": text,
+                "is_supporting": is_supporting,
+                "rank": rank,
+                "chunk_id": str(chunk.get("chunk_id") or ""),
+                "reference_id": str(chunk.get("reference_id") or ""),
+                "file_path": str(chunk.get("file_path") or ""),
+            }
+        )
+    return out
+
+
+def _build_qa_context(rows: List[Dict[str, Any]]) -> str:
+    parts: List[str] = []
+    for row in rows:
+        rank = int(row.get("rank") or 0)
+        title = str(row.get("title") or "").strip()
+        text = str(row.get("text") or "").strip()
+        doc_id = str(row.get("id") or "").strip()
+        if not text:
+            continue
+        parts.append(
+            f"[Rank {rank} | id={doc_id}]\n"
+            f"Title: {title}\n"
+            f"Content: {text}"
+        )
+    return "\n\n".join(parts)
+
+
+def _answer_with_llm(
+    llm_client: OpenAI,
+    *,
+    model: str,
+    question: str,
+    context: str,
+    answer_max_tokens: int,
+    qa_prompt_mode: str,
+    temperature: float,
+) -> str:
+    if qa_prompt_mode == "answer_only":
+        system_prompt = (
+            "You are a factual answerer. Use the provided context to answer the question.\n"
+            "If the context is partial, answer based on the best available information or reasonable inference. "
+            "Only say 'Insufficient evidence' if absolutely no relevant information is present.\n"
+            "If the context supports a reasonable answer (even if partial), choose the best answer rather than 'Insufficient evidence'.\n"
+            "For yes/no questions, answer exactly 'yes' or 'no' (lowercase).\n"
+            "Return only the final short answer text. Do not output analysis or rationale."
+        )
+    else:
+        system_prompt = "Answer using only the provided context."
+
+    response = llm_client.chat.completions.create(
+        model=model,
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {
+                "role": "user",
+                "content": f"Question: {question}\n\nContext:\n{context}\n\nAnswer:",
+            },
+        ],
+        temperature=float(temperature),
+        max_tokens=max(16, int(answer_max_tokens)),
+    )
+    return normalize_answer_for_eval(response.choices[0].message.content or "")
+
+
+def _fallback_lightrag_prompt(query_mode: str) -> str:
+    context_key = "content_data" if str(query_mode).strip().lower() == "naive" else "context_data"
+    return (
+        "You are a QA assistant.\n"
+        "Answer the user question using only the given context.\n"
+        "Return only the final short answer text.\n"
+        "Do not output markdown, explanations, or references.\n"
+        "If the context is insufficient, return: Insufficient evidence.\n\n"
+        f"Context:\n{{{context_key}}}"
+    )
+
+
 async def _run_single_question(
     args: argparse.Namespace,
     *,
@@ -59,7 +214,7 @@ async def _run_single_question(
     embedding_dim: int,
     workspace_root: Path,
     row: Dict[str, Any],
-) -> str:
+) -> Dict[str, Any]:
     from lightrag import LightRAG, QueryParam
     from lightrag.utils import wrap_embedding_func_with_attrs
 
@@ -70,7 +225,7 @@ async def _run_single_question(
         docs = docs[: args.max_docs]
 
     if not qid or not question:
-        return ""
+        return {"id": qid, "pred": "", "ctxs": [], "retrieved_context_topk": []}
 
     q_workspace = workspace_root / "lightrag" / dataset / backend_name / _sanitize_qid(qid)
     state_path = q_workspace / "index_state.json"
@@ -168,18 +323,58 @@ async def _run_single_question(
             )
 
         response_type = "Short Answer" if args.qa_prompt_mode == "answer_only" else "Multiple Paragraphs"
+        query_param = QueryParam(
+            mode=args.query_mode,
+            enable_rerank=False,
+            top_k=int(args.top_k),
+            response_type=response_type,
+        )
+
+        if hasattr(rag, "aquery_data"):
+            query_data = await rag.aquery_data(
+                question,
+                param=query_param,
+            )
+            data = query_data.get("data") if isinstance(query_data, dict) else {}
+            chunks = list((data or {}).get("chunks") or [])
+            retrieved_rows = _build_retrieved_context_rows(
+                docs=docs,
+                chunks=chunks,
+                top_k=int(args.top_k),
+            )
+            context = _build_qa_context(retrieved_rows)
+            if context:
+                pred = _answer_with_llm(
+                    llm_client,
+                    model=backend_model,
+                    question=question,
+                    context=context,
+                    answer_max_tokens=args.answer_max_tokens,
+                    qa_prompt_mode=args.qa_prompt_mode,
+                    temperature=args.temperature,
+                )
+            elif args.qa_prompt_mode == "answer_only":
+                pred = "Insufficient evidence"
+            else:
+                pred = ""
+
+            return {
+                "id": qid,
+                "pred": normalize_answer_for_eval(pred),
+                "ctxs": retrieved_rows,
+                "retrieved_context_topk": retrieved_rows,
+                "retrieved_context_raw": retrieved_rows,
+            }
+
         result = await rag.aquery(
             question,
-            param=QueryParam(
-                mode=args.query_mode,
-                enable_rerank=False,
-                top_k=int(args.top_k),
-                response_type=response_type,
-            ),
+            param=query_param,
+            system_prompt=_fallback_lightrag_prompt(args.query_mode),
         )
-        return str(result or "").strip()
+        pred = normalize_answer_for_eval(str(result or ""))
+        return {"id": qid, "pred": pred, "ctxs": [], "retrieved_context_topk": []}
     except Exception:
-        return ""
+        return {"id": qid, "pred": "", "ctxs": [], "retrieved_context_topk": []}
     finally:
         if hasattr(rag, "finalize_storages"):
             await rag.finalize_storages()
@@ -232,10 +427,9 @@ async def run(args: argparse.Namespace) -> Path:
             f"Use --embedding_dim {observed_dim} (or --embedding_dim 0 for auto-detect)."
         )
 
-    pred_rows: List[Dict[str, str]] = []
+    pred_rows: List[Dict[str, Any]] = []
     for row in qa_rows:
-        qid = str(row.get("id") or "").strip()
-        pred = await _run_single_question(
+        pred_row = await _run_single_question(
             args,
             dataset=dataset,
             backend_name=backend.name,
@@ -246,7 +440,7 @@ async def run(args: argparse.Namespace) -> Path:
             workspace_root=workspace_root,
             row=row,
         )
-        pred_rows.append({"id": qid, "pred": pred})
+        pred_rows.append(pred_row)
 
     write_pred_jsonl(pred_path, pred_rows)
     return pred_path

@@ -24,17 +24,18 @@ from common import (  # noqa: E402
     EMBED_MODEL,
     ensure_dataset,
     load_qa_with_docs,
+    normalize_answer_for_eval,
     output_pred_path,
     resolve_llm_backend,
     write_pred_jsonl,
 )
 
 
-ANSWER_ONLY_PROMPT = """You are a QA assistant.
-Answer the user question using only the retrieved context.
-Return only the short final answer text.
-Do not provide explanation, list, or extra words.
-If the context is insufficient, return: Insufficient evidence
+ANSWER_ONLY_PROMPT = """You are a factual answerer. Use the provided context to answer the question.
+If the context is partial, answer based on the best available information or reasonable inference. Only say "Insufficient evidence" if absolutely no relevant information is present.
+If the context supports a reasonable answer (even if partial), choose the best answer rather than "Insufficient evidence".
+For yes/no questions, answer exactly "yes" or "no" (lowercase).
+Return only the final short answer text. Do not output analysis or rationale.
 """
 
 
@@ -509,7 +510,7 @@ def _build_and_query_one(
         ],
         env=env,
     )
-    return _last_non_empty_line(result.stdout)
+    return normalize_answer_for_eval(_last_non_empty_line(result.stdout))
 
 
 def main() -> None:

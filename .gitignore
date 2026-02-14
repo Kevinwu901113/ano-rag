@@ -1,5 +1,19 @@
+# Python
 __pycache__/
 *.pyc
+
+# Environment & IDE
+.env
+.venv
+.vscode/
+.idea/
+*.swp
+
+# Trae - ignore everything except skills
+.trae/
+!.trae/skills/
+
+# Data & Results
 relrag_out/
 smoke_test_out/
 result_relrag/
@@ -7,27 +21,33 @@ data/
 data_full/
 result/
 sample/
+baseline/results/
+baseline/results_backup/
+baseline/workspaces/
+
+# Datasets
 narrativeqa/
-.trae/
-.musique/
-musique
-narrativeqa
+musique/
 mirage/
+.musique/
+
+# Logs
+*.log
+*.log.*
+logs/
+
+# Patch files
+*.patch
+
+# Scripts specific ignore rules
 !scripts/musique/
 scripts/musique/*
 !scripts/musique/hop_study.py
-!scripts/musique/HOP_STUDY.md
 
-# Runtime logs
-lightrag.log
-
-# Baseline experiment artifacts
-baseline/workspaces/
-baseline/results/
-
-# Ignore all markdown files except README
+# Documentation
 *.md
-!README.md
-!readme.md
-!Readme.md
-*.log
+!/README.md
+
+# Keep Trae Skills definitions
+!.trae/skills/**/*.md
+!.trae/skills/*.md
