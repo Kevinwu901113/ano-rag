@@ -23,6 +23,10 @@ result/
 sample/
 baseline/results/
 baseline/results_backup/
+baseline/results_test/
+baseline/results_shards/
+baseline/results_retrieval_fix/
+baseline/data_shards/
 baseline/workspaces/
 
 # Datasets
@@ -46,6 +50,7 @@ scripts/musique/*
 
 # Documentation
 *.md
+**/*.md
 !/README.md
 
 # Keep Trae Skills definitions

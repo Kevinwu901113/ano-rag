@@ -61,7 +61,7 @@ vllm:
 openai:
   enabled: true
   model: deepseek-chat
-  answer_prompt_name: answerer_openai.txt
+  answer_prompt_name: answerer.txt
   api_key: "sk-c003ed6c90c24b5f8caad6252b4d6a24"
   api_key_env: OPENAI_API_KEY
   temperature: 0.7
@@ -71,7 +71,7 @@ openai:
   max_retries: 5
   retry_backoff_sec: 2.0
   retry_backoff_max_sec: 60.0
-  system_prompt_name: system_prompt_openai.txt
+  system_prompt_name: system_prompt.txt
 answerer:
   stop: null
 datasets:

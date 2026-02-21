@@ -6,6 +6,7 @@ import hashlib
 import json
 import math
 import sys
+import time
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
@@ -149,6 +150,8 @@ def _answer_with_llm(
     context: str,
     answer_max_tokens: int,
     qa_prompt_mode: str,
+    content_risk_retries: int,
+    content_risk_retry_wait_sec: float,
 ) -> str:
     if qa_prompt_mode == "answer_only":
         system_prompt = (
@@ -162,19 +165,30 @@ def _answer_with_llm(
     else:
         system_prompt = "Answer using only the provided context."
 
-    response = client.chat.completions.create(
-        model=model,
-        messages=[
-            {"role": "system", "content": system_prompt},
-            {
-                "role": "user",
-                "content": f"Question: {question}\n\nContext:\n{context}\n\nAnswer:",
-            },
-        ],
-        temperature=0.0,
-        max_tokens=max(16, int(answer_max_tokens)),
-    )
-    return (response.choices[0].message.content or "").strip()
+    risk_retries = max(0, int(content_risk_retries))
+    retry_wait_s = max(0.0, float(content_risk_retry_wait_sec))
+    for risk_try in range(risk_retries + 1):
+        try:
+            response = client.chat.completions.create(
+                model=model,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {
+                        "role": "user",
+                        "content": f"Question: {question}\n\nContext:\n{context}\n\nAnswer:",
+                    },
+                ],
+                temperature=0.0,
+                max_tokens=max(16, int(answer_max_tokens)),
+            )
+            return (response.choices[0].message.content or "").strip()
+        except Exception as exc:
+            if "content exists risk" in str(exc or "").lower() and risk_try < risk_retries:
+                if retry_wait_s > 0:
+                    time.sleep(retry_wait_s)
+                continue
+            raise
+    return ""
 
 
 def main() -> None:
@@ -197,6 +211,19 @@ def main() -> None:
     parser.add_argument("--top_k", type=int, default=5)
     parser.add_argument("--answer_max_tokens", type=int, default=96)
     parser.add_argument("--qa_prompt_mode", default="answer_only", choices=["answer_only", "default"])
+    parser.add_argument(
+        "--content_risk_retries",
+        type=int,
+        default=3,
+        help="Question-level retries for backend moderation error: Content Exists Risk.",
+    )
+    parser.add_argument(
+        "--content_risk_retry_wait_sec",
+        type=float,
+        default=1.0,
+        help="Sleep time between content-risk retries.",
+    )
+    parser.add_argument("--retrieval_only", action="store_true", help="Skip LLM generation, only output retrieval results.")
     args = parser.parse_args()
 
     dataset = ensure_dataset(args.dataset)
@@ -210,6 +237,8 @@ def main() -> None:
 
     rows = load_qa_with_docs(qa_path, limit=args.limit)
     pred_path = output_pred_path(Path(args.output_root), "dense", dataset, backend.name)
+    if args.retrieval_only:
+        pred_path = pred_path.with_name(pred_path.stem + "_retrieval.jsonl")
 
     llm_client = OpenAI(
         base_url=backend.base_url,
@@ -292,19 +321,41 @@ def main() -> None:
             scored.sort(key=lambda item: item[1], reverse=True)
 
             top_items = scored[: max(0, int(args.top_k))]
-            context = _build_context(top_items)
-            pred = _answer_with_llm(
-                llm_client,
-                model=backend.model,
-                question=question,
-                context=context,
-                answer_max_tokens=args.answer_max_tokens,
-                qa_prompt_mode=args.qa_prompt_mode,
-            )
-        except Exception:
-            pred = ""
+            
+            # Save retrieval context
+            ctxs = []
+            for rank, (doc, score) in enumerate(top_items, start=1):
+                ctxs.append({
+                    "id": doc.get("id"),
+                    "title": doc.get("title"),
+                    "text": doc.get("text"),
+                    "score": score,
+                    "rank": rank
+                })
 
-        pred_rows.append({"id": qid, "pred": pred})
+            context = _build_context(top_items)
+            if args.retrieval_only:
+                pred = ""
+            else:
+                pred = _answer_with_llm(
+                    llm_client,
+                    model=backend.model,
+                    question=question,
+                    context=context,
+                    answer_max_tokens=args.answer_max_tokens,
+                    qa_prompt_mode=args.qa_prompt_mode,
+                    content_risk_retries=args.content_risk_retries,
+                    content_risk_retry_wait_sec=args.content_risk_retry_wait_sec,
+                )
+            
+        except Exception:
+            import traceback
+            traceback.print_exc()
+            pred = ""
+            if 'ctxs' not in locals():
+                ctxs = []
+
+        pred_rows.append({"id": qid, "pred": pred, "ctxs": ctxs})
 
     write_pred_jsonl(pred_path, pred_rows)
     print(f"[ok] wrote {pred_path}")

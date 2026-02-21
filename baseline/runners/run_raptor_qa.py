@@ -6,8 +6,9 @@ import hashlib
 import json
 import pickle
 import sys
+import time
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Tuple
 
 from openai import OpenAI
 
@@ -25,6 +26,7 @@ from common import (  # noqa: E402
     resolve_llm_backend,
     write_pred_jsonl,
 )
+from retrieval_schema import build_raptor_ctxs  # noqa: E402
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _RAPTOR_PKG = _REPO_ROOT / "RAPTOR" / "raptor"
@@ -171,6 +173,10 @@ def _sanitize_qid(value: str) -> str:
     return "".join(ch if ch.isalnum() or ch in {"-", "_"} else "_" for ch in value)[:160]
 
 
+def _is_content_exists_risk(exc: Exception) -> bool:
+    return "content exists risk" in str(exc or "").lower()
+
+
 def _docs_to_text(docs: List[Dict[str, Any]]) -> str:
     parts: List[str] = []
     for row in docs:
@@ -229,7 +235,7 @@ def _answer_one_question(
     question: str,
     docs: List[Dict[str, Any]],
     workspace_root: Path,
-) -> str:
+) -> Tuple[str, List[Any]]:
     q_workspace = workspace_root / "raptor" / dataset / backend_name / _sanitize_qid(qid)
     q_workspace.mkdir(parents=True, exist_ok=True)
     tree_path = q_workspace / "tree.pkl"
@@ -242,34 +248,94 @@ def _answer_one_question(
     corpus_text = _docs_to_text(docs)
     corpus_hash = _sha1_text(corpus_text)
 
-    reuse_index = (
-        (not args.rebuild_index)
-        and tree_path.exists()
-        and state_path.exists()
-        and json.loads(state_path.read_text(encoding="utf-8")).get("docs_hash") == docs_hash
-    )
+    risk_retries = max(0, int(args.content_risk_retries))
+    retry_wait_s = max(0.0, float(args.content_risk_retry_wait_sec))
 
-    if reuse_index:
-        ra = RetrievalAugmentation(config=config, tree=str(tree_path))
-    else:
-        ra = RetrievalAugmentation(config=config)
-        ra.add_documents(corpus_text)
-        with tree_path.open("wb") as handle:
-            pickle.dump(ra.tree, handle)
-        state = {
-            "dataset": dataset,
-            "llm_backend": backend_name,
-            "qid": qid,
-            "docs_hash": docs_hash,
-            "corpus_hash": corpus_hash,
-            "tree_path": str(tree_path),
-        }
-        state_path.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+    for risk_try in range(risk_retries + 1):
+        try:
+            reuse_index = (
+                (not args.rebuild_index)
+                and tree_path.exists()
+                and state_path.exists()
+                and json.loads(state_path.read_text(encoding="utf-8")).get("docs_hash") == docs_hash
+            )
 
-    try:
-        return normalize_answer_for_eval(str(ra.answer_question(question) or "").strip())
-    except Exception:
-        return ""
+            if reuse_index:
+                ra = RetrievalAugmentation(config=config, tree=str(tree_path))
+            else:
+                ra = RetrievalAugmentation(config=config)
+                ra.add_documents(corpus_text)
+                with tree_path.open("wb") as handle:
+                    pickle.dump(ra.tree, handle)
+                state = {
+                    "dataset": dataset,
+                    "llm_backend": backend_name,
+                    "qid": qid,
+                    "docs_hash": docs_hash,
+                    "corpus_hash": corpus_hash,
+                    "tree_path": str(tree_path),
+                }
+                state_path.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+
+            if args.retrieval_only:
+                retrieval = ra.retrieve(
+                    question,
+                    top_k=args.top_k,
+                    max_tokens=args.answer_max_tokens * 10,  # rough estimate for context
+                    return_layer_information=True,
+                )
+                if isinstance(retrieval, tuple) and len(retrieval) == 2:
+                    context, layer_information = retrieval
+                else:
+                    context, layer_information = retrieval, []
+
+                node_text_by_index: Dict[int, str] = {}
+                try:
+                    tree = getattr(ra, "tree", None)
+                    all_nodes = getattr(tree, "all_nodes", {}) if tree is not None else {}
+                    if isinstance(all_nodes, dict):
+                        for key, node in all_nodes.items():
+                            try:
+                                node_index = int(key)
+                            except (TypeError, ValueError):
+                                continue
+                            node_text_by_index[node_index] = str(getattr(node, "text", "") or "")
+                except Exception:
+                    node_text_by_index = {}
+
+                ctxs = build_raptor_ctxs(
+                    context_text=str(context or ""),
+                    docs=docs,
+                    top_k=args.top_k,
+                    layer_information=layer_information if isinstance(layer_information, list) else [],
+                    node_text_by_index=node_text_by_index,
+                )
+                return "", ctxs
+
+            return normalize_answer_for_eval(str(ra.answer_question(question) or "").strip()), []
+
+        except KeyboardInterrupt:
+            raise
+        except Exception as exc:
+            if _is_content_exists_risk(exc):
+                if risk_try < risk_retries:
+                    # Clean partial artifacts before retrying this question.
+                    try:
+                        if tree_path.exists():
+                            tree_path.unlink()
+                    except Exception:
+                        pass
+                    try:
+                        if state_path.exists():
+                            state_path.unlink()
+                    except Exception:
+                        pass
+                    if retry_wait_s > 0:
+                        time.sleep(retry_wait_s)
+                    continue
+            return "", []
+
+    return "", []
 
 
 def main() -> None:
@@ -295,7 +361,20 @@ def main() -> None:
     parser.add_argument("--top_k", type=int, default=5)
     parser.add_argument("--answer_max_tokens", type=int, default=96)
     parser.add_argument("--qa_prompt_mode", default="answer_only", choices=["answer_only", "default"])
+    parser.add_argument("--retrieval_only", action="store_true", help="Skip LLM generation, only output retrieval results.")
     parser.add_argument("--request_timeout", type=float, default=60.0)
+    parser.add_argument(
+        "--content_risk_retries",
+        type=int,
+        default=3,
+        help="Question-level retries for backend moderation error: Content Exists Risk.",
+    )
+    parser.add_argument(
+        "--content_risk_retry_wait_sec",
+        type=float,
+        default=1.0,
+        help="Sleep time between content-risk retries.",
+    )
 
     args = parser.parse_args()
 
@@ -314,6 +393,8 @@ def main() -> None:
 
     qa_rows = load_qa_with_docs(qa_path, limit=args.limit)
     pred_path = output_pred_path(output_root, "raptor", dataset, backend.name)
+    if args.retrieval_only:
+        pred_path = pred_path.with_name(pred_path.stem + "_retrieval.jsonl")
 
     config = build_config(
         args,
@@ -322,24 +403,54 @@ def main() -> None:
         llm_model=backend.model,
     )
 
-    pred_rows: List[Dict[str, str]] = []
+    completed_ids = set()
+    if pred_path.exists():
+        with pred_path.open("r", encoding="utf-8") as f:
+            for line in f:
+                try:
+                    completed_ids.add(json.loads(line)["id"])
+                except Exception:
+                    pass
+    
+    # Open file in append mode for incremental writing
+    pred_handle = pred_path.open("a", encoding="utf-8")
+
+    pred_rows: List[Dict[str, Any]] = []
     for row in qa_rows:
         qid = str(row.get("id") or "").strip()
+        if qid in completed_ids:
+            continue
+            
         question = str(row.get("question") or "").strip()
         docs = list(row.get("docs") or [])
-        pred = _answer_one_question(
-            args,
-            dataset=dataset,
-            backend_name=backend.name,
-            config=config,
-            qid=qid,
-            question=question,
-            docs=docs,
-            workspace_root=workspace_root,
-        )
-        pred_rows.append({"id": qid, "pred": pred})
+        try:
+            pred, ctxs = _answer_one_question(
+                args,
+                dataset=dataset,
+                backend_name=backend.name,
+                config=config,
+                qid=qid,
+                question=question,
+                docs=docs,
+                workspace_root=workspace_root,
+            )
+        except KeyboardInterrupt:
+            raise
+        except Exception:
+            pred = ""
+            ctxs = []
+        
+        out_row = {"id": qid, "pred": pred}
+        if ctxs:
+            out_row["ctxs"] = ctxs
 
-    write_pred_jsonl(pred_path, pred_rows)
+        # Write immediately
+        pred_handle.write(json.dumps(out_row, ensure_ascii=False) + "\n")
+        pred_handle.flush()
+        # pred_rows.append(out_row) # No need to keep in memory
+
+    pred_handle.close()
+    # write_pred_jsonl(pred_path, pred_rows)
     print(f"[ok] wrote {pred_path}")
 
 

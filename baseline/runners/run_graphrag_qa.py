@@ -2,12 +2,15 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import hashlib
+import io
 import json
 import os
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
@@ -29,6 +32,7 @@ from common import (  # noqa: E402
     resolve_llm_backend,
     write_pred_jsonl,
 )
+from retrieval_schema import build_graphrag_ctxs_from_sources  # noqa: E402
 
 
 ANSWER_ONLY_PROMPT = """You are a factual answerer. Use the provided context to answer the question.
@@ -36,6 +40,11 @@ If the context is partial, answer based on the best available information or rea
 If the context supports a reasonable answer (even if partial), choose the best answer rather than "Insufficient evidence".
 For yes/no questions, answer exactly "yes" or "no" (lowercase).
 Return only the final short answer text. Do not output analysis or rationale.
+"""
+
+RETRIEVAL_ONLY_PROMPT = """You are a retrieval debugger.
+Please output the provided Context verbatim.
+Do not summarize. Do not explain. Just output the context text.
 """
 
 
@@ -58,13 +67,6 @@ def _resolve_graphrag_cli(explicit: str | None) -> str:
     if detected:
         return detected
     raise RuntimeError("graphrag CLI not found in PATH")
-
-
-def _last_non_empty_line(text: str) -> str:
-    for line in reversed((text or "").splitlines()):
-        if line.strip():
-            return line.strip()
-    return ""
 
 
 def _detect_embedding_dim(embed_base_url: str, embed_model: str, request_timeout: float) -> int:
@@ -102,6 +104,10 @@ def _is_prune_empty_failure(exc: Exception) -> bool:
             or "No relationships remain" in text
         )
     )
+
+
+def _is_content_exists_risk(exc: Exception) -> bool:
+    return "content exists risk" in str(exc or "").lower()
 
 
 def _ensure_community_reports(workspace: Path) -> None:
@@ -154,6 +160,7 @@ def _patch_settings(
     qa_prompt_mode: str,
     relax_pruning: bool,
     request_timeout: float,
+    retrieval_only: bool = False,
 ) -> None:
     cfg = yaml.safe_load(settings_path.read_text(encoding="utf-8")) or {}
 
@@ -281,10 +288,24 @@ def _patch_settings(
     cfg.setdefault("local_search", {})
     cfg["local_search"]["completion_model_id"] = completion_id
     cfg["local_search"]["embedding_model_id"] = embedding_id
-    cfg["local_search"]["prompt"] = "prompts/answer_only.txt" if qa_prompt_mode == "answer_only" else cfg["local_search"].get("prompt", "prompts/local_search_system_prompt.txt")
+    # Keep compatibility across GraphRAG versions:
+    # some use `top_k_entities`, some use `top_k_mapped_entities`.
+    cfg["local_search"]["top_k_entities"] = int(top_k)
     cfg["local_search"]["top_k_mapped_entities"] = int(top_k)
     cfg["local_search"]["top_k_relationships"] = int(top_k)
-    cfg["local_search"]["llm_max_gen_tokens"] = int(answer_max_tokens)
+    
+    if retrieval_only:
+        cfg["local_search"]["prompt"] = "prompts/retrieval_only.txt"
+        # Retrieval-only path only needs context_data for schema reconstruction.
+        # Keep generation tiny to reduce per-query latency.
+        cfg["local_search"]["llm_max_gen_tokens"] = 64
+    elif qa_prompt_mode == "answer_only":
+        cfg["local_search"]["prompt"] = "prompts/answer_only.txt"
+    else:
+        cfg["local_search"]["prompt"] = cfg["local_search"].get("prompt", "prompts/local_search_system_prompt.txt")
+
+    if not retrieval_only:
+        cfg["local_search"]["llm_max_gen_tokens"] = int(answer_max_tokens)
 
     cfg.setdefault("prune_graph", {})
     if relax_pruning:
@@ -316,6 +337,7 @@ def _prepare_workspace(
     qa_prompt_mode: str,
     relax_pruning: bool,
     request_timeout: float,
+    retrieval_only: bool = False,
 ) -> None:
     if workspace.exists():
         shutil.rmtree(workspace)
@@ -338,6 +360,7 @@ def _prepare_workspace(
     prompts_dir = workspace / "prompts"
     prompts_dir.mkdir(parents=True, exist_ok=True)
     (prompts_dir / "answer_only.txt").write_text(ANSWER_ONLY_PROMPT, encoding="utf-8")
+    (prompts_dir / "retrieval_only.txt").write_text(RETRIEVAL_ONLY_PROMPT, encoding="utf-8")
 
     input_dir = workspace / "input"
     input_dir.mkdir(parents=True, exist_ok=True)
@@ -360,6 +383,7 @@ def _prepare_workspace(
         qa_prompt_mode=qa_prompt_mode,
         relax_pruning=relax_pruning,
         request_timeout=request_timeout,
+        retrieval_only=retrieval_only,
     )
 
 
@@ -401,6 +425,147 @@ def _build_docs(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return docs
 
 
+def _records_from_maybe_table(value: Any) -> List[Dict[str, Any]]:
+    if isinstance(value, pd.DataFrame):
+        return value.to_dict(orient="records")
+    if isinstance(value, list):
+        return [row for row in value if isinstance(row, dict)]
+    if isinstance(value, dict):
+        try:
+            return pd.DataFrame(value).to_dict(orient="records")
+        except Exception:
+            return []
+    return []
+
+
+def _build_graphrag_ctxs(
+    *,
+    workspace: Path,
+    context_data: Dict[str, Any],
+    top_k: int,
+    fallback_text: str,
+) -> List[Dict[str, Any]]:
+    sources_records = _records_from_maybe_table((context_data or {}).get("sources"))
+    if not sources_records:
+        if fallback_text.strip():
+            return [
+                {
+                    "id": "graphrag_context_0001",
+                    "title": "",
+                    "text": fallback_text.strip(),
+                    "rank": 1,
+                    "provenance": {"source": "response_fallback"},
+                }
+            ]
+        return []
+
+    text_units_path = workspace / "output" / "text_units.parquet"
+    documents_path = workspace / "output" / "documents.parquet"
+    if not text_units_path.exists() or not documents_path.exists():
+        if fallback_text.strip():
+            return [
+                {
+                    "id": "graphrag_context_0001",
+                    "title": "",
+                    "text": fallback_text.strip(),
+                    "rank": 1,
+                    "provenance": {"source": "response_fallback"},
+                }
+            ]
+        return []
+
+    text_units = pd.read_parquet(text_units_path).to_dict(orient="records")
+    documents = pd.read_parquet(documents_path).to_dict(orient="records")
+    return build_graphrag_ctxs_from_sources(
+        sources_records=sources_records,
+        text_unit_records=text_units,
+        document_records=documents,
+        top_k=top_k,
+    )
+
+
+def _run_local_query(
+    *,
+    root_dir: Path,
+    response_type: str,
+    question: str,
+) -> Tuple[str, Dict[str, Any]]:
+    try:
+        from graphrag.cli.query import run_local_search
+    except Exception as exc:
+        raise RuntimeError(
+            "Failed to import GraphRAG Python query API (graphrag.cli.query.run_local_search)."
+        ) from exc
+
+    capture = io.StringIO()
+    with contextlib.redirect_stdout(capture):
+        response, context_data = run_local_search(
+            data_dir=None,
+            root_dir=root_dir,
+            community_level=2,
+            response_type=response_type,
+            streaming=False,
+            query=question,
+            verbose=False,
+    )
+    return str(response or "").strip(), context_data if isinstance(context_data, dict) else {}
+
+
+def _run_local_context_only(
+    *,
+    root_dir: Path,
+    question: str,
+) -> Tuple[str, Dict[str, Any]]:
+    try:
+        from graphrag.config.load_config import load_config
+        import graphrag.api.query as query_api
+    except Exception as exc:
+        raise RuntimeError(
+            "Failed to import GraphRAG Python context APIs for retrieval-only mode."
+        ) from exc
+
+    output_dir = root_dir / "output"
+    communities = pd.read_parquet(output_dir / "communities.parquet")
+    community_reports = pd.read_parquet(output_dir / "community_reports.parquet")
+    text_units = pd.read_parquet(output_dir / "text_units.parquet")
+    relationships = pd.read_parquet(output_dir / "relationships.parquet")
+    entities = pd.read_parquet(output_dir / "entities.parquet")
+    covariates_path = output_dir / "covariates.parquet"
+    covariates = pd.read_parquet(covariates_path) if covariates_path.exists() else None
+
+    config = load_config(root_dir=root_dir, cli_overrides={})
+    community_level = 2
+    description_embedding_store = query_api.get_embedding_store(
+        config=config.vector_store,
+        embedding_name=query_api.entity_description_embedding,
+    )
+    entities_ = query_api.read_indexer_entities(entities, communities, community_level)
+    covariates_ = query_api.read_indexer_covariates(covariates) if covariates is not None else []
+
+    search_engine = query_api.get_local_search_engine(
+        config=config,
+        reports=query_api.read_indexer_reports(community_reports, communities, community_level),
+        text_units=query_api.read_indexer_text_units(text_units),
+        entities=entities_,
+        relationships=query_api.read_indexer_relationships(relationships),
+        covariates={"claims": covariates_},
+        description_embedding_store=description_embedding_store,
+        response_type="Short Answer",
+        system_prompt=RETRIEVAL_ONLY_PROMPT,
+        callbacks=[],
+    )
+
+    context_result = search_engine.context_builder.build_context(
+        query=question,
+        **(getattr(search_engine, "context_builder_params", {}) or {}),
+    )
+    context_text = str(getattr(context_result, "context_chunks", "") or "")
+    context_data = getattr(context_result, "context_records", {})
+    if not isinstance(context_data, dict):
+        context_data = {}
+    return context_text, context_data
+
+
 def _build_and_query_one(
     args: argparse.Namespace,
     *,
@@ -415,7 +580,7 @@ def _build_and_query_one(
     graphrag_cli: str,
     env: Dict[str, str],
     embedding_dim: int,
-) -> str:
+) -> Tuple[str, List[Any]]:
     if args.max_docs > 0:
         docs = docs[: args.max_docs]
     docs = _build_docs(docs)
@@ -451,6 +616,7 @@ def _build_and_query_one(
                 qa_prompt_mode=args.qa_prompt_mode,
                 relax_pruning=False,
                 request_timeout=args.request_timeout,
+                retrieval_only=args.retrieval_only,
             )
             _index_workspace(
                 q_workspace,
@@ -478,6 +644,7 @@ def _build_and_query_one(
                 qa_prompt_mode=args.qa_prompt_mode,
                 relax_pruning=True,
                 request_timeout=args.request_timeout,
+                retrieval_only=args.retrieval_only,
             )
             _index_workspace(
                 q_workspace,
@@ -496,21 +663,66 @@ def _build_and_query_one(
         }
         state_path.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
 
-    result = _run(
-        [
-            graphrag_cli,
-            "query",
-            "--root",
-            str(q_workspace),
-            "--method",
-            "local",
-            "--response-type",
-            "Short Answer" if args.qa_prompt_mode == "answer_only" else "Multiple Paragraphs",
-            question,
-        ],
-        env=env,
-    )
-    return normalize_answer_for_eval(_last_non_empty_line(result.stdout))
+    if reuse_index and args.retrieval_only:
+        # Force update settings for retrieval only mode
+        prompts_dir = q_workspace / "prompts"
+        prompts_dir.mkdir(parents=True, exist_ok=True)
+        (prompts_dir / "retrieval_only.txt").write_text(RETRIEVAL_ONLY_PROMPT, encoding="utf-8")
+        
+        settings_path = q_workspace / "settings.yaml"
+        # Try to load prune_relaxed from state if possible, default to False
+        try:
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+            prune_relaxed_val = state.get("prune_relaxed", False)
+        except Exception:
+            prune_relaxed_val = False
+
+        _patch_settings(
+            settings_path,
+            llm_base_url=backend_base_url,
+            llm_model=backend_model,
+            embed_base_url=args.embed_base_url,
+            embed_model=args.embed_model,
+            embed_dim=embedding_dim,
+            temperature=args.temperature,
+            answer_max_tokens=args.answer_max_tokens,
+            top_k=args.top_k,
+            qa_prompt_mode=args.qa_prompt_mode,
+            relax_pruning=prune_relaxed_val,
+            request_timeout=args.request_timeout,
+            retrieval_only=True,
+        )
+
+    response_type = "Short Answer" if (args.retrieval_only or args.qa_prompt_mode == "answer_only") else "Multiple Paragraphs"
+    old_key = os.environ.get("OPENAI_API_KEY")
+    os.environ["OPENAI_API_KEY"] = str(env.get("OPENAI_API_KEY") or "EMPTY")
+    try:
+        if args.retrieval_only:
+            result_text, context_data = _run_local_context_only(
+                root_dir=q_workspace,
+                question=question,
+            )
+        else:
+            result_text, context_data = _run_local_query(
+                root_dir=q_workspace,
+                response_type=response_type,
+                question=question,
+            )
+    finally:
+        if old_key is None:
+            os.environ.pop("OPENAI_API_KEY", None)
+        else:
+            os.environ["OPENAI_API_KEY"] = old_key
+
+    if args.retrieval_only:
+        ctxs = _build_graphrag_ctxs(
+            workspace=q_workspace,
+            context_data=context_data,
+            top_k=args.top_k,
+            fallback_text=result_text,
+        )
+        return "", ctxs
+    return normalize_answer_for_eval(result_text), []
 
 
 def main() -> None:
@@ -538,8 +750,21 @@ def main() -> None:
     parser.add_argument("--top_k", type=int, default=5)
     parser.add_argument("--qa_prompt_mode", default="answer_only", choices=["answer_only", "default"])
     parser.add_argument("--request_timeout", type=float, default=60.0)
+    parser.add_argument(
+        "--content_risk_retries",
+        type=int,
+        default=3,
+        help="Question-level retries for backend moderation error: Content Exists Risk.",
+    )
+    parser.add_argument(
+        "--content_risk_retry_wait_sec",
+        type=float,
+        default=1.0,
+        help="Sleep time between content-risk retries.",
+    )
     parser.add_argument("--index_method", default="standard", choices=["standard", "fast"])
     parser.add_argument("--graphrag_cli", default=None)
+    parser.add_argument("--retrieval_only", action="store_true", help="Skip QA generation, output context dump.")
     args = parser.parse_args()
 
     dataset = ensure_dataset(args.dataset)
@@ -557,11 +782,25 @@ def main() -> None:
 
     qa_rows = load_qa_with_docs(qa_path, limit=args.limit)
     pred_path = output_pred_path(output_root, "graphrag", dataset, backend.name)
+    if args.retrieval_only:
+        pred_path = pred_path.with_name(pred_path.stem + "_retrieval.jsonl")
 
     graphrag_cli = _resolve_graphrag_cli(args.graphrag_cli)
     env = os.environ.copy()
     env["PYTHONUNBUFFERED"] = "1"
     env["OPENAI_API_KEY"] = backend.api_key
+
+    completed_ids = set()
+    if pred_path.exists():
+        with pred_path.open("r", encoding="utf-8") as f:
+            for line in f:
+                try:
+                    completed_ids.add(json.loads(line)["id"])
+                except Exception:
+                    pass
+    
+    # Open file in append mode
+    pred_handle = pred_path.open("a", encoding="utf-8")
 
     observed_dim = _detect_embedding_dim(
         args.embed_base_url,
@@ -582,33 +821,56 @@ def main() -> None:
             f"Use --embedding_dim {observed_dim} (or --embedding_dim 0 for auto-detect)."
         )
 
-    pred_rows: List[Dict[str, str]] = []
+    pred_rows: List[Dict[str, Any]] = []
+    risk_retries = max(0, int(args.content_risk_retries))
+    retry_wait_s = max(0.0, float(args.content_risk_retry_wait_sec))
     for row in qa_rows:
         qid = str(row.get("id") or "").strip()
+        if qid in completed_ids:
+            continue
+            
         question = str(row.get("question") or "").strip()
         docs = list(row.get("docs") or [])
 
-        try:
-            pred = _build_and_query_one(
-                args,
-                dataset=dataset,
-                backend_name=backend.name,
-                backend_model=backend.model,
-                backend_base_url=backend.base_url,
-                qid=qid,
-                question=question,
-                docs=docs,
-                workspace_root=workspace_root,
-                graphrag_cli=graphrag_cli,
-                env=env,
-                embedding_dim=embedding_dim,
-            )
-        except Exception:
-            pred = ""
+        pred = ""
+        ctxs = []
+        for risk_try in range(risk_retries + 1):
+            try:
+                pred, ctxs = _build_and_query_one(
+                    args,
+                    dataset=dataset,
+                    backend_name=backend.name,
+                    backend_model=backend.model,
+                    backend_base_url=backend.base_url,
+                    qid=qid,
+                    question=question,
+                    docs=docs,
+                    workspace_root=workspace_root,
+                    graphrag_cli=graphrag_cli,
+                    env=env,
+                    embedding_dim=embedding_dim,
+                )
+                break
+            except Exception as exc:
+                if _is_content_exists_risk(exc) and risk_try < risk_retries:
+                    if retry_wait_s > 0:
+                        time.sleep(retry_wait_s)
+                    continue
+                pred = ""
+                ctxs = []
+                break
 
-        pred_rows.append({"id": qid, "pred": pred})
+        out_row = {"id": qid, "pred": pred}
+        if ctxs:
+            out_row["ctxs"] = ctxs
+        
+        # Write immediately
+        pred_handle.write(json.dumps(out_row, ensure_ascii=False) + "\n")
+        pred_handle.flush()
+        # pred_rows.append(out_row)
 
-    write_pred_jsonl(pred_path, pred_rows)
+    pred_handle.close()
+    # write_pred_jsonl(pred_path, pred_rows)
     print(f"[ok] wrote {pred_path}")
 
 

@@ -8,6 +8,7 @@ import json
 import re
 import shutil
 import sys
+import time
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
@@ -52,6 +53,10 @@ def _sanitize_qid(value: str) -> str:
 
 def _title_key(text: str) -> str:
     return re.sub(r"\s+", " ", str(text or "").strip()).lower()
+
+
+def _is_content_exists_risk(exc: Exception) -> bool:
+    return "content exists risk" in str(exc or "").lower()
 
 
 def _guess_title_and_body(content: str) -> Tuple[str, str]:
@@ -163,6 +168,8 @@ def _answer_with_llm(
     answer_max_tokens: int,
     qa_prompt_mode: str,
     temperature: float,
+    content_risk_retries: int,
+    content_risk_retry_wait_sec: float,
 ) -> str:
     if qa_prompt_mode == "answer_only":
         system_prompt = (
@@ -176,19 +183,30 @@ def _answer_with_llm(
     else:
         system_prompt = "Answer using only the provided context."
 
-    response = llm_client.chat.completions.create(
-        model=model,
-        messages=[
-            {"role": "system", "content": system_prompt},
-            {
-                "role": "user",
-                "content": f"Question: {question}\n\nContext:\n{context}\n\nAnswer:",
-            },
-        ],
-        temperature=float(temperature),
-        max_tokens=max(16, int(answer_max_tokens)),
-    )
-    return normalize_answer_for_eval(response.choices[0].message.content or "")
+    risk_retries = max(0, int(content_risk_retries))
+    retry_wait_s = max(0.0, float(content_risk_retry_wait_sec))
+    for risk_try in range(risk_retries + 1):
+        try:
+            response = llm_client.chat.completions.create(
+                model=model,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {
+                        "role": "user",
+                        "content": f"Question: {question}\n\nContext:\n{context}\n\nAnswer:",
+                    },
+                ],
+                temperature=float(temperature),
+                max_tokens=max(16, int(answer_max_tokens)),
+            )
+            return normalize_answer_for_eval(response.choices[0].message.content or "")
+        except Exception as exc:
+            if _is_content_exists_risk(exc) and risk_try < risk_retries:
+                if retry_wait_s > 0:
+                    time.sleep(retry_wait_s)
+                continue
+            raise
+    return ""
 
 
 def _fallback_lightrag_prompt(query_mode: str) -> str:
@@ -223,6 +241,8 @@ async def _run_single_question(
     docs = list(row.get("docs") or [])
     if args.max_docs > 0:
         docs = docs[: args.max_docs]
+    risk_retries = max(0, int(args.content_risk_retries))
+    retry_wait_s = max(0.0, float(args.content_risk_retry_wait_sec))
 
     if not qid or not question:
         return {"id": qid, "pred": "", "ctxs": [], "retrieved_context_topk": []}
@@ -285,7 +305,16 @@ async def _run_single_question(
             )
             return (response.choices[0].message.content or "").strip()
 
-        return await asyncio.to_thread(_call)
+        for risk_try in range(risk_retries + 1):
+            try:
+                return await asyncio.to_thread(_call)
+            except Exception as exc:
+                if _is_content_exists_risk(exc) and risk_try < risk_retries:
+                    if retry_wait_s > 0:
+                        await asyncio.sleep(retry_wait_s)
+                    continue
+                raise
+        return ""
 
     rag = LightRAG(
         working_dir=str(q_workspace),
@@ -352,6 +381,8 @@ async def _run_single_question(
                     answer_max_tokens=args.answer_max_tokens,
                     qa_prompt_mode=args.qa_prompt_mode,
                     temperature=args.temperature,
+                    content_risk_retries=args.content_risk_retries,
+                    content_risk_retry_wait_sec=args.content_risk_retry_wait_sec,
                 )
             elif args.qa_prompt_mode == "answer_only":
                 pred = "Insufficient evidence"
@@ -472,6 +503,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--answer_max_tokens", type=int, default=96)
     parser.add_argument("--extract_max_tokens", type=int, default=6144)
     parser.add_argument("--qa_prompt_mode", default="answer_only", choices=["answer_only", "default"])
+    parser.add_argument(
+        "--content_risk_retries",
+        type=int,
+        default=3,
+        help="Question-level retries for backend moderation error: Content Exists Risk.",
+    )
+    parser.add_argument(
+        "--content_risk_retry_wait_sec",
+        type=float,
+        default=1.0,
+        help="Sleep time between content-risk retries.",
+    )
     parser.add_argument("--top_k", type=int, default=5)
     parser.add_argument("--query_mode", default="hybrid")
     parser.add_argument("--chunk_token_size", type=int, default=600)

@@ -40,7 +40,7 @@ from scripts.ultradomain.common import (
 )
 
 SYSTEMS = ["RelRAG-full", "BM25-only", "Dense-only", "Hybrid-only"]
-ANSWER_PROMPT_PATH = Path("relrag/prompt/answerer_openai.txt")
+ANSWER_PROMPT_PATH = Path("relrag/prompt/answerer.txt")
 
 
 def _json_hash(payload: Any) -> str:
