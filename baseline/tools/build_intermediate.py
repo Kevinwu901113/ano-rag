@@ -10,6 +10,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Tuple
 
+try:
+    from relrag.doc.chunking_strategies import FixedWindowChunker, SentenceAwareChunker
+except Exception:
+    FixedWindowChunker = None
+    SentenceAwareChunker = None
+
 
 @dataclass(frozen=True)
 class DatasetSpec:
@@ -146,13 +152,116 @@ def _build_musique_doc_rows(paragraphs: Any) -> List[Dict[str, Any]]:
     return rows
 
 
-def build_dataset(spec: DatasetSpec, out_root: Path) -> None:
+def _naive_word_chunk(
+    *,
+    text: str,
+    chunk_size: int,
+    overlap: int,
+) -> List[str]:
+    words = [w for w in str(text or "").split() if w]
+    if not words:
+        return []
+    size = max(1, int(chunk_size))
+    ov = max(0, int(overlap))
+    stride = max(1, size - ov)
+    if len(words) <= size:
+        return [" ".join(words)]
+    out: List[str] = []
+    for start in range(0, len(words), stride):
+        window = words[start : start + size]
+        if not window:
+            continue
+        out.append(" ".join(window))
+        if start + size >= len(words):
+            break
+    return out
+
+
+def _chunk_doc_rows(
+    *,
+    docs: List[Dict[str, Any]],
+    chunking_method: str,
+    chunk_size: int,
+    chunk_overlap: int,
+) -> List[Dict[str, Any]]:
+    rows: List[Dict[str, Any]] = []
+    seen: set[str] = set()
+    method = str(chunking_method).strip().lower()
+
+    chunker = None
+    if method == "fixed" and FixedWindowChunker is not None:
+        chunker = FixedWindowChunker(chunk_size=int(chunk_size), overlap=int(chunk_overlap))
+    elif method == "sentence" and SentenceAwareChunker is not None:
+        chunker = SentenceAwareChunker()
+
+    for doc in docs:
+        doc_id = str(doc.get("id") or "").strip()
+        title = str(doc.get("title") or "").strip()
+        text = str(doc.get("text") or "").strip()
+        if not doc_id or not text:
+            continue
+        source_idx = int(doc.get("source_idx") or 0)
+        is_supporting = doc.get("is_supporting")
+
+        chunk_texts: List[str] = []
+        if chunker is not None:
+            try:
+                raw_chunks = chunker.chunk(doc_id, text, {"title": title})
+            except Exception:
+                raw_chunks = []
+            for item in raw_chunks:
+                c_text = str((item or {}).get("text") or "").strip()
+                if c_text:
+                    chunk_texts.append(c_text)
+
+        if not chunk_texts:
+            if method == "fixed":
+                chunk_texts = _naive_word_chunk(
+                    text=text,
+                    chunk_size=int(chunk_size),
+                    overlap=int(chunk_overlap),
+                )
+            else:
+                chunk_texts = [text]
+
+        for chunk_idx, chunk_text in enumerate(chunk_texts):
+            chunk_text = str(chunk_text or "").strip()
+            if not chunk_text:
+                continue
+            dedup_key = doc_key(doc_id, chunk_text)
+            if dedup_key in seen:
+                continue
+            seen.add(dedup_key)
+            chunk_id = f"{doc_id}::c{chunk_idx:04d}"
+            rows.append(
+                {
+                    "id": chunk_id,
+                    "title": title,
+                    "text": chunk_text,
+                    "parent_doc_id": doc_id,
+                    "source_idx": source_idx,
+                    "chunk_idx": int(chunk_idx),
+                    "is_supporting": None if is_supporting is None else bool(is_supporting),
+                }
+            )
+    return rows
+
+
+def build_dataset(
+    spec: DatasetSpec,
+    out_root: Path,
+    *,
+    chunking_method: str,
+    chunk_size: int,
+    chunk_overlap: int,
+) -> None:
     records = list(iter_jsonl(spec.source_path))
     corpus_by_key: Dict[str, Dict[str, Any]] = {}
     qa_rows: List[Dict[str, Any]] = []
 
     raw_doc_mentions = 0
     docs_per_question: List[int] = []
+    chunks_per_question: List[int] = []
 
     for rec in records:
         if spec.name in {"hotpotqa", "2wiki"}:
@@ -196,6 +305,13 @@ def build_dataset(spec: DatasetSpec, out_root: Path) -> None:
             local_doc_ids.append(corpus_by_key[key]["id"])
 
         docs_per_question.append(len(set(local_doc_ids)))
+        q_chunks = _chunk_doc_rows(
+            docs=q_docs,
+            chunking_method=chunking_method,
+            chunk_size=chunk_size,
+            chunk_overlap=chunk_overlap,
+        )
+        chunks_per_question.append(len(q_chunks))
 
         qa_rows.append(
             {
@@ -206,6 +322,7 @@ def build_dataset(spec: DatasetSpec, out_root: Path) -> None:
                 "answer_aliases": answer_aliases,
                 "dataset": spec.name,
                 "docs": q_docs,
+                "chunks": q_chunks,
             }
         )
 
@@ -235,6 +352,7 @@ def build_dataset(spec: DatasetSpec, out_root: Path) -> None:
 
     unique_docs = len(corpus_rows)
     avg_docs = sum(docs_per_question) / len(docs_per_question) if docs_per_question else 0.0
+    avg_chunks = sum(chunks_per_question) / len(chunks_per_question) if chunks_per_question else 0.0
     dedup_rate = 0.0
     if raw_doc_mentions > 0:
         dedup_rate = 1.0 - (unique_docs / raw_doc_mentions)
@@ -245,8 +363,12 @@ def build_dataset(spec: DatasetSpec, out_root: Path) -> None:
         "num_questions": len(qa_rows),
         "num_unique_docs": unique_docs,
         "avg_docs_per_question": round(avg_docs, 4),
+        "avg_chunks_per_question": round(avg_chunks, 4),
         "raw_doc_mentions": raw_doc_mentions,
         "dedup_rate": round(dedup_rate, 6),
+        "chunking_method": str(chunking_method),
+        "chunk_size": int(chunk_size),
+        "chunk_overlap": int(chunk_overlap),
         "built_at": datetime.now(timezone.utc).isoformat(),
     }
     meta_path.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -260,6 +382,9 @@ def main() -> None:
     parser.add_argument("--hotpot", default="data/hotpot_dev_distractor_500_jsonl.jsonl")
     parser.add_argument("--musique", default="data/musique_ans_v1.0_dev_500.jsonl")
     parser.add_argument("--twowiki", default="data/2wiki_dev_sample_500.jsonl")
+    parser.add_argument("--chunking_method", default="fixed", choices=["fixed", "sentence"])
+    parser.add_argument("--chunk_size", type=int, default=256)
+    parser.add_argument("--chunk_overlap", type=int, default=32)
     args = parser.parse_args()
 
     out_root = Path(args.out_root)
@@ -273,7 +398,13 @@ def main() -> None:
     for spec in specs:
         if not spec.source_path.exists():
             raise FileNotFoundError(f"Missing source file: {spec.source_path}")
-        build_dataset(spec, out_root)
+        build_dataset(
+            spec,
+            out_root,
+            chunking_method=args.chunking_method,
+            chunk_size=args.chunk_size,
+            chunk_overlap=args.chunk_overlap,
+        )
 
 
 if __name__ == "__main__":

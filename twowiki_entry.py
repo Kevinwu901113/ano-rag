@@ -40,6 +40,7 @@ from relrag.generator import answerer as answerer_module
 from relrag.indexer import IndexBuilder
 from relrag.indexer.bm25_index import BM25IndexBuilder
 from relrag.indexer.embedding_index import EmbeddingIndexBuilder
+from relrag.doc.chunking_strategies import Chunker, FixedWindowChunker, SentenceAwareChunker
 from relrag.retriever.chunk_store import ChunkStore
 from relrag.retriever.note_store import NoteStore
 from relrag.prompt import load_prompt
@@ -47,6 +48,7 @@ from relrag.utils.answer_source import resolve_short_answer, sha1_text
 from relrag.utils.openai_answer import generate_openai_answer
 from relrag.utils.eval_metrics import score_metrics
 from relrag.utils.output_eval import has_final_tag
+from relrag.utils.llm_stats import LLMCallStats, llm_stats_scope
 from relrag.utils.vllm_runtime import resolve_vllm_endpoint_model
 
 
@@ -281,33 +283,26 @@ def _write_sentence_notes_for_example(
 def _write_chunks_for_example(
     doc_index: Dict[str, Dict[str, Any]],
     chunks_path: Path,
+    chunker: Optional[Chunker] = None,
     overwrite: bool = False,
 ) -> int:
     if chunks_path.exists() and not overwrite:
         return 0
     chunks_path.parent.mkdir(parents=True, exist_ok=True)
+    if chunker is None:
+        chunker = SentenceAwareChunker()
     written = 0
     with chunks_path.open("w", encoding="utf-8") as handle:
-        for idx, (doc_id, meta) in enumerate(doc_index.items()):
+        for doc_id, meta in doc_index.items():
             title = str(meta.get("title") or doc_id)
             sentences = [str(s).strip() for s in (meta.get("sentences") or []) if str(s).strip()]
             if not sentences:
                 continue
-            chunk_id = f"c{idx:04d}_{doc_id}"
             text = " ".join(sentences)
-            sent_spans = [{"idx": sent_idx, "text": sentence} for sent_idx, sentence in enumerate(sentences)]
-            chunk = {
-                "chunk_id": chunk_id,
-                "doc_id": str(doc_id),
-                "text": text,
-                "meta": {
-                    "title": title,
-                    "doc_title": title,
-                    "sent_spans": sent_spans,
-                },
-            }
-            handle.write(json.dumps(chunk, ensure_ascii=False) + "\n")
-            written += 1
+            chunks = chunker.chunk(doc_id, text, {"title": title, "sentences": sentences})
+            for chunk in chunks:
+                handle.write(json.dumps(chunk, ensure_ascii=False) + "\n")
+                written += 1
     return written
 
 
@@ -1172,6 +1167,7 @@ def generate_answer(
     run_dir: Optional[str] = None,
 ) -> Tuple[str, Dict[str, Any], Optional[str], Optional[str]]:
     prompt_capture: Dict[str, Any] = {}
+    aligned_prompt_name = "answerer_openai.txt"
     if reader == "vllm":
         try:
             raw_answer = answer(
@@ -1179,13 +1175,15 @@ def generate_answer(
                 evidences=evidences,
                 llm_endpoint=llm_endpoint,
                 llm_model=llm_model,
+                prompt_name=aligned_prompt_name,
+                system_prompt_name="system_prompt_openai.txt",
                 prompt_capture=prompt_capture,
                 cfg=base_cfg,
                 run_dir=run_dir,
             )
         except Exception as exc:
             reason, message = _classify_llm_exception(exc)
-            prompt_name = prompt_capture.get("prompt_name") or answerer_module.ANSWER_PROMPT_NAME
+            prompt_name = prompt_capture.get("prompt_name") or aligned_prompt_name
             prompt_template_hash = _prompt_template_hash(prompt_name)
             llm_input_hash = _resolve_llm_input_hash(prompt_capture) if prompt_capture else ""
             return "", {
@@ -1193,7 +1191,7 @@ def generate_answer(
                 "prompt_template_hash": prompt_template_hash,
                 "llm_input_hash": llm_input_hash,
             }, message, reason
-        prompt_name = prompt_capture.get("prompt_name") or answerer_module.ANSWER_PROMPT_NAME
+        prompt_name = prompt_capture.get("prompt_name") or aligned_prompt_name
         prompt_template_hash = _prompt_template_hash(prompt_name)
         llm_input_hash = _resolve_llm_input_hash(prompt_capture)
         return raw_answer, {
@@ -1204,6 +1202,17 @@ def generate_answer(
     if reader == "openai":
         if not openai_cfg:
             raise ValueError("OpenAI config missing for reader=openai")
+        openai_cfg = dict(openai_cfg)
+        model_hint = str(openai_cfg.get("model") or llm_model or "").lower()
+        base_url_hint = str(openai_cfg.get("base_url") or "").lower()
+        is_deepseek = ("deepseek" in model_hint) or ("deepseek" in base_url_hint)
+        if is_deepseek:
+            # DeepSeek reader should avoid CoT-style prompt templates with <think> blocks.
+            openai_cfg["answer_prompt_name"] = "answerer_openai.txt"
+            openai_cfg["system_prompt_name"] = "system_prompt_openai.txt"
+        else:
+            openai_cfg.setdefault("answer_prompt_name", "answerer_openai.txt")
+            openai_cfg.setdefault("system_prompt_name", "system_prompt_openai.txt")
         try:
             raw_answer = generate_openai_answer(
                 question,
@@ -1659,6 +1668,7 @@ def _ensure_index(
     doc_index: Dict[str, Dict[str, Any]],
     index_root: Path,
     force_build: bool,
+    chunker: Optional[Chunker] = None,
 ) -> Dict[str, Any]:
     notes_path = index_root / "notes.jsonl"
     chunks_path = index_root / "chunks.jsonl"
@@ -1672,7 +1682,7 @@ def _ensure_index(
         if not force_build and notes_ready and indexes_ready and chunks_ready:
             return {"status": "reused"}
         if not force_build and notes_ready and indexes_ready and not chunks_ready:
-            chunks_written = _write_chunks_for_example(doc_index, chunks_path, overwrite=True)
+            chunks_written = _write_chunks_for_example(doc_index, chunks_path, chunker=chunker, overwrite=True)
             return {"status": "reused_chunks", "chunks": chunks_written}
         
         index_root.mkdir(parents=True, exist_ok=True)
@@ -1681,7 +1691,7 @@ def _ensure_index(
         if force_build or not notes_path.exists():
             notes_written = _write_sentence_notes_for_example(doc_index, notes_path, overwrite=True)
         if force_build or not chunks_path.exists():
-            chunks_written = _write_chunks_for_example(doc_index, chunks_path, overwrite=True)
+            chunks_written = _write_chunks_for_example(doc_index, chunks_path, chunker=chunker, overwrite=True)
         builder = IndexBuilder()
         builder.build_from_jsonl(str(notes_path))
         builder.dump(str(indexes_dir))
@@ -2046,14 +2056,24 @@ def _process_example(
     debug_dir: Optional[Path],
     debug_max_notes: int,
     run_dir: Optional[str] = None,
+    chunking_method: str = "sentence",
+    chunking_size: int = 256,
+    chunking_overlap: int = 32,
 ) -> Dict[str, Any]:
     qid = str(example.get("_id") or "unknown")
     question = str(example.get("question") or "")
+    index_start = time.perf_counter()
+
+    chunker: Optional[Chunker] = None
+    if chunking_method == "fixed":
+        chunker = FixedWindowChunker(chunk_size=chunking_size, overlap=chunking_overlap)
+    else:
+        chunker = SentenceAwareChunker()
 
     example_root = cache_root / qid
     docs_dir = example_root / "docs"
     doc_index = _write_docs_for_example(example, docs_dir, overwrite=force_build)
-    build_stats = _ensure_index(doc_index, example_root, force_build)
+    build_stats = _ensure_index(doc_index, example_root, force_build, chunker=chunker)
     build_embedding, build_bm25 = _mode_requirements(mode)
     aux_stats = _build_aux_indexes(
         example_root,
@@ -2062,38 +2082,43 @@ def _process_example(
         build_bm25=build_bm25,
         force_build=force_build,
     )
+    index_time_ms = (time.perf_counter() - index_start) * 1000.0
     notes_path = example_root / "notes.jsonl"
     index_dir = example_root / "indexes"
     note_store = NoteStore(str(notes_path))
-    (
-        retrieve_result,
-        retrieved_context_raw,
-        retrieved_context_topk,
-        dedup_stats,
-        retriever_paths,
-        top_k_fill_reason,
-        backfill_attempts,
-        shortage_refill_info,
-    ) = _retrieve_with_backfill(
-        question=question,
-        index_dir=index_dir,
-        notes_path=notes_path,
-        doc_index=doc_index,
-        note_store=note_store,
-        base_cfg=base_cfg,
-        mode=mode,
-        top_k=top_k,
-        top_k_raw=top_k_raw,
-        backfill_max_overfetch=backfill_max_overfetch,
-        backfill_step=backfill_step,
-        backfill_rounds=backfill_rounds,
-        shortage_refill_enabled=shortage_refill_enabled,
-        shortage_refill_max_candidates=shortage_refill_max_candidates,
-        shortage_refill_min_score=shortage_refill_min_score,
-        shortage_refill_prefer_new_titles=shortage_refill_prefer_new_titles,
-        predicate_mode=predicate_mode,
-        predicate_random_seed=predicate_random_seed,
-    )
+    llm_stats = LLMCallStats()
+    query_retrieval_start = time.perf_counter()
+    with llm_stats_scope(llm_stats):
+        (
+            retrieve_result,
+            retrieved_context_raw,
+            retrieved_context_topk,
+            dedup_stats,
+            retriever_paths,
+            top_k_fill_reason,
+            backfill_attempts,
+            shortage_refill_info,
+        ) = _retrieve_with_backfill(
+            question=question,
+            index_dir=index_dir,
+            notes_path=notes_path,
+            doc_index=doc_index,
+            note_store=note_store,
+            base_cfg=base_cfg,
+            mode=mode,
+            top_k=top_k,
+            top_k_raw=top_k_raw,
+            backfill_max_overfetch=backfill_max_overfetch,
+            backfill_step=backfill_step,
+            backfill_rounds=backfill_rounds,
+            shortage_refill_enabled=shortage_refill_enabled,
+            shortage_refill_max_candidates=shortage_refill_max_candidates,
+            shortage_refill_min_score=shortage_refill_min_score,
+            shortage_refill_prefer_new_titles=shortage_refill_prefer_new_titles,
+            predicate_mode=predicate_mode,
+            predicate_random_seed=predicate_random_seed,
+        )
+    query_retrieval_ms = (time.perf_counter() - query_retrieval_start) * 1000.0
 
     # FIXED: Ensure evidences passed to generator are strictly top-k from the final context
     evidences = [_ctx_to_evidence(ctx) for ctx in retrieved_context_topk]
@@ -2102,6 +2127,7 @@ def _process_example(
     prompt_meta: Dict[str, Any] = {}
     llm_error: Optional[str] = None
     llm_error_reason: Optional[str] = None
+    query_reader_ms = 0.0
     if retrieval_only:
         short_answer = str(structured_answer or "").strip()
         answer_source = "retrieval_only"
@@ -2110,24 +2136,27 @@ def _process_example(
             "structured_answer_used": bool(short_answer),
         }
     else:
-        raw_answer, prompt_meta, llm_error, llm_error_reason = generate_answer(
-            question=question,
-            evidences=evidences,
-            reader=reader,
-            llm_endpoint=llm_endpoint,
-            llm_model=llm_model,
-            openai_cfg=openai_cfg,
-            base_cfg=base_cfg,
-            run_dir=run_dir,
-        )
-        short_answer, answer_source, answer_source_detail = resolve_short_answer(
-            structured_answer,
-            raw_answer,
-            question=question,
-        )
-        if answer_source == "empty":
-            answer_source = "llm_fallback"
-            answer_source_detail["fallback_override"] = "empty"
+        query_reader_start = time.perf_counter()
+        with llm_stats_scope(llm_stats):
+            raw_answer, prompt_meta, llm_error, llm_error_reason = generate_answer(
+                question=question,
+                evidences=evidences,
+                reader=reader,
+                llm_endpoint=llm_endpoint,
+                llm_model=llm_model,
+                openai_cfg=openai_cfg,
+                base_cfg=base_cfg,
+                run_dir=run_dir,
+            )
+            short_answer, answer_source, answer_source_detail = resolve_short_answer(
+                structured_answer,
+                raw_answer,
+                question=question,
+            )
+            if answer_source == "empty":
+                answer_source = "llm_fallback"
+                answer_source_detail["fallback_override"] = "empty"
+        query_reader_ms = (time.perf_counter() - query_reader_start) * 1000.0
     fallback_reason = None
     if not retrieval_only:
         if llm_error_reason:
@@ -2154,46 +2183,49 @@ def _process_example(
         retry_evidences = evidences
         if llm_retry_max_evidence > 0:
             retry_evidences = evidences[: int(llm_retry_max_evidence)]
-        for _ in range(max(1, int(llm_retry_on_empty))):
-            retry_raw, retry_meta, retry_error, retry_error_reason = generate_answer(
-                question=question,
-                evidences=retry_evidences,
-                reader=reader,
-                llm_endpoint=llm_endpoint,
-                llm_model=llm_model,
-                openai_cfg=openai_cfg,
-                base_cfg=base_cfg,
-                run_dir=run_dir,
-            )
-            retry_short, retry_source, retry_detail = resolve_short_answer(
-                structured_answer,
-                retry_raw,
-                question=question,
-            )
-            if retry_source == "empty":
-                retry_source = "llm_fallback"
-                retry_detail["fallback_override"] = "empty"
-            retry_fallback_reason = None
-            if retry_error_reason:
-                retry_fallback_reason = retry_error_reason
-            elif retry_source == "llm_fallback":
-                if not str(retry_raw or "").strip():
-                    retry_fallback_reason = "empty_output"
-                elif not has_final_tag(str(retry_raw)):
-                    retry_fallback_reason = "parse_error"
-            llm_retry_used = True
-            llm_retry_source = retry_source
-            llm_retry_reason = retry_fallback_reason or retry_error_reason
-            if retry_source in {"llm_final", "structured_answer"}:
-                raw_answer = retry_raw
-                prompt_meta = retry_meta
-                llm_error = retry_error
-                llm_error_reason = retry_error_reason
-                short_answer = retry_short
-                answer_source = retry_source
-                answer_source_detail = retry_detail
-                fallback_reason = retry_fallback_reason
-                break
+        retry_start = time.perf_counter()
+        with llm_stats_scope(llm_stats):
+            for _ in range(max(1, int(llm_retry_on_empty))):
+                retry_raw, retry_meta, retry_error, retry_error_reason = generate_answer(
+                    question=question,
+                    evidences=retry_evidences,
+                    reader=reader,
+                    llm_endpoint=llm_endpoint,
+                    llm_model=llm_model,
+                    openai_cfg=openai_cfg,
+                    base_cfg=base_cfg,
+                    run_dir=run_dir,
+                )
+                retry_short, retry_source, retry_detail = resolve_short_answer(
+                    structured_answer,
+                    retry_raw,
+                    question=question,
+                )
+                if retry_source == "empty":
+                    retry_source = "llm_fallback"
+                    retry_detail["fallback_override"] = "empty"
+                retry_fallback_reason = None
+                if retry_error_reason:
+                    retry_fallback_reason = retry_error_reason
+                elif retry_source == "llm_fallback":
+                    if not str(retry_raw or "").strip():
+                        retry_fallback_reason = "empty_output"
+                    elif not has_final_tag(str(retry_raw)):
+                        retry_fallback_reason = "parse_error"
+                llm_retry_used = True
+                llm_retry_source = retry_source
+                llm_retry_reason = retry_fallback_reason or retry_error_reason
+                if retry_source in {"llm_final", "structured_answer"}:
+                    raw_answer = retry_raw
+                    prompt_meta = retry_meta
+                    llm_error = retry_error
+                    llm_error_reason = retry_error_reason
+                    short_answer = retry_short
+                    answer_source = retry_source
+                    answer_source_detail = retry_detail
+                    fallback_reason = retry_fallback_reason
+                    break
+        query_reader_ms += (time.perf_counter() - retry_start) * 1000.0
     answer_model = openai_cfg.get("model") if reader == "openai" and openai_cfg else llm_model
 
     references: List[str] = []
@@ -2226,6 +2258,26 @@ def _process_example(
             top_k_raw_source_final = "backfill+shortage_refill"
         else:
             top_k_raw_source_final = "shortage_refill"
+
+    query_time_ms = query_retrieval_ms + query_reader_ms
+    prompt_tokens_total = int(llm_stats.prompt_tokens_total or 0)
+    completion_tokens_total = int(llm_stats.completion_tokens_total or 0)
+    total_tokens = prompt_tokens_total + completion_tokens_total
+    token_source = "estimated" if llm_stats.llm_calls > 0 else "unavailable"
+    token_reason = None if llm_stats.llm_calls > 0 else "no_llm_calls_observed"
+    cost_payload = {
+        "index_time_ms": round(index_time_ms, 3),
+        "query_time_ms": round(query_time_ms, 3),
+        "query_retrieval_ms": round(query_retrieval_ms, 3),
+        "query_reader_ms": round(query_reader_ms, 3),
+        "llm_calls": int(llm_stats.llm_calls),
+        "llm_retries": int(llm_stats.llm_retries),
+        "prompt_tokens_total": (prompt_tokens_total if llm_stats.llm_calls > 0 else None),
+        "completion_tokens_total": (completion_tokens_total if llm_stats.llm_calls > 0 else None),
+        "total_tokens": (total_tokens if llm_stats.llm_calls > 0 else None),
+        "token_source": token_source,
+        "token_unavailable_reason": token_reason,
+    }
 
     output_record = {
         "_id": qid,
@@ -2267,6 +2319,7 @@ def _process_example(
         "top_k_fill_reason": top_k_fill_reason,
         "top_k_shortage_refill": shortage_refill_info,
         "llm_input_hash": llm_input_hash,
+        "cost": cost_payload,
         "intermediate": {
             "build_stats": build_stats,
             "aux_indexes": aux_stats,
@@ -2627,6 +2680,9 @@ def run_experiment_task(
     stall_abort_sec: float,
     readers_count: int,
     modes_count: int,
+    chunking_method: str = "sentence",
+    chunking_size: int = 256,
+    chunking_overlap: int = 32,
 ) -> Dict[str, Any]:
     reader_openai_cfg = openai_runtime_cfg if reader == "openai" else None
     answer_model = reader_openai_cfg.get("model") if reader == "openai" and reader_openai_cfg else llm_model
@@ -2644,6 +2700,9 @@ def run_experiment_task(
         effective_entry_cfg["title_diversity_keep_first"] = bool(title_diversity_keep_first)
         effective_entry_cfg["query_title_promotion_enabled"] = bool(query_title_promotion_enabled)
         effective_entry_cfg["query_title_promotion_window"] = int(query_title_promotion_window)
+        effective_entry_cfg["chunking_method"] = str(chunking_method)
+        effective_entry_cfg["chunking_size"] = int(chunking_size)
+        effective_entry_cfg["chunking_overlap"] = int(chunking_overlap)
 
     single_task = readers_count == 1 and modes_count == 1
     output_base = Path(run_dir) if run_dir else output_dir
@@ -2718,6 +2777,9 @@ def run_experiment_task(
             "pred_sp_prefer_new_titles": pred_sp_prefer_new_titles,
             "llm_retry_on_empty": llm_retry_on_empty,
             "llm_retry_max_evidence": llm_retry_max_evidence,
+            "chunking_method": chunking_method,
+            "chunking_size": chunking_size,
+            "chunking_overlap": chunking_overlap,
             "limit": limit,
             "workers": workers,
         }
@@ -2803,6 +2865,9 @@ def run_experiment_task(
         "predicate_constraint_enabled": str(predicate_mode).strip().lower() != "off",
         "predicate_random_seed": int(predicate_random_seed),
         "predicate_random_mode": random_mode,
+        "chunking_method": str(chunking_method),
+        "chunking_size": int(chunking_size),
+        "chunking_overlap": int(chunking_overlap),
         "pred_sp_policy": {
             "policy": pred_sp_policy,
             "max_facts": int(pred_sp_max_facts),
@@ -2880,6 +2945,9 @@ def run_experiment_task(
                             debug_dir=run_debug_dir,
                             debug_max_notes=debug_max_notes,
                             run_dir=str(output_base),
+                            chunking_method=chunking_method,
+                            chunking_size=chunking_size,
+                            chunking_overlap=chunking_overlap,
                         )
                         handle.write(json.dumps(record, ensure_ascii=False) + "\n")
                         handle.flush()
@@ -2941,6 +3009,9 @@ def run_experiment_task(
                             run_debug_dir,
                             debug_max_notes,
                             str(output_base),
+                            chunking_method,
+                            chunking_size,
+                            chunking_overlap,
                         )
                         future_map[future] = qid
                         scheduled += 1
@@ -3097,6 +3168,9 @@ def main() -> None:
     parser.add_argument("--debug_max_notes", type=int, help="Max notes to store per question in debug dump (fallback to config)")
     parser.add_argument("--stall_warn_sec", type=float, help="Warn if no worker finishes within this many seconds (fallback to config)")
     parser.add_argument("--stall_abort_sec", type=float, help="Abort pending workers after this many idle seconds (0 to disable, fallback to config)")
+    parser.add_argument("--chunking_method", choices=["sentence", "fixed"], help="Chunking method: sentence or fixed")
+    parser.add_argument("--chunking_size", type=int, help="Fixed chunk size in tokens")
+    parser.add_argument("--chunking_overlap", type=int, help="Fixed chunk overlap in tokens")
 
     args = parser.parse_args()
     repo_root = Path(__file__).resolve().parent
@@ -3118,6 +3192,9 @@ def main() -> None:
     args.split = _pick_arg(args, entry_cfg, dataset_cfg, "split", DEFAULT_SPLIT)
     args.cache_dir = _pick_arg(args, entry_cfg, dataset_cfg, "cache_dir", DEFAULT_CACHE_DIR)
     args.output_dir = _pick_arg(args, entry_cfg, dataset_cfg, "output_dir", DEFAULT_OUTPUT_DIR)
+    args.chunking_method = _pick_arg(args, entry_cfg, dataset_cfg, "chunking_method", "sentence")
+    args.chunking_size = _coerce_int(_pick_arg(args, entry_cfg, dataset_cfg, "chunking_size", 256), 256)
+    args.chunking_overlap = _coerce_int(_pick_arg(args, entry_cfg, dataset_cfg, "chunking_overlap", 32), 32)
     args.top_k = _coerce_int(
         _pick_arg(args, entry_cfg, dataset_cfg, "top_k", DEFAULT_TOP_K),
         DEFAULT_TOP_K,
@@ -3396,6 +3473,9 @@ def main() -> None:
                 "pred_sp_prefer_new_titles": args.pred_sp_prefer_new_titles,
                 "llm_retry_on_empty": args.llm_retry_on_empty,
                 "llm_retry_max_evidence": args.llm_retry_max_evidence,
+                "chunking_method": args.chunking_method,
+                "chunking_size": args.chunking_size,
+                "chunking_overlap": args.chunking_overlap,
                 "limit": args.limit,
                 "workers": args.workers,
                 "force_build": args.force_build,

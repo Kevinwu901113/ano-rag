@@ -34,6 +34,7 @@ from relrag.utils import TextUtils
 from relrag.utils.answer_source import resolve_short_answer, sha1_text
 from relrag.utils.openai_answer import generate_openai_answer
 from relrag.utils.output_eval import has_final_tag
+from relrag.utils.llm_stats import LLMCallStats, llm_stats_scope
 from relrag.utils.vllm_runtime import resolve_vllm_endpoint_model
 from relrag.doc.chunking_strategies import SentenceAwareChunker, FixedWindowChunker, Chunker
 
@@ -919,6 +920,7 @@ def generate_answer(
     run_dir: Optional[str] = None,
 ) -> Tuple[str, Dict[str, Any], Optional[str], Optional[str]]:
     prompt_capture: Dict[str, Any] = {}
+    aligned_prompt_name = "answerer_openai.txt"
     if reader == "vllm":
         try:
             raw_answer = answer(
@@ -928,13 +930,15 @@ def generate_answer(
                 llm_model=llm_model,
                 attribute_name=attribute_name,
                 label_instruction_override=label_instruction_override,
+                prompt_name=aligned_prompt_name,
+                system_prompt_name="system_prompt_openai.txt",
                 prompt_capture=prompt_capture,
                 cfg=base_cfg,
                 run_dir=run_dir,
             )
         except Exception as exc:
             reason, message = _classify_llm_exception(exc)
-            prompt_name = prompt_capture.get("prompt_name") or answerer_module.ANSWER_PROMPT_NAME
+            prompt_name = prompt_capture.get("prompt_name") or aligned_prompt_name
             prompt_template_hash = _prompt_template_hash(prompt_name)
             llm_input_hash = _resolve_llm_input_hash(prompt_capture) if prompt_capture else ""
             return "", {
@@ -942,7 +946,7 @@ def generate_answer(
                 "prompt_template_hash": prompt_template_hash,
                 "llm_input_hash": llm_input_hash,
             }, message, reason
-        prompt_name = prompt_capture.get("prompt_name") or answerer_module.ANSWER_PROMPT_NAME
+        prompt_name = prompt_capture.get("prompt_name") or aligned_prompt_name
         prompt_template_hash = _prompt_template_hash(prompt_name)
         llm_input_hash = _resolve_llm_input_hash(prompt_capture)
         return raw_answer, {
@@ -953,6 +957,17 @@ def generate_answer(
     if reader == "openai":
         if not openai_cfg:
             raise ValueError("OpenAI config missing for reader=openai")
+        openai_cfg = dict(openai_cfg)
+        model_hint = str(openai_cfg.get("model") or llm_model or "").lower()
+        base_url_hint = str(openai_cfg.get("base_url") or "").lower()
+        is_deepseek = ("deepseek" in model_hint) or ("deepseek" in base_url_hint)
+        if is_deepseek:
+            # DeepSeek reader should avoid CoT-style prompt templates with <think> blocks.
+            openai_cfg["answer_prompt_name"] = "answerer_openai.txt"
+            openai_cfg["system_prompt_name"] = "system_prompt_openai.txt"
+        else:
+            openai_cfg.setdefault("answer_prompt_name", "answerer_openai.txt")
+            openai_cfg.setdefault("system_prompt_name", "system_prompt_openai.txt")
         try:
             raw_answer = generate_openai_answer(
                 question,
@@ -1694,6 +1709,7 @@ def _process_example(
     cache_key = f"{qid}__{int(example_idx):05d}"
     example_root = cache_root / cache_key
     docs_dir = example_root / "docs"
+    index_start = time.perf_counter()
     
     chunker: Optional[Chunker] = None
     if chunking_method == "fixed":
@@ -1711,32 +1727,37 @@ def _process_example(
         build_bm25=build_bm25,
         force_build=force_build,
     )
+    index_time_ms = (time.perf_counter() - index_start) * 1000.0
     notes_path = example_root / "notes.jsonl"
     index_dir = example_root / "indexes"
     note_store = NoteStore(str(notes_path))
-    (
-        retrieve_result,
-        retrieved_context_raw,
-        retrieved_context_topk,
-        dedup_stats,
-        retriever_paths,
-        top_k_fill_reason,
-        backfill_attempts,
-        vector_fallback_info,
-    ) = _retrieve_with_backfill(
-        question=question,
-        index_dir=index_dir,
-        notes_path=notes_path,
-        doc_index=doc_index,
-        note_store=note_store,
-        base_cfg=base_cfg,
-        mode=mode,
-        top_k=top_k,
-        top_k_raw=top_k_raw,
-        backfill_max_overfetch=backfill_max_overfetch,
-        backfill_step=backfill_step,
-        backfill_rounds=backfill_rounds,
-    )
+    llm_stats = LLMCallStats()
+    query_retrieval_start = time.perf_counter()
+    with llm_stats_scope(llm_stats):
+        (
+            retrieve_result,
+            retrieved_context_raw,
+            retrieved_context_topk,
+            dedup_stats,
+            retriever_paths,
+            top_k_fill_reason,
+            backfill_attempts,
+            vector_fallback_info,
+        ) = _retrieve_with_backfill(
+            question=question,
+            index_dir=index_dir,
+            notes_path=notes_path,
+            doc_index=doc_index,
+            note_store=note_store,
+            base_cfg=base_cfg,
+            mode=mode,
+            top_k=top_k,
+            top_k_raw=top_k_raw,
+            backfill_max_overfetch=backfill_max_overfetch,
+            backfill_step=backfill_step,
+            backfill_rounds=backfill_rounds,
+        )
+    query_retrieval_ms = (time.perf_counter() - query_retrieval_start) * 1000.0
 
     # evidences = retrieve_result.get("evidence") or []
     # FIXED: Ensure evidences passed to generator are strictly top-k from the final context
@@ -1768,17 +1789,19 @@ def _process_example(
     attribute_name = str(intent_payload.get("attribute") or "").strip() or None
     structured_answer = retrieve_result.get("answer") if use_structured_answer else None
 
-    raw_answer, prompt_meta, llm_error, llm_error_reason = generate_answer(
-        question=question,
-        evidences=evidences,
-        reader=reader,
-        llm_endpoint=llm_endpoint,
-        llm_model=llm_model,
-        openai_cfg=openai_cfg,
-        attribute_name=attribute_name,
-        base_cfg=base_cfg,
-        run_dir=run_dir,
-    )
+    query_reader_start = time.perf_counter()
+    with llm_stats_scope(llm_stats):
+        raw_answer, prompt_meta, llm_error, llm_error_reason = generate_answer(
+            question=question,
+            evidences=evidences,
+            reader=reader,
+            llm_endpoint=llm_endpoint,
+            llm_model=llm_model,
+            openai_cfg=openai_cfg,
+            attribute_name=attribute_name,
+            base_cfg=base_cfg,
+            run_dir=run_dir,
+        )
     short_answer, answer_source, answer_source_detail = resolve_short_answer(
         structured_answer,
         raw_answer,
@@ -1807,47 +1830,48 @@ def _process_example(
         retry_evidences = evidences
         if llm_retry_max_evidence > 0:
             retry_evidences = evidences[: int(llm_retry_max_evidence)]
-        for _ in range(max(1, int(llm_retry_on_empty))):
-            retry_raw, retry_meta, retry_error, retry_error_reason = generate_answer(
-                question=question,
-                evidences=retry_evidences,
-                reader=reader,
-                llm_endpoint=llm_endpoint,
-                llm_model=llm_model,
-                openai_cfg=openai_cfg,
-                attribute_name=attribute_name,
-                base_cfg=base_cfg,
-                run_dir=run_dir,
-            )
-            retry_short, retry_source, retry_detail = resolve_short_answer(
-                structured_answer,
-                retry_raw,
-                question=question,
-            )
-            if retry_source == "empty":
-                retry_source = "llm_fallback"
-                retry_detail["fallback_override"] = "empty"
-            retry_fallback_reason = None
-            if retry_error_reason:
-                retry_fallback_reason = retry_error_reason
-            elif retry_source == "llm_fallback":
-                if not str(retry_raw or "").strip():
-                    retry_fallback_reason = "empty_output"
-                elif not has_final_tag(str(retry_raw)):
-                    retry_fallback_reason = "parse_error"
-            llm_retry_used = True
-            llm_retry_source = retry_source
-            llm_retry_reason = retry_fallback_reason or retry_error_reason
-            if retry_source in {"llm_final", "structured_answer"}:
-                raw_answer = retry_raw
-                prompt_meta = retry_meta
-                llm_error = retry_error
-                llm_error_reason = retry_error_reason
-                short_answer = retry_short
-                answer_source = retry_source
-                answer_source_detail = retry_detail
-                fallback_reason = retry_fallback_reason
-                break
+        with llm_stats_scope(llm_stats):
+            for _ in range(max(1, int(llm_retry_on_empty))):
+                retry_raw, retry_meta, retry_error, retry_error_reason = generate_answer(
+                    question=question,
+                    evidences=retry_evidences,
+                    reader=reader,
+                    llm_endpoint=llm_endpoint,
+                    llm_model=llm_model,
+                    openai_cfg=openai_cfg,
+                    attribute_name=attribute_name,
+                    base_cfg=base_cfg,
+                    run_dir=run_dir,
+                )
+                retry_short, retry_source, retry_detail = resolve_short_answer(
+                    structured_answer,
+                    retry_raw,
+                    question=question,
+                )
+                if retry_source == "empty":
+                    retry_source = "llm_fallback"
+                    retry_detail["fallback_override"] = "empty"
+                retry_fallback_reason = None
+                if retry_error_reason:
+                    retry_fallback_reason = retry_error_reason
+                elif retry_source == "llm_fallback":
+                    if not str(retry_raw or "").strip():
+                        retry_fallback_reason = "empty_output"
+                    elif not has_final_tag(str(retry_raw)):
+                        retry_fallback_reason = "parse_error"
+                llm_retry_used = True
+                llm_retry_source = retry_source
+                llm_retry_reason = retry_fallback_reason or retry_error_reason
+                if retry_source in {"llm_final", "structured_answer"}:
+                    raw_answer = retry_raw
+                    prompt_meta = retry_meta
+                    llm_error = retry_error
+                    llm_error_reason = retry_error_reason
+                    short_answer = retry_short
+                    answer_source = retry_source
+                    answer_source_detail = retry_detail
+                    fallback_reason = retry_fallback_reason
+                    break
     repair_attempted = False
     repair_applied = False
     repair_reason = None
@@ -1864,18 +1888,19 @@ def _process_example(
         if repair_reason:
             repair_attempted = True
             repair_instruction = _build_repair_instruction(attribute_name, force_answerable)
-            repaired_raw, repaired_meta, repaired_error, repaired_error_reason = generate_answer(
-                question=question,
-                evidences=evidences,
-                reader=reader,
-                llm_endpoint=llm_endpoint,
-                llm_model=llm_model,
-                openai_cfg=openai_cfg,
-                attribute_name=attribute_name,
-                label_instruction_override=repair_instruction,
-                base_cfg=base_cfg,
-                run_dir=run_dir,
-            )
+            with llm_stats_scope(llm_stats):
+                repaired_raw, repaired_meta, repaired_error, repaired_error_reason = generate_answer(
+                    question=question,
+                    evidences=evidences,
+                    reader=reader,
+                    llm_endpoint=llm_endpoint,
+                    llm_model=llm_model,
+                    openai_cfg=openai_cfg,
+                    attribute_name=attribute_name,
+                    label_instruction_override=repair_instruction,
+                    base_cfg=base_cfg,
+                    run_dir=run_dir,
+                )
             repaired_short, repaired_source, repaired_detail = resolve_short_answer(
                 structured_answer,
                 repaired_raw,
@@ -1911,6 +1936,7 @@ def _process_example(
                 answer_source_detail["repair_attempted"] = True
                 answer_source_detail["repair_reason"] = repair_reason
                 answer_source_detail["repair_applied"] = False
+    query_reader_ms = (time.perf_counter() - query_reader_start) * 1000.0
     answer_model = openai_cfg.get("model") if reader == "openai" and openai_cfg else llm_model
 
     gold_primary, answerable, aliases = _resolve_gold_answers(
@@ -1943,6 +1969,26 @@ def _process_example(
         top_k_raw_source_final = (
             "backfill+vector_fallback" if top_k_raw_source_final == "backfill" else "vector_fallback"
         )
+
+    query_time_ms = query_retrieval_ms + query_reader_ms
+    prompt_tokens_total = int(llm_stats.prompt_tokens_total or 0)
+    completion_tokens_total = int(llm_stats.completion_tokens_total or 0)
+    total_tokens = prompt_tokens_total + completion_tokens_total
+    token_source = "estimated" if llm_stats.llm_calls > 0 else "unavailable"
+    token_reason = None if llm_stats.llm_calls > 0 else "no_llm_calls_observed"
+    cost_payload = {
+        "index_time_ms": round(index_time_ms, 3),
+        "query_time_ms": round(query_time_ms, 3),
+        "query_retrieval_ms": round(query_retrieval_ms, 3),
+        "query_reader_ms": round(query_reader_ms, 3),
+        "llm_calls": int(llm_stats.llm_calls),
+        "llm_retries": int(llm_stats.llm_retries),
+        "prompt_tokens_total": (prompt_tokens_total if llm_stats.llm_calls > 0 else None),
+        "completion_tokens_total": (completion_tokens_total if llm_stats.llm_calls > 0 else None),
+        "total_tokens": (total_tokens if llm_stats.llm_calls > 0 else None),
+        "token_source": token_source,
+        "token_unavailable_reason": token_reason,
+    }
 
     top_k_final_value = dedup_stats.get("top_k_final")
     top_k_hit = 1.0 if top_k_final_value == top_k else 0.0
@@ -1999,6 +2045,7 @@ def _process_example(
         "llm_error": llm_error,
         "top_k_fill_reason": top_k_fill_reason,
         "llm_input_hash": llm_input_hash,
+        "cost": cost_payload,
         "intermediate": {
             "build_stats": build_stats,
             "aux_indexes": aux_stats,

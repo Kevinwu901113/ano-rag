@@ -9,6 +9,7 @@ from relrag.utils.llm_client import LLMChatClient
 from relrag.utils.context_budget import apply_load_shed, budget_answer_prompt, log_budget_event
 from relrag.utils.llm_errors import ContextLengthError
 from relrag.config.config_loader import config as global_config
+from relrag.prompt import load_prompt
 
 
 ANSWER_PROMPT_NAME = "answerer.txt"
@@ -26,6 +27,7 @@ def call_llm(
     attribute_name: Optional[str] = None,
     label_instruction_override: Optional[str] = None,
     prompt_name: str = ANSWER_PROMPT_NAME,
+    system_prompt_name: Optional[str] = None,
     prompt_capture: Optional[Dict[str, Any]] = None,
     cfg: Optional[Dict[str, Any]] = None,
     run_dir: Optional[str] = None,
@@ -74,6 +76,15 @@ def call_llm(
             else vllm_cfg.get("max_tokens", 256)
         )
     requested_max_tokens = int(max_tokens)
+    system_prompt_text: Optional[str] = None
+    if system_prompt_name is not None:
+        name = str(system_prompt_name).strip()
+        if name:
+            try:
+                system_prompt_text = load_prompt(name)
+            except Exception as exc:
+                logger.warning("Failed to load system prompt {}: {}", name, exc)
+                system_prompt_text = None
     max_items_override = None
     max_item_tokens_override = None
     max_item_chars_override = None
@@ -98,7 +109,7 @@ def call_llm(
             display_evs,
             prompt_name=prompt_name,
             label_instruction=label_instruction,
-            system_prompt=None,
+            system_prompt=system_prompt_text,
             cfg=resolved_cfg,
             llm_cfg=resolved_cfg.get("vllm"),
             requested_max_tokens=requested_max_tokens,
@@ -125,6 +136,8 @@ def call_llm(
         if prompt_capture is not None:
             prompt_capture["prompt"] = budgeted.prompt
             prompt_capture["prompt_name"] = prompt_name
+            if system_prompt_text is not None:
+                prompt_capture["system_prompt"] = system_prompt_text
         log_budget_event(
             run_dir,
             stage="answer",

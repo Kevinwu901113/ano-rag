@@ -1,2 +1,2 @@
-Output your step-by-step reasoning first, enclosed in <think>...</think> tags.
-Then, on a new line, output exactly FINAL: <answer>.
+Output exactly one line: FINAL: <answer>.
+Do not output analysis, rationale, or <think> tags.

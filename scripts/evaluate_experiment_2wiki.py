@@ -268,10 +268,10 @@ def main():
         
         if valid_results:
             best_f1_config = max(valid_results.keys(), key=lambda x: valid_results[x]['f1'])
-            best_recall_config = max(valid_results.keys(), key=lambda x: valid_results[x]['ndcg@10'])
+            best_recall_config = max(valid_results.keys(), key=lambda x: valid_results[x]['ndcg@5'])
             
-            f.write(f"- **最佳 QA 配置 (N>{10})**: `{best_f1_config}` (F1: {valid_results[best_f1_config]['f1']:.4f})\n")
-            f.write(f"- **最佳 检索 配置 (N>{10})**: `{best_recall_config}` (NDCG@10: {valid_results[best_recall_config]['ndcg@10']:.4f})\n")
+            f.write(f"- **最佳 QA 配置 (N>10)**: `{best_f1_config}` (F1: {valid_results[best_f1_config]['f1']:.4f})\n")
+            f.write(f"- **最佳 检索 配置 (N>10)**: `{best_recall_config}` (NDCG@5: {valid_results[best_recall_config]['ndcg@5']:.4f})\n")
             
             # Compare OpenAI vs VLLM if possible
             openai_f1 = [valid_results[k]['f1'] for k in valid_results if 'openai' in k]

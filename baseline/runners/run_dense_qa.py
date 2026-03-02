@@ -5,6 +5,7 @@ import argparse
 import hashlib
 import json
 import math
+import re
 import sys
 import time
 from pathlib import Path
@@ -19,12 +20,22 @@ if str(_THIS_DIR) not in sys.path:
 from common import (  # noqa: E402
     EMBED_BASE_URL,
     EMBED_MODEL,
+    build_cost_record,
     ensure_dataset,
+    load_aligned_reader_system_prompt,
     load_qa_with_docs,
+    normalize_answer_for_eval,
     output_pred_path,
+    render_aligned_reader_prompt,
+    resolve_effective_reader_params,
     resolve_llm_backend,
+    summarize_cost_records,
+    usage_prompt_completion,
+    write_json,
     write_pred_jsonl,
 )
+
+_TOKEN_RE = re.compile(r"[A-Za-z0-9]+")
 
 
 def _sha1_json(payload: Any) -> str:
@@ -128,18 +139,26 @@ def _write_doc_embedding_cache(
     )
 
 
-def _build_context(items: List[Tuple[Dict[str, Any], float]]) -> str:
-    parts: List[str] = []
+def _build_ctxs(items: List[Tuple[Dict[str, Any], float]]) -> List[Dict[str, Any]]:
+    ctxs: List[Dict[str, Any]] = []
     for rank, (doc, score) in enumerate(items, start=1):
-        title = str(doc.get("title") or "").strip()
-        text = str(doc.get("text") or "").strip()
-        doc_id = str(doc.get("id") or f"qdoc_{rank:04d}")
-        parts.append(
-            f"[Rank {rank} | cosine={score:.6f} | id={doc_id}]\n"
-            f"Title: {title}\n"
-            f"Content: {text}"
+        ctxs.append(
+            {
+                "id": doc.get("id"),
+                "title": doc.get("title"),
+                "text": doc.get("text"),
+                "score": float(score),
+                "rank": rank,
+                "is_supporting": doc.get("is_supporting"),
+                "parent_doc_id": doc.get("parent_doc_id"),
+                "chunk_idx": doc.get("chunk_idx"),
+            }
         )
-    return "\n\n".join(parts)
+    return ctxs
+
+
+def _estimate_tokens(text: str) -> int:
+    return max(1, len(_TOKEN_RE.findall(str(text or ""))))
 
 
 def _answer_with_llm(
@@ -147,48 +166,79 @@ def _answer_with_llm(
     *,
     model: str,
     question: str,
-    context: str,
+    evidence_rows: List[Dict[str, Any]],
+    temperature: float,
     answer_max_tokens: int,
-    qa_prompt_mode: str,
     content_risk_retries: int,
     content_risk_retry_wait_sec: float,
-) -> str:
-    if qa_prompt_mode == "answer_only":
-        system_prompt = (
-            "You are a factual answerer. Use the provided context to answer the question.\n"
-            "If the context is partial, answer based on the best available information or reasonable inference. "
-            "Only say 'Insufficient evidence' if absolutely no relevant information is present.\n"
-            "If the context supports a reasonable answer (even if partial), choose the best answer rather than 'Insufficient evidence'.\n"
-            "For yes/no questions, answer exactly 'yes' or 'no' (lowercase).\n"
-            "Return only the final short answer text. Do not output analysis or rationale."
-        )
-    else:
-        system_prompt = "Answer using only the provided context."
+) -> Tuple[str, Dict[str, Any]]:
+    system_prompt = load_aligned_reader_system_prompt()
+    user_prompt = render_aligned_reader_prompt(question=question, evidence_rows=evidence_rows)
 
     risk_retries = max(0, int(content_risk_retries))
     retry_wait_s = max(0.0, float(content_risk_retry_wait_sec))
+    llm_calls = 0
+    llm_retries = 0
+    prompt_tokens_total = 0
+    completion_tokens_total = 0
+    token_source = "unavailable"
+    token_reason = "usage_not_provided"
+
     for risk_try in range(risk_retries + 1):
         try:
+            llm_calls += 1
             response = client.chat.completions.create(
                 model=model,
                 messages=[
                     {"role": "system", "content": system_prompt},
-                    {
-                        "role": "user",
-                        "content": f"Question: {question}\n\nContext:\n{context}\n\nAnswer:",
-                    },
+                    {"role": "user", "content": user_prompt},
                 ],
-                temperature=0.0,
+                temperature=float(temperature),
                 max_tokens=max(16, int(answer_max_tokens)),
             )
-            return (response.choices[0].message.content or "").strip()
+            content = (response.choices[0].message.content or "").strip()
+            prompt_used, completion_used = usage_prompt_completion(getattr(response, "usage", None))
+            if prompt_used is not None or completion_used is not None:
+                token_source = "api_usage"
+                token_reason = None
+                prompt_tokens_total += int(prompt_used or 0)
+                completion_tokens_total += int(completion_used or 0)
+            else:
+                token_source = "estimated"
+                token_reason = "usage_not_provided"
+                prompt_tokens_total += _estimate_tokens(system_prompt) + _estimate_tokens(user_prompt)
+                completion_tokens_total += _estimate_tokens(content)
+            return content, {
+                "llm_calls": llm_calls,
+                "llm_retries": llm_retries,
+                "prompt_tokens_total": prompt_tokens_total,
+                "completion_tokens_total": completion_tokens_total,
+                "token_source": token_source,
+                "token_unavailable_reason": token_reason,
+            }
         except Exception as exc:
             if "content exists risk" in str(exc or "").lower() and risk_try < risk_retries:
+                llm_retries += 1
                 if retry_wait_s > 0:
                     time.sleep(retry_wait_s)
                 continue
-            raise
-    return ""
+            return "", {
+                "llm_calls": llm_calls,
+                "llm_retries": llm_retries,
+                "prompt_tokens_total": None,
+                "completion_tokens_total": None,
+                "token_source": "unavailable",
+                "token_unavailable_reason": str(exc)[:200],
+            }
+
+    return "", {
+        "llm_calls": llm_calls,
+        "llm_retries": llm_retries,
+        "prompt_tokens_total": None,
+        "completion_tokens_total": None,
+        "token_source": "unavailable",
+        "token_unavailable_reason": "unknown_error",
+    }
 
 
 def main() -> None:
@@ -208,8 +258,10 @@ def main() -> None:
     parser.add_argument("--cache_embeddings", action="store_true")
     parser.add_argument("--request_timeout", type=float, default=60.0)
 
-    parser.add_argument("--top_k", type=int, default=5)
-    parser.add_argument("--answer_max_tokens", type=int, default=96)
+    parser.add_argument("--top_k", type=int, default=10)
+    parser.add_argument("--answer_max_tokens", type=int, default=None)
+    parser.add_argument("--temperature", type=float, default=None)
+    parser.add_argument("--relrag_config", default=None, help="Optional RelRAG config path for default reader policy.")
     parser.add_argument("--qa_prompt_mode", default="answer_only", choices=["answer_only", "default"])
     parser.add_argument(
         "--content_risk_retries",
@@ -228,6 +280,13 @@ def main() -> None:
 
     dataset = ensure_dataset(args.dataset)
     backend = resolve_llm_backend(args.llm_backend)
+    reader_params = resolve_effective_reader_params(
+        dataset=dataset,
+        backend=backend.name,
+        answer_max_tokens=args.answer_max_tokens,
+        temperature=args.temperature,
+        config_path=args.relrag_config,
+    )
 
     qa_path = Path(args.data_root) / dataset / "qa.jsonl"
     if not qa_path.exists():
@@ -251,113 +310,132 @@ def main() -> None:
         timeout=float(args.request_timeout),
     )
 
-    pred_rows: List[Dict[str, str]] = []
+    pred_rows: List[Dict[str, Any]] = []
     for row in rows:
         qid = str(row.get("id") or "").strip()
         question = str(row.get("question") or "").strip()
-        docs = list(row.get("docs") or [])
+
+        docs = list(row.get("chunks") or [])
+        if not docs:
+            docs = list(row.get("docs") or [])
         if args.max_docs > 0:
             docs = docs[: args.max_docs]
 
-        try:
-            doc_payload = [
-                {
-                    "id": str(doc.get("id") or ""),
-                    "title": str(doc.get("title") or ""),
-                    "text": str(doc.get("text") or ""),
-                }
-                for doc in docs
-            ]
-            docs_hash = _sha1_json(doc_payload)
-            cache_key = _cache_key_payload(
-                qid=qid,
-                docs_hash=docs_hash,
-                embed_model=args.embed_model,
-                embed_base_url=args.embed_base_url,
-            )
+        index_time_ms = 0.0
+        retrieval_start = time.perf_counter()
 
-            q_workspace = (
-                Path(args.workspace_root)
-                / "dense"
-                / dataset
-                / backend.name
-                / _sanitize_qid(qid)
-            )
-            cache_path = q_workspace / "doc_embeddings.json"
+        doc_payload = [
+            {
+                "id": str(doc.get("id") or ""),
+                "title": str(doc.get("title") or ""),
+                "text": str(doc.get("text") or ""),
+            }
+            for doc in docs
+        ]
+        docs_hash = _sha1_json(doc_payload)
+        cache_key = _cache_key_payload(
+            qid=qid,
+            docs_hash=docs_hash,
+            embed_model=args.embed_model,
+            embed_base_url=args.embed_base_url,
+        )
 
-            doc_embeddings: List[List[float]] | None = None
-            if args.cache_embeddings and (not args.rebuild_index):
-                doc_embeddings = _load_doc_embedding_cache(cache_path, cache_key)
+        q_workspace = (
+            Path(args.workspace_root)
+            / "dense"
+            / dataset
+            / backend.name
+            / _sanitize_qid(qid)
+        )
+        cache_path = q_workspace / "doc_embeddings.json"
 
-            if doc_embeddings is None:
-                doc_texts: List[str] = []
-                for doc in docs:
-                    title = str(doc.get("title") or "").strip()
-                    text = str(doc.get("text") or "").strip()
-                    doc_texts.append(f"{title}\n{text}" if title else text)
-                doc_embeddings = _embed_texts(
-                    embed_client,
-                    model=args.embed_model,
-                    texts=doc_texts,
-                    batch_size=args.embed_batch_size,
-                )
-                if args.cache_embeddings:
-                    _write_doc_embedding_cache(
-                        cache_path,
-                        cache_key=cache_key,
-                        doc_embeddings=doc_embeddings,
-                    )
+        doc_embeddings: List[List[float]] | None = None
+        if args.cache_embeddings and (not args.rebuild_index):
+            doc_embeddings = _load_doc_embedding_cache(cache_path, cache_key)
 
-            question_vec = _embed_texts(
+        if doc_embeddings is None:
+            index_start = time.perf_counter()
+            doc_texts: List[str] = []
+            for doc in docs:
+                title = str(doc.get("title") or "").strip()
+                text = str(doc.get("text") or "").strip()
+                doc_texts.append(f"{title}\n{text}" if title else text)
+            doc_embeddings = _embed_texts(
                 embed_client,
                 model=args.embed_model,
-                texts=[question],
-                batch_size=1,
-            )[0]
-
-            scored: List[Tuple[Dict[str, Any], float]] = []
-            for doc, vec in zip(docs, doc_embeddings):
-                scored.append((doc, _cosine_similarity(question_vec, vec)))
-            scored.sort(key=lambda item: item[1], reverse=True)
-
-            top_items = scored[: max(0, int(args.top_k))]
-            
-            # Save retrieval context
-            ctxs = []
-            for rank, (doc, score) in enumerate(top_items, start=1):
-                ctxs.append({
-                    "id": doc.get("id"),
-                    "title": doc.get("title"),
-                    "text": doc.get("text"),
-                    "score": score,
-                    "rank": rank
-                })
-
-            context = _build_context(top_items)
-            if args.retrieval_only:
-                pred = ""
-            else:
-                pred = _answer_with_llm(
-                    llm_client,
-                    model=backend.model,
-                    question=question,
-                    context=context,
-                    answer_max_tokens=args.answer_max_tokens,
-                    qa_prompt_mode=args.qa_prompt_mode,
-                    content_risk_retries=args.content_risk_retries,
-                    content_risk_retry_wait_sec=args.content_risk_retry_wait_sec,
+                texts=doc_texts,
+                batch_size=args.embed_batch_size,
+            )
+            index_time_ms += (time.perf_counter() - index_start) * 1000.0
+            if args.cache_embeddings:
+                _write_doc_embedding_cache(
+                    cache_path,
+                    cache_key=cache_key,
+                    doc_embeddings=doc_embeddings,
                 )
-            
-        except Exception:
-            import traceback
-            traceback.print_exc()
-            pred = ""
-            if 'ctxs' not in locals():
-                ctxs = []
 
-        pred_rows.append({"id": qid, "pred": pred, "ctxs": ctxs})
+        question_vec = _embed_texts(
+            embed_client,
+            model=args.embed_model,
+            texts=[question],
+            batch_size=1,
+        )[0]
+
+        scored: List[Tuple[Dict[str, Any], float]] = []
+        for doc, vec in zip(docs, doc_embeddings):
+            scored.append((doc, _cosine_similarity(question_vec, vec)))
+        scored.sort(key=lambda item: item[1], reverse=True)
+
+        top_items = scored[: max(0, int(args.top_k))]
+        ctxs = _build_ctxs(top_items)
+        query_retrieval_ms = (time.perf_counter() - retrieval_start) * 1000.0
+
+        query_reader_ms = 0.0
+        llm_meta = {
+            "llm_calls": 0,
+            "llm_retries": 0,
+            "prompt_tokens_total": None,
+            "completion_tokens_total": None,
+            "token_source": "unavailable",
+            "token_unavailable_reason": "retrieval_only",
+        }
+
+        if args.retrieval_only:
+            pred = ""
+        else:
+            reader_start = time.perf_counter()
+            pred_raw, llm_meta = _answer_with_llm(
+                llm_client,
+                model=backend.model,
+                question=question,
+                evidence_rows=ctxs,
+                temperature=reader_params["temperature"],
+                answer_max_tokens=reader_params["answer_max_tokens"],
+                content_risk_retries=args.content_risk_retries,
+                content_risk_retry_wait_sec=args.content_risk_retry_wait_sec,
+            )
+            query_reader_ms = (time.perf_counter() - reader_start) * 1000.0
+            pred = normalize_answer_for_eval(pred_raw)
+
+        cost = build_cost_record(
+            index_time_ms=index_time_ms,
+            query_retrieval_ms=query_retrieval_ms,
+            query_reader_ms=query_reader_ms,
+            llm_calls=llm_meta.get("llm_calls", 0),
+            llm_retries=llm_meta.get("llm_retries", 0),
+            prompt_tokens_total=llm_meta.get("prompt_tokens_total"),
+            completion_tokens_total=llm_meta.get("completion_tokens_total"),
+            token_source=str(llm_meta.get("token_source") or "unavailable"),
+            token_unavailable_reason=llm_meta.get("token_unavailable_reason"),
+        ).to_dict()
+
+        pred_rows.append({"id": qid, "pred": pred, "ctxs": ctxs, "cost": cost})
 
     write_pred_jsonl(pred_path, pred_rows)
+    write_json(
+        pred_path.parent / "cost_summary.json",
+        summarize_cost_records(method="dense", dataset=dataset, backend=backend.name, rows=pred_rows),
+    )
     print(f"[ok] wrote {pred_path}")
 
 

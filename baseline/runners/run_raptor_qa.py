@@ -19,11 +19,18 @@ if str(_THIS_DIR) not in sys.path:
 from common import (  # noqa: E402
     EMBED_BASE_URL,
     EMBED_MODEL,
+    build_cost_record,
     ensure_dataset,
+    load_aligned_reader_system_prompt,
     load_qa_with_docs,
     normalize_answer_for_eval,
     output_pred_path,
+    render_aligned_reader_prompt,
+    resolve_effective_reader_params,
     resolve_llm_backend,
+    summarize_cost_records,
+    usage_prompt_completion,
+    write_json,
     write_pred_jsonl,
 )
 from retrieval_schema import build_raptor_ctxs  # noqa: E402
@@ -85,6 +92,7 @@ class OpenAICompatSummarizationModel(BaseSummarizationModel):
         model: str,
         max_input_chars: int,
         request_timeout: float,
+        temperature: float,
     ):
         self.client = OpenAI(
             base_url=base_url,
@@ -93,9 +101,23 @@ class OpenAICompatSummarizationModel(BaseSummarizationModel):
         )
         self.model = model
         self.max_input_chars = int(max_input_chars)
+        self.temperature = float(temperature)
+        self.calls = 0
+        self.prompt_tokens = 0
+        self.completion_tokens = 0
+        self.elapsed_ms = 0.0
+
+    def snapshot(self) -> Dict[str, float]:
+        return {
+            "calls": float(self.calls),
+            "prompt_tokens": float(self.prompt_tokens),
+            "completion_tokens": float(self.completion_tokens),
+            "elapsed_ms": float(self.elapsed_ms),
+        }
 
     def summarize(self, context: str, max_tokens: int = 150):
         prompt = str(context or "")[: self.max_input_chars]
+        start = time.perf_counter()
         response = self.client.chat.completions.create(
             model=self.model,
             messages=[
@@ -105,9 +127,14 @@ class OpenAICompatSummarizationModel(BaseSummarizationModel):
                     "content": f"Summarize the following in <= {max_tokens} tokens:\n\n{prompt}",
                 },
             ],
-            temperature=0.0,
+            temperature=self.temperature,
             max_tokens=max(32, int(max_tokens)),
         )
+        self.calls += 1
+        self.elapsed_ms += (time.perf_counter() - start) * 1000.0
+        p_tok, c_tok = usage_prompt_completion(getattr(response, "usage", None))
+        self.prompt_tokens += int(p_tok or 0)
+        self.completion_tokens += int(c_tok or 0)
         return (response.choices[0].message.content or "").strip()
 
 
@@ -121,6 +148,7 @@ class OpenAICompatQAModel(BaseQAModel):
         max_tokens: int,
         qa_prompt_mode: str,
         request_timeout: float,
+        temperature: float,
     ):
         self.client = OpenAI(
             base_url=base_url,
@@ -131,32 +159,42 @@ class OpenAICompatQAModel(BaseQAModel):
         self.max_input_chars = int(max_input_chars)
         self.max_tokens = int(max_tokens)
         self.qa_prompt_mode = str(qa_prompt_mode)
+        self.temperature = float(temperature)
+        self.calls = 0
+        self.prompt_tokens = 0
+        self.completion_tokens = 0
+        self.elapsed_ms = 0.0
+
+    def snapshot(self) -> Dict[str, float]:
+        return {
+            "calls": float(self.calls),
+            "prompt_tokens": float(self.prompt_tokens),
+            "completion_tokens": float(self.completion_tokens),
+            "elapsed_ms": float(self.elapsed_ms),
+        }
 
     def answer_question(self, context: str, question: str):
         ctx = str(context or "")[: self.max_input_chars]
-        if self.qa_prompt_mode == "answer_only":
-            sys_prompt = (
-                "You are a factual answerer. Use the provided context to answer the question.\n"
-                "If the context is partial, answer based on the best available information or reasonable inference. "
-                "Only say 'Insufficient evidence' if absolutely no relevant information is present.\n"
-                "If the context supports a reasonable answer (even if partial), choose the best answer rather than 'Insufficient evidence'.\n"
-                "For yes/no questions, answer exactly 'yes' or 'no' (lowercase).\n"
-                "Return only the final short answer text. Do not output analysis or rationale."
-            )
-        else:
-            sys_prompt = "Answer using only the provided context."
+        sys_prompt = load_aligned_reader_system_prompt()
+        user_prompt = render_aligned_reader_prompt(
+            question=question,
+            evidence_rows=[{"id": "raptor_ctx", "title": "", "text": ctx, "rank": 1}],
+        )
+        start = time.perf_counter()
         response = self.client.chat.completions.create(
             model=self.model,
             messages=[
                 {"role": "system", "content": sys_prompt},
-                {
-                    "role": "user",
-                    "content": f"Context:\n{ctx}\n\nQuestion: {question}\nAnswer:",
-                },
+                {"role": "user", "content": user_prompt},
             ],
-            temperature=0.0,
+            temperature=self.temperature,
             max_tokens=max(16, self.max_tokens),
         )
+        self.calls += 1
+        self.elapsed_ms += (time.perf_counter() - start) * 1000.0
+        p_tok, c_tok = usage_prompt_completion(getattr(response, "usage", None))
+        self.prompt_tokens += int(p_tok or 0)
+        self.completion_tokens += int(c_tok or 0)
         return normalize_answer_for_eval(response.choices[0].message.content or "")
 
 
@@ -191,7 +229,20 @@ def _docs_to_text(docs: List[Dict[str, Any]]) -> str:
     return "\n".join(parts).strip()
 
 
-def build_config(args: argparse.Namespace, llm_base_url: str, llm_api_key: str, llm_model: str):
+def _snapshot_delta(after: Dict[str, float], before: Dict[str, float]) -> Dict[str, float]:
+    keys = ("calls", "prompt_tokens", "completion_tokens", "elapsed_ms")
+    out: Dict[str, float] = {}
+    for key in keys:
+        out[key] = float(after.get(key, 0.0) - before.get(key, 0.0))
+    return out
+
+
+def build_config(
+    args: argparse.Namespace,
+    llm_base_url: str,
+    llm_api_key: str,
+    llm_model: str,
+) -> Tuple[RetrievalAugmentationConfig, OpenAICompatSummarizationModel, OpenAICompatQAModel]:
     embedding_model = OpenAICompatEmbeddingModel(
         base_url=args.embed_base_url,
         api_key="EMPTY",
@@ -204,6 +255,7 @@ def build_config(args: argparse.Namespace, llm_base_url: str, llm_api_key: str, 
         model=llm_model,
         max_input_chars=args.summarizer_max_input_chars,
         request_timeout=args.request_timeout,
+        temperature=args.temperature,
     )
     qa_model = OpenAICompatQAModel(
         base_url=llm_base_url,
@@ -213,8 +265,9 @@ def build_config(args: argparse.Namespace, llm_base_url: str, llm_api_key: str, 
         max_tokens=args.answer_max_tokens,
         qa_prompt_mode=args.qa_prompt_mode,
         request_timeout=args.request_timeout,
+        temperature=args.temperature,
     )
-    return RetrievalAugmentationConfig(
+    config = RetrievalAugmentationConfig(
         embedding_model=embedding_model,
         summarization_model=summarizer,
         qa_model=qa_model,
@@ -223,6 +276,7 @@ def build_config(args: argparse.Namespace, llm_base_url: str, llm_api_key: str, 
         tb_summarization_length=args.tb_summarization_length,
         tr_top_k=args.top_k,
     )
+    return config, summarizer, qa_model
 
 
 def _answer_one_question(
@@ -231,11 +285,13 @@ def _answer_one_question(
     dataset: str,
     backend_name: str,
     config: RetrievalAugmentationConfig,
+    summarizer: OpenAICompatSummarizationModel,
+    qa_model: OpenAICompatQAModel,
     qid: str,
     question: str,
     docs: List[Dict[str, Any]],
     workspace_root: Path,
-) -> Tuple[str, List[Any]]:
+) -> Tuple[str, List[Any], Dict[str, Any]]:
     q_workspace = workspace_root / "raptor" / dataset / backend_name / _sanitize_qid(qid)
     q_workspace.mkdir(parents=True, exist_ok=True)
     tree_path = q_workspace / "tree.pkl"
@@ -250,19 +306,25 @@ def _answer_one_question(
 
     risk_retries = max(0, int(args.content_risk_retries))
     retry_wait_s = max(0.0, float(args.content_risk_retry_wait_sec))
+    token_source = "api_usage"
+    token_reason = None
 
     for risk_try in range(risk_retries + 1):
         try:
+            sum_before = summarizer.snapshot()
+            qa_before = qa_model.snapshot()
             reuse_index = (
                 (not args.rebuild_index)
                 and tree_path.exists()
                 and state_path.exists()
                 and json.loads(state_path.read_text(encoding="utf-8")).get("docs_hash") == docs_hash
             )
+            index_time_ms = 0.0
 
             if reuse_index:
                 ra = RetrievalAugmentation(config=config, tree=str(tree_path))
             else:
+                index_start = time.perf_counter()
                 ra = RetrievalAugmentation(config=config)
                 ra.add_documents(corpus_text)
                 with tree_path.open("wb") as handle:
@@ -276,14 +338,17 @@ def _answer_one_question(
                     "tree_path": str(tree_path),
                 }
                 state_path.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+                index_time_ms = (time.perf_counter() - index_start) * 1000.0
 
             if args.retrieval_only:
+                query_start = time.perf_counter()
                 retrieval = ra.retrieve(
                     question,
                     top_k=args.top_k,
                     max_tokens=args.answer_max_tokens * 10,  # rough estimate for context
                     return_layer_information=True,
                 )
+                query_time_ms = (time.perf_counter() - query_start) * 1000.0
                 if isinstance(retrieval, tuple) and len(retrieval) == 2:
                     context, layer_information = retrieval
                 else:
@@ -310,9 +375,64 @@ def _answer_one_question(
                     layer_information=layer_information if isinstance(layer_information, list) else [],
                     node_text_by_index=node_text_by_index,
                 )
-                return "", ctxs
+                sum_after = summarizer.snapshot()
+                qa_after = qa_model.snapshot()
+                sum_delta = _snapshot_delta(sum_after, sum_before)
+                qa_delta = _snapshot_delta(qa_after, qa_before)
+                prompt_tokens = int(sum_delta["prompt_tokens"] + qa_delta["prompt_tokens"])
+                completion_tokens = int(sum_delta["completion_tokens"] + qa_delta["completion_tokens"])
+                llm_calls = int(sum_delta["calls"] + qa_delta["calls"])
+                if llm_calls == 0:
+                    token_source = "unavailable"
+                    token_reason = "raptor_no_usage_observed"
+                    prompt_tokens_val = None
+                    completion_tokens_val = None
+                else:
+                    prompt_tokens_val = prompt_tokens
+                    completion_tokens_val = completion_tokens
+                cost = build_cost_record(
+                    index_time_ms=index_time_ms,
+                    query_retrieval_ms=max(0.0, query_time_ms - qa_delta["elapsed_ms"]),
+                    query_reader_ms=max(0.0, qa_delta["elapsed_ms"]),
+                    llm_calls=llm_calls,
+                    llm_retries=0,
+                    prompt_tokens_total=prompt_tokens_val,
+                    completion_tokens_total=completion_tokens_val,
+                    token_source=token_source,
+                    token_unavailable_reason=token_reason,
+                ).to_dict()
+                return "", ctxs, cost
 
-            return normalize_answer_for_eval(str(ra.answer_question(question) or "").strip()), []
+            query_start = time.perf_counter()
+            pred = normalize_answer_for_eval(str(ra.answer_question(question) or "").strip())
+            query_time_ms = (time.perf_counter() - query_start) * 1000.0
+            sum_after = summarizer.snapshot()
+            qa_after = qa_model.snapshot()
+            sum_delta = _snapshot_delta(sum_after, sum_before)
+            qa_delta = _snapshot_delta(qa_after, qa_before)
+            prompt_tokens = int(sum_delta["prompt_tokens"] + qa_delta["prompt_tokens"])
+            completion_tokens = int(sum_delta["completion_tokens"] + qa_delta["completion_tokens"])
+            llm_calls = int(sum_delta["calls"] + qa_delta["calls"])
+            if llm_calls == 0:
+                token_source = "unavailable"
+                token_reason = "raptor_no_usage_observed"
+                prompt_tokens_val = None
+                completion_tokens_val = None
+            else:
+                prompt_tokens_val = prompt_tokens
+                completion_tokens_val = completion_tokens
+            cost = build_cost_record(
+                index_time_ms=index_time_ms,
+                query_retrieval_ms=max(0.0, query_time_ms - qa_delta["elapsed_ms"]),
+                query_reader_ms=max(0.0, qa_delta["elapsed_ms"]),
+                llm_calls=llm_calls,
+                llm_retries=0,
+                prompt_tokens_total=prompt_tokens_val,
+                completion_tokens_total=completion_tokens_val,
+                token_source=token_source,
+                token_unavailable_reason=token_reason,
+            ).to_dict()
+            return pred, [], cost
 
         except KeyboardInterrupt:
             raise
@@ -333,9 +453,31 @@ def _answer_one_question(
                     if retry_wait_s > 0:
                         time.sleep(retry_wait_s)
                     continue
-            return "", []
+            cost = build_cost_record(
+                index_time_ms=0.0,
+                query_retrieval_ms=0.0,
+                query_reader_ms=0.0,
+                llm_calls=0,
+                llm_retries=0,
+                prompt_tokens_total=None,
+                completion_tokens_total=None,
+                token_source="unavailable",
+                token_unavailable_reason=str(exc)[:200],
+            ).to_dict()
+            return "", [], cost
 
-    return "", []
+    cost = build_cost_record(
+        index_time_ms=0.0,
+        query_retrieval_ms=0.0,
+        query_reader_ms=0.0,
+        llm_calls=0,
+        llm_retries=0,
+        prompt_tokens_total=None,
+        completion_tokens_total=None,
+        token_source="unavailable",
+        token_unavailable_reason="unknown_error",
+    ).to_dict()
+    return "", [], cost
 
 
 def main() -> None:
@@ -358,8 +500,10 @@ def main() -> None:
     parser.add_argument("--summarizer_max_input_chars", type=int, default=24000)
     parser.add_argument("--qa_max_input_chars", type=int, default=32000)
 
-    parser.add_argument("--top_k", type=int, default=5)
-    parser.add_argument("--answer_max_tokens", type=int, default=96)
+    parser.add_argument("--top_k", type=int, default=10)
+    parser.add_argument("--answer_max_tokens", type=int, default=None)
+    parser.add_argument("--temperature", type=float, default=None)
+    parser.add_argument("--relrag_config", default=None, help="Optional RelRAG config path for default reader policy.")
     parser.add_argument("--qa_prompt_mode", default="answer_only", choices=["answer_only", "default"])
     parser.add_argument("--retrieval_only", action="store_true", help="Skip LLM generation, only output retrieval results.")
     parser.add_argument("--request_timeout", type=float, default=60.0)
@@ -380,6 +524,15 @@ def main() -> None:
 
     dataset = ensure_dataset(args.dataset)
     backend = resolve_llm_backend(args.llm_backend)
+    reader_params = resolve_effective_reader_params(
+        dataset=dataset,
+        backend=backend.name,
+        answer_max_tokens=args.answer_max_tokens,
+        temperature=args.temperature,
+        config_path=args.relrag_config,
+    )
+    args.answer_max_tokens = int(reader_params["answer_max_tokens"])
+    args.temperature = float(reader_params["temperature"])
 
     data_root = Path(args.data_root)
     output_root = Path(args.output_root)
@@ -396,7 +549,7 @@ def main() -> None:
     if args.retrieval_only:
         pred_path = pred_path.with_name(pred_path.stem + "_retrieval.jsonl")
 
-    config = build_config(
+    config, summarizer, qa_model = build_config(
         args,
         llm_base_url=backend.base_url,
         llm_api_key=backend.api_key,
@@ -424,11 +577,13 @@ def main() -> None:
         question = str(row.get("question") or "").strip()
         docs = list(row.get("docs") or [])
         try:
-            pred, ctxs = _answer_one_question(
+            pred, ctxs, cost = _answer_one_question(
                 args,
                 dataset=dataset,
                 backend_name=backend.name,
                 config=config,
+                summarizer=summarizer,
+                qa_model=qa_model,
                 qid=qid,
                 question=question,
                 docs=docs,
@@ -439,18 +594,43 @@ def main() -> None:
         except Exception:
             pred = ""
             ctxs = []
+            cost = build_cost_record(
+                index_time_ms=0.0,
+                query_retrieval_ms=0.0,
+                query_reader_ms=0.0,
+                llm_calls=0,
+                llm_retries=0,
+                prompt_tokens_total=None,
+                completion_tokens_total=None,
+                token_source="unavailable",
+                token_unavailable_reason="exception",
+            ).to_dict()
         
-        out_row = {"id": qid, "pred": pred}
+        out_row = {"id": qid, "pred": pred, "cost": cost}
         if ctxs:
             out_row["ctxs"] = ctxs
 
         # Write immediately
         pred_handle.write(json.dumps(out_row, ensure_ascii=False) + "\n")
         pred_handle.flush()
-        # pred_rows.append(out_row) # No need to keep in memory
+        pred_rows.append(out_row)
 
     pred_handle.close()
-    # write_pred_jsonl(pred_path, pred_rows)
+    all_rows: List[Dict[str, Any]] = []
+    if pred_path.exists():
+        with pred_path.open("r", encoding="utf-8") as handle:
+            for line in handle:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    all_rows.append(json.loads(line))
+                except Exception:
+                    continue
+    write_json(
+        pred_path.parent / "cost_summary.json",
+        summarize_cost_records(method="raptor", dataset=dataset, backend=backend.name, rows=all_rows),
+    )
     print(f"[ok] wrote {pred_path}")
 
 
