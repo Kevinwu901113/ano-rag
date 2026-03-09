@@ -1,0 +1,311 @@
+{
+  "aligned_count": 500,
+  "means": {
+    "dense_f1": 0.4352388997475954,
+    "raptor_f1": 0.519873206428934,
+    "dense_em": 0.328,
+    "raptor_em": 0.396,
+    "dense_recall5": 0.756,
+    "raptor_recall5": 0.4033333333333333,
+    "dense_refusal_rate": 0.228,
+    "raptor_refusal_rate": 0.12,
+    "dense_answer_in_ctx_rate": 0.706,
+    "raptor_answer_in_ctx_rate": 0.32
+  },
+  "counts": {
+    "dense_f1_zero": 230,
+    "raptor_f1_zero": 187,
+    "dense_f1_zero_and_refusal": 114,
+    "raptor_f1_zero_and_refusal": 60,
+    "dense_recall_ge_0_5": 457,
+    "dense_recall_ge_0_5_and_f1_zero": 197,
+    "dense_recall_eq_1_0": 241,
+    "dense_recall_eq_1_0_and_f1_lt_0_5": 83,
+    "dense_recall_eq_1_0_and_f1_zero": 64,
+    "dense_recall_gt_raptor_recall": 327,
+    "dense_recall_gt_raptor_recall_and_dense_f1_lt_raptor_f1": 64,
+    "dense_answer_in_ctx_and_f1_zero": 109,
+    "dense_answer_in_ctx_and_f1_zero_and_refusal": 48,
+    "pairwise_dense_better": 61,
+    "pairwise_raptor_better": 112,
+    "pairwise_tie": 327
+  },
+  "hop_stats": {
+    "2hop": {
+      "n": 259,
+      "dense_recall5": 0.8146718146718147,
+      "raptor_recall5": 0.4420849420849421,
+      "dense_f1": 0.49258125997256436,
+      "raptor_f1": 0.5763058450143811,
+      "dense_refusal_rate": 0.1891891891891892,
+      "raptor_refusal_rate": 0.0888030888030888
+    },
+    "3hop1": {
+      "n": 127,
+      "dense_recall5": 0.7362204724409449,
+      "raptor_recall5": 0.38845144356955374,
+      "dense_f1": 0.44737244382913677,
+      "raptor_f1": 0.5575145018637376,
+      "dense_refusal_rate": 0.18110236220472442,
+      "raptor_refusal_rate": 0.07874015748031496
+    },
+    "3hop2": {
+      "n": 30,
+      "dense_recall5": 0.8111111111111111,
+      "raptor_recall5": 0.3555555555555555,
+      "dense_f1": 0.3511111111111111,
+      "raptor_f1": 0.44587301587301587,
+      "dense_refusal_rate": 0.36666666666666664,
+      "raptor_refusal_rate": 0.26666666666666666
+    },
+    "4hop1": {
+      "n": 48,
+      "dense_recall5": 0.5572916666666666,
+      "raptor_recall5": 0.3454861111111111,
+      "dense_f1": 0.34518849206349206,
+      "raptor_f1": 0.39637896825396823,
+      "dense_refusal_rate": 0.25,
+      "raptor_refusal_rate": 0.10416666666666667
+    },
+    "4hop2": {
+      "n": 15,
+      "dense_recall5": 0.6277777777777778,
+      "raptor_recall5": 0.26666666666666666,
+      "dense_f1": 0.12666666666666665,
+      "raptor_f1": 0.16666666666666666,
+      "dense_refusal_rate": 0.6,
+      "raptor_refusal_rate": 0.4666666666666667
+    },
+    "4hop3": {
+      "n": 21,
+      "dense_recall5": 0.6190476190476191,
+      "raptor_recall5": 0.3134920634920635,
+      "dense_f1": 0.20105820105820107,
+      "raptor_f1": 0.2365079365079365,
+      "dense_refusal_rate": 0.47619047619047616,
+      "raptor_refusal_rate": 0.3333333333333333
+    }
+  },
+  "examples_dense_highrecall_fail_raptor_good": [
+    {
+      "id": "2hop__124807_135019",
+      "question": "Who is the mother of Nephalion's father?",
+      "gold_answer": "Europa",
+      "dense_pred": "Insufficient evidence",
+      "raptor_pred": "Europa",
+      "dense_recall5": 0.5,
+      "raptor_recall5": 0.5,
+      "dense_f1": 0.0,
+      "raptor_f1": 1.0
+    },
+    {
+      "id": "2hop__13548_13529",
+      "question": "When was the person who Messi's goals in Copa del Rey compared to get signed by Barcelona?",
+      "gold_answer": "June 1982",
+      "dense_pred": "Insufficient evidence",
+      "raptor_pred": "June 1982",
+      "dense_recall5": 1.0,
+      "raptor_recall5": 1.0,
+      "dense_f1": 0.0,
+      "raptor_f1": 1.0
+    },
+    {
+      "id": "2hop__136214_483189",
+      "question": "The person whom Sikyona is named after is part of what?",
+      "gold_answer": "Greek mythology",
+      "dense_pred": "the polis of the same name",
+      "raptor_pred": "Greek mythology",
+      "dense_recall5": 1.0,
+      "raptor_recall5": 0.0,
+      "dense_f1": 0.0,
+      "raptor_f1": 1.0
+    },
+    {
+      "id": "2hop__145282_21711",
+      "question": "When was the Palau de la Generalitat constructed in the location where Paco Godia was born?",
+      "gold_answer": "built in the 15th century",
+      "dense_pred": "Insufficient evidence",
+      "raptor_pred": "15th century",
+      "dense_recall5": 0.5,
+      "raptor_recall5": 0.5,
+      "dense_f1": 0.0,
+      "raptor_f1": 1.0
+    },
+    {
+      "id": "2hop__219456_87295",
+      "question": "What character in Princess Diaries does the actress play who was also a cast member in On Golden Pond?",
+      "gold_answer": "Queen dowager Clarisse Renaldi",
+      "dense_pred": "Julie Andrews",
+      "raptor_pred": "Queen dowager Clarisse Renaldi",
+      "dense_recall5": 1.0,
+      "raptor_recall5": 0.5,
+      "dense_f1": 0.0,
+      "raptor_f1": 1.0
+    },
+    {
+      "id": "2hop__231890_595414",
+      "question": "Which county does Lloyd Dane's birthplace belong to?",
+      "gold_answer": "Miller County",
+      "dense_pred": "Insufficient evidence",
+      "raptor_pred": "Miller County",
+      "dense_recall5": 0.5,
+      "raptor_recall5": 1.0,
+      "dense_f1": 0.0,
+      "raptor_f1": 1.0
+    },
+    {
+      "id": "2hop__32441_522949",
+      "question": "Who is the spouse of the other president Jenkins Orphanage played for that wasn't Taft?",
+      "gold_answer": "Edith Roosevelt",
+      "dense_pred": "Hillary Rodham Clinton",
+      "raptor_pred": "Edith Roosevelt",
+      "dense_recall5": 0.5,
+      "raptor_recall5": 0.5,
+      "dense_f1": 0.0,
+      "raptor_f1": 1.0
+    },
+    {
+      "id": "2hop__46213_494136",
+      "question": "The actor who plays the father in I Can Only Imagine has a wife played by who in another film?",
+      "gold_answer": "Meg Ryan",
+      "dense_pred": "Madeline Carroll",
+      "raptor_pred": "Meg Ryan",
+      "dense_recall5": 0.5,
+      "raptor_recall5": 0.0,
+      "dense_f1": 0.0,
+      "raptor_f1": 1.0
+    },
+    {
+      "id": "2hop__47712_25719",
+      "question": "At the end of which year did tribes from the place where the Celts are said to have migrated from invade the Roman empire?",
+      "gold_answer": "406",
+      "dense_pred": "In 390 BC",
+      "raptor_pred": "406",
+      "dense_recall5": 1.0,
+      "raptor_recall5": 0.0,
+      "dense_f1": 0.0,
+      "raptor_f1": 1.0
+    },
+    {
+      "id": "2hop__477492_240386",
+      "question": "What is the record label of the Metalworks Studio founder?",
+      "gold_answer": "TML Entertainment",
+      "dense_pred": "Insufficient evidence",
+      "raptor_pred": "TML Entertainment",
+      "dense_recall5": 0.5,
+      "raptor_recall5": 0.5,
+      "dense_f1": 0.0,
+      "raptor_f1": 1.0
+    },
+    {
+      "id": "2hop__487706_40501",
+      "question": "How many refugees emigrated to the participant of Battle of Kentish Knock?",
+      "gold_answer": "75,000 to 100,000",
+      "dense_pred": "Insufficient evidence",
+      "raptor_pred": "75,000 to 100,000",
+      "dense_recall5": 1.0,
+      "raptor_recall5": 1.0,
+      "dense_f1": 0.0,
+      "raptor_f1": 1.0
+    },
+    {
+      "id": "2hop__511176_22458",
+      "question": "What does the acronym of the organization Danish Football Union is part of stand for?",
+      "gold_answer": "International Federation of Association Football",
+      "dense_pred": "UEFA",
+      "raptor_pred": "FIFA",
+      "dense_recall5": 0.5,
+      "raptor_recall5": 0.0,
+      "dense_f1": 0.0,
+      "raptor_f1": 1.0
+    },
+    {
+      "id": "2hop__557743_92763",
+      "question": "What is the enrollment at Henry Latimer's alma mater?",
+      "gold_answer": "16,801",
+      "dense_pred": "Insufficient evidence",
+      "raptor_pred": "16,801",
+      "dense_recall5": 1.0,
+      "raptor_recall5": 0.5,
+      "dense_f1": 0.0,
+      "raptor_f1": 1.0
+    },
+    {
+      "id": "2hop__62020_158262",
+      "question": "When did the president of the Confederacy end his fight in the Mexican-American war?",
+      "gold_answer": "1848",
+      "dense_pred": "Insufficient evidence",
+      "raptor_pred": "1848",
+      "dense_recall5": 0.5,
+      "raptor_recall5": 0.0,
+      "dense_f1": 0.0,
+      "raptor_f1": 1.0
+    },
+    {
+      "id": "2hop__620853_22458",
+      "question": "What does the name of the organization the Haiti national football team belongs to stand for?",
+      "gold_answer": "International Federation of Association Football",
+      "dense_pred": "Insufficient evidence",
+      "raptor_pred": "FIFA",
+      "dense_recall5": 1.0,
+      "raptor_recall5": 0.0,
+      "dense_f1": 0.0,
+      "raptor_f1": 1.0
+    },
+    {
+      "id": "2hop__647996_551681",
+      "question": "What is another notable work made by the author of Miss Sara Sampson?",
+      "gold_answer": "Emilia Galotti",
+      "dense_pred": "Nathan the Wise",
+      "raptor_pred": "Emilia Galotti",
+      "dense_recall5": 0.5,
+      "raptor_recall5": 0.0,
+      "dense_f1": 0.0,
+      "raptor_f1": 1.0
+    },
+    {
+      "id": "2hop__65576_80026",
+      "question": "Who played the spoilt character in Charlie and the Chocolate Factory?",
+      "gold_answer": "Julie Dawn Cole",
+      "dense_pred": "David Kelly",
+      "raptor_pred": "Julie Dawn Cole",
+      "dense_recall5": 0.5,
+      "raptor_recall5": 0.5,
+      "dense_f1": 0.0,
+      "raptor_f1": 1.0
+    },
+    {
+      "id": "2hop__686395_141338",
+      "question": "What company is Frederic Ewen's employer part of?",
+      "gold_answer": "City University of New York",
+      "dense_pred": "Insufficient evidence",
+      "raptor_pred": "City University of New York",
+      "dense_recall5": 0.5,
+      "raptor_recall5": 0.5,
+      "dense_f1": 0.0,
+      "raptor_f1": 1.0
+    },
+    {
+      "id": "2hop__693157_131890",
+      "question": "What is the body of water by the area where Athlete was formed?",
+      "gold_answer": "River Thames",
+      "dense_pred": "Insufficient evidence",
+      "raptor_pred": "Thames River",
+      "dense_recall5": 0.5,
+      "raptor_recall5": 0.5,
+      "dense_f1": 0.0,
+      "raptor_f1": 1.0
+    },
+    {
+      "id": "2hop__71871_494136",
+      "question": "Who is the spouse of the actor playing Bart's father in I can only imagine?",
+      "gold_answer": "Meg Ryan",
+      "dense_pred": "Dennis Quaid",
+      "raptor_pred": "Meg Ryan",
+      "dense_recall5": 0.5,
+      "raptor_recall5": 0.5,
+      "dense_f1": 0.0,
+      "raptor_f1": 1.0
+    }
+  ]
+}

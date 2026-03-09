@@ -124,6 +124,16 @@ def load_gold(dataset):
                             gold_data[item['_id']] = item
                         elif 'id' in item:
                             gold_data[item['id']] = item
+                            
+                        if dataset == 'musique' and 'paragraphs' in item:
+                            sp = []
+                            for p in item['paragraphs']:
+                                if p.get('is_supporting'):
+                                    sp.append([p['title'], p.get('idx', 0)])
+                            item['supporting_facts'] = sp
+                            if '_id' in item: gold_data[item['_id']] = item
+                            elif 'id' in item: gold_data[item['id']] = item
+                            
                     except: pass
     except Exception as e:
         print(f"Error loading gold: {e}")
@@ -183,22 +193,19 @@ def evaluate_pred_file(pred_path, gold_data):
 def identify_dataset_and_range(dir_name):
     # 2Wiki
     if '2wiki' in dir_name:
-        # experiment_2wiki, experiment_2wiki_1...
-        # Check if suffix is in 1..8 or empty
-        suffix = dir_name.replace('experiment_2wiki', '')
-        if suffix == '' or suffix.startswith('_'):
-             # Handle _1, _8, _7_gpt
-             # Extract number if present
-             nums = re.findall(r'\d+', suffix)
-             if not nums: return '2wiki' # root experiment_2wiki
-             num = int(nums[0])
-             if num <= 8: return '2wiki'
+        return '2wiki'
     
     # Check HotpotQA
     # Handle experiment_19, 20...
     if dir_name.startswith('experiment_') and '2wiki' not in dir_name and 'musique' not in dir_name:
-        # e.g. experiment_20, experiment_20_smoke100
         m = re.match(r'experiment_(\d+)', dir_name)
+        if m:
+            num = int(m.group(1))
+            if num in RANGES['hotpotqa']:
+                return 'hotpotqa'
+        
+        # Also try experiment_20_smoke100
+        m = re.match(r'experiment_(\d+)_', dir_name)
         if m:
             num = int(m.group(1))
             if num in RANGES['hotpotqa']:
@@ -211,6 +218,14 @@ def identify_dataset_and_range(dir_name):
             num = int(m.group(1))
             if num in RANGES['musique']:
                 return 'musique'
+    
+    # Also handle things like musique_experiment_11half
+    if dir_name.startswith('musique_experiment_'):
+        m = re.search(r'(\d+)', dir_name.replace('musique_experiment_', ''))
+        if m:
+             num = int(m.group(1))
+             if num in RANGES['musique']:
+                 return 'musique'
             
     return None
 
@@ -243,19 +258,24 @@ def scan_best():
                 if 'runs' in data:
                     for reader, retrievers in data['runs'].items():
                         for retriever, metrics in retrievers.items():
-                            if 'f1' not in metrics: continue
+                            f1 = metrics.get('f1')
+                            if f1 is None: f1 = metrics.get('bleu1', metrics.get('rougeL'))
+                            if f1 is None: continue
+                            
                             if metrics.get('count', 0) < 50: continue # Skip small tests
                             
                             model = metrics.get('model', 'unknown')
                             family = identify_model_family(model, reader)
+                            print(f"DEBUG: Found run {dataset} {d} {reader} {retriever} model={model} fam={family} score={f1}")
                             if family in ['DeepSeek', 'Qwen']:
                                 candidates[dataset][family].append({
-                                    'dir': d,
-                                    'reader': reader,
-                                    'retriever': retriever,
-                                    'f1': metrics['f1'],
-                                    'pred_file': f"pred_dev_{reader}_{retriever}.jsonl" # guess
-                                })
+                                'dir': d,
+                                'reader': reader,
+                                'retriever': retriever,
+                                'f1': metrics['f1'],
+                                'pred_file': f"pred_dev_{reader}_{retriever}.jsonl" # guess
+                            })
+                            # print(f"DEBUG: Appended candidate for {dataset} {family}. Count now: {len(candidates[dataset][family])}")
             except: pass
             
         # Check metrics*.json
@@ -274,10 +294,18 @@ def scan_best():
                 f1 = metrics.get('f1')
                 if f1 is None and 'stats' in metrics: f1 = metrics['stats'].get('f1')
                 
+                # If F1 missing, try alternatives for 2wiki/hotpot
+                if f1 is None:
+                    if 'stats' in metrics:
+                        f1 = metrics['stats'].get('bleu1', metrics['stats'].get('rougeL'))
+                    else:
+                        f1 = metrics.get('bleu1', metrics.get('rougeL'))
+                
                 if f1 is None: continue
                 
                 model = metrics.get('model', metrics.get('stats', {}).get('model', 'unknown'))
                 family = identify_model_family(model, reader)
+                print(f"DEBUG: Found metrics {dataset} {d} {reader} {retriever} model={model} fam={family} score={f1}")
                 
                 if family in ['DeepSeek', 'Qwen']:
                     # Add candidate (duplicates handled later by taking max)
@@ -295,7 +323,13 @@ def scan_best():
                         'f1': f1,
                         'pred_file': pred_path
                     })
+                    # print(f"DEBUG: Appended candidate for {dataset} {family}. Count now: {len(candidates[dataset][family])}")
             except: pass
+
+    # Debug print candidates
+    for ds in ['2wiki', 'hotpotqa', 'musique']:
+        for fam in ['DeepSeek', 'Qwen']:
+            print(f"DEBUG: {ds} {fam} count: {len(candidates[ds][fam])}")
 
     # 2. Select BEST F1 for each (Dataset, Family) and compute full metrics
     gold_cache = {}
@@ -304,7 +338,9 @@ def scan_best():
     
     for ds in ['2wiki', 'hotpotqa', 'musique']:
         print(f"\n## Dataset: {ds}")
-        if ds not in gold_cache:
+        # Only load gold if we have candidates
+        has_cands = any(candidates[ds][f] for f in ['DeepSeek', 'Qwen'])
+        if has_cands and ds not in gold_cache:
             gold_cache[ds] = load_gold(ds)
             
         for fam in ['DeepSeek', 'Qwen']:

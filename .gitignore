@@ -56,3 +56,4 @@ scripts/musique/*
 # Keep Trae Skills definitions
 !.trae/skills/**/*.md
 !.trae/skills/*.md
+relrag_paper/
